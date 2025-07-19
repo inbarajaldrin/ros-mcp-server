@@ -101,21 +101,46 @@ code $env:AppData\Claude\claude_desktop_config.json
 ## MCP Functions
 
 You can find the list of functions in the [MCPFUNCTIONS.md](MCPFUNCTIONS.md).
+Thanks — here’s the revised 2-step version with **full rosbridge\_suite build** included:
+
+---
 
 ## How To Use
+
 ### 1. Set IP and Port to connect rosbridge.
-- Open `server.py` and change your `LOCAL_IP`, `ROSBRIDGE_IP` and `ROSBRIDGE_PORT`. (`ROSBRIDGE_PORT`'s default value is `9090`)
+
+* Find your local IP using:
+
+  ```bash
+  hostname -I | awk '{print $1}'
+  ```
+* Open `server.py` and set the following:
+
+  ```python
+  LOCAL_IP = "your_local_ip"      # e.g., 192.168.1.101
+  ROSBRIDGE_IP = "localhost"      # Always use 'localhost' if rosbridge runs on same machine
+  ROSBRIDGE_PORT = 9090           # Default websocket port
+  ```
 
 ### 2. Run rosbridge server.
-ROS 1
+
+#### ROS 1:
+
 ```bash
 roslaunch rosbridge_server rosbridge_websocket.launch
 ```
-ROS 2
+
+#### ROS 2 (build from source if not installed):
+
 ```bash
+cd ~/ros2_ws/src
+git clone https://github.com/RobotWebTools/rosbridge_suite.git -b humble
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build
+source install/setup.bash
 ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 ```
-
 ### 3. Run any AI system that has imported ``ros-mcp-server``.
 
 ### 4. Type "Make the robot move forward.".
