@@ -66,12 +66,9 @@ Set MCP setting to mcp.json.
 {
   "mcpServers": {
     "ros-mcp-server": {
-      "command": "uv",
+      "command": "/usr/bin/python",
       "args": [
-        "--directory",
-        "/ABSOLUTE/PATH/TO/PARENT/FOLDER/ros-mcp-server",,
-        "run",
-        "server.py"
+        "/home/aaugus11/Documents/ros-mcp-server/server.py"
       ]
     }
   }
