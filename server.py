@@ -14,7 +14,7 @@ from utils.network_utils import ping_ip_and_port
 from utils.websocket_manager import WebSocketManager, parse_image, parse_json
 
 # ROS bridge connection settings
-ROSBRIDGE_IP = "127.0.0.1"  # Default is localhost. Replace with your local IPor set using the LLM.
+ROSBRIDGE_IP = "localhost"  # Default is localhost. Replace with your local IPor set using the LLM.
 ROSBRIDGE_PORT = (
     9090  # Rosbridge default is 9090. Replace with your rosbridge port or set using the LLM.
 )
@@ -24,7 +24,7 @@ MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()  # Default is stdio.
 
 # MCP connection settings (streamable-http)
 MCP_HOST = os.getenv(
-    "MCP_HOST", "127.0.0.1"
+    "MCP_HOST", "localhost"
 )  # Default is localhost. Replace with the address of your remote MCP server.
 
 # MCP port settings (default=9000)
