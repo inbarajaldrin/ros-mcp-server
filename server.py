@@ -1586,7 +1586,7 @@ Examples:
 
 ## ############################################################################################## ##
 ##
-##                      YOLOE PROMPT-FREE DETECTION
+##                      YOLOE DETECTION
 ##
 ## ############################################################################################## ##
 
@@ -1722,6 +1722,196 @@ def run_prompt_free_detection():
         return {
             "status": "timeout",
             "message": "Script execution timed out after 60 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@mcp.tool(
+    description=(
+        "Run the prompt-set YOLOE detection test with multiple text prompts.\n"
+        "Tests multiple prompts and identifies the best performing one.\n"
+        "Format: Use comma-separated prompts like 'red object, blue object, green object'"
+    )
+)
+def run_prompt_set_detection(prompts: str = ""):
+    """
+    Run the prompt-set YOLOE detection test with multiple text prompts.
+    This tool tests multiple prompts on a single captured image, saves annotated results for each prompt,
+    and identifies which prompt performs best for object detection.
+    
+    CRITICAL: Separate multiple prompts with COMMAS, not periods or other separators.
+    
+    Args:
+        prompts: Comma-separated string of text prompts to test.
+                 Each prompt should describe objects to detect.
+                 
+                 CORRECT FORMAT: "red object, blue object, green object"
+                 WRONG FORMAT:   "red object. blue object. green object"
+                 
+                 Alternative: JSON array format like '["red object", "blue object"]'
+                 
+                 Pass empty string "" to use default prompts.
+    
+    Returns:
+        Dictionary with detection results, images for each tested prompt, and the best prompt identified
+        
+    Examples:
+        # CORRECT - Comma-separated prompts
+        run_prompt_set_detection(prompts="red object, blue object, green object, yellow object")
+        
+        # CORRECT - JSON array format
+        run_prompt_set_detection(prompts='["red object", "blue object", "green object"]')
+        
+        # Use default prompts
+        run_prompt_set_detection(prompts="")
+    """
+    try:
+        import subprocess
+        import os
+        import glob
+        from datetime import datetime
+        import re
+        import json
+        
+        # Parse prompts from string format (matches update_yolo_prompts pattern)
+        prompt_list = []
+        
+        if prompts and prompts.strip():
+            # Try to parse as JSON array first
+            if prompts.strip().startswith('['):
+                try:
+                    prompt_list = json.loads(prompts)
+                    if not isinstance(prompt_list, list):
+                        return {
+                            "status": "error",
+                            "error": f"JSON parsed but result is not a list: {type(prompt_list).__name__}"
+                        }
+                except json.JSONDecodeError as e:
+                    return {
+                        "status": "error",
+                        "error": f"Invalid JSON array format: {str(e)}"
+                    }
+            else:
+                # Parse as comma-separated string only
+                if ',' in prompts:
+                    prompt_list = [p.strip() for p in prompts.split(',') if p.strip()]
+                else:
+                    # Single prompt (no commas)
+                    prompt_list = [prompts.strip()]
+        
+        # If empty, prompt_list stays [] and script will use defaults
+        
+        script_path = "/home/aaugus11/Documents/ros-mcp-server/tools/yoloe/prompt_set_test.py"
+        screenshots_dir = "/home/aaugus11/Documents/ros-mcp-server/tools/yoloe/screenshots"
+        
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"Prompt set test script not found: {script_path}"
+            }
+        
+        # Clear old screenshots to avoid confusion
+        old_screenshots = glob.glob(os.path.join(screenshots_dir, "prompt_*.jpg"))
+        for old_file in old_screenshots:
+            try:
+                os.remove(old_file)
+            except:
+                pass
+        
+        # Build the command parts (same pattern as update_yolo_prompts)
+        cmd_parts = [
+            "bash", "-c",
+            "source /opt/ros/humble/setup.bash && "
+            "source ~/Desktop/ros2_ws/install/setup.bash && "
+            "export ROS_DOMAIN_ID=0 && "
+            f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
+            "python3 prompt_set_test.py"
+        ]
+        
+        # Add prompts as command-line arguments if provided (same pattern as update_yolo_prompts)
+        if prompt_list and len(prompt_list) > 0:
+            cmd_parts[2] += " --prompts"
+            for prompt in prompt_list:
+                cmd_parts[2] += f" '{prompt}'"
+        # If empty list, script will use DEFAULT_PROMPTS
+        
+        result = subprocess.run(
+            cmd_parts,
+            capture_output=True,
+            text=True,
+            timeout=120  # Longer timeout since testing multiple prompts
+        )
+        
+        # Find all the prompt test images that were created
+        prompt_images = glob.glob(os.path.join(screenshots_dir, "prompt_*.jpg"))
+        
+        if not prompt_images:
+            return {
+                "status": "error",
+                "message": "No prompt test images found after running script",
+                "script_output": result.stdout if result.stdout else None,
+                "script_stderr": result.stderr if result.stderr else None
+            }
+        
+        # Parse results from script output
+        tested_prompts = []
+        best_prompt = None
+        
+        if result and result.stdout:
+            lines = result.stdout.strip().split('\n')
+            
+            # Parse test results
+            for line in lines:
+                if "Testing prompt" in line and ":" in line:
+                    # Extract prompt name from line like "Testing prompt 1/5: 'red object'"
+                    match = re.search(r"Testing prompt \d+/\d+: '([^']+)'", line)
+                    if match:
+                        prompt_name = match.group(1)
+                        tested_prompts.append({"prompt": prompt_name, "detections": 0})
+                
+                # Look for detection counts
+                elif "Found" in line and "detections" in line:
+                    match = re.search(r"Found (\d+) detections", line)
+                    if match and tested_prompts:
+                        tested_prompts[-1]["detections"] = int(match.group(1))
+                
+                # Extract best prompt
+                elif "BEST PROMPT:" in line:
+                    match = re.search(r"BEST PROMPT: '([^']+)'", line)
+                    if match:
+                        best_prompt = match.group(1)
+        
+        # Read the prompt test images and create MCP Image objects
+        mcp_images = []
+        for img_path in sorted(prompt_images):
+            try:
+                with open(img_path, 'rb') as f:
+                    img_data = f.read()
+                mcp_images.append(Image(data=img_data, format="jpeg"))
+            except Exception as e:
+                continue
+        
+        return {
+            "status": "success",
+            "message": "Prompt-set detection completed successfully",
+            "tested_prompts": tested_prompts,
+            "best_prompt": best_prompt,
+            "test_images_count": len(prompt_images),
+            "image_paths": prompt_images,
+            "script_output": result.stdout if result and result.stdout else None,
+            "script_stderr": result.stderr if result and result.stderr else None,
+            "timestamp": datetime.now().isoformat()
+        }, *mcp_images
+        
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "Script execution timed out after 120 seconds"
         }
     except Exception as e:
         return {

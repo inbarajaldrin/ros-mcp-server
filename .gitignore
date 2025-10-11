@@ -182,3 +182,7 @@ pyrightconfig.json
 
 # screenshots
 tools/yoloe/screenshots/*
+
+# mobile clip
+tools/yoloe/mobileclip_blt.ts
+tools/depth/mobileclip_blt.ts

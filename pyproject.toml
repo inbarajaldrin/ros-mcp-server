@@ -16,9 +16,15 @@ authors = [
 dependencies = [
     "fastmcp>=2.11.3",
     "jsonschema>=4.25.1",
+    "matplotlib>=3.10.7",
     "mcp[cli]>=1.13.0",
+    "numpy<2.0.0",
     "opencv-python>=4.11.0.86",
     "pillow>=11.3.0",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+    "transformers>=4.57.0",
+    "ultralytics>=8.3.209",
     "websocket-client>=1.8.0",
 ]
 
