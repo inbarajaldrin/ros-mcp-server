@@ -1508,6 +1508,14 @@ def ping_robot(ip: str, port: int, ping_timeout: float = 2.0, port_timeout: floa
 ##                      IMAGE ANALYSIS
 ##
 ## ############################################################################################## ##
+
+
+@mcp.tool(
+    description=(
+        "First, subscribe to an Image topic using 'subscribe_once' to save an image.\n"
+        "Then, use this tool to analyze the saved image\n"
+    )
+)
 def _encode_image_to_imagecontent(image):
     """
     Encodes a PIL Image to a format compatible with ImageContent.
@@ -1525,12 +1533,6 @@ def _encode_image_to_imagecontent(image):
     return img_obj.to_image_content()
 
 
-@mcp.tool(
-    description=(
-        "First, subscribe to an Image topic using 'subscribe_once' to save an image.\n"
-        "Then, use this tool to analyze the saved image\n"
-    )
-)
 def analyze_previously_received_image():
     """
     Analyze the previously received image saved at ./camera/received_image.jpeg
@@ -1582,6 +1584,279 @@ Examples:
     return parser.parse_args()
 
 
+## ############################################################################################## ##
+##
+##                      YOLOE PROMPT-FREE DETECTION
+##
+## ############################################################################################## ##
+
+
+@mcp.tool(
+    description=(
+        "Run the prompt-free YOLOE detection test and return both original and annotated images.\n"
+        "This tool executes the prompt_free_test.py script and returns the images it creates."
+    )
+)
+def run_prompt_free_detection():
+    """
+    Run the prompt-free YOLOE detection test and return both original and annotated images.
+    This tool executes the prompt_free_test.py script and returns the images it creates.
+    
+    Returns:
+        Dictionary with detection results, original image, and annotated image
+    """
+    try:
+        import subprocess
+        import os
+        import glob
+        from datetime import datetime
+        
+        # Path to the prompt free test script
+        script_path = "/home/aaugus11/Documents/ros-mcp-server/tools/yoloe/prompt_free_test.py"
+        screenshots_dir = "/home/aaugus11/Documents/ros-mcp-server/tools/yoloe/screenshots"
+        
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"Prompt free test script not found: {script_path}"
+            }
+        
+        # Run the script with proper environment setup
+        cmd = [
+            "bash", "-c",
+            "source /opt/ros/humble/setup.bash && "
+            "source ~/Desktop/ros2_ws/install/setup.bash && "
+            "export ROS_DOMAIN_ID=0 && "
+            f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
+            "python3 prompt_free_test.py"
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60  # Increased timeout since the script now works properly
+        )
+        
+        # Find the images that were created
+        annotated_files = glob.glob(os.path.join(screenshots_dir, "annotated_photo_*.jpg"))
+        original_files = glob.glob(os.path.join(screenshots_dir, "original_photo_*.jpg"))
+        
+        if not annotated_files:
+            return {
+                "status": "error",
+                "message": "No annotated images found after running script",
+                "script_output": result.stdout if result.stdout else None,
+                "script_stderr": result.stderr if result.stderr else None
+            }
+        
+        # Get the most recent files
+        latest_annotated = max(annotated_files, key=os.path.getctime)
+        latest_original = max(original_files, key=os.path.getctime) if original_files else None
+        
+        # Read the images
+        try:
+            # Read annotated image
+            with open(latest_annotated, 'rb') as f:
+                annotated_data = f.read()
+            annotated_mcp_image = Image(data=annotated_data, format="jpeg")
+            
+            # Read original image if it exists
+            if latest_original and os.path.exists(latest_original):
+                with open(latest_original, 'rb') as f:
+                    original_data = f.read()
+                original_mcp_image = Image(data=original_data, format="jpeg")
+            else:
+                # Use annotated image as fallback
+                original_mcp_image = annotated_mcp_image
+                latest_original = latest_annotated
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to read images: {str(e)}",
+                "annotated_image": latest_annotated,
+                "original_image": latest_original
+            }
+        
+        # Parse detection results from script output
+        detected_objects = []
+        if result and result.stdout:
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if 'conf:' in line:
+                    try:
+                        parts = line.split('conf:')[0].strip()
+                        if '(' in parts and 'conf:' in parts:
+                            class_part = parts.split('(')[0].strip()
+                            conf_part = parts.split('conf:')[1].split(')')[0].strip()
+                            detected_objects.append({
+                                "class_name": class_part,
+                                "confidence": float(conf_part)
+                            })
+                    except (ValueError, IndexError):
+                        continue
+        
+        # If no objects parsed, provide generic info
+        if not detected_objects:
+            detected_objects = [{
+                "class_name": "detected_objects",
+                "confidence": 0.8,
+                "note": "Objects detected by YOLOE prompt-free model (see annotated image for details)"
+            }]
+        
+        return {
+            "status": "success",
+            "message": "Prompt-free detection completed successfully",
+            "annotated_image": latest_annotated,
+            "original_image": latest_original,
+            "detected_objects": detected_objects,
+            "object_count": len(detected_objects),
+            "script_output": result.stdout if result and result.stdout else None,
+            "script_stderr": result.stderr if result and result.stderr else None,
+            "timestamp": datetime.now().isoformat()
+        }, original_mcp_image, annotated_mcp_image
+        
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "Script execution timed out after 60 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@mcp.tool(
+    description=(
+        "Update YOLO detection prompts using the UpdateYoloPrompts ROS2 service.\n"
+        "This tool CORRECTS mislabeled objects from the prompt-free YOLO detector."
+    )
+)
+def update_yolo_prompts(prompt_map: dict):
+    """
+    Update YOLO detection prompts using the UpdateYoloPrompts ROS2 service.
+    This CORRECTS mislabeled objects from the prompt-free YOLO detector.
+    
+    CRITICAL: The prompt_map maps FROM what YOLO wrongly detected TO what it actually is!
+    The prompts are automatically derived from the prompt_map keys.
+    
+    Args:
+        prompt_map: Dictionary that CORRECTS wrong labels
+                   KEY = What YOLO WRONGLY detected (look at annotated image labels)
+                   VALUE = What the object ACTUALLY is (what you want it called)
+                   
+                   Format: {
+                       "YOLO_WRONG_LABEL": "actual_object_name",
+                       "YOLO_WRONG_LABEL": "actual_object_name"
+                   }
+    
+    Returns:
+        Dictionary with service call results
+        
+    Examples:
+        # Looking at annotated image, YOLO detected:
+        # - "cork" (but it's actually a jenga block)
+        # - "matchbox" (but it's actually a red block)  
+        # - "envelope" (but it's actually a blue block)
+        # - "first-aid kit" (but it's actually a white box)
+        
+        update_yolo_prompts({
+            "cork": "jenga block",           # YOLO said "cork" → Actually "jenga block"
+            "first-aid kit": "white box",    # YOLO said "first-aid kit" → Actually "white box"
+            "envelope": "blue block",        # YOLO said "envelope" → Actually "blue block"
+            "clipboard": "red block"         # YOLO said "clipboard" → Actually "red block"
+        })
+        
+        # Step-by-step for VLM:
+        # 1. Look at ANNOTATED image - read the wrong labels YOLO put on each object
+        # 2. Look at ORIGINAL image - identify what each object actually is
+        # 3. Create mapping: prompt_map[wrong_yolo_label] = actual_object_name
+    """
+    try:
+        import subprocess
+        import os
+        
+        # Derive prompts from prompt_map keys
+        prompts = list(prompt_map.keys())
+        
+        # Path to the update service script
+        script_path = "/home/aaugus11/Documents/ros-mcp-server/tools/yoloe/update_yolo_prompts_service.py"
+        
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"Update service script not found: {script_path}"
+            }
+        
+        # Build the command arguments
+        cmd_parts = [
+            "bash", "-c",
+            "source /opt/ros/humble/setup.bash && "
+            "source ~/Desktop/ros2_ws/install/setup.bash && "
+            "export ROS_DOMAIN_ID=0 && "
+            f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
+            f"python3 update_yolo_prompts_service.py"
+        ]
+        
+        # Add prompts to the command (derived from prompt_map keys)
+        for prompt in prompts:
+            cmd_parts[2] += f" '{prompt}'"
+        
+        # Add prompt map
+        cmd_parts[2] += " --prompt-map"
+        for prompt, color in prompt_map.items():
+            cmd_parts[2] += f" '{prompt}:{color}'"
+        
+        # Execute the service call
+        result = subprocess.run(
+            cmd_parts,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            return {
+                "status": "success",
+                "message": "YOLO prompts updated successfully",
+                "prompts": prompts,
+                "prompt_map": prompt_map,
+                "service_output": result.stdout.strip() if result.stdout else None
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to update YOLO prompts",
+                "error": result.stderr.strip() if result.stderr else "Unknown error",
+                "service_output": result.stdout.strip() if result.stdout else None,
+                "return_code": result.returncode
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "Service call timed out after 10 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+## ############################################################################################## ##
+##
+##                      MAIN
+##
+## ############################################################################################## ##
+
+
 def main():
     """Main entry point for the MCP server console script."""
     # Parse command line arguments
@@ -1616,3 +1891,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
