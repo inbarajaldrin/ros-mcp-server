@@ -56,9 +56,10 @@ class YOLOEDepthDetectorNode(Node):
         cv2.namedWindow("YOLOE (Prompt Set) + Depth Detection", cv2.WINDOW_AUTOSIZE)
         
         # Create subscribers for RGB and depth images
-        self.rgb_sub = Subscriber(self, Image, '/rgb_lego')
-        self.depth_sub = Subscriber(self, Image, '/depth_lego')
-        
+        self.rgb_sub = Subscriber(self, Image, '/rgb')
+        self.depth_sub = Subscriber(self, Image, '/depth')
+        # self.depth_sub = Subscriber(self, Image, '/rgb_depth_lego')
+
         # Synchronize RGB and depth images
         self.sync = ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub], 
@@ -75,8 +76,8 @@ class YOLOEDepthDetectorNode(Node):
         )
         
         self.get_logger().info("🤖 YOLOE (Prompt Set) + Depth Detector started")
-        self.get_logger().info("Subscribing to: /rgb_lego")
-        self.get_logger().info("Subscribing to: /depth_lego")
+        self.get_logger().info("Subscribing to: /rgb")
+        self.get_logger().info("Subscribing to: /rgb_depth_lego")
         self.get_logger().info("Publishing to: /yoloe_depth_annotated")
         self.get_logger().info("Press 'q' to quit")
     

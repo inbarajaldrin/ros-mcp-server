@@ -30,7 +30,7 @@ class DepthEstimationNode(Node):
         self.get_logger().info("Depth model loaded!")
         
         # ROS2 subscribers and publishers
-        self.image_sub = self.create_subscription(ROSImage, '/rgb_lego', self.image_callback, 10)
+        self.image_sub = self.create_subscription(ROSImage, '/rgb', self.image_callback, 10)
         self.depth_pub = self.create_publisher(ROSImage, '/rgb_depth_lego', 10)
         
         self.get_logger().info("Depth estimation node ready")
