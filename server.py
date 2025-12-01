@@ -39,7 +39,7 @@ ws_manager = WebSocketManager(
 )  # Increased default timeout for ROS operations
 
 
-@mcp.tool(description=("Get robot configuration from YAML file."))
+# @mcp.tool(description=("Get robot configuration from YAML file."))
 def get_robot_config(name: str) -> dict:
     """
     Get the robot configuration from the YAML file for connecting to the robot and knowing its capabilities.
@@ -60,9 +60,9 @@ def get_robot_config(name: str) -> dict:
     return {"robot_config": robot_config}
 
 
-@mcp.tool(
-    description=("List all available robot specifications that can be used with get_robot_config.")
-)
+# @mcp.tool(
+#     description=("List all available robot specifications that can be used with get_robot_config.")
+# )
 def list_verified_robot_specifications() -> dict:
     """
     Get a list of all available robot specification files.
@@ -73,11 +73,11 @@ def list_verified_robot_specifications() -> dict:
     return get_robot_specifications()
 
 
-@mcp.tool(
-    description=(
-        "After getting the robot config, connect to the robot by setting the IP/port and testing connectivity."
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "After getting the robot config, connect to the robot by setting the IP/port and testing connectivity."
+#     )
+# )
 def connect_to_robot(
     ip: Optional[str] = None,
     port: Optional[Union[int, str]] = None,
@@ -113,7 +113,7 @@ def connect_to_robot(
     }
 
 
-@mcp.tool(description="Detect the ROS version and distribution via rosbridge.")
+# @mcp.tool(description="Detect the ROS version and distribution via rosbridge.")
 def detect_ros_version() -> dict:
     """
     Detects the ROS version and distro via rosbridge WebSocket.
@@ -182,9 +182,9 @@ def get_topics() -> dict:
         return {"warning": "No topics found"}
 
 
-@mcp.tool(
-    description=("Get the message type for a specific topic.\nExample:\nget_topic_type('/cmd_vel')")
-)
+# @mcp.tool(
+#     description=("Get the message type for a specific topic.\nExample:\nget_topic_type('/cmd_vel')")
+# )
 def get_topic_type(topic: str) -> dict:
     """
     Get the message type for a specific topic.
@@ -230,13 +230,13 @@ def get_topic_type(topic: str) -> dict:
         return {"error": f"Failed to get type for topic {topic}"}
 
 
-@mcp.tool(
-    description=(
-        "Get the complete structure/definition of a message type.\n"
-        "Example:\n"
-        "get_message_details('geometry_msgs/Twist')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get the complete structure/definition of a message type.\n"
+#         "Example:\n"
+#         "get_message_details('geometry_msgs/Twist')"
+#     )
+# )
 def get_message_details(message_type: str) -> dict:
     """
     Get the complete structure/definition of a message type.
@@ -295,13 +295,13 @@ def get_message_details(message_type: str) -> dict:
         return {"error": f"Failed to get details for message type {message_type}"}
 
 
-@mcp.tool(
-    description=(
-        "Get list of nodes that are publishing to a specific topic.\n"
-        "Example:\n"
-        "get_publishers_for_topic('/cmd_vel')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get list of nodes that are publishing to a specific topic.\n"
+#         "Example:\n"
+#         "get_publishers_for_topic('/cmd_vel')"
+#     )
+# )
 def get_publishers_for_topic(topic: str) -> dict:
     """
     Get list of nodes that are publishing to a specific topic.
@@ -344,13 +344,13 @@ def get_publishers_for_topic(topic: str) -> dict:
         return {"error": f"Failed to get publishers for topic {topic}"}
 
 
-@mcp.tool(
-    description=(
-        "Get list of nodes that are subscribed to a specific topic.\n"
-        "Example:\n"
-        "get_subscribers_for_topic('/cmd_vel')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get list of nodes that are subscribed to a specific topic.\n"
+#         "Example:\n"
+#         "get_subscribers_for_topic('/cmd_vel')"
+#     )
+# )
 def get_subscribers_for_topic(topic: str) -> dict:
     """
     Get list of nodes that are subscribed to a specific topic.
@@ -393,13 +393,13 @@ def get_subscribers_for_topic(topic: str) -> dict:
         return {"error": f"Failed to get subscribers for topic {topic}"}
 
 
-@mcp.tool(
-    description=(
-        "Get comprehensive information about all ROS topics including publishers, subscribers, and message types. Note that this may take time to execute when three are a large number of topics since it queries each one by one under the hood. \n"
-        "Example:\n"
-        "inspect_all_topics()"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get comprehensive information about all ROS topics including publishers, subscribers, and message types. Note that this may take time to execute when three are a large number of topics since it queries each one by one under the hood. \n"
+#         "Example:\n"
+#         "inspect_all_topics()"
+#     )
+# )
 def inspect_all_topics() -> dict:
     """
     Get comprehensive information about all ROS topics including publishers, subscribers, and message types.
@@ -588,13 +588,13 @@ def subscribe_once(
         return {"error": "Timeout waiting for message from topic"}
 
 
-@mcp.tool(
-    description=(
-        "Publish a single message to a ROS topic.\n"
-        "Example:\n"
-        "publish_once(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', msg={'linear': {'x': 1.0}})"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Publish a single message to a ROS topic.\n"
+#         "Example:\n"
+#         "publish_once(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', msg={'linear': {'x': 1.0}})"
+#     )
+# )
 def publish_once(topic: str = "", msg_type: str = "", msg: dict = {}) -> dict:
     """
     Publish a single message to a ROS topic via rosbridge.
@@ -664,14 +664,14 @@ def publish_once(topic: str = "", msg_type: str = "", msg: dict = {}) -> dict:
     }
 
 
-@mcp.tool(
-    description=(
-        "Subscribe to a topic for a duration and collect messages.\n"
-        "Example:\n"
-        "subscribe_for_duration(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', duration=5, max_messages=10)\n"
-        "subscribe_for_duration(topic='/high_rate_topic', msg_type='sensor_msgs/Image', duration=10, queue_length=5, throttle_rate_ms=100)  # Control message buffering and rate"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Subscribe to a topic for a duration and collect messages.\n"
+#         "Example:\n"
+#         "subscribe_for_duration(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', duration=5, max_messages=10)\n"
+#         "subscribe_for_duration(topic='/high_rate_topic', msg_type='sensor_msgs/Image', duration=10, queue_length=5, throttle_rate_ms=100)  # Control message buffering and rate"
+#     )
+# )
 def subscribe_for_duration(
     topic: str = "",
     msg_type: str = "",
@@ -766,13 +766,13 @@ def subscribe_for_duration(
     }
 
 
-@mcp.tool(
-    description=(
-        "Publish a sequence of messages with delays.\n"
-        "Example:\n"
-        "publish_for_durations(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', messages=[{'linear': {'x': 1.0}}, {'linear': {'x': 0.0}}], durations=[1, 2])"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Publish a sequence of messages with delays.\n"
+#         "Example:\n"
+#         "publish_for_durations(topic='/cmd_vel', msg_type='geometry_msgs/msg/TwistStamped', messages=[{'linear': {'x': 1.0}}, {'linear': {'x': 0.0}}], durations=[1, 2])"
+#     )
+# )
 def publish_for_durations(
     topic: str = "",
     msg_type: str = "",
@@ -877,7 +877,7 @@ def publish_for_durations(
 ## ############################################################################################## ##
 
 
-@mcp.tool(description=("Get list of all available ROS services.\nExample:\nget_services()"))
+# @mcp.tool(description=("Get list of all available ROS services.\nExample:\nget_services()"))
 def get_services() -> dict:
     """
     Get list of all available ROS services.
@@ -913,11 +913,11 @@ def get_services() -> dict:
         return {"warning": "No services found"}
 
 
-@mcp.tool(
-    description=(
-        "Get the service type for a specific service.\nExample:\nget_service_type('/rosapi/topics')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get the service type for a specific service.\nExample:\nget_service_type('/rosapi/topics')"
+#     )
+# )
 def get_service_type(service: str) -> dict:
     """
     Get the service type for a specific service.
@@ -963,13 +963,13 @@ def get_service_type(service: str) -> dict:
         return {"error": f"Failed to get type for service {service}"}
 
 
-@mcp.tool(
-    description=(
-        "Get complete service details including request and response structures.\n"
-        "Example:\n"
-        "get_service_details('my_package/CustomService')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get complete service details including request and response structures.\n"
+#         "Example:\n"
+#         "get_service_details('my_package/CustomService')"
+#     )
+# )
 def get_service_details(service_type: str) -> dict:
     """
     Get complete service details including request and response structures.
@@ -1037,13 +1037,13 @@ def get_service_details(service_type: str) -> dict:
     return result
 
 
-@mcp.tool(
-    description=(
-        "Get list of nodes that provide a specific service.\n"
-        "Example:\n"
-        "get_service_providers('/rosapi/topics')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get list of nodes that provide a specific service.\n"
+#         "Example:\n"
+#         "get_service_providers('/rosapi/topics')"
+#     )
+# )
 def get_service_providers(service: str) -> dict:
     """
     Get list of nodes that provide a specific service.
@@ -1097,13 +1097,13 @@ def get_service_providers(service: str) -> dict:
     return {"service": service, "providers": providers, "provider_count": len(providers)}
 
 
-@mcp.tool(
-    description=(
-        "Get comprehensive information about all services including types and providers. Note that this may take time to execute when three are a large number of services since it queries each one by one under the hood. \n"
-        "Example:\n"
-        "inspect_all_services()"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get comprehensive information about all services including types and providers. Note that this may take time to execute when three are a large number of services since it queries each one by one under the hood. \n"
+#         "Example:\n"
+#         "inspect_all_services()"
+#     )
+# )
 def inspect_all_services() -> dict:
     """
     Get comprehensive information about all services including types and providers.
@@ -1193,14 +1193,14 @@ def inspect_all_services() -> dict:
         }
 
 
-@mcp.tool(
-    description=(
-        "Call a ROS service with specified request data.\n"
-        "Example:\n"
-        "call_service('/rosapi/topics', 'rosapi/Topics', {})\n"
-        "call_service('/slow_service', 'my_package/SlowService', {}, timeout=10.0)  # Specify timeout only for slow services"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Call a ROS service with specified request data.\n"
+#         "Example:\n"
+#         "call_service('/rosapi/topics', 'rosapi/Topics', {})\n"
+#         "call_service('/slow_service', 'my_package/SlowService', {}, timeout=10.0)  # Specify timeout only for slow services"
+#     )
+# )
 def call_service(
     service_name: str, service_type: str, request: dict, timeout: Optional[float] = None
 ) -> dict:
@@ -1276,7 +1276,7 @@ def call_service(
         }
 
 
-@mcp.tool(description=("Get list of all currently running ROS nodes.\nExample:\nget_nodes()"))
+# @mcp.tool(description=("Get list of all currently running ROS nodes.\nExample:\nget_nodes()"))
 def get_nodes() -> dict:
     """
     Get list of all currently running ROS nodes.
@@ -1312,13 +1312,13 @@ def get_nodes() -> dict:
         return {"warning": "No nodes found"}
 
 
-@mcp.tool(
-    description=(
-        "Get detailed information about a specific node including its publishers, subscribers, and services.\n"
-        "Example:\n"
-        "get_node_details('/turtlesim')"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get detailed information about a specific node including its publishers, subscribers, and services.\n"
+#         "Example:\n"
+#         "get_node_details('/turtlesim')"
+#     )
+# )
 def get_node_details(node: str) -> dict:
     """
     Get detailed information about a specific node including its publishers, subscribers, and services.
@@ -1386,13 +1386,13 @@ def get_node_details(node: str) -> dict:
     return result
 
 
-@mcp.tool(
-    description=(
-        "Get comprehensive information about all ROS nodes including their publishers, subscribers, and services.\n"
-        "Example:\n"
-        "inspect_all_nodes()"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Get comprehensive information about all ROS nodes including their publishers, subscribers, and services.\n"
+#         "Example:\n"
+#         "inspect_all_nodes()"
+#     )
+# )
 def inspect_all_nodes() -> dict:
     """
     Get comprehensive information about all ROS nodes including their publishers, subscribers, and services.
@@ -1479,14 +1479,14 @@ def inspect_all_nodes() -> dict:
 ## ############################################################################################## ##
 
 
-@mcp.tool(
-    description=(
-        "Ping a robot's IP address and check if a specific port is open.\n"
-        "A successful ping to the IP but not the port can indicate that ROSbridge is not running.\n"
-        "Example:\n"
-        "ping_robot(ip='192.168.1.100', port=9090)"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Ping a robot's IP address and check if a specific port is open.\n"
+#         "A successful ping to the IP but not the port can indicate that ROSbridge is not running.\n"
+#         "Example:\n"
+#         "ping_robot(ip='192.168.1.100', port=9090)"
+#     )
+# )
 def ping_robot(ip: str, port: int, ping_timeout: float = 2.0, port_timeout: float = 2.0) -> dict:
     """
     Ping an IP address and check if a specific port is open.
@@ -1510,12 +1510,12 @@ def ping_robot(ip: str, port: int, ping_timeout: float = 2.0, port_timeout: floa
 ## ############################################################################################## ##
 
 
-@mcp.tool(
-    description=(
-        "First, subscribe to an Image topic using 'subscribe_once' to save an image.\n"
-        "Then, use this tool to analyze the saved image\n"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "First, subscribe to an Image topic using 'subscribe_once' to save an image.\n"
+#         "Then, use this tool to analyze the saved image\n"
+#     )
+# )
 def _encode_image_to_imagecontent(image):
     """
     Encodes a PIL Image to a format compatible with ImageContent.
@@ -1591,12 +1591,12 @@ Examples:
 ## ############################################################################################## ##
 
 
-@mcp.tool(
-    description=(
-        "Run the prompt-free YOLOE detection test and return both original and annotated images.\n"
-        "This tool executes the prompt_free_test.py script and returns the images it creates."
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Run the prompt-free YOLOE detection test and return both original and annotated images.\n"
+#         "This tool executes the prompt_free_test.py script and returns the images it creates."
+#     )
+# )
 def run_prompt_free_detection():
     """
     Run the prompt-free YOLOE detection test and return both original and annotated images.
@@ -1726,17 +1726,16 @@ def run_prompt_free_detection():
     except Exception as e:
         return {
             "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }
 
-@mcp.tool(
-    description=(
-        "Run the prompt-set YOLOE detection test with multiple text prompts.\n"
-        "Tests multiple prompts and identifies the best performing one.\n"
-        "Format: Use comma-separated prompts like 'red object, blue object, green object'"
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Run the prompt-set YOLOE detection test with multiple text prompts.\n"
+#         "Tests multiple prompts and identifies the best performing one.\n"
+#         "Format: Use comma-separated prompts like 'red object, blue object, green object'"
+#     )
+# )
 def run_prompt_set_detection(prompts: str = ""):
     """
     Run the prompt-set YOLOE detection test with multiple text prompts.
@@ -1916,16 +1915,15 @@ def run_prompt_set_detection(prompts: str = ""):
     except Exception as e:
         return {
             "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }
 
-@mcp.tool(
-    description=(
-        "Update YOLO detection prompts using the UpdateYoloPrompts ROS2 service.\n"
-        "This tool CORRECTS mislabeled objects from the prompt-free YOLO detector."
-    )
-)
+# @mcp.tool(
+#     description=(
+#         "Update YOLO detection prompts using the UpdateYoloPrompts ROS2 service.\n"
+#         "This tool CORRECTS mislabeled objects from the prompt-free YOLO detector."
+#     )
+# )
 def update_yolo_prompts(prompt_map: dict):
     """
     Update YOLO detection prompts using the UpdateYoloPrompts ROS2 service.
@@ -2035,8 +2033,159 @@ def update_yolo_prompts(prompt_map: dict):
     except Exception as e:
         return {
             "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
+        }
+
+
+@mcp.tool(
+    description=(
+        "Add a YOLO detection prompt by sending a ROS2 service call via rosbridge.\n"
+        "This tool adds a single prompt with its mapped name to the YOLO detector.\n"
+        "You can provide just the prompt, or 'prompt:mapped_name' format.\n"
+        "Example:\n"
+        "add_yolo_prompt('blue_object')\n"
+        "add_yolo_prompt('blue_object:blue object')"
+    )
+)
+def add_yolo_prompt(prompt_input: str, timeout: Optional[float] = None) -> dict:
+    """
+    Add a YOLO detection prompt by sending a ROS2 service call via rosbridge.
+    
+    Args:
+        prompt_input (str): The prompt input. Can be:
+            - Just the prompt name (e.g., 'blue_object') - will use prompt as mapped_name
+            - Format 'prompt:mapped_name' (e.g., 'blue_object:blue object')
+        timeout (Optional[float]): Timeout in seconds. If None, uses the default timeout.
+    
+    Returns:
+        dict: Service call results with status and output
+    
+    Example:
+        add_yolo_prompt('blue_object')
+        add_yolo_prompt('blue_object:blue object')
+    """
+    # Validate input
+    if not prompt_input or not prompt_input.strip():
+        return {"status": "error", "error": "Prompt input cannot be empty"}
+    
+    # Parse the input - check if it contains a colon for mapping
+    if ':' in prompt_input:
+        # Format: "prompt:mapped_name"
+        parts = prompt_input.split(':', 1)
+        prompt = parts[0].strip()
+        mapped_name = parts[1].strip()
+        
+        if not prompt:
+            return {"status": "error", "error": "Prompt cannot be empty"}
+        if not mapped_name:
+            return {"status": "error", "error": "Mapped name cannot be empty"}
+    else:
+        # Just the prompt - use it as both prompt and mapped_name
+        prompt = prompt_input.strip()
+        mapped_name = prompt
+    
+    # Build the service request
+    # The service expects prompts_json (JSON array) and color_map_json (JSON object)
+    prompts_list = [prompt]
+    prompt_map = {prompt: mapped_name}
+    
+    # Create rosbridge service call message
+    message = {
+        "op": "call_service",
+        "service": "/update_yolo_prompts",
+        "type": "max_camera_msgs/srv/UpdateYoloPrompts",
+        "args": {
+            "prompts_json": json.dumps(prompts_list),
+            "color_map_json": json.dumps(prompt_map)
+        },
+        "id": f"add_yolo_prompt_{prompt.replace(' ', '_')}",
+    }
+    
+    # Call the service through rosbridge (same pattern as subscribe_once)
+    with ws_manager:
+        response = ws_manager.request(message, timeout=timeout)
+    
+    # Check for service response errors
+    if response and "result" in response and not response["result"]:
+        # Service call failed - return error with details from values
+        error_msg = response.get("values", {}).get("message", "Service call failed")
+        return {
+            "status": "error",
+            "message": "Failed to add YOLO prompt",
+            "error": f"Service call failed: {error_msg}",
+            "prompt": prompt,
+            "mapped_name": mapped_name
+        }
+    
+    # Return service response if present
+    if response:
+        if response.get("op") == "service_response":
+            # Service response format
+            values = response.get("values", {})
+            success = response.get("result", True)
+            message_text = values.get("message", "")
+            
+            if success:
+                return {
+                    "status": "success",
+                    "message": message_text or "YOLO prompt added successfully",
+                    "prompt": prompt,
+                    "mapped_name": mapped_name,
+                    "service_response": values
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": message_text or "Failed to add YOLO prompt",
+                    "prompt": prompt,
+                    "mapped_name": mapped_name,
+                    "service_response": values
+                }
+        elif response.get("op") == "status" and response.get("level") == "error":
+            # Error response
+            return {
+                "status": "error",
+                "message": "Failed to add YOLO prompt",
+                "error": response.get("msg", "Unknown error"),
+                "prompt": prompt,
+                "mapped_name": mapped_name
+            }
+        else:
+            # Check if response has values with success/message
+            if "values" in response:
+                values = response["values"]
+                if isinstance(values, dict) and "success" in values:
+                    if values.get("success"):
+                        return {
+                            "status": "success",
+                            "message": values.get("message", "YOLO prompt added successfully"),
+                            "prompt": prompt,
+                            "mapped_name": mapped_name,
+                            "service_response": values
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": values.get("message", "Failed to add YOLO prompt"),
+                            "prompt": prompt,
+                            "mapped_name": mapped_name,
+                            "service_response": values
+                        }
+            
+            # Unexpected response format
+            return {
+                "status": "error",
+                "message": "Unexpected response format from service",
+                "prompt": prompt,
+                "mapped_name": mapped_name,
+                "raw_response": response
+            }
+    else:
+        return {
+            "status": "error",
+            "message": "No response received from service call",
+            "prompt": prompt,
+            "mapped_name": mapped_name
         }
 
 
