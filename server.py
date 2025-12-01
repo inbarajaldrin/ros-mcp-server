@@ -2189,6 +2189,148 @@ def add_yolo_prompt(prompt_input: str, timeout: Optional[float] = None) -> dict:
         }
 
 
+@mcp.tool(
+    description=(
+        "Publish MQTT message to update LEGO sorting database.\n"
+        "This tool publishes database update messages via MQTT to the lego_sorting/sql_update topic.\n"
+        "Use 'insert' action to add a new processing record, or 'update' action to mark a record as completed.\n"
+        "Example:\n"
+        "mqtt_update_database(action='insert', aruco_id=1, color='Red', count=3)\n"
+        "mqtt_update_database(action='update', aruco_id=1, color='Red')"
+    )
+)
+def mqtt_update_database(
+    action: str,
+    aruco_id: Union[int, str],
+    color: str,
+    status: Optional[str] = None,
+    count: Optional[Union[int, str]] = None
+) -> dict:
+    """
+    Publish MQTT message to update LEGO sorting database.
+    
+    Args:
+        action (str): Action to perform - 'insert' (add new record) or 'update' (mark as completed)
+        aruco_id (int): ArUco marker ID
+        color (str): Color of the object (e.g., 'Red', 'Blue', 'Green', 'Yellow')
+        status (Optional[str]): Status for insert action (default: 'Processing'). Ignored for update.
+        count (Optional[int]): Count for insert action (required for insert, ignored for update)
+    
+    Returns:
+        dict: Status of the MQTT publish operation
+    
+    Example:
+        # Insert a Processing record
+        mqtt_update_database(action='insert', aruco_id=1, color='Red', count=3)
+        
+        # Update Processing to Completed
+        mqtt_update_database(action='update', aruco_id=1, color='Red')
+        
+        # Insert with custom status
+        mqtt_update_database(action='insert', aruco_id=2, color='Blue', status='Processing', count=5)
+    """
+    try:
+        import subprocess
+        import os
+        
+        # Validate and convert action
+        if action not in ['insert', 'update']:
+            return {
+                "status": "error",
+                "error": f"Invalid action: {action}. Must be 'insert' or 'update'"
+            }
+        
+        # Convert aruco_id to int if it's a string
+        try:
+            aruco_id = int(aruco_id)
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": f"aruco_id must be an integer, got: {aruco_id}"
+            }
+        
+        # Convert count to int if it's provided and is a string
+        if count is not None:
+            try:
+                count = int(count)
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "error": f"count must be an integer, got: {count}"
+                }
+        
+        # Validate required fields for insert
+        if action == "insert" and count is None:
+            return {
+                "status": "error",
+                "error": "count is required for insert action"
+            }
+        
+        # Get the script path (relative to server.py location)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_dir, "primitives", "mqtt_update_database.py")
+        
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"MQTT update script not found: {script_path}"
+            }
+        
+        # Build command arguments
+        cmd = [
+            "python3",
+            script_path,
+            "--action", action,
+            "--aruco_id", str(aruco_id),
+            "--color", color
+        ]
+        
+        # Add optional arguments
+        if action == "insert":
+            if status:
+                cmd.extend(["--status", status])
+            if count is not None:
+                cmd.extend(["--count", str(count)])
+        
+        # Execute the script
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            return {
+                "status": "success",
+                "message": f"MQTT message published successfully",
+                "action": action,
+                "aruco_id": aruco_id,
+                "color": color,
+                "output": result.stdout.strip() if result.stdout else None
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to publish MQTT message",
+                "error": result.stderr.strip() if result.stderr else "Unknown error",
+                "output": result.stdout.strip() if result.stdout else None,
+                "return_code": result.returncode
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "MQTT publish operation timed out after 10 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
 ## ############################################################################################## ##
 ##
 ##                      MAIN
