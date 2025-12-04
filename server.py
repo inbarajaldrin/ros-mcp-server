@@ -2425,17 +2425,15 @@ def control_wheels(
             
             # Publish message(s)
             if duration is not None and duration > 0:
-                # Publish continuously for duration
-                start_time = time.time()
-                publish_count = 0
-                while time.time() - start_time < duration:
-                    publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                    send_error = ws_manager.send(publish_msg)
-                    if send_error:
-                        ws_manager.send({"op": "unadvertise", "topic": topic})
-                        return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                    publish_count += 1
-                    time.sleep(0.1)  # 10Hz publishing rate
+                # Send command once (matching control_wheels.py behavior)
+                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
+                send_error = ws_manager.send(publish_msg)
+                if send_error:
+                    ws_manager.send({"op": "unadvertise", "topic": topic})
+                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
+                
+                # Wait for duration (matching control_wheels.py behavior)
+                time.sleep(duration)
                 
                 # Send stop command
                 if mode == 'real':
