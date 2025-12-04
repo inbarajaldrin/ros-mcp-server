@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from PIL import Image as PILImage
 
-from utils.config_utils import get_robot_specifications, parse_robot_config
+from utils.config_utils import get_default_mode, get_robot_specifications, parse_robot_config
 from utils.network_utils import ping_ip_and_port
 from utils.websocket_manager import WebSocketManager, parse_image, parse_json
 
@@ -31,6 +31,9 @@ MCP_HOST = os.getenv(
 MCP_PORT = int(
     os.getenv("MCP_PORT", "9000")
 )  # Default is 9000. Replace with the port of your remote MCP server.
+
+# Load default mode from config
+DEFAULT_MODE = get_default_mode()
 
 # Initialize MCP server and WebSocket manager
 mcp = FastMCP("ros-mcp-server")
@@ -2334,7 +2337,7 @@ def mqtt_update_database(
     )
 )
 def control_wheels(
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     linear: float = 0.0,
     angular: float = 0.0,
     duration: Optional[float] = None,
@@ -2484,7 +2487,7 @@ def control_wheels(
 )
 def control_gripper(
     action: str,
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     timeout: Optional[float] = None
 ) -> dict:
     """
@@ -2651,7 +2654,7 @@ def control_gripper(
 def move_camera(
     angle: Optional[float] = None,
     action: Optional[str] = None,
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -2800,7 +2803,7 @@ def move_camera(
 )
 def move_to_aruco(
     aruco_id: int,
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     gain: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -2981,7 +2984,7 @@ def move_to_aruco(
 )
 def move_to_drop(
     drop_id: int,
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -3212,7 +3215,7 @@ def move_to_drop(
 )
 def move_to_grasp(
     object_name: str,
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -3440,7 +3443,7 @@ def move_to_grasp(
     )
 )
 def reset_joints(
-    mode: str = "sim",
+    mode: str = DEFAULT_MODE,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:

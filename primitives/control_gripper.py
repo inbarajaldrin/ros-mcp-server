@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import rclpy
 from rclpy.node import Node
@@ -18,6 +19,10 @@ from builtin_interfaces.msg import Duration
 from std_msgs.msg import Float32
 import time
 import threading
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import get_default_mode
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
@@ -34,7 +39,9 @@ GRIPPER_MAX_ANGLE = 1.22  # Fully open
 class GripperController(Node):
     """ROS2 node for controlling the gripper"""
     
-    def __init__(self, mode='sim'):
+    def __init__(self, mode=None):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('gripper_controller')
         
         self.mode = mode
@@ -479,11 +486,12 @@ Examples:
         help='Gripper action: open or close'
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     args = parser.parse_args()

@@ -12,11 +12,17 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64MultiArray
 import time
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import get_default_mode
 
 # Wheel inversion compensation (set to True if wheels are inverted, False otherwise)
 WHEELS_INVERTED = True
@@ -25,7 +31,9 @@ WHEELS_INVERTED = True
 class WheelController(Node):
     """ROS2 node for controlling the wheels"""
     
-    def __init__(self, mode='sim'):
+    def __init__(self, mode=None):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('wheel_controller')
         
         self.mode = mode
@@ -133,11 +141,12 @@ Examples:
         """
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     parser.add_argument(

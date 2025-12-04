@@ -32,7 +32,9 @@ TRAJECTORY_DURATION = 1.0
 class MoveToGraspController(Node):
     """ROS2 node for moving to grasp objects"""
     
-    def __init__(self, mode='sim'):
+    def __init__(self, mode=None):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('move_to_grasp_controller')
         
         self.mode = mode
@@ -301,11 +303,12 @@ Examples:
         help='Name of the object to grasp (e.g., lego_1, aruco_5)'
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     parser.add_argument(

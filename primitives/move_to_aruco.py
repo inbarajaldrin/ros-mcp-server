@@ -12,6 +12,8 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -19,6 +21,10 @@ from tf2_msgs.msg import TFMessage
 import time
 import threading
 import math
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import get_default_mode
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
@@ -30,7 +36,9 @@ ROTATION_GAIN = 1.0  # Gain for calculating target angles from marker position
 class VisualServoArUcoController(Node):
     """ROS2 node for visual servoing to ArUco markers"""
     
-    def __init__(self, mode='sim', aruco_id=1, rotation_gain=ROTATION_GAIN):
+    def __init__(self, mode=None, aruco_id=1, rotation_gain=ROTATION_GAIN):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('visual_servo_aruco_controller')
         
         self.mode = mode
@@ -276,11 +284,12 @@ Examples:
         help='ArUco marker ID to align to (e.g., 1, 5, 8)'
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     parser.add_argument(

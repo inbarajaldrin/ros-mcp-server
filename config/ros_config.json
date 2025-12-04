@@ -1,0 +1,5 @@
+{
+  "mode": "real",
+  "description": "Default mode for ROS operations. Can be 'real' for real hardware or 'sim' for simulation. Individual tool calls can override this with the mode argument."
+}
+

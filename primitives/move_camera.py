@@ -11,11 +11,17 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 import time
 import math
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import get_default_mode
 
 # Trajectory duration in seconds
 CAMERA_TRAJECTORY_DURATION = 1.0
@@ -24,7 +30,9 @@ CAMERA_TRAJECTORY_DURATION = 1.0
 class MoveCameraController(Node):
     """ROS2 node for moving camera"""
     
-    def __init__(self, mode='sim'):
+    def __init__(self, mode=None):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('move_camera_controller')
         
         self.mode = mode
@@ -170,11 +178,12 @@ Examples:
         help='Target camera angle in degrees (e.g., -45, 0, 30). Ignored if action is specified.'
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     parser.add_argument(

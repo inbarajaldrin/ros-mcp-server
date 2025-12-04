@@ -9,12 +9,18 @@ Usage:
 """
 
 import argparse
+import os
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 import time
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import get_default_mode
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
@@ -23,7 +29,9 @@ TRAJECTORY_DURATION = 1.0
 class ResetJointsController(Node):
     """ROS2 node for resetting arm joints to home position"""
     
-    def __init__(self, mode='sim'):
+    def __init__(self, mode=None):
+        if mode is None:
+            mode = get_default_mode()
         super().__init__('reset_joints_controller')
         
         self.mode = mode
@@ -205,11 +213,12 @@ Examples:
         """
     )
     
+    default_mode = get_default_mode()
     parser.add_argument(
         '--mode',
         choices=['real', 'sim'],
-        default='sim',
-        help='Hardware mode: real for real hardware, sim for simulation (default: sim)'
+        default=default_mode,
+        help=f'Hardware mode: real for real hardware, sim for simulation (default: {default_mode} from config)'
     )
     
     parser.add_argument(

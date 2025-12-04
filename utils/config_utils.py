@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -87,3 +88,32 @@ def get_robot_specifications(specs_dir: str = "utils/robot_specifications") -> d
 
     except Exception as e:
         return {"error": f"Failed to read robot specifications directory: {str(e)}"}
+
+
+def get_default_mode(config_path: str = "config/ros_config.json") -> str:
+    """
+    Get the default mode (real/sim) from the ROS configuration file.
+    
+    Args:
+        config_path (str): Path to the ROS config JSON file. Defaults to "config/ros_config.json".
+    
+    Returns:
+        str: The default mode ('real' or 'sim'). Returns 'sim' if config file doesn't exist or mode is invalid.
+    """
+    config_file = Path(config_path)
+    
+    if not config_file.exists():
+        return "sim"  # Default fallback
+    
+    try:
+        with config_file.open("r") as file:
+            config = json.load(file)
+            mode = config.get("mode", "sim").lower()
+            
+            # Validate mode
+            if mode not in ["real", "sim"]:
+                return "sim"  # Default fallback for invalid mode
+            
+            return mode
+    except (json.JSONDecodeError, KeyError, Exception):
+        return "sim"  # Default fallback on any error
