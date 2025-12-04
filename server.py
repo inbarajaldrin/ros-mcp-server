@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import shlex
 import time
 from typing import Any, Dict, List, Optional, Union
 
@@ -9,7 +10,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from PIL import Image as PILImage
 
-from utils.config_utils import get_default_mode, get_robot_specifications, parse_robot_config
+from utils.config_utils import get_default_mode, get_ros_config, get_ros_setup_command, get_robot_specifications, parse_robot_config
 from utils.network_utils import ping_ip_and_port
 from utils.websocket_manager import WebSocketManager, parse_image, parse_json
 
@@ -34,6 +35,88 @@ MCP_PORT = int(
 
 # Load default mode from config
 DEFAULT_MODE = get_default_mode()
+
+# Helper function to run primitive scripts
+def run_primitive_script(script_name: str, args: List[str], timeout: Optional[float] = 30.0) -> dict:
+    """
+    Run a primitive script via subprocess with ROS environment setup.
+    
+    Args:
+        script_name (str): Name of the primitive script (e.g., 'move_to_grasp.py')
+        args (List[str]): List of command-line arguments for the script
+        timeout (Optional[float]): Timeout in seconds
+    
+    Returns:
+        dict: Result dictionary with status and output
+    """
+    try:
+        import subprocess
+        import os
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_dir, "primitives", script_name)
+        
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"Primitive script not found: {script_path}"
+            }
+        
+        # Get ROS setup command from config
+        ros_setup = get_ros_setup_command()
+        
+        # Build command - construct the full command as a list, then join with proper escaping
+        # This handles negative numbers and special characters correctly
+        python_cmd = ["python3", f"primitives/{script_name}"]
+        python_cmd.extend(args if args else [])
+        
+        # Use shlex.join() (Python 3.8+) or manual construction to properly escape
+        # Escape the entire python command string for bash -c
+        python_cmd_str = " ".join(shlex.quote(str(arg)) for arg in python_cmd)
+        
+        # Construct the full bash command
+        full_cmd_str = f"{ros_setup} && cd {shlex.quote(script_dir)} && {python_cmd_str}"
+        
+        cmd = ["bash", "-c", full_cmd_str]
+        
+        # Run the primitive script
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        if result.returncode == 0:
+            output = result.stdout.strip() if result.stdout else ""
+            stderr_output = result.stderr.strip() if result.stderr else ""
+            return {
+                "status": "success",
+                "output": output,
+                "stderr": stderr_output,  # Include stderr even on success for debugging
+                "debug_command": python_cmd_str,  # Include command for debugging
+                "message": f"Primitive script {script_name} completed successfully"
+            }
+        else:
+            error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
+            return {
+                "status": "error",
+                "error": f"Primitive script failed: {error_msg}",
+                "return_code": result.returncode,
+                "stdout": result.stdout.strip() if result.stdout else "",
+                "stderr": result.stderr.strip() if result.stderr else ""
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": f"Primitive script {script_name} timed out after {timeout} seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 # Initialize MCP server and WebSocket manager
 mcp = FastMCP("ros-mcp-server")
@@ -1618,12 +1701,13 @@ def run_prompt_free_detection():
                 "error": f"Prompt free test script not found: {script_path}"
             }
         
+        # Get ROS setup command from config
+        ros_setup = get_ros_setup_command()
+        
         # Run the script with proper environment setup
         cmd = [
             "bash", "-c",
-            "source /opt/ros/humble/setup.bash && "
-            "source ~/Desktop/ros2_ws/install/setup.bash && "
-            "export ROS_DOMAIN_ID=0 && "
+            f"{ros_setup} && "
             f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
             "python3 prompt_free_test.py"
         ]
@@ -1818,12 +1902,13 @@ def run_prompt_set_detection(prompts: str = ""):
             except:
                 pass
         
+        # Get ROS setup command from config
+        ros_setup = get_ros_setup_command()
+        
         # Build the command parts (same pattern as update_yolo_prompts)
         cmd_parts = [
             "bash", "-c",
-            "source /opt/ros/humble/setup.bash && "
-            "source ~/Desktop/ros2_ws/install/setup.bash && "
-            "export ROS_DOMAIN_ID=0 && "
+            f"{ros_setup} && "
             f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
             "python3 prompt_set_test.py"
         ]
@@ -1980,9 +2065,7 @@ def update_yolo_prompts(prompt_map: dict):
         # Build the command arguments
         cmd_parts = [
             "bash", "-c",
-            "source /opt/ros/humble/setup.bash && "
-            "source ~/Desktop/ros2_ws/install/setup.bash && "
-            "export ROS_DOMAIN_ID=0 && "
+            f"{get_ros_setup_command()} && "
             f"cd /home/aaugus11/Documents/ros-mcp-server/tools/yoloe && "
             f"python3 update_yolo_prompts_service.py"
         ]
@@ -2330,164 +2413,170 @@ def mqtt_update_database(
 @mcp.tool(
     description=(
         "Control JETANK wheels in both simulation and real hardware modes.\n"
-        "Controls linear and angular velocities for robot movement via websocket.\n"
+        "Controls linear and angular velocities for robot movement.\n"
         "Example:\n"
-        "control_wheels(mode='sim', linear=0.5, angular=0.0, duration=2.0)\n"
-        "control_wheels(mode='real', linear=0.0, angular=0.0)  # Stop"
+        "control_wheels(linear=0.5, angular=0.0, duration=2.0)\n"
+        "control_wheels(linear=0.0, angular=0.0)  # Stop"
     )
 )
 def control_wheels(
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     linear: float = 0.0,
     angular: float = 0.0,
-    duration: Optional[float] = None,
+    duration: float = 0.0,
     timeout: Optional[float] = None
 ) -> dict:
     """
     Control JETANK wheels in both simulation and real hardware modes via websocket.
     
     Args:
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         linear (float): Linear velocity - positive = forward, negative = backward (default: 0.0)
         angular (float): Angular velocity - positive = left turn, negative = right turn (default: 0.0)
-        duration (Optional[float]): Duration in seconds. If None, command is sent once and robot continues until stopped.
+        duration (float): Duration in seconds. If 0.0, command is sent once and robot continues until stopped. Default: 0.0.
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
     Returns:
         dict: Status of the wheel control operation
     
     Example:
-        # Move forward in simulation for 2 seconds
-        control_wheels(mode='sim', linear=0.5, duration=2.0)
+        # Move forward for 2 seconds (uses default mode from config)
+        control_wheels(linear=0.5, duration=2.0)
         
-        # Turn left in real hardware
-        control_wheels(mode='real', angular=0.4, duration=1.0)
+        # Turn left
+        control_wheels(angular=0.4, duration=1.0)
         
         # Stop robot
-        control_wheels(mode='real', linear=0.0, angular=0.0)
+        control_wheels(linear=0.0, angular=0.0)
     """
-    try:
-        import math
-        
-        if mode not in ['real', 'sim']:
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    elif mode not in ['real', 'sim']:
+        mode = DEFAULT_MODE
+    
+    # FIX: Changed duration from Optional[float] = None to float = 0.0 to fix MCP schema validation errors.
+    #      Previously, Optional[float] caused "'0.5' is not valid under any of the given schemas" errors
+    #      when trying to pass numeric duration values. Now duration is always a float (default 0.0),
+    #      and we explicitly handle None/null values by converting them to 0.0.
+    
+    # Convert duration to float if it's a string (handles XML-to-JSON conversion)
+    # Also handle None/null in case it's passed from the API
+    if isinstance(duration, str):
+        try:
+            duration = float(duration)
+        except (ValueError, TypeError):
             return {
                 "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
+                "error": f"duration must be a number, got: {duration}"
             }
-        
-        # Wheel inversion compensation (matching control_wheels.py)
-        WHEELS_INVERTED = True
-        
-        # Determine topic and message type based on mode
-        if mode == 'real':
-            topic = 'cmd_vel'
-            msg_type = 'geometry_msgs/msg/Twist'
-            
-            # Create Twist message
-            linear_x = -linear if WHEELS_INVERTED else linear
-            angular_z = -angular if WHEELS_INVERTED else angular
-            
-            msg = {
-                "linear": {"x": linear_x, "y": 0.0, "z": 0.0},
-                "angular": {"x": 0.0, "y": 0.0, "z": angular_z}
+    
+    # Handle None/null duration - treat as 0.0 (keep moving)
+    # Note: duration=0.0 means send command once and robot continues until stopped externally
+    #       duration>0 means send command once, wait for duration, then automatically stop
+    if duration is None:
+        duration = 0.0
+    
+    # Wheel inversion compensation (matching control_wheels.py)
+    WHEELS_INVERTED = True
+    
+    # Apply wheel inversion if needed
+    linear_x = linear
+    angular_z = angular
+    if WHEELS_INVERTED:
+        linear_x = -linear_x
+        angular_z = -angular_z
+    
+    # Build Twist message for cmd_vel topic
+    twist_msg = {
+        "linear": {"x": float(linear_x), "y": 0.0, "z": 0.0},
+        "angular": {"x": 0.0, "y": 0.0, "z": float(angular_z)}
+    }
+    
+    # Use websocket to publish directly to cmd_vel topic (for real hardware)
+    # This avoids subprocess issues and ensures proper ROS connection
+    try:
+        if duration == 0.0:
+            # Send command once - robot will continue until stopped
+            result = publish_once(
+                topic="cmd_vel",
+                msg_type="geometry_msgs/msg/Twist",
+                msg=twist_msg
+            )
+        else:
+            # Send command, wait for duration, then send stop command
+            stop_msg = {
+                "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
             }
-        else:  # sim mode
-            topic = '/forward_velocity_controller/commands'
-            msg_type = 'std_msgs/msg/Float64MultiArray'
             
-            # Scale speeds to match GUI pattern (0.5 linear -> 5.0 sim speed)
-            sim_linear = linear * 10.0
-            sim_angular = angular * 10.0
+            # Send the movement command
+            result = publish_once(
+                topic="cmd_vel",
+                msg_type="geometry_msgs/msg/Twist",
+                msg=twist_msg
+            )
             
-            # Calculate wheel speeds based on control_wheels.py logic
-            if abs(angular) < 0.01:  # Pure linear motion
-                data = [sim_linear, -sim_linear, sim_linear, -sim_linear]
-            elif abs(linear) < 0.01:  # Pure rotation
-                data = [sim_angular, sim_angular, sim_angular, sim_angular]
-            else:  # Combined motion
-                left_speed = sim_linear + sim_angular
-                right_speed = sim_linear - sim_angular
-                data = [left_speed, -right_speed, left_speed, -right_speed]
-            
-            # Apply wheel inversion compensation if needed
-            if WHEELS_INVERTED:
-                data = [-x for x in data]
-            
-            msg = {"data": data}
-        
-        # Publish via websocket
-        with ws_manager:
-            # Advertise topic
-            advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-            send_error = ws_manager.send(advertise_msg)
-            if send_error:
-                return {"status": "error", "error": f"Failed to advertise topic: {send_error}"}
-            
-            # Wait a bit for advertisement
-            time.sleep(0.1)
-            
-            # Publish message(s)
-            if duration is not None and duration > 0:
-                # Send command once (matching control_wheels.py behavior)
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                # Wait for duration (matching control_wheels.py behavior)
+            if result.get("success"):
+                # Wait for the duration
                 time.sleep(duration)
                 
-                # Send stop command
-                if mode == 'real':
-                    stop_msg = {
-                        "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
-                        "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
-                    }
-                else:
-                    stop_msg = {"data": [0.0, 0.0, 0.0, 0.0]}
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": stop_msg}
-                ws_manager.send(publish_msg)
-            else:
-                # Single publish
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-            
-            # Unadvertise
-            ws_manager.send({"op": "unadvertise", "topic": topic})
+                # Send stop command multiple times to ensure it's received
+                for _ in range(3):
+                    stop_result = publish_once(
+                        topic="cmd_vel",
+                        msg_type="geometry_msgs/msg/Twist",
+                        msg=stop_msg
+                    )
+                    if not stop_result.get("success"):
+                        result["stop_warning"] = "Stop command may not have been sent successfully"
+                    time.sleep(0.02)  # Small delay between stop commands
         
+        # Convert result format to match expected response
+        if result.get("success"):
+            return {
+                "status": "success",
+                "mode": mode,
+                "linear": linear,
+                "angular": angular,
+                "duration": duration,
+                "linear_sent": linear_x,  # Show actual value sent after inversion
+                "angular_sent": angular_z,
+                "message": f"Wheel command sent successfully via websocket"
+            }
+        else:
+            return {
+                "status": "error",
+                "error": result.get("error", "Failed to send wheel command via websocket"),
+                "mode": mode,
+                "linear": linear,
+                "angular": angular,
+                "duration": duration
+            }
+            
+    except Exception as e:
         return {
-            "status": "success",
-            "message": "Wheel control command sent via websocket",
+            "status": "error",
+            "error": f"Exception while sending wheel command: {str(e)}",
             "mode": mode,
             "linear": linear,
             "angular": angular,
             "duration": duration
         }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
 
 
 @mcp.tool(
     description=(
-        "Control JETANK gripper in both simulation and real hardware modes via websocket.\n"
+        "Control JETANK gripper in both simulation and real hardware modes.\n"
         "Opens or closes the gripper with smooth trajectory motion.\n"
         "Example:\n"
-        "control_gripper(action='open', mode='sim')\n"
-        "control_gripper(action='close', mode='real')"
+        "control_gripper(action='open')\n"
+        "control_gripper(action='close')"
     )
 )
 def control_gripper(
     action: str,
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     timeout: Optional[float] = None
 ) -> dict:
     """
@@ -2495,166 +2584,64 @@ def control_gripper(
     
     Args:
         action (str): Gripper action - 'open' or 'close'
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
     Returns:
         dict: Status of the gripper control operation
     
     Example:
-        # Open gripper in simulation
-        control_gripper(action='open', mode='sim')
+        # Open gripper (uses default mode from config)
+        control_gripper(action='open')
         
-        # Close gripper in real hardware
-        control_gripper(action='close', mode='real')
+        # Close gripper
+        control_gripper(action='close')
     """
-    try:
-        import math
-        
-        if action not in ['open', 'close']:
-            return {
-                "status": "error",
-                "error": f"Invalid action: {action}. Must be 'open' or 'close'"
-            }
-        
-        if mode not in ['real', 'sim']:
-            return {
-                "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
-            }
-        
-        TRAJECTORY_DURATION = 1.0
-        GRIPPER_MAX_ANGLE = 1.047198  # URDF gripper joint limit
-        WRIST_MAX_ANGLE = 1.22  # Maximum wrist servo angle (fully open)
-        
-        # Determine target angles
-        if action == 'open':
-            if mode == 'real':
-                target_wrist_angle = WRIST_MAX_ANGLE
-            else:
-                target_gripper_angles = [-GRIPPER_MAX_ANGLE, -GRIPPER_MAX_ANGLE, GRIPPER_MAX_ANGLE, -GRIPPER_MAX_ANGLE]
-        else:  # close
-            if mode == 'real':
-                target_wrist_angle = 0.0
-            else:
-                target_gripper_angles = [0.0, 0.0, 0.0, 0.0]
-        
-        # Get current joint state via websocket
-        joint_topic = 'real_joint_states' if mode == 'real' else 'joint_states'
-        joint_msg = _subscribe_once_internal(
-            topic=joint_topic,
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            # Assume starting from 0 if we can't get current state
-            current_wrist_angle = 0.0
-        else:
-            # Extract current wrist angle from joint state
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            
-            if mode == 'real':
-                try:
-                    wrist_idx = names.index('wrist_joint')
-                    current_wrist_angle = positions[wrist_idx] if wrist_idx < len(positions) else 0.0
-                except (ValueError, IndexError):
-                    current_wrist_angle = 0.0
-            else:
-                try:
-                    r1_idx = names.index('Revolute_GRIPPER_R1')
-                    gripper_angle = abs(positions[r1_idx]) if r1_idx < len(positions) else 0.0
-                    current_wrist_angle = gripper_angle * WRIST_MAX_ANGLE / GRIPPER_MAX_ANGLE
-                except (ValueError, IndexError):
-                    current_wrist_angle = 0.0
-        
-        # Publish trajectory via websocket
-        topic = 'joint_commands'
-        msg_type = 'sensor_msgs/msg/JointState'
-        
-        with ws_manager:
-            # Advertise topic
-            advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-            send_error = ws_manager.send(advertise_msg)
-            if send_error:
-                return {"status": "error", "error": f"Failed to advertise topic: {send_error}"}
-            
-            time.sleep(0.1)
-            
-            # Publish trajectory (50Hz for 1 second = 50 messages)
-            steps = 50
-            start_time = time.time()
-            
-            for i in range(steps + 1):
-                t = i / steps
-                t_smooth = 3 * t**2 - 2 * t**3  # Cubic easing
-                
-                if mode == 'real':
-                    current_angle = current_wrist_angle + (target_wrist_angle - current_wrist_angle) * t_smooth
-                    msg = {
-                        "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                        "name": ["wrist_joint"],
-                        "position": [current_angle]
-                    }
-                else:
-                    current_angle = current_wrist_angle + (target_wrist_angle - current_wrist_angle) * t_smooth
-                    gripper_angle = current_angle * GRIPPER_MAX_ANGLE / WRIST_MAX_ANGLE
-                    if action == 'open':
-                        angles = [-gripper_angle, -gripper_angle, gripper_angle, -gripper_angle]
-                    else:
-                        angles = [0.0, 0.0, 0.0, 0.0]
-                    
-                    msg = {
-                        "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                        "name": ["revolute_GRIPPER_L1", "revolute_GRIPPER_L2", "Revolute_GRIPPER_R1", "Revolute_GRIPPER_R2"],
-                        "position": angles
-                    }
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                # Maintain 50Hz rate
-                elapsed = time.time() - start_time
-                target_time = i * 0.02
-                if elapsed < target_time:
-                    time.sleep(target_time - elapsed)
-            
-            # Unadvertise
-            ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": f"Gripper {action} command sent via websocket",
-            "action": action,
-            "mode": mode
-        }
-            
-    except Exception as e:
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    
+    if action not in ['open', 'close']:
         return {
             "status": "error",
-            "error": str(e)
+            "error": f"Invalid action: {action}. Must be 'open' or 'close'"
         }
+    
+    if mode not in ['real', 'sim']:
+        return {
+            "status": "error",
+            "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
+        }
+    
+    # Build command arguments (action is positional)
+    args = [action, "--mode", mode]
+    
+    # Run the primitive script
+    result = run_primitive_script("control_gripper.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
+            "action": action,
+            "mode": mode
+        })
+    
+    return result
 
 
 @mcp.tool(
     description=(
-        "Move JETANK camera to a specified angle via websocket.\n"
+        "Move JETANK camera to a specified angle.\n"
         "Controls camera tilt angle in degrees or uses preset actions.\n"
         "Example:\n"
-        "move_camera(angle=-45, mode='real')\n"
-        "move_camera(action='down', mode='sim')\n"
-        "move_camera(action='reset', mode='real')"
+        "move_camera(angle=-45)\n"
+        "move_camera(action='down')\n"
+        "move_camera(action='reset')"
     )
 )
 def move_camera(
     angle: Optional[float] = None,
     action: Optional[str] = None,
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -2664,7 +2651,7 @@ def move_camera(
     Args:
         angle (Optional[float]): Target camera angle in degrees (e.g., -45, 0, 30). Ignored if action is specified.
         action (Optional[str]): Quick action - 'down' (move to -45°) or 'reset' (move to 0°)
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         duration (Optional[float]): Trajectory duration in seconds (default: 1.0)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
@@ -2672,139 +2659,76 @@ def move_camera(
         dict: Status of the camera movement operation
     
     Example:
-        # Move camera to -45 degrees
-        move_camera(angle=-45, mode='real')
+        # Move camera to -45 degrees (uses default mode from config)
+        move_camera(angle=-45)
         
         # Move camera down (preset to -45°)
-        move_camera(action='down', mode='sim')
+        move_camera(action='down')
         
         # Reset camera to 0 degrees
-        move_camera(action='reset', mode='real')
+        move_camera(action='reset')
     """
-    try:
-        import math
-        
-        if mode not in ['real', 'sim']:
-            return {
-                "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
-            }
-        
-        if action is not None and action not in ['down', 'reset']:
-            return {
-                "status": "error",
-                "error": f"Invalid action: {action}. Must be 'down' or 'reset'"
-            }
-        
-        if angle is None and action is None:
-            return {
-                "status": "error",
-                "error": "Either angle or action must be specified"
-            }
-        
-        # Determine target angle
-        if action == 'down':
-            target_angle_deg = -45.0
-        elif action == 'reset':
-            target_angle_deg = 0.0
-        else:
-            target_angle_deg = angle
-        
-        target_angle = math.radians(target_angle_deg)
-        CAMERA_TRAJECTORY_DURATION = duration or 1.0
-        
-        # Get current camera angle via websocket
-        joint_msg = _subscribe_once_internal(
-            topic='joint_states',
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            current_angle = 0.0
-        else:
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            try:
-                camera_idx = names.index('revolute_CAMERA_HOLDER_ARM_LOWER')
-                current_angle = positions[camera_idx] if camera_idx < len(positions) else 0.0
-            except (ValueError, IndexError):
-                current_angle = 0.0
-        
-        # Publish trajectory via websocket
-        topic = 'joint_commands'
-        msg_type = 'sensor_msgs/msg/JointState'
-        
-        with ws_manager:
-            # Advertise topic
-            advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-            send_error = ws_manager.send(advertise_msg)
-            if send_error:
-                return {"status": "error", "error": f"Failed to advertise topic: {send_error}"}
-            
-            time.sleep(0.1)
-            
-            # Publish trajectory (50Hz)
-            steps = int(CAMERA_TRAJECTORY_DURATION * 50)
-            start_time = time.time()
-            
-            for i in range(steps + 1):
-                t = i / steps
-                t_smooth = 3 * t**2 - 2 * t**3  # Cubic easing
-                
-                current_angle_interp = current_angle + (target_angle - current_angle) * t_smooth
-                
-                msg = {
-                    "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                    "name": ["camera_joint"],
-                    "position": [current_angle_interp]
-                }
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                # Maintain 50Hz rate
-                elapsed = time.time() - start_time
-                target_time = i * 0.02
-                if elapsed < target_time:
-                    time.sleep(target_time - elapsed)
-            
-            # Unadvertise
-            ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": f"Camera moved to {target_angle_deg:.1f}° via websocket",
-            "angle": target_angle_deg,
-            "action": action,
-            "mode": mode,
-            "duration": CAMERA_TRAJECTORY_DURATION
-        }
-            
-    except Exception as e:
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    
+    if mode not in ['real', 'sim']:
         return {
             "status": "error",
-            "error": str(e)
+            "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
         }
+    
+    if action is not None and action not in ['down', 'reset']:
+        return {
+            "status": "error",
+            "error": f"Invalid action: {action}. Must be 'down' or 'reset'"
+        }
+    
+    if angle is None and action is None:
+        return {
+            "status": "error",
+            "error": "Either angle or action must be specified"
+        }
+    
+    # Build command arguments
+    args = ["--mode", mode]
+    
+    if action is not None:
+        args.append(action)  # Positional argument
+    elif angle is not None:
+        args.extend(["--angle", str(angle)])
+    
+    if duration is not None:
+        args.extend(["--duration", str(duration)])
+    
+    # Run the primitive script
+    result = run_primitive_script("move_camera.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
+            "mode": mode,
+            "action": action,
+            "angle": angle,
+            "duration": duration or 1.0
+        })
+    
+    return result
 
 
 @mcp.tool(
     description=(
-        "Align camera center to an ArUco marker by rotating the base via websocket.\n"
+        "Align camera center to an ArUco marker by rotating the base.\n"
         "Uses visual servoing to center the marker in the camera view.\n"
         "Example:\n"
-        "move_to_aruco(aruco_id=1, mode='real')\n"
-        "move_to_aruco(aruco_id=5, mode='sim', gain=1.5)"
+        "move_to_aruco(aruco_id=1)\n"
+        "move_to_aruco(aruco_id=5, gain=1.5)"
     )
 )
 def move_to_aruco(
     aruco_id: int,
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     gain: Optional[float] = None,
+    duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
     """
@@ -2812,179 +2736,65 @@ def move_to_aruco(
     
     Args:
         aruco_id (int): ArUco marker ID to align to (e.g., 1, 5, 8)
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         gain (Optional[float]): Rotation control gain (default: 1.0)
+        duration (Optional[float]): Trajectory duration in seconds (default: 1.0)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
     Returns:
         dict: Status of the ArUco alignment operation
     
     Example:
-        # Align to marker ID 1 in real hardware
-        move_to_aruco(aruco_id=1, mode='real')
+        # Align to marker ID 1 (uses default mode from config)
+        move_to_aruco(aruco_id=1)
         
-        # Align to marker ID 5 in simulation with custom gain
-        move_to_aruco(aruco_id=5, mode='sim', gain=1.5)
+        # Align to marker ID 5 with custom gain and duration
+        move_to_aruco(aruco_id=5, gain=1.5, duration=2.0)
     """
-    try:
-        import math
-        
-        if mode not in ['real', 'sim']:
-            return {
-                "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
-            }
-        
-        ROTATION_GAIN = gain or 1.0
-        TRAJECTORY_DURATION = 1.0
-        target_marker_name = f"aruco_{aruco_id}"
-        
-        # Get ArUco pose via websocket
-        aruco_msg = _subscribe_once_internal(
-            topic='/aruco_poses',
-            msg_type='tf2_msgs/msg/TFMessage',
-            timeout=timeout or 5.0
-        )
-        
-        if "error" in aruco_msg:
-            return {
-                "status": "error",
-                "error": f"Failed to get ArUco poses: {aruco_msg.get('error', 'Unknown error')}"
-            }
-        
-        # Find the target marker in the TFMessage
-        tf_data = aruco_msg.get("msg", {})
-        transforms = tf_data.get("transforms", [])
-        
-        position = None
-        for transform in transforms:
-            if transform.get("child_frame_id") == target_marker_name:
-                translation = transform.get("transform", {}).get("translation", {})
-                position = [
-                    translation.get("x", 0.0),
-                    translation.get("y", 0.0),
-                    translation.get("z", 0.0)
-                ]
-                break
-        
-        if position is None:
-            return {
-                "status": "error",
-                "error": f"Marker {target_marker_name} not found in aruco_poses topic"
-            }
-        
-        x, y, z = position
-        
-        # Get current joint states
-        joint_msg = _subscribe_once_internal(
-            topic='joint_states',
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            current_bearing = 0.0
-            current_camera = 0.0
-        else:
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            
-            try:
-                bearing_idx = names.index('revolute_BEARING')
-                current_bearing = positions[bearing_idx] if bearing_idx < len(positions) else 0.0
-            except (ValueError, IndexError):
-                current_bearing = 0.0
-            
-            try:
-                camera_idx = names.index('revolute_CAMERA_HOLDER_ARM_LOWER')
-                current_camera = positions[camera_idx] if camera_idx < len(positions) else 0.0
-            except (ValueError, IndexError):
-                current_camera = 0.0
-        
-        # Calculate target angles
-        bearing_delta = ROTATION_GAIN * x
-        camera_delta = -ROTATION_GAIN * y
-        
-        target_bearing = max(-1.5708, min(1.5708, current_bearing + bearing_delta))
-        target_camera = max(-0.785398, min(0.785398, current_camera + camera_delta))
-        
-        # Publish trajectory via websocket
-        topic = 'joint_commands'
-        msg_type = 'sensor_msgs/msg/JointState'
-        
-        with ws_manager:
-            advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-            send_error = ws_manager.send(advertise_msg)
-            if send_error:
-                return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-            
-            time.sleep(0.1)
-            
-            steps = int(TRAJECTORY_DURATION * 50)
-            start_time = time.time()
-            
-            for i in range(steps + 1):
-                t = i / steps
-                t_smooth = 3 * t**2 - 2 * t**3
-                
-                current_bearing_interp = current_bearing + (target_bearing - current_bearing) * t_smooth
-                current_camera_interp = current_camera + (target_camera - current_camera) * t_smooth
-                
-                # Publish bearing
-                msg_bearing = {
-                    "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                    "name": ["base_joint"],
-                    "position": [current_bearing_interp]
-                }
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg_bearing}
-                ws_manager.send(publish_msg)
-                
-                # Publish camera
-                msg_camera = {
-                    "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                    "name": ["camera_joint"],
-                    "position": [current_camera_interp]
-                }
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg_camera}
-                ws_manager.send(publish_msg)
-                
-                elapsed = time.time() - start_time
-                target_time = i * 0.02
-                if elapsed < target_time:
-                    time.sleep(target_time - elapsed)
-            
-            ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": f"Aligned to marker {target_marker_name} via websocket",
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    elif mode not in ['real', 'sim']:
+        mode = DEFAULT_MODE
+    
+    # Build command arguments - always explicitly pass mode
+    args = [
+        "--aruco_id", str(aruco_id),
+        "--mode", str(mode)
+    ]
+    
+    if gain is not None:
+        args.extend(["--gain", str(gain)])
+    
+    if duration is not None:
+        args.extend(["--duration", str(duration)])
+    
+    # Run the primitive script
+    result = run_primitive_script("move_to_aruco.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
             "aruco_id": aruco_id,
             "mode": mode,
-            "gain": ROTATION_GAIN,
-            "target_bearing": math.degrees(target_bearing),
-            "target_camera": math.degrees(target_camera)
-        }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+            "gain": gain or 1.0,
+            "duration": duration or 1.0
+        })
+    
+    return result
 
 
 @mcp.tool(
     description=(
-        "Move JETANK arm to drop position using the drop_poses topic via websocket.\n"
+        "Move JETANK arm to drop position using the drop_poses topic.\n"
         "Moves the arm to a specified drop location for placing objects.\n"
         "Example:\n"
-        "move_to_drop(drop_id=1, mode='real')\n"
-        "move_to_drop(drop_id=2, mode='sim', duration=2.0)"
+        "move_to_drop(drop_id=1)\n"
+        "move_to_drop(drop_id=2, duration=2.0)"
     )
 )
 def move_to_drop(
     drop_id: int,
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -2993,7 +2803,7 @@ def move_to_drop(
     
     Args:
         drop_id (int): ID of the drop position (e.g., 1, 2, 3). Will look for drop_1, drop_2, etc. in drop_poses topic.
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         duration (Optional[float]): Trajectory duration in seconds (default: 1.0)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
@@ -3001,221 +2811,56 @@ def move_to_drop(
         dict: Status of the move to drop operation
     
     Example:
-        # Move to drop position 1 in real hardware
-        move_to_drop(drop_id=1, mode='real')
+        # Move to drop position 1 (uses default mode from config)
+        move_to_drop(drop_id=1)
         
-        # Move to drop position 2 in simulation with custom duration
-        move_to_drop(drop_id=2, mode='sim', duration=2.0)
+        # Move to drop position 2 with custom duration
+        move_to_drop(drop_id=2, duration=2.0)
     """
-    try:
-        import os
-        import sys
-        import math
-        
-        # Import IK functions
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, script_dir)
-        from primitives.perform_ik import compute_ik
-        
-        if mode not in ['real', 'sim']:
-            return {
-                "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
-            }
-        
-        TRAJECTORY_DURATION = duration or 1.0
-        drop_name = f"drop_{drop_id}"
-        
-        # Get drop pose via websocket
-        drop_msg = _subscribe_once_internal(
-            topic='/drop_poses',
-            msg_type='tf2_msgs/msg/TFMessage',
-            timeout=timeout or 5.0
-        )
-        
-        if "error" in drop_msg:
-            return {
-                "status": "error",
-                "error": f"Failed to get drop poses: {drop_msg.get('error', 'Unknown error')}"
-            }
-        
-        # Find the target drop in the TFMessage
-        tf_data = drop_msg.get("msg", {})
-        transforms = tf_data.get("transforms", [])
-        
-        position = None
-        for transform in transforms:
-            if transform.get("child_frame_id") == drop_name:
-                translation = transform.get("transform", {}).get("translation", {})
-                pos_m = [
-                    translation.get("x", 0.0),
-                    translation.get("y", 0.0),
-                    translation.get("z", 0.0)
-                ]
-                # Apply z-offset (+0.05m = +50mm) and convert to mm
-                position = [pos_m[0] * 1000, pos_m[1] * 1000, (pos_m[2] + 0.05) * 1000]
-                break
-        
-        if position is None:
-            return {
-                "status": "error",
-                "error": f"Drop position '{drop_name}' not found in drop_poses topic"
-            }
-        
-        x, y, z = position
-        
-        # Compute IK
-        joint_angles = compute_ik(x, y, z, max_tries=5, position_tolerance=2.0)
-        
-        if joint_angles is None:
-            return {
-                "status": "error",
-                "error": f"IK failed: No solution found for target position ({x:.1f}, {y:.1f}, {z:.1f})mm"
-            }
-        
-        theta0, theta1, theta3 = joint_angles
-        target_joints = [theta0, theta1, theta3]
-        
-        # Get current joint positions
-        joint_msg = _subscribe_once_internal(
-            topic='joint_states',
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            current_joints = [0.0, 0.785, -1.57]
-        else:
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            
-            arm_joint_names = ['revolute_BEARING', 'Revolute_SERVO_LOWER', 'Revolute_SERVO_UPPER']
-            current_joints = []
-            for joint_name in arm_joint_names:
-                try:
-                    idx = names.index(joint_name)
-                    current_joints.append(positions[idx] if idx < len(positions) else 0.0)
-                except (ValueError, IndexError):
-                    current_joints.append(0.0)
-            
-            if len(current_joints) < 3:
-                current_joints = [0.0, 0.785, -1.57]
-        
-        # Publish trajectory (same logic as reset_joints)
-        arm_joint_names = ['revolute_BEARING', 'Revolute_SERVO_LOWER', 'Revolute_SERVO_UPPER']
-        real_joint_names = ['base_joint', 'shoulder_joint', 'elbow_joint']
-        
-        if mode == 'real':
-            topic = 'joint_commands'
-            msg_type = 'sensor_msgs/msg/JointState'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = int(TRAJECTORY_DURATION * 50)
-                start_time = time.time()
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    for j, joint_name in enumerate(real_joint_names):
-                        msg = {
-                            "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                            "name": [joint_name],
-                            "position": [current_positions[j]]
-                        }
-                        publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                        ws_manager.send(publish_msg)
-                    
-                    elapsed = time.time() - start_time
-                    target_time = i * 0.02
-                    if elapsed < target_time:
-                        time.sleep(target_time - elapsed)
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        else:
-            topic = 'arm_trajectory'
-            msg_type = 'trajectory_msgs/msg/JointTrajectory'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = max(10, int(TRAJECTORY_DURATION * 50))
-                trajectory_points = []
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    point = {
-                        "positions": current_positions,
-                        "time_from_start": {"sec": int(t * TRAJECTORY_DURATION), "nanosec": int(((t * TRAJECTORY_DURATION) % 1) * 1e9)}
-                    }
-                    trajectory_points.append(point)
-                
-                msg = {
-                    "joint_names": arm_joint_names,
-                    "points": trajectory_points
-                }
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": f"Move to drop {drop_name} command sent via websocket",
-            "drop_id": drop_id,
-            "mode": mode,
-            "duration": TRAJECTORY_DURATION,
-            "target_position_mm": {"x": x, "y": y, "z": z}
-        }
-            
-    except Exception as e:
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    
+    if mode not in ['real', 'sim']:
         return {
             "status": "error",
-            "error": str(e)
+            "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
         }
+    
+    # Build command arguments
+    args = [
+        "--drop_id", str(drop_id),
+        "--mode", mode
+    ]
+    
+    if duration is not None:
+        args.extend(["--duration", str(duration)])
+    
+    # Run the primitive script
+    result = run_primitive_script("move_to_drop.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
+            "drop_id": drop_id,
+            "mode": mode,
+            "duration": duration or 1.0
+        })
+    
+    return result
 
 
 @mcp.tool(
     description=(
-        "Move JETANK arm to grasp a detected object using the objects_poses topic via websocket.\n"
+        "Move JETANK arm to grasp a detected object using the objects_poses topic.\n"
         "Moves the arm to a detected object position for grasping.\n"
         "Example:\n"
-        "move_to_grasp(object_name='lego_1', mode='real')\n"
-        "move_to_grasp(object_name='aruco_5', mode='sim', duration=2.0)"
+        "move_to_grasp(object_name='lego_1')\n"
+        "move_to_grasp(object_name='aruco_5', duration=2.0)"
     )
 )
 def move_to_grasp(
     object_name: str,
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -3224,7 +2869,7 @@ def move_to_grasp(
     
     Args:
         object_name (str): Name of the object to grasp (e.g., 'lego_1', 'aruco_5')
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         duration (Optional[float]): Trajectory duration in seconds (default: 1.0)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
@@ -3232,218 +2877,51 @@ def move_to_grasp(
         dict: Status of the move to grasp operation
     
     Example:
-        # Move to grasp object 'lego_1' in real hardware
-        move_to_grasp(object_name='lego_1', mode='real')
+        # Move to grasp object 'lego_1' (uses default mode from config)
+        move_to_grasp(object_name='lego_1')
         
-        # Move to grasp object 'aruco_5' in simulation with custom duration
-        move_to_grasp(object_name='aruco_5', mode='sim', duration=2.0)
+        # Move to grasp object 'aruco_5' with custom duration
+        move_to_grasp(object_name='aruco_5', duration=2.0)
     """
-    try:
-        import os
-        import sys
-        
-        # Import IK functions
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, script_dir)
-        from primitives.perform_ik import compute_ik
-        
-        if mode not in ['real', 'sim']:
-            return {
-                "status": "error",
-                "error": f"Invalid mode: {mode}. Must be 'real' or 'sim'"
-            }
-        
-        TRAJECTORY_DURATION = duration or 1.0
-        
-        # Get object pose via websocket
-        objects_msg = _subscribe_once_internal(
-            topic='/objects_poses',
-            msg_type='tf2_msgs/msg/TFMessage',
-            timeout=timeout or 5.0
-        )
-        
-        if "error" in objects_msg:
-            return {
-                "status": "error",
-                "error": f"Failed to get object poses: {objects_msg.get('error', 'Unknown error')}"
-            }
-        
-        # Find the target object in the TFMessage
-        tf_data = objects_msg.get("msg", {})
-        transforms = tf_data.get("transforms", [])
-        
-        position = None
-        for transform in transforms:
-            if transform.get("child_frame_id") == object_name:
-                translation = transform.get("transform", {}).get("translation", {})
-                pos_m = [
-                    translation.get("x", 0.0),
-                    translation.get("y", 0.0),
-                    translation.get("z", 0.0)
-                ]
-                # Convert to mm
-                position = [pos_m[0] * 1000, pos_m[1] * 1000, pos_m[2] * 1000]
-                break
-        
-        if position is None:
-            return {
-                "status": "error",
-                "error": f"Object '{object_name}' not found in objects_poses topic"
-            }
-        
-        x, y, z = position
-        
-        # Compute IK
-        joint_angles = compute_ik(x, y, z, max_tries=5, position_tolerance=2.0)
-        
-        if joint_angles is None:
-            return {
-                "status": "error",
-                "error": f"IK failed: No solution found for target position ({x:.1f}, {y:.1f}, {z:.1f})mm"
-            }
-        
-        theta0, theta1, theta3 = joint_angles
-        target_joints = [theta0, theta1, theta3]
-        
-        # Get current joint positions
-        joint_msg = _subscribe_once_internal(
-            topic='joint_states',
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            current_joints = [0.0, 0.785, -1.57]
-        else:
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            
-            arm_joint_names = ['revolute_BEARING', 'Revolute_SERVO_LOWER', 'Revolute_SERVO_UPPER']
-            current_joints = []
-            for joint_name in arm_joint_names:
-                try:
-                    idx = names.index(joint_name)
-                    current_joints.append(positions[idx] if idx < len(positions) else 0.0)
-                except (ValueError, IndexError):
-                    current_joints.append(0.0)
-            
-            if len(current_joints) < 3:
-                current_joints = [0.0, 0.785, -1.57]
-        
-        # Publish trajectory (same logic as move_to_drop)
-        arm_joint_names = ['revolute_BEARING', 'Revolute_SERVO_LOWER', 'Revolute_SERVO_UPPER']
-        real_joint_names = ['base_joint', 'shoulder_joint', 'elbow_joint']
-        
-        if mode == 'real':
-            topic = 'joint_commands'
-            msg_type = 'sensor_msgs/msg/JointState'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = int(TRAJECTORY_DURATION * 50)
-                start_time = time.time()
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    for j, joint_name in enumerate(real_joint_names):
-                        msg = {
-                            "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                            "name": [joint_name],
-                            "position": [current_positions[j]]
-                        }
-                        publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                        ws_manager.send(publish_msg)
-                    
-                    elapsed = time.time() - start_time
-                    target_time = i * 0.02
-                    if elapsed < target_time:
-                        time.sleep(target_time - elapsed)
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        else:
-            topic = 'arm_trajectory'
-            msg_type = 'trajectory_msgs/msg/JointTrajectory'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = max(10, int(TRAJECTORY_DURATION * 50))
-                trajectory_points = []
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    point = {
-                        "positions": current_positions,
-                        "time_from_start": {"sec": int(t * TRAJECTORY_DURATION), "nanosec": int(((t * TRAJECTORY_DURATION) % 1) * 1e9)}
-                    }
-                    trajectory_points.append(point)
-                
-                msg = {
-                    "joint_names": arm_joint_names,
-                    "points": trajectory_points
-                }
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": f"Move to grasp {object_name} command sent via websocket",
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    elif mode not in ['real', 'sim']:
+        mode = DEFAULT_MODE
+    
+    # Build command arguments - always explicitly pass mode
+    args = [
+        "--object_name", object_name,
+        "--mode", str(mode)
+    ]
+    
+    if duration is not None:
+        args.extend(["--duration", str(duration)])
+    
+    # Run the primitive script
+    result = run_primitive_script("move_to_grasp.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
             "object_name": object_name,
             "mode": mode,
-            "duration": TRAJECTORY_DURATION,
-            "target_position_mm": {"x": x, "y": y, "z": z}
-        }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+            "duration": duration or 1.0
+        })
+    
+    return result
 
 
 @mcp.tool(
     description=(
-        "Reset JETANK arm joints to home position (0, 0, 0) via websocket.\n"
+        "Reset JETANK arm joints to home position (0, 0, 0).\n"
         "Moves all arm joints to their home position using smooth trajectory.\n"
         "Example:\n"
-        "reset_joints(mode='real')\n"
-        "reset_joints(mode='sim', duration=2.0)"
+        "reset_joints()\n"
+        "reset_joints(duration=2.0)"
     )
 )
 def reset_joints(
-    mode: str = DEFAULT_MODE,
+    mode: str = None,
     duration: Optional[float] = None,
     timeout: Optional[float] = None
 ) -> dict:
@@ -3451,7 +2929,7 @@ def reset_joints(
     Reset JETANK arm joints to home position (0, 0, 0) via websocket.
     
     Args:
-        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: 'sim')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
         duration (Optional[float]): Trajectory duration in seconds (default: 1.0)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
@@ -3459,140 +2937,36 @@ def reset_joints(
         dict: Status of the reset joints operation
     
     Example:
-        # Reset joints in real hardware
-        reset_joints(mode='real')
+        # Reset joints (uses default mode from config)
+        reset_joints()
         
-        # Reset joints in simulation with custom duration
-        reset_joints(mode='sim', duration=2.0)
+        # Reset joints with custom duration
+        reset_joints(duration=2.0)
     """
-    try:
-        TRAJECTORY_DURATION = duration or 1.0
-        target_joints = [0.0, 0.0, 0.0]  # Home position
-        arm_joint_names = ['revolute_BEARING', 'Revolute_SERVO_LOWER', 'Revolute_SERVO_UPPER']
-        real_joint_names = ['base_joint', 'shoulder_joint', 'elbow_joint']
-        
-        # Get current joint positions via websocket
-        joint_msg = _subscribe_once_internal(
-            topic='joint_states',
-            msg_type='sensor_msgs/msg/JointState',
-            timeout=timeout or 3.0
-        )
-        
-        if "error" in joint_msg:
-            current_joints = [0.0, 0.785, -1.57]  # Default
-        else:
-            joint_state = joint_msg.get("msg", {})
-            names = joint_state.get("name", [])
-            positions = joint_state.get("position", [])
-            
-            current_joints = []
-            for joint_name in arm_joint_names:
-                try:
-                    idx = names.index(joint_name)
-                    current_joints.append(positions[idx] if idx < len(positions) else 0.0)
-                except (ValueError, IndexError):
-                    current_joints.append(0.0)
-            
-            if len(current_joints) < 3:
-                current_joints = [0.0, 0.785, -1.57]  # Default
-        
-        # Publish trajectory via websocket
-        topic = 'joint_commands' if mode == 'real' else 'arm_trajectory'
-        
-        if mode == 'real':
-            msg_type = 'sensor_msgs/msg/JointState'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = int(TRAJECTORY_DURATION * 50)
-                start_time = time.time()
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    # Send each joint separately
-                    for j, joint_name in enumerate(real_joint_names):
-                        msg = {
-                            "header": {"stamp": {"sec": 0, "nanosec": 0}},
-                            "name": [joint_name],
-                            "position": [current_positions[j]]
-                        }
-                        publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                        ws_manager.send(publish_msg)
-                    
-                    elapsed = time.time() - start_time
-                    target_time = i * 0.02
-                    if elapsed < target_time:
-                        time.sleep(target_time - elapsed)
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        else:
-            # Sim mode - publish trajectory
-            msg_type = 'trajectory_msgs/msg/JointTrajectory'
-            
-            with ws_manager:
-                advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
-                send_error = ws_manager.send(advertise_msg)
-                if send_error:
-                    return {"status": "error", "error": f"Failed to advertise: {send_error}"}
-                
-                time.sleep(0.1)
-                
-                steps = max(10, int(TRAJECTORY_DURATION * 50))
-                trajectory_points = []
-                
-                for i in range(steps + 1):
-                    t = i / steps
-                    t_smooth = 3 * t**2 - 2 * t**3
-                    
-                    current_positions = []
-                    for j in range(3):
-                        pos = current_joints[j] + (target_joints[j] - current_joints[j]) * t_smooth
-                        current_positions.append(pos)
-                    
-                    point = {
-                        "positions": current_positions,
-                        "time_from_start": {"sec": int(t * TRAJECTORY_DURATION), "nanosec": int(((t * TRAJECTORY_DURATION) % 1) * 1e9)}
-                    }
-                    trajectory_points.append(point)
-                
-                msg = {
-                    "joint_names": arm_joint_names,
-                    "points": trajectory_points
-                }
-                
-                publish_msg = {"op": "publish", "topic": topic, "msg": msg}
-                send_error = ws_manager.send(publish_msg)
-                if send_error:
-                    ws_manager.send({"op": "unadvertise", "topic": topic})
-                    return {"status": "error", "error": f"Failed to publish: {send_error}"}
-                
-                ws_manager.send({"op": "unadvertise", "topic": topic})
-        
-        return {
-            "status": "success",
-            "message": "Reset joints command sent via websocket",
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    elif mode not in ['real', 'sim']:
+        mode = DEFAULT_MODE
+    
+    # Build command arguments - always explicitly pass mode
+    args = [
+        "--mode", str(mode)
+    ]
+    
+    if duration is not None:
+        args.extend(["--duration", str(duration)])
+    
+    # Run the primitive script
+    result = run_primitive_script("reset_joints.py", args, timeout=timeout or 30.0)
+    
+    if result.get("status") == "success":
+        result.update({
             "mode": mode,
-            "duration": TRAJECTORY_DURATION
-        }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+            "duration": duration or 1.0
+        })
+    
+    return result
 
 
 ## ############################################################################################## ##

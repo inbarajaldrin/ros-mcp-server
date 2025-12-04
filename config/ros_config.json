@@ -1,5 +1,7 @@
 {
   "mode": "real",
-  "description": "Default mode for ROS operations. Can be 'real' for real hardware or 'sim' for simulation. Individual tool calls can override this with the mode argument."
+  "description": "Default mode for ROS operations. Can be 'real' for real hardware or 'sim' for simulation. Individual tool calls can override this with the mode argument.",
+  "ros_distribution": "humble",
+  "ros_workspace": "~/Desktop/ros2_ws",
+  "ros_domain_id": 45
 }
-

@@ -149,7 +149,6 @@ class ResetJointsController(Node):
     def send_trajectory_real(self, start_joints, target_joints, duration):
         """Send trajectory to real hardware (continuous commands at 50Hz)"""
         start_time = time.time()
-        iteration_count = 0
         
         while time.time() - start_time < duration:
             elapsed = time.time() - start_time
@@ -164,11 +163,8 @@ class ResetJointsController(Node):
                 pos = start_joints[j] + (target_joints[j] - start_joints[j]) * t_smooth
                 current_positions.append(pos)
             
-            # Send to real hardware at lower rate (every 5th iteration = 10Hz, matching GUI)
-            if iteration_count % 5 == 0:
-                self.send_arm_command_real(current_positions[0], current_positions[1], current_positions[2])
-            
-            iteration_count += 1
+            # Send command
+            self.send_arm_command_real(current_positions[0], current_positions[1], current_positions[2])
             time.sleep(0.02)  # 50Hz update rate
         
         # Ensure final position is set

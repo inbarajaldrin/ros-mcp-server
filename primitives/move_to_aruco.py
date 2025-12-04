@@ -299,6 +299,13 @@ Examples:
         help=f'Rotation control gain (default: {ROTATION_GAIN})'
     )
     
+    parser.add_argument(
+        '--duration',
+        type=float,
+        default=TRAJECTORY_DURATION,
+        help=f'Trajectory duration in seconds (default: {TRAJECTORY_DURATION})'
+    )
+    
     args = parser.parse_args()
     
     # Initialize ROS2
@@ -318,7 +325,7 @@ Examples:
         time.sleep(0.5)  # Additional buffer for DDS discovery
         
         # Perform alignment (blocking call)
-        success, message = controller.align_to_marker()
+        success, message = controller.align_to_marker(duration=args.duration)
         
         # Clean shutdown
         controller.destroy_node()

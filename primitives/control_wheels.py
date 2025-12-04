@@ -55,7 +55,7 @@ class WheelController(Node):
         
         self.get_logger().info(f'Wheel controller initialized in {mode} mode')
     
-    def send_command_real(self, linear_x, angular_z):
+    def send_command_real(self, linear_x, angular_z, log=True):
         """Send command to real hardware using Twist message"""
         msg = Twist()
         msg.linear.x = linear_x
@@ -66,9 +66,10 @@ class WheelController(Node):
             msg.angular.z = -msg.angular.z
         
         self.cmd_vel_pub.publish(msg)
-        self.get_logger().info(f'Real hardware command: linear.x={msg.linear.x}, angular.z={msg.angular.z}')
+        if log:
+            self.get_logger().info(f'Real hardware command: linear.x={msg.linear.x}, angular.z={msg.angular.z}')
     
-    def send_command_sim(self, linear_speed, angular_speed):
+    def send_command_sim(self, linear_speed, angular_speed, log=True):
         """Send command to simulation using Float64MultiArray message"""
         # For forward/backward: [left_front, right_front, left_back, right_back]
         # Pattern: forward = [speed, -speed, speed, -speed]
@@ -101,29 +102,38 @@ class WheelController(Node):
             msg.data = [-x for x in msg.data]
         
         self.velocity_pub.publish(msg)
-        self.get_logger().info(f'Simulation command: {msg.data}')
+        if log:
+            self.get_logger().info(f'Simulation command: {msg.data}')
     
-    def move_custom(self, linear=0.0, angular=0.0, duration=None):
+    def move_custom(self, linear=0.0, angular=0.0, duration=0.0):
         """Move with custom linear and angular velocities"""
+        # Send command once
         if self.use_real_hardware:
             self.send_command_real(linear, angular)
         else:
             self.send_command_sim(linear, angular)
         
-        if duration:
+        # If duration > 0, wait for that duration then stop
+        # If duration is 0.0, command is sent and robot continues until stopped externally
+        if duration and duration > 0.0:
             time.sleep(duration)
             self.stop()
     
     def stop(self):
-        """Stop all motion"""
-        if self.use_real_hardware:
-            self.send_command_real(0.0, 0.0)
-        else:
-            msg = Float64MultiArray()
-            msg.data = [0.0, 0.0, 0.0, 0.0]
-            self.velocity_pub.publish(msg)
-        
-        self.get_logger().info('Stop command sent')
+        """Stop all motion - send stop command multiple times to ensure it's received"""
+        # Send stop command multiple times to ensure it's received
+        for _ in range(5):
+            if self.use_real_hardware:
+                self.send_command_real(0.0, 0.0, log=(_ == 0))  # Only log first time
+            else:
+                msg = Float64MultiArray()
+                msg.data = [0.0, 0.0, 0.0, 0.0]
+                self.velocity_pub.publish(msg)
+                if _ == 0:
+                    self.get_logger().info('Stop command sent')
+            
+            rclpy.spin_once(self, timeout_sec=0.01)
+            time.sleep(0.02)  # Small delay between stop commands
 
 
 def main():
@@ -163,11 +173,14 @@ Examples:
         help='Angular velocity (positive = left turn, negative = right turn, default: 0.0)'
     )
     
+    # FIX: Changed duration default from None to 0.0 to match server.py schema fix.
+    #      This ensures consistency: duration=0.0 means keep moving, duration>0 means move then stop.
+    #      The server.py had schema validation errors with Optional[float] = None, so we changed to float = 0.0.
     parser.add_argument(
         '--duration',
         type=float,
-        default=None,
-        help='Duration in seconds. If not specified, command is sent once and robot continues until stopped.'
+        default=0.0,
+        help='Duration in seconds. If 0.0, command is sent once and robot continues until stopped. If > 0, robot moves for that duration then stops.'
     )
     
     args = parser.parse_args()
@@ -190,8 +203,9 @@ Examples:
         else:
             controller.move_custom(linear=args.linear, angular=args.angular, duration=args.duration)
         
-        # If duration was specified, we already stopped. Otherwise, keep publishing
-        if args.duration is None and not (args.linear == 0.0 and args.angular == 0.0):
+        # If duration was 0.0, we already sent the command and it will keep moving
+        # If duration > 0, we already stopped in move_custom
+        if args.duration == 0.0 and not (args.linear == 0.0 and args.angular == 0.0):
             # Keep the command active by publishing periodically
             # This allows the agent to control duration externally
             print(f"Command sent. Robot will continue until stopped. Use 'stop' command to halt.")

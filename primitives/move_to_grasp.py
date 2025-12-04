@@ -25,6 +25,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from primitives.perform_ik import compute_ik, forward_kinematics, verify_solution
+from utils.config_utils import get_default_mode
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
