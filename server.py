@@ -1667,6 +1667,56 @@ Examples:
 
 ## ############################################################################################## ##
 ##
+##                      PROMPTS
+##
+## ############################################################################################## ##
+
+
+# Function to automatically load and register prompts from prompts.py
+def load_prompts_from_file():
+    """
+    Automatically load all prompts from prompts.py and register them as MCP prompts.
+    This function should be called during server initialization.
+    """
+    try:
+        from prompts import PROMPTS
+        from fastmcp.prompts import Prompt
+        
+        for prompt_name, prompt_text in PROMPTS.items():
+            # Create a function with proper closure by binding text at definition time
+            def create_prompt_func(name, text):
+                def prompt_function() -> str:
+                    """Returns the prompt content as text."""
+                    return text
+                # Set function name for better debugging
+                prompt_function.__name__ = name
+                return prompt_function
+            
+            # Create prompt function with proper closure
+            prompt_func = create_prompt_func(prompt_name, prompt_text)
+            
+            # Create Prompt object from function
+            prompt = Prompt.from_function(
+                prompt_func,
+                name=prompt_name,
+                description=f"Prompt: {prompt_name}"
+            )
+            
+            # Register the prompt with the server
+            mcp.add_prompt(prompt)
+            
+    except ImportError as e:
+        print(f"Warning: Failed to import prompts module: {str(e)}")
+    except Exception as e:
+        print(f"Warning: Error loading prompts: {str(e)}")
+
+
+# Automatically load all prompts from prompts.py as MCP prompts
+load_prompts_from_file()
+
+
+## ############################################################################################## ##
+##
 ##                      YOLOE DETECTION
 ##
 ## ############################################################################################## ##
