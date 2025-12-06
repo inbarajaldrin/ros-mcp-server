@@ -2913,6 +2913,69 @@ def move_to_grasp(
 
 @mcp.tool(
     description=(
+        "Move JETANK robot to align with a detected object using visual servoing.\n"
+        "First aligns y position using angular velocity, then moves forward/backward to reach target x-position.\n"
+        "Example:\n"
+        "move_to_lego(object_name='lego_1')\n"
+        "move_to_lego(object_name='lego_2', linear_gain=15.0)"
+    )
+)
+def move_to_lego(
+    object_name: str,
+    mode: str = None,
+    linear_gain: Optional[float] = None,
+    timeout: Optional[float] = None
+) -> dict:
+    """
+    Move JETANK robot to align with a detected object using visual servoing.
+    First aligns y position using angular velocity control, then moves forward/backward to reach target x-position.
+    
+    Args:
+        object_name (str): Name of the object to align to (e.g., 'lego_1', 'lego_2')
+        mode (str): Hardware mode - 'real' for real hardware, 'sim' for simulation (default: from config/ros_config.json)
+        linear_gain (Optional[float]): Linear velocity control gain (default: 10.0)
+        timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
+    
+    Returns:
+        dict: Status of the move to lego operation
+    
+    Example:
+        # Move to align with object 'lego_1' (uses default mode from config)
+        move_to_lego(object_name='lego_1')
+        
+        # Move to align with object 'lego_2' with custom linear gain
+        move_to_lego(object_name='lego_2', linear_gain=15.0)
+    """
+    # Use default mode from config if not provided
+    if mode is None:
+        mode = DEFAULT_MODE
+    elif mode not in ['real', 'sim']:
+        mode = DEFAULT_MODE
+    
+    # Build command arguments - always explicitly pass mode
+    args = [
+        "--object_name", object_name,
+        "--mode", str(mode)
+    ]
+    
+    if linear_gain is not None:
+        args.extend(["--linear_gain", str(linear_gain)])
+    
+    # Run the primitive script
+    result = run_primitive_script("move_to_lego.py", args, timeout=timeout or 60.0)
+    
+    if result.get("status") == "success":
+        result.update({
+            "object_name": object_name,
+            "mode": mode,
+            "linear_gain": linear_gain or 10.0
+        })
+    
+    return result
+
+
+@mcp.tool(
+    description=(
         "Reset JETANK arm joints to home position (0, 0, 0).\n"
         "Moves all arm joints to their home position using smooth trajectory.\n"
         "Example:\n"
