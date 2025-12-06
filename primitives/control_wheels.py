@@ -9,6 +9,8 @@ Usage:
     python3 primitives/control_wheels.py --mode real --angular 0.4 --duration 1.0
     python3 primitives/control_wheels.py --mode sim --linear 0.5 --angular 0.2 --duration 2.0
     python3 primitives/control_wheels.py --mode real --linear 0.0 --angular 0.0
+    python3 primitives/control_wheels.py --mode real --target-yaw 0.0
+    python3 primitives/control_wheels.py --mode real --target-yaw 90.0 --angular-speed 0.4
 """
 
 import argparse
@@ -16,6 +18,7 @@ import time
 import sys
 import os
 import json
+import math
 from typing import Optional, Dict, Any
 
 # Add parent directory to path for imports
@@ -30,6 +33,107 @@ WHEELS_INVERTED = True
 # Default websocket connection (can be overridden via environment or config)
 ROSBRIDGE_IP = os.getenv("ROSBRIDGE_IP", "localhost")
 ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))
+
+# Control constants
+CONTROL_RATE = 30.0  # Control loop frequency (Hz)
+MAX_ANGULAR_VELOCITY = 0.4  # Maximum angular velocity (rad/s)
+
+
+def quaternion_to_yaw(qx, qy, qz, qw):
+    """Convert quaternion to yaw angle (rotation around z-axis) in radians"""
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (qw * qx + qy * qz)
+    cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1:
+        pitch = math.copysign(math.pi / 2, sinp)  # Use 90 degrees if out of range
+    else:
+        pitch = math.asin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (qw * qz + qx * qy)
+    cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    
+    return yaw
+
+
+def normalize_angle(angle):
+    """Normalize angle to [-pi, pi] range"""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
+class PIDController:
+    """PID Controller for angle control"""
+    
+    def __init__(self, kp=1.0, ki=0.1, kd=0.5, integral_limit=2.0):
+        """
+        Initialize PID controller
+        
+        Args:
+            kp: Proportional gain
+            ki: Integral gain
+            kd: Derivative gain
+            integral_limit: Maximum absolute value for integral term (windup protection)
+        """
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral_limit = integral_limit
+        
+        self.integral = 0.0
+        self.previous_error = 0.0
+    
+    def reset(self):
+        """Reset PID controller state"""
+        self.integral = 0.0
+        self.previous_error = 0.0
+    
+    def compute(self, error, dt):
+        """
+        Compute PID control output
+        
+        Args:
+            error: Current error (target - current)
+            dt: Time step since last call
+        
+        Returns:
+            Control output
+        """
+        # Proportional term
+        p_term = self.kp * error
+        
+        # Integral term with windup protection
+        self.integral += error * dt
+        # Clamp integral to prevent windup
+        self.integral = max(-self.integral_limit, min(self.integral_limit, self.integral))
+        i_term = self.ki * self.integral
+        
+        # Derivative term (using error derivative)
+        if dt > 0:
+            d_term = self.kd * (error - self.previous_error) / dt
+        else:
+            d_term = 0.0
+        
+        # Store current error for next iteration
+        self.previous_error = error
+        
+        # Total output
+        output = p_term + i_term + d_term
+        
+        return output
+    
+    def reset_integral_on_sign_change(self, error):
+        """Reset integral term when error sign changes to prevent overshoot"""
+        if (self.previous_error > 0 and error < 0) or (self.previous_error < 0 and error > 0):
+            self.integral = 0.0
 
 
 def publish_once_websocket(
@@ -188,6 +292,218 @@ class WheelController:
         
         return {"success": True}
     
+    def move_to_angle(self, target_yaw: float = 0.0, angular_speed: float = 0.4, 
+                      tolerance: float = 0.05, max_iterations: int = 1000,
+                      kp: float = 0.35, ki: float = 0.01, kd: float = 1.8) -> Dict[str, Any]:
+        """
+        Move wheels to a target yaw angle using IMU feedback with PID control.
+        Follows the pattern from move_to_lego.py for subscription and control.
+        
+        Args:
+            target_yaw: Target yaw angle in radians (default: 0.0)
+            angular_speed: Maximum angular velocity limit (default: 0.4)
+            tolerance: Angular tolerance in radians to consider target reached (default: 0.05 ~ 3 degrees)
+            max_iterations: Maximum number of control loop iterations (default: 1000)
+            kp: Proportional gain (default: 1.0)
+            ki: Integral gain (default: 0.1)
+            kd: Derivative gain (default: 0.5)
+        
+        Returns:
+            Dict with success status and final angle
+        """
+        control_period = 1.0 / CONTROL_RATE
+        iteration = 0
+        
+        # Initialize PID controller
+        pid = PIDController(kp=kp, ki=ki, kd=kd)
+        pid.reset()
+        
+        # Smoothing parameters
+        smoothing_factor = 0.5  # Exponential smoothing factor (0-1, lower = smoother)
+        max_velocity_change = 0.06  # Maximum change in velocity per control period (rad/s) - reduced for smoother motion
+        dead_zone = 0.03  # Dead zone in radians (~1.7 degrees) to prevent jitter - increased
+        previous_angular_velocity = 0.0
+        previous_yaw = None
+        
+        print(f"Moving to target yaw: {math.degrees(target_yaw):.2f} degrees")
+        print(f"PID gains: Kp={kp}, Ki={ki}, Kd={kd}")
+        
+        # Keep WebSocket connection open for the entire control loop (like move_to_lego.py)
+        with self.ws_manager:
+            # Subscribe to IMU topic
+            subscribe_imu_msg = {
+                "op": "subscribe",
+                "topic": "/imu/data",
+                "type": "sensor_msgs/msg/Imu",
+            }
+            
+            self.ws_manager.send(subscribe_imu_msg)
+            time.sleep(0.1)  # Give time for subscription to register
+            
+            current_yaw = None
+            last_imu_update = 0
+            last_log_time = time.time()
+            
+            try:
+                while iteration < max_iterations:
+                    # Receive messages from subscribed topic (check multiple times per iteration)
+                    # Process multiple messages to catch all updates (like move_to_lego.py)
+                    messages_processed = 0
+                    while messages_processed < 5:  # Process up to 5 messages per iteration
+                        response = self.ws_manager.receive(timeout=0.01)  # Shorter timeout for faster checking
+                        if response:
+                            msg_data = parse_json(response)
+                            if msg_data:
+                                # Handle IMU messages
+                                if msg_data.get("op") == "publish" and msg_data.get("topic") == "/imu/data":
+                                    msg = msg_data.get("msg", {})
+                                    orientation = msg.get("orientation", {})
+                                    qx = orientation.get("x", 0.0)
+                                    qy = orientation.get("y", 0.0)
+                                    qz = orientation.get("z", 0.0)
+                                    qw = orientation.get("w", 1.0)
+                                    
+                                    current_yaw = quaternion_to_yaw(qx, qy, qz, qw)
+                                    last_imu_update = time.time()
+                                    messages_processed += 1
+                                    if iteration == 0:
+                                        print(f"IMU connected. Initial yaw: {math.degrees(current_yaw):.2f}°")
+                        else:
+                            break  # No more messages available
+                    
+                    # Check if we have recent data (within 0.5 seconds) - like move_to_lego.py
+                    current_time = time.time()
+                    if current_yaw is None or (current_time - last_imu_update) > 0.5:
+                        if iteration % 50 == 0:
+                            print(f"Warning: No recent IMU data")
+                        time.sleep(control_period)
+                        iteration += 1
+                        continue
+                    
+                    # Calculate angle difference
+                    angle_error = normalize_angle(target_yaw - current_yaw)
+                    angle_error_deg = math.degrees(angle_error)
+                    
+                    # Log progress every 0.5 seconds
+                    if time.time() - last_log_time >= 0.5:
+                        print(f"Current yaw: {math.degrees(current_yaw):.2f}°, "
+                              f"Target: {math.degrees(target_yaw):.2f}°, "
+                              f"Error: {angle_error_deg:.2f}°")
+                        last_log_time = time.time()
+                    
+                    # Check if we're close enough to target
+                    if abs(angle_error) < tolerance:
+                        self.stop()
+                        print(f"Target reached! Final yaw: {math.degrees(current_yaw):.2f}°")
+                        # Unsubscribe before returning
+                        self.ws_manager.send({"op": "unsubscribe", "topic": "/imu/data"})
+                        return {"success": True, "final_yaw": current_yaw, "target_yaw": target_yaw}
+                    
+                    # Calculate current angular velocity from yaw change (for predictive stopping)
+                    current_angular_velocity_estimate = 0.0
+                    if previous_yaw is not None:
+                        yaw_change = normalize_angle(current_yaw - previous_yaw)
+                        current_angular_velocity_estimate = yaw_change / control_period
+                    previous_yaw = current_yaw
+                    
+                    # Dead zone: stop if error is very small to prevent jitter
+                    if abs(angle_error) < dead_zone:
+                        angular_velocity = 0.0
+                    else:
+                        # Calculate PID control output
+                        pid.reset_integral_on_sign_change(angle_error)
+                        pid_output = pid.compute(angle_error, control_period)
+                        
+                        # Clamp output to angular_speed limit
+                        angular_velocity = max(-angular_speed, min(angular_speed, pid_output))
+                        
+                        # Predictive stopping: estimate stopping distance based on current velocity
+                        # Using simplified physics: distance = v^2 / (2 * decel)
+                        # Assume deceleration of ~0.3 rad/s^2
+                        estimated_decel = 0.3
+                        if abs(current_angular_velocity_estimate) > 0.01:
+                            stopping_distance = (current_angular_velocity_estimate ** 2) / (2 * estimated_decel)
+                            # If we're within stopping distance, start aggressive reduction
+                            if abs(angle_error) < stopping_distance * 1.2:  # Add 20% safety margin
+                                reduction_factor = max(0.1, abs(angle_error) / (stopping_distance * 1.2))
+                                angular_velocity *= reduction_factor * reduction_factor
+                        
+                        # Reduce velocity when close to target - start much earlier
+                        abs_error = abs(angle_error)
+                        if abs_error < 0.2:  # Within ~11.5 degrees - very close
+                            # Very aggressive cubic reduction
+                            reduction_factor = abs_error / 0.2
+                            angular_velocity *= reduction_factor * reduction_factor * reduction_factor
+                        elif abs_error < 0.4:  # Within ~23 degrees
+                            # Aggressive quadratic reduction
+                            reduction_factor = (abs_error - 0.2) / 0.2  # 0 to 1 over this range
+                            angular_velocity *= (0.3 + 0.7 * reduction_factor * reduction_factor)
+                        elif abs_error < 0.7:  # Within ~40 degrees - start reducing earlier
+                            # Moderate reduction
+                            reduction_factor = (abs_error - 0.4) / 0.3  # 0 to 1 over this range
+                            angular_velocity *= (0.7 + 0.3 * (1.0 - reduction_factor))
+                        elif abs_error < 1.0:  # Within ~57 degrees
+                            # Light reduction
+                            reduction_factor = (abs_error - 0.7) / 0.3  # 0 to 1 over this range
+                            angular_velocity *= (0.85 + 0.15 * (1.0 - reduction_factor))
+                        
+                        # Apply minimum speed to ensure robot can overcome friction
+                        # Always apply 0.2 rad/s minimum for IMU control
+                        min_speed = 0.2  # Minimum angular velocity (rad/s)
+                        if abs(angle_error) > dead_zone and abs(angular_velocity) > 0.0:
+                            # Ensure minimum speed in the correct direction
+                            if abs(angular_velocity) < min_speed:
+                                angular_velocity = min_speed * math.copysign(1.0, angular_velocity)
+                    
+                    # Rate limiting: limit the change in velocity per control period
+                    velocity_change = angular_velocity - previous_angular_velocity
+                    if abs(velocity_change) > max_velocity_change:
+                        velocity_change = max_velocity_change * math.copysign(1.0, velocity_change)
+                        angular_velocity = previous_angular_velocity + velocity_change
+                    
+                    # Exponential smoothing: blend current command with previous command
+                    angular_velocity = (smoothing_factor * angular_velocity + 
+                                      (1.0 - smoothing_factor) * previous_angular_velocity)
+                    
+                    # Store for next iteration
+                    previous_angular_velocity = angular_velocity
+                    
+                    # Send wheel command (like move_to_lego.py - publish doesn't need subscription)
+                    if self.use_real_hardware:
+                        result = self.send_command_real(0.0, angular_velocity, log=(iteration % 50 == 0))
+                    else:
+                        result = self.send_command_sim(0.0, angular_velocity, log=(iteration % 50 == 0))
+                    
+                    if "error" in result:
+                        print(f"Error sending wheel command: {result.get('error')}")
+                        self.stop()
+                        self.ws_manager.send({"op": "unsubscribe", "topic": "/imu/data"})
+                        return result
+                    
+                    time.sleep(control_period)
+                    iteration += 1
+                
+                # Timeout reached
+                self.stop()
+                if current_yaw is not None:
+                    print(f"Timeout reached. Final yaw: {math.degrees(current_yaw):.2f}°")
+                else:
+                    print("Timeout reached. Could not get final yaw.")
+                
+                # Unsubscribe before returning
+                self.ws_manager.send({"op": "unsubscribe", "topic": "/imu/data"})
+                return {
+                    "success": False, 
+                    "error": "Timeout reached before reaching target angle",
+                    "final_yaw": current_yaw,
+                    "target_yaw": target_yaw
+                }
+            
+            except KeyboardInterrupt:
+                self.stop()
+                self.ws_manager.send({"op": "unsubscribe", "topic": "/imu/data"})
+                raise
+    
     def stop(self):
         """Stop all motion - send stop command multiple times to ensure it's received"""
         # Send stop command multiple times to ensure it's received
@@ -225,6 +541,8 @@ Examples:
   python3 primitives/control_wheels.py --mode real --angular 0.4 --duration 1.0
   python3 primitives/control_wheels.py --mode sim --linear 0.5 --angular 0.2 --duration 2.0
   python3 primitives/control_wheels.py --mode real --linear 0.0 --angular 0.0
+  python3 primitives/control_wheels.py --mode real --target-yaw 0.0
+  python3 primitives/control_wheels.py --mode real --target-yaw 90.0 --angular-speed 0.4
         """
     )
     
@@ -260,6 +578,27 @@ Examples:
         help='Duration in seconds. If 0.0, command is sent once and robot continues until stopped. If > 0, robot moves for that duration then stops.'
     )
     
+    parser.add_argument(
+        '--target-yaw',
+        type=float,
+        default=None,
+        help='Target yaw angle in degrees. If specified, robot will rotate to this angle using IMU feedback. (default: None)'
+    )
+    
+    parser.add_argument(
+        '--angular-speed',
+        type=float,
+        default=0.4,
+        help='Angular speed for rotation when using --target-yaw (default: 0.4)'
+    )
+    
+    parser.add_argument(
+        '--tolerance',
+        type=float,
+        default=3.0,
+        help='Angular tolerance in degrees when using --target-yaw (default: 3.0)'
+    )
+    
     args = parser.parse_args()
     
     try:
@@ -270,7 +609,16 @@ Examples:
         time.sleep(0.5)
         
         # Execute the requested action
-        if args.linear == 0.0 and args.angular == 0.0:
+        if args.target_yaw is not None:
+            # Move to target angle using IMU
+            target_yaw_rad = math.radians(args.target_yaw)
+            tolerance_rad = math.radians(args.tolerance)
+            result = controller.move_to_angle(
+                target_yaw=target_yaw_rad,
+                angular_speed=args.angular_speed,
+                tolerance=tolerance_rad
+            )
+        elif args.linear == 0.0 and args.angular == 0.0:
             result = controller.stop()
         else:
             result = controller.move_custom(linear=args.linear, angular=args.angular, duration=args.duration)
