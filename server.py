@@ -2399,7 +2399,7 @@ def mqtt_update_database(
         
         # Get the script path (relative to server.py location)
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(script_dir, "primitives", "mqtt_update_database.py")
+        script_path = os.path.join(script_dir, "primitives", "mqtt_database.py")
         
         # Check if script exists
         if not os.path.exists(script_path):
@@ -2454,6 +2454,132 @@ def mqtt_update_database(
         return {
             "status": "timeout",
             "message": "MQTT publish operation timed out after 10 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@mcp.tool(
+    description=(
+        "Query/read the LEGO sorting database via MQTT.\n"
+        "This tool queries the database to see which aruco IDs are assigned to which colors.\n"
+        "You can query all records, filter by color, or filter by aruco_id.\n"
+        "Example:\n"
+        "mqtt_read_database()  # Get all records\n"
+        "mqtt_read_database(color='Red')  # Get records for Red color\n"
+        "mqtt_read_database(aruco_id=1)  # Get record for aruco_id 1"
+    )
+)
+def mqtt_read_database(
+    color: Optional[str] = None,
+    aruco_id: Optional[Union[int, str]] = None
+) -> dict:
+    """
+    Query/read the LEGO sorting database via MQTT.
+    
+    Args:
+        color (Optional[str]): Filter by color (e.g., 'Red', 'Blue', 'Green', 'Yellow'). If None, returns all records.
+        aruco_id (Optional[int]): Filter by aruco marker ID. If None, returns all records.
+    
+    Returns:
+        dict: Database query results containing records with aruco_id, color, status, and count.
+              Returns error dict if query fails.
+    
+    Example:
+        # Get all records
+        mqtt_read_database()
+        
+        # Get records for a specific color
+        mqtt_read_database(color='Red')
+        
+        # Get record for a specific aruco_id
+        mqtt_read_database(aruco_id=1)
+    """
+    try:
+        import subprocess
+        import os
+        import json
+        
+        # Get the script path (relative to server.py location)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_dir, "primitives", "mqtt_database.py")
+        
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "error": f"MQTT database script not found: {script_path}"
+            }
+        
+        # Build command arguments
+        cmd = [
+            "python3",
+            script_path,
+            "--action", "query"
+        ]
+        
+        # Add optional filter arguments
+        if color is not None:
+            cmd.extend(["--color", color])
+        if aruco_id is not None:
+            try:
+                aruco_id_int = int(aruco_id)
+                cmd.extend(["--aruco_id", str(aruco_id_int)])
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "error": f"aruco_id must be an integer, got: {aruco_id}"
+                }
+        
+        # Execute the script
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15  # Longer timeout for query operations
+        )
+        
+        if result.returncode == 0:
+            # Try to parse JSON output from stdout
+            try:
+                output = result.stdout.strip()
+                if output:
+                    # Parse the JSON response
+                    query_result = json.loads(output)
+                    return {
+                        "status": "success",
+                        "data": query_result,
+                        "message": "Database query completed successfully"
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "error": "No output received from query"
+                    }
+            except json.JSONDecodeError as e:
+                # If JSON parsing fails, return the raw output
+                return {
+                    "status": "success",
+                    "data": result.stdout.strip(),
+                    "message": "Query completed but response format may be unexpected",
+                    "raw_output": result.stdout.strip()
+                }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to query database",
+                "error": result.stderr.strip() if result.stderr else "Unknown error",
+                "output": result.stdout.strip() if result.stdout else None,
+                "return_code": result.returncode
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "Database query operation timed out after 15 seconds"
         }
     except Exception as e:
         return {
