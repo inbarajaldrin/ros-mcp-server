@@ -13,6 +13,8 @@ from PIL import Image as PILImage
 from utils.config_utils import get_default_mode, get_ros_config, get_ros_setup_command, get_robot_specifications, parse_robot_config
 from utils.network_utils import ping_ip_and_port
 from utils.websocket_manager import WebSocketManager, parse_image, parse_json
+from primitives.control_wheels import WheelController
+import math
 
 # ROS bridge connection settings
 ROSBRIDGE_IP = "localhost"  # Default is localhost. Replace with your local IPor set using the LLM.
@@ -2414,9 +2416,11 @@ def mqtt_update_database(
     description=(
         "Control JETANK wheels in both simulation and real hardware modes.\n"
         "Controls linear and angular velocities for robot movement.\n"
+        "Can also rotate to a target angle using IMU feedback.\n"
         "Example:\n"
         "control_wheels(linear=0.5, angular=0.0, duration=2.0)\n"
-        "control_wheels(linear=0.0, angular=0.0)  # Stop"
+        "control_wheels(linear=0.0, angular=0.0)  # Stop\n"
+        "control_wheels(target_yaw=90.0)  # Rotate to 90 degrees using IMU"
     )
 )
 def control_wheels(
@@ -2424,6 +2428,9 @@ def control_wheels(
     linear: float = 0.0,
     angular: float = 0.0,
     duration: float = 0.0,
+    target_yaw: Union[float, str, None] = None,
+    angular_speed: float = 0.4,
+    tolerance: float = 3.0,
     timeout: Optional[float] = None
 ) -> dict:
     """
@@ -2434,6 +2441,9 @@ def control_wheels(
         linear (float): Linear velocity - positive = forward, negative = backward (default: 0.0)
         angular (float): Angular velocity - positive = left turn, negative = right turn (default: 0.0)
         duration (float): Duration in seconds. If 0.0, command is sent once and robot continues until stopped. Default: 0.0.
+        target_yaw (Optional[float]): Target yaw angle in degrees. If specified, robot will rotate to this angle using IMU feedback. (default: None)
+        angular_speed (float): Maximum angular speed for rotation when using target_yaw (default: 0.4 rad/s)
+        tolerance (float): Angular tolerance in degrees when using target_yaw (default: 3.0 degrees)
         timeout (Optional[float]): Timeout in seconds. If None, uses default timeout.
     
     Returns:
@@ -2448,12 +2458,89 @@ def control_wheels(
         
         # Stop robot
         control_wheels(linear=0.0, angular=0.0)
+        
+        # Rotate to 90 degrees using IMU feedback
+        control_wheels(target_yaw=90.0)
     """
     # Use default mode from config if not provided
     if mode is None:
         mode = DEFAULT_MODE
     elif mode not in ['real', 'sim']:
         mode = DEFAULT_MODE
+    
+    # Convert string parameters to float (handles XML-to-JSON conversion and MCP schema validation)
+    # This is needed because FastMCP may pass numeric values as strings
+    if target_yaw is not None:
+        if isinstance(target_yaw, str):
+            try:
+                target_yaw = float(target_yaw)
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "error": f"target_yaw must be a number, got: {target_yaw}"
+                }
+        target_yaw = float(target_yaw)
+    
+    if isinstance(angular_speed, str):
+        try:
+            angular_speed = float(angular_speed)
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": f"angular_speed must be a number, got: {angular_speed}"
+            }
+    angular_speed = float(angular_speed)
+    
+    if isinstance(tolerance, str):
+        try:
+            tolerance = float(tolerance)
+        except (ValueError, TypeError):
+            return {
+                "status": "error",
+                "error": f"tolerance must be a number, got: {tolerance}"
+            }
+    tolerance = float(tolerance)
+    
+    # Handle IMU-based angle control if target_yaw is specified
+    if target_yaw is not None:
+        try:
+            # Convert target_yaw from degrees to radians
+            target_yaw_rad = math.radians(target_yaw)
+            tolerance_rad = math.radians(tolerance)
+            
+            # Create WheelController and use move_to_angle
+            controller = WheelController(mode=mode)
+            time.sleep(0.5)  # Give websocket time to establish connection
+            
+            result = controller.move_to_angle(
+                target_yaw=target_yaw_rad,
+                angular_speed=angular_speed,
+                tolerance=tolerance_rad
+            )
+            
+            if result.get("success"):
+                return {
+                    "status": "success",
+                    "mode": mode,
+                    "target_yaw": target_yaw,
+                    "final_yaw": math.degrees(result.get("final_yaw", 0.0)),
+                    "message": f"Rotated to target angle. Final yaw: {math.degrees(result.get('final_yaw', 0.0)):.2f}°"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "error": result.get("error", "Failed to reach target angle"),
+                    "mode": mode,
+                    "target_yaw": target_yaw,
+                    "final_yaw": math.degrees(result.get("final_yaw", 0.0)) if result.get("final_yaw") is not None else None
+                }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": f"Exception during IMU angle control: {str(e)}",
+                "mode": mode,
+                "target_yaw": target_yaw
+            }
     
     # FIX: Changed duration from Optional[float] = None to float = 0.0 to fix MCP schema validation errors.
     #      Previously, Optional[float] caused "'0.5' is not valid under any of the given schemas" errors
