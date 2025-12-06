@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
 Visual Servo ArUco Primitive
-Aligns the camera center to an ArUco marker by rotating the base.
+Aligns the camera center to an ArUco marker by rotating the base via websocket.
 
 Uses aruco_poses topic to get marker position and rotates base bearing joint
 to center the marker in the camera view.
 
 Usage:
-    python3 primitives/visual_servo_aruco.py --aruco_id 1 --mode real
-    python3 primitives/visual_servo_aruco.py --aruco_id 5 --mode sim
+    python3 primitives/move_to_aruco.py --aruco_id 1 --mode real
+    python3 primitives/move_to_aruco.py --aruco_id 5 --mode sim
 """
 
 import argparse
-import os
-import sys
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from tf2_msgs.msg import TFMessage
 import time
-import threading
 import math
+import sys
+import os
+import json
+from typing import Optional, Dict, Any
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.config_utils import get_default_mode
+from utils.websocket_manager import WebSocketManager, parse_json
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
@@ -32,128 +31,226 @@ TRAJECTORY_DURATION = 1.0
 # Control parameters
 ROTATION_GAIN = 1.0  # Gain for calculating target angles from marker position
 
+# Default websocket connection (can be overridden via environment or config)
+ROSBRIDGE_IP = os.getenv("ROSBRIDGE_IP", "localhost")
+ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))
 
-class VisualServoArUcoController(Node):
-    """ROS2 node for visual servoing to ArUco markers"""
+
+def subscribe_once_websocket(
+    ws_manager: WebSocketManager,
+    topic: str,
+    msg_type: str,
+    timeout: float = 5.0
+) -> Dict[str, Any]:
+    """Subscribe to a ROS topic via websocket and return the first message"""
+    subscribe_msg = {
+        "op": "subscribe",
+        "topic": topic,
+        "type": msg_type,
+    }
     
-    def __init__(self, mode=None, aruco_id=1, rotation_gain=ROTATION_GAIN):
+    send_error = ws_manager.send(subscribe_msg)
+    if send_error:
+        return {"error": f"Failed to subscribe: {send_error}"}
+    
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        response = ws_manager.receive(timeout=0.5)
+        if response is None:
+            continue
+        
+        msg_data = parse_json(response)
+        if not msg_data:
+            continue
+        
+        if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+            unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+            ws_manager.send(unsubscribe_msg)
+            return {"error": f"Rosbridge error: {msg_data.get('msg', 'Unknown error')}"}
+        
+        if msg_data.get("op") == "publish" and msg_data.get("topic") == topic:
+            unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+            ws_manager.send(unsubscribe_msg)
+            return {"msg": msg_data.get("msg", {})}
+    
+    unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+    ws_manager.send(unsubscribe_msg)
+    return {"error": "Timeout waiting for message from topic"}
+
+
+def publish_once_websocket(
+    ws_manager: WebSocketManager,
+    topic: str,
+    msg_type: str,
+    msg: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Publish a message to a ROS topic via websocket"""
+    # Advertise the topic
+    advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
+    send_error = ws_manager.send(advertise_msg)
+    if send_error:
+        return {"error": f"Failed to advertise topic: {send_error}"}
+    
+    # Check for advertise response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Advertise failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for advertise
+    
+    # Publish the message
+    publish_msg = {"op": "publish", "topic": topic, "msg": msg}
+    send_error = ws_manager.send(publish_msg)
+    if send_error:
+        ws_manager.send({"op": "unadvertise", "topic": topic})
+        return {"error": f"Failed to publish message: {send_error}"}
+    
+    # Check for publish response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Publish failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for publish
+    
+    # Unadvertise the topic
+    ws_manager.send({"op": "unadvertise", "topic": topic})
+    
+    return {"success": True}
+
+
+class VisualServoArUcoController:
+    """Controller for visual servoing to ArUco markers using websocket"""
+    
+    def __init__(self, mode=None, aruco_id=1, rotation_gain=ROTATION_GAIN, ws_manager=None):
         if mode is None:
             mode = get_default_mode()
-        super().__init__('visual_servo_aruco_controller')
         
         self.mode = mode
         self.use_real_hardware = (mode == 'real')
         self.aruco_id = aruco_id
         self.target_marker_name = f"aruco_{aruco_id}"
-        
-        # Control parameters
         self.rotation_gain = rotation_gain
+        self.ws_manager = ws_manager or WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, default_timeout=5.0)
         
-        # ArUco poses data storage
-        self.aruco_poses_data = {}
-        self.aruco_poses_lock = threading.Lock()
-        
-        # Create subscriber for ArUco poses
-        self.aruco_poses_sub = self.create_subscription(
-            TFMessage,
-            '/aruco_poses',
-            self.aruco_poses_callback,
-            10
-        )
-        
-        # Create publisher for joint commands
-        self.joint_command_pub = self.create_publisher(
-            JointState, 
-            'joint_commands', 
-            10
-        )
-        
-        # Current joint state
-        self.current_joint_state = None
-        self.joint_state_sub = self.create_subscription(
-            JointState,
-            'joint_states',
-            self.joint_state_callback,
-            10
-        )
-        
-        
-        self.get_logger().info(f'Visual servo ArUco controller initialized in {mode} mode, targeting marker {self.target_marker_name}')
+        print(f'Visual servo ArUco controller initialized in {mode} mode, targeting marker {self.target_marker_name}')
     
-    def aruco_poses_callback(self, msg):
-        """Callback for aruco_poses topic (TFMessage format)"""
-        with self.aruco_poses_lock:
-            # Store the latest ArUco poses data
-            self.aruco_poses_data = {}
-            for transform in msg.transforms:
-                # Use child_frame_id as marker name
-                marker_name = transform.child_frame_id
-                
-                # Extract position from transform (already in correct frame, no transformation needed)
-                pos = [
-                    transform.transform.translation.x,
-                    transform.transform.translation.y,
-                    transform.transform.translation.z
-                ]
-                
-                # Store position (in meters)
-                self.aruco_poses_data[marker_name] = {
-                    'position': pos,  # Position in meters
-                    'header': transform.header
-                }
-    
-    def joint_state_callback(self, msg):
-        """Callback for joint states"""
-        self.current_joint_state = msg
-    
-    def get_marker_position(self, marker_name):
+    def get_marker_position(self, marker_name: str, timeout: float = 5.0):
         """Get position of a specific marker by name (returns position in meters)"""
-        with self.aruco_poses_lock:
-            if marker_name in self.aruco_poses_data:
-                return self.aruco_poses_data[marker_name]['position']
-            return None
+        result = subscribe_once_websocket(
+            self.ws_manager,
+            "/aruco_poses",
+            "tf2_msgs/msg/TFMessage",
+            timeout=timeout
+        )
+        
+        if "error" in result:
+            return None, result.get("error")
+        
+        transforms = result.get("msg", {}).get("transforms", [])
+        
+        for transform in transforms:
+            if transform.get("child_frame_id") == marker_name:
+                translation = transform.get("transform", {}).get("translation", {})
+                position = [
+                    translation.get("x", 0.0),
+                    translation.get("y", 0.0),
+                    translation.get("z", 0.0)
+                ]
+                return position, None
+        
+        return None, f"Marker {marker_name} not found. Make sure the aruco_poses topic is publishing."
     
-    def get_current_bearing_angle(self):
+    def get_current_bearing_angle(self, timeout: float = 5.0):
         """Get current base bearing joint angle"""
-        if self.current_joint_state is None:
+        result = subscribe_once_websocket(
+            self.ws_manager,
+            "/joint_states",
+            "sensor_msgs/msg/JointState",
+            timeout=timeout
+        )
+        
+        if "error" in result:
             return None
         
+        joint_state = result.get("msg", {})
+        joint_names = joint_state.get("name", [])
+        joint_positions = joint_state.get("position", [])
+        
         try:
-            bearing_idx = self.current_joint_state.name.index('revolute_BEARING')
-            return self.current_joint_state.position[bearing_idx]
+            bearing_idx = joint_names.index("revolute_BEARING")
+            return joint_positions[bearing_idx]
         except (ValueError, IndexError):
             return None
     
-    def get_current_camera_angle(self):
+    def get_current_camera_angle(self, timeout: float = 5.0):
         """Get current camera tilt angle"""
-        if self.current_joint_state is None:
+        result = subscribe_once_websocket(
+            self.ws_manager,
+            "/joint_states",
+            "sensor_msgs/msg/JointState",
+            timeout=timeout
+        )
+        
+        if "error" in result:
             return None
+        
+        joint_state = result.get("msg", {})
+        joint_names = joint_state.get("name", [])
+        joint_positions = joint_state.get("position", [])
         
         try:
-            camera_idx = self.current_joint_state.name.index('revolute_CAMERA_HOLDER_ARM_LOWER')
-            return self.current_joint_state.position[camera_idx]
+            camera_idx = joint_names.index("revolute_CAMERA_HOLDER_ARM_LOWER")
+            return joint_positions[camera_idx]
         except (ValueError, IndexError):
             return None
-    
-    def send_real_hardware_command(self, joint_name, position, velocity=None):
-        """Send joint command to real hardware (matching GUI behavior)"""
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = [joint_name]
-        msg.position = [position]
-        if velocity is not None:
-            msg.velocity = [velocity]
-        
-        self.joint_command_pub.publish(msg)
     
     def send_bearing_command(self, angle):
         """Send base bearing joint command"""
-        self.send_real_hardware_command('base_joint', angle)
+        joint_msg = {
+            "header": {
+                "stamp": {
+                    "sec": int(time.time()),
+                    "nanosec": int((time.time() % 1) * 1e9)
+                }
+            },
+            "name": ["base_joint"],
+            "position": [angle]
+        }
+        
+        return publish_once_websocket(
+            self.ws_manager,
+            "joint_commands",
+            "sensor_msgs/msg/JointState",
+            joint_msg
+        )
     
     def send_camera_command(self, angle):
         """Send camera joint command"""
-        self.send_real_hardware_command('camera_joint', angle)
-    
+        joint_msg = {
+            "header": {
+                "stamp": {
+                    "sec": int(time.time()),
+                    "nanosec": int((time.time() % 1) * 1e9)
+                }
+            },
+            "name": ["camera_joint"],
+            "position": [angle]
+        }
+        
+        return publish_once_websocket(
+            self.ws_manager,
+            "joint_commands",
+            "sensor_msgs/msg/JointState",
+            joint_msg
+        )
     
     def send_joint_trajectory_real(self, start_bearing, start_camera, target_bearing, target_camera, duration):
         """Send trajectory to real hardware (continuous commands at 50Hz)"""
@@ -171,55 +268,54 @@ class VisualServoArUcoController(Node):
             current_camera = start_camera + (target_camera - start_camera) * t_smooth
             
             # Send commands
-            self.send_bearing_command(current_bearing)
-            self.send_camera_command(current_camera)
+            result1 = self.send_bearing_command(current_bearing)
+            result2 = self.send_camera_command(current_camera)
+            if "error" in result1:
+                return result1
+            if "error" in result2:
+                return result2
+            
             time.sleep(0.02)  # 50Hz update rate
         
         # Ensure final positions are set
-        self.send_bearing_command(target_bearing)
-        self.send_camera_command(target_camera)
+        result1 = self.send_bearing_command(target_bearing)
+        result2 = self.send_camera_command(target_camera)
+        if "error" in result1:
+            return result1
+        return result2
     
     def align_to_marker(self, duration=TRAJECTORY_DURATION):
         """Align to marker by moving base and camera once"""
-        self.get_logger().info(f"Aligning to marker {self.target_marker_name}")
+        print(f"Aligning to marker {self.target_marker_name}")
         
-        # Wait for marker data
-        position = None
-        for _ in range(50):  # Wait up to 5 seconds
-            rclpy.spin_once(self, timeout_sec=0.1)
-            position = self.get_marker_position(self.target_marker_name)
-            if position is not None:
-                break
-            time.sleep(0.1)
-        
+        # Get marker position
+        position, error = self.get_marker_position(self.target_marker_name, timeout=5.0)
         if position is None:
-            error_msg = f"Marker {self.target_marker_name} not found. Make sure the aruco_poses topic is publishing."
-            self.get_logger().error(error_msg)
-            return False, error_msg
+            return False, error or "Failed to get marker position"
         
         x, y, z = position
         
-        self.get_logger().info(f"Marker position: x={x:.4f}m, y={y:.4f}m, z={z:.4f}m")
+        print(f"Marker position: x={x:.4f}m, y={y:.4f}m, z={z:.4f}m")
         
         # Get current angles
-        current_bearing = self.get_current_bearing_angle()
+        current_bearing = self.get_current_bearing_angle(timeout=5.0)
         if current_bearing is None:
             current_bearing = 0.0
-            self.get_logger().warn("Current bearing angle unknown, assuming 0.0")
+            print("Warning: Current bearing angle unknown, assuming 0.0")
         
-        current_camera = self.get_current_camera_angle()
+        current_camera = self.get_current_camera_angle(timeout=5.0)
         if current_camera is None:
             current_camera = 0.0
-            self.get_logger().warn("Current camera angle unknown, assuming 0.0")
+            print("Warning: Current camera angle unknown, assuming 0.0")
         
         # Calculate target angles based on marker position
-        # x < 0 means marker is to the left, so rotate base RIGHT (negative) to center it
-        # x > 0 means marker is to the right, so rotate base LEFT (positive) to center it
+        # x < 0 means marker is to the left, so rotate base RIGHT (positive) to center it
+        # x > 0 means marker is to the right, so rotate base LEFT (negative) to center it
         # y < 0 means marker is below, so tilt camera DOWN (negative) to center it
         # y > 0 means marker is above, so tilt camera UP (positive) to center it
         # Use proportional control with gain
-        bearing_delta = self.rotation_gain * x  # Positive x (right) -> positive rotation (left), negative x (left) -> negative rotation (right)
-        camera_delta = -self.rotation_gain * y  # Positive y (above) -> negative tilt (down), negative y (below) -> positive tilt (up)
+        bearing_delta = -self.rotation_gain * x  # Negative x (left) -> positive rotation (right), positive x (right) -> negative rotation (left)
+        camera_delta = -self.rotation_gain * y  # Negative y (below) -> positive tilt (up), positive y (above) -> negative tilt (down)
         
         target_bearing = current_bearing + bearing_delta
         target_camera = current_camera + camera_delta
@@ -230,12 +326,14 @@ class VisualServoArUcoController(Node):
         # Camera: -0.785398 to 0.785398 rad (±45 degrees)
         target_camera = max(-0.785398, min(0.785398, target_camera))
         
-        self.get_logger().info(f"Moving base: {current_bearing:.4f} -> {target_bearing:.4f} rad")
-        self.get_logger().info(f"Moving camera: {current_camera:.4f} -> {target_camera:.4f} rad")
+        print(f"Moving base: {current_bearing:.4f} -> {target_bearing:.4f} rad")
+        print(f"Moving camera: {current_camera:.4f} -> {target_camera:.4f} rad")
         
         # Send trajectory
         if self.use_real_hardware:
-            self.send_joint_trajectory_real(current_bearing, current_camera, target_bearing, target_camera, duration)
+            result = self.send_joint_trajectory_real(current_bearing, current_camera, target_bearing, target_camera, duration)
+            if "error" in result:
+                return False, result.get("error", "Failed to send trajectory")
         else:
             # For simulation, send commands continuously
             start_time = time.time()
@@ -249,18 +347,27 @@ class VisualServoArUcoController(Node):
                 current_bearing_interp = current_bearing + (target_bearing - current_bearing) * t_smooth
                 current_camera_interp = current_camera + (target_camera - current_camera) * t_smooth
                 
-                self.send_bearing_command(current_bearing_interp)
-                self.send_camera_command(current_camera_interp)
+                result1 = self.send_bearing_command(current_bearing_interp)
+                result2 = self.send_camera_command(current_camera_interp)
+                if "error" in result1:
+                    return False, result1.get("error", "Failed to send bearing command")
+                if "error" in result2:
+                    return False, result2.get("error", "Failed to send camera command")
+                
                 time.sleep(0.02)  # 50Hz update rate
             
             # Ensure final positions are set
-            self.send_bearing_command(target_bearing)
-            self.send_camera_command(target_camera)
+            result1 = self.send_bearing_command(target_bearing)
+            result2 = self.send_camera_command(target_camera)
+            if "error" in result1:
+                return False, result1.get("error", "Failed to send final bearing command")
+            if "error" in result2:
+                return False, result2.get("error", "Failed to send final camera command")
         
         # Wait for trajectory to complete
         time.sleep(duration + 0.2)
         
-        self.get_logger().info(f"Alignment completed. Base: {target_bearing:.4f} rad, Camera: {target_camera:.4f} rad")
+        print(f"Alignment completed. Base: {target_bearing:.4f} rad, Camera: {target_camera:.4f} rad")
         return True, f"Successfully aligned to marker. Base: {math.degrees(target_bearing):.1f}°, Camera: {math.degrees(target_camera):.1f}°"
 
 
@@ -271,9 +378,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 primitives/visual_servo_aruco.py --aruco_id 1 --mode real
-  python3 primitives/visual_servo_aruco.py --aruco_id 5 --mode sim
-  python3 primitives/visual_servo_aruco.py --aruco_id 8 --mode real --gain 1.5
+  python3 primitives/move_to_aruco.py --aruco_id 1 --mode real
+  python3 primitives/move_to_aruco.py --aruco_id 5 --mode sim
+  python3 primitives/move_to_aruco.py --aruco_id 8 --mode real --gain 1.5
         """
     )
     
@@ -308,28 +415,19 @@ Examples:
     
     args = parser.parse_args()
     
-    # Initialize ROS2
-    rclpy.init()
-    
     try:
-        # Create controller node with parameters
+        # Create controller
         controller = VisualServoArUcoController(
             mode=args.mode, 
             aruco_id=args.aruco_id,
             rotation_gain=args.gain
         )
         
-        # Give subscribers time to establish connection (DDS discovery)
-        for _ in range(20):  # Wait up to 2 seconds for discovery
-            rclpy.spin_once(controller, timeout_sec=0.1)
-        time.sleep(0.5)  # Additional buffer for DDS discovery
+        # Give websocket time to establish connection
+        time.sleep(0.5)
         
-        # Perform alignment (blocking call)
+        # Perform alignment
         success, message = controller.align_to_marker(duration=args.duration)
-        
-        # Clean shutdown
-        controller.destroy_node()
-        rclpy.shutdown()
         
         if success:
             print(f"Success: {message}")
@@ -340,23 +438,11 @@ Examples:
         
     except KeyboardInterrupt:
         print('\nInterrupted by user')
-        try:
-            controller.running = False
-            controller.destroy_node()
-            rclpy.shutdown()
-        except:
-            pass
         return 1
     except Exception as e:
         print(f'Error: {e}')
         import traceback
         traceback.print_exc()
-        try:
-            controller.running = False
-            controller.destroy_node()
-            rclpy.shutdown()
-        except:
-            pass
         return 1
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Reset Joints Primitive
-Resets the JETANK arm joints to home position (0, 0, 0).
+Resets the JETANK arm joints to home position (0, 0, 0) via websocket.
 
 Usage:
     python3 primitives/reset_joints.py --mode real
@@ -9,47 +9,126 @@ Usage:
 """
 
 import argparse
-import os
-import sys
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from builtin_interfaces.msg import Duration
 import time
+import sys
+import os
+import json
+from typing import Optional, Dict, Any
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.config_utils import get_default_mode
+from utils.websocket_manager import WebSocketManager, parse_json
 
 # Trajectory duration in seconds
 TRAJECTORY_DURATION = 1.0
 
+# Default websocket connection (can be overridden via environment or config)
+ROSBRIDGE_IP = os.getenv("ROSBRIDGE_IP", "localhost")
+ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))
 
-class ResetJointsController(Node):
-    """ROS2 node for resetting arm joints to home position"""
+
+def subscribe_once_websocket(
+    ws_manager: WebSocketManager,
+    topic: str,
+    msg_type: str,
+    timeout: float = 5.0
+) -> Dict[str, Any]:
+    """Subscribe to a ROS topic via websocket and return the first message"""
+    subscribe_msg = {
+        "op": "subscribe",
+        "topic": topic,
+        "type": msg_type,
+    }
     
-    def __init__(self, mode=None):
+    send_error = ws_manager.send(subscribe_msg)
+    if send_error:
+        return {"error": f"Failed to subscribe: {send_error}"}
+    
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        response = ws_manager.receive(timeout=0.5)
+        if response is None:
+            continue
+        
+        msg_data = parse_json(response)
+        if not msg_data:
+            continue
+        
+        if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+            unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+            ws_manager.send(unsubscribe_msg)
+            return {"error": f"Rosbridge error: {msg_data.get('msg', 'Unknown error')}"}
+        
+        if msg_data.get("op") == "publish" and msg_data.get("topic") == topic:
+            unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+            ws_manager.send(unsubscribe_msg)
+            return {"msg": msg_data.get("msg", {})}
+    
+    unsubscribe_msg = {"op": "unsubscribe", "topic": topic}
+    ws_manager.send(unsubscribe_msg)
+    return {"error": "Timeout waiting for message from topic"}
+
+
+def publish_once_websocket(
+    ws_manager: WebSocketManager,
+    topic: str,
+    msg_type: str,
+    msg: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Publish a message to a ROS topic via websocket"""
+    # Advertise the topic
+    advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
+    send_error = ws_manager.send(advertise_msg)
+    if send_error:
+        return {"error": f"Failed to advertise topic: {send_error}"}
+    
+    # Check for advertise response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Advertise failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for advertise
+    
+    # Publish the message
+    publish_msg = {"op": "publish", "topic": topic, "msg": msg}
+    send_error = ws_manager.send(publish_msg)
+    if send_error:
+        ws_manager.send({"op": "unadvertise", "topic": topic})
+        return {"error": f"Failed to publish message: {send_error}"}
+    
+    # Check for publish response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Publish failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for publish
+    
+    # Unadvertise the topic
+    ws_manager.send({"op": "unadvertise", "topic": topic})
+    
+    return {"success": True}
+
+
+class ResetJointsController:
+    """Controller for resetting arm joints to home position using websocket"""
+    
+    def __init__(self, mode=None, ws_manager=None):
         if mode is None:
             mode = get_default_mode()
-        super().__init__('reset_joints_controller')
         
         self.mode = mode
         self.use_real_hardware = (mode == 'real')
-        
-        # Create publisher for joint commands (used for both real and sim)
-        self.joint_command_pub = self.create_publisher(
-            JointState, 
-            'joint_commands', 
-            10
-        )
-        
-        # Create publisher for trajectory (simulation mode)
-        self.trajectory_pub = self.create_publisher(
-            JointTrajectory,
-            'arm_trajectory',
-            10
-        )
+        self.ws_manager = ws_manager or WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, default_timeout=5.0)
         
         # Arm joint names (matching GUI order)
         self.arm_joint_names = [
@@ -58,57 +137,65 @@ class ResetJointsController(Node):
             'Revolute_SERVO_UPPER'         # 2
         ]
         
-        # Current joint state
-        self.current_joint_state = None
-        self.joint_state_sub = self.create_subscription(
-            JointState,
-            'joint_states',
-            self.joint_state_callback,
-            10
+        print(f'Reset joints controller initialized in {mode} mode')
+    
+    def get_current_arm_joints(self, timeout: float = 5.0):
+        """Get current arm joint positions"""
+        result = subscribe_once_websocket(
+            self.ws_manager,
+            "/joint_states",
+            "sensor_msgs/msg/JointState",
+            timeout=timeout
         )
         
-        self.get_logger().info(f'Reset joints controller initialized in {mode} mode')
-    
-    def joint_state_callback(self, msg):
-        """Callback for joint states"""
-        self.current_joint_state = msg
-    
-    def get_current_arm_joints(self):
-        """Get current arm joint positions"""
-        if self.current_joint_state is None:
+        if "error" in result:
             return None
         
+        joint_state = result.get("msg", {})
+        joint_names = joint_state.get("name", [])
+        joint_positions = joint_state.get("position", [])
+        
         try:
-            # Find indices of arm joints
-            bearing_idx = self.current_joint_state.name.index('revolute_BEARING')
-            servo_lower_idx = self.current_joint_state.name.index('Revolute_SERVO_LOWER')
-            servo_upper_idx = self.current_joint_state.name.index('Revolute_SERVO_UPPER')
+            bearing_idx = joint_names.index("revolute_BEARING")
+            servo_lower_idx = joint_names.index("Revolute_SERVO_LOWER")
+            servo_upper_idx = joint_names.index("Revolute_SERVO_UPPER")
             
             return [
-                self.current_joint_state.position[bearing_idx],
-                self.current_joint_state.position[servo_lower_idx],
-                self.current_joint_state.position[servo_upper_idx]
+                joint_positions[bearing_idx],
+                joint_positions[servo_lower_idx],
+                joint_positions[servo_upper_idx]
             ]
         except (ValueError, IndexError):
             return None
     
     def send_arm_command_real(self, theta0, theta1, theta3):
         """Send arm command to real hardware (sends each joint separately, matching GUI behavior)"""
-        # Send each joint separately (same as GUI behavior)
-        self.send_real_hardware_command('base_joint', theta0)
-        self.send_real_hardware_command('shoulder_joint', theta1)
-        self.send_real_hardware_command('elbow_joint', theta3)
-    
-    def send_real_hardware_command(self, joint_name, position, velocity=None):
-        """Send joint command to real hardware (matching GUI behavior)"""
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = [joint_name]
-        msg.position = [position]
-        if velocity is not None:
-            msg.velocity = [velocity]
+        joint_names_map = ['base_joint', 'shoulder_joint', 'elbow_joint']
+        joint_values = [theta0, theta1, theta3]
         
-        self.joint_command_pub.publish(msg)
+        for joint_name, position in zip(joint_names_map, joint_values):
+            joint_msg = {
+                "header": {
+                    "stamp": {
+                        "sec": int(time.time()),
+                        "nanosec": int((time.time() % 1) * 1e9)
+                    }
+                },
+                "name": [joint_name],
+                "position": [position]
+            }
+            
+            result = publish_once_websocket(
+                self.ws_manager,
+                "joint_commands",
+                "sensor_msgs/msg/JointState",
+                joint_msg
+            )
+            
+            if "error" in result:
+                return result
+        
+        return {"success": True}
     
     def send_trajectory_sim(self, start_joints, target_joints, duration):
         """Send trajectory to simulation"""
@@ -120,7 +207,7 @@ class ResetJointsController(Node):
         
         for i in range(steps + 1):
             # Calculate interpolation factor (0 to 1)
-            t = i / steps
+            t = i / steps if steps > 0 else 1.0
             
             # Smooth interpolation using cubic easing
             t_smooth = 3 * t**2 - 2 * t**3  # Smooth start and end
@@ -132,19 +219,28 @@ class ResetJointsController(Node):
                 current_positions.append(pos)
             
             # Create trajectory point
-            point = JointTrajectoryPoint()
-            point.positions = current_positions
-            point.time_from_start = Duration(sec=int(t * duration), nanosec=int(((t * duration) % 1) * 1e9))
-            
+            point_time = t * duration
+            point = {
+                "positions": current_positions,
+                "time_from_start": {
+                    "sec": int(point_time),
+                    "nanosec": int(((point_time % 1) * 1e9))
+                }
+            }
             trajectory_points.append(point)
         
         # Create and publish trajectory
-        traj = JointTrajectory()
-        traj.joint_names = self.arm_joint_names
-        traj.points = trajectory_points
+        trajectory_msg = {
+            "joint_names": self.arm_joint_names,
+            "points": trajectory_points
+        }
         
-        # Publish trajectory
-        self.trajectory_pub.publish(traj)
+        return publish_once_websocket(
+            self.ws_manager,
+            "arm_trajectory",
+            "trajectory_msgs/msg/JointTrajectory",
+            trajectory_msg
+        )
     
     def send_trajectory_real(self, start_joints, target_joints, duration):
         """Send trajectory to real hardware (continuous commands at 50Hz)"""
@@ -164,36 +260,43 @@ class ResetJointsController(Node):
                 current_positions.append(pos)
             
             # Send command
-            self.send_arm_command_real(current_positions[0], current_positions[1], current_positions[2])
+            result = self.send_arm_command_real(current_positions[0], current_positions[1], current_positions[2])
+            if "error" in result:
+                return result
+            
             time.sleep(0.02)  # 50Hz update rate
         
         # Ensure final position is set
-        self.send_arm_command_real(target_joints[0], target_joints[1], target_joints[2])
+        return self.send_arm_command_real(target_joints[0], target_joints[1], target_joints[2])
     
     def reset_joints(self, duration=TRAJECTORY_DURATION):
         """Reset arm joints to home position (0, 0, 0)"""
         # Get current joint positions
-        current_joints = self.get_current_arm_joints()
+        current_joints = self.get_current_arm_joints(timeout=5.0)
         if current_joints is None:
             # Use default if current position unknown
             current_joints = [0.0, 0.785, -1.57]
-            self.get_logger().warn("Current joint positions unknown, using default")
+            print("Warning: Current joint positions unknown, using default")
         
         # Target joint positions (home position)
         target_joints = [0.0, 0.0, 0.0]
         
-        self.get_logger().info(f"Resetting arm joints from [{current_joints[0]:.3f}, {current_joints[1]:.3f}, {current_joints[2]:.3f}] to [0.000, 0.000, 0.000]")
+        print(f"Resetting arm joints from [{current_joints[0]:.3f}, {current_joints[1]:.3f}, {current_joints[2]:.3f}] to [0.000, 0.000, 0.000]")
         
         # Send trajectory
         if self.use_real_hardware:
-            self.send_trajectory_real(current_joints, target_joints, duration)
+            result = self.send_trajectory_real(current_joints, target_joints, duration)
+            if "error" in result:
+                return False, result.get("error", "Failed to send trajectory")
         else:
-            self.send_trajectory_sim(current_joints, target_joints, duration)
+            result = self.send_trajectory_sim(current_joints, target_joints, duration)
+            if "error" in result:
+                return False, result.get("error", "Failed to send trajectory")
         
         # Wait for trajectory to complete
-        time.sleep(duration + 0.2)
+        time.sleep(duration + 1.0)  # Wait for trajectory duration + 1 second for hardware settling
         
-        self.get_logger().info("Arm joints reset to home position (camera unchanged)")
+        print("Arm joints reset to home position (camera unchanged)")
         return True, "Successfully reset arm joints to home position"
 
 
@@ -226,28 +329,15 @@ Examples:
     
     args = parser.parse_args()
     
-    # Initialize ROS2
-    rclpy.init()
-    
     try:
-        # Create controller node
+        # Create controller
         controller = ResetJointsController(mode=args.mode)
         
-        # Give subscribers time to establish connection (DDS discovery)
-        for _ in range(20):  # Wait up to 2 seconds for discovery
-            rclpy.spin_once(controller, timeout_sec=0.1)
-        time.sleep(0.5)  # Additional buffer for DDS discovery
+        # Give websocket time to establish connection
+        time.sleep(0.5)
         
         # Reset joints
         success, message = controller.reset_joints(duration=args.duration)
-        
-        # Spin a few times to process callbacks
-        for _ in range(10):
-            rclpy.spin_once(controller, timeout_sec=0.1)
-        
-        # Clean shutdown
-        controller.destroy_node()
-        rclpy.shutdown()
         
         if success:
             print(f"Success: {message}")
@@ -258,24 +348,13 @@ Examples:
         
     except KeyboardInterrupt:
         print('\nInterrupted by user')
-        try:
-            controller.destroy_node()
-            rclpy.shutdown()
-        except:
-            pass
         return 1
     except Exception as e:
         print(f'Error: {e}')
         import traceback
         traceback.print_exc()
-        try:
-            controller.destroy_node()
-            rclpy.shutdown()
-        except:
-            pass
         return 1
 
 
 if __name__ == '__main__':
     exit(main())
-

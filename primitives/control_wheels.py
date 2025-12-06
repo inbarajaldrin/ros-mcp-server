@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Wheel Control Script
-Controls the JETANK wheels in both simulation and real hardware modes.
+Controls the JETANK wheels in both simulation and real hardware modes via websocket.
 
 Usage:
     python3 primitives/control_wheels.py --mode real --linear 0.5 --duration 2.0
@@ -12,62 +12,113 @@ Usage:
 """
 
 import argparse
-import os
-import sys
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist
-from std_msgs.msg import Float64MultiArray
 import time
+import sys
+import os
+import json
+from typing import Optional, Dict, Any
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.config_utils import get_default_mode
+from utils.websocket_manager import WebSocketManager, parse_json
 
 # Wheel inversion compensation (set to True if wheels are inverted, False otherwise)
 WHEELS_INVERTED = True
 
+# Default websocket connection (can be overridden via environment or config)
+ROSBRIDGE_IP = os.getenv("ROSBRIDGE_IP", "localhost")
+ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))
 
-class WheelController(Node):
-    """ROS2 node for controlling the wheels"""
+
+def publish_once_websocket(
+    ws_manager: WebSocketManager,
+    topic: str,
+    msg_type: str,
+    msg: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Publish a message to a ROS topic via websocket"""
+    # Advertise the topic
+    advertise_msg = {"op": "advertise", "topic": topic, "type": msg_type}
+    send_error = ws_manager.send(advertise_msg)
+    if send_error:
+        return {"error": f"Failed to advertise topic: {send_error}"}
     
-    def __init__(self, mode=None):
+    # Check for advertise response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Advertise failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for advertise
+    
+    # Publish the message
+    publish_msg = {"op": "publish", "topic": topic, "msg": msg}
+    send_error = ws_manager.send(publish_msg)
+    if send_error:
+        ws_manager.send({"op": "unadvertise", "topic": topic})
+        return {"error": f"Failed to publish message: {send_error}"}
+    
+    # Check for publish response/errors
+    response = ws_manager.receive(timeout=1.0)
+    if response:
+        try:
+            msg_data = json.loads(response)
+            if msg_data.get("op") == "status" and msg_data.get("level") == "error":
+                ws_manager.send({"op": "unadvertise", "topic": topic})
+                return {"error": f"Publish failed: {msg_data.get('msg', 'Unknown error')}"}
+        except json.JSONDecodeError:
+            pass  # Non-JSON response is usually fine for publish
+    
+    # Unadvertise the topic
+    ws_manager.send({"op": "unadvertise", "topic": topic})
+    
+    return {"success": True}
+
+
+class WheelController:
+    """Controller for controlling wheels using websocket"""
+    
+    def __init__(self, mode=None, ws_manager=None):
         if mode is None:
             mode = get_default_mode()
-        super().__init__('wheel_controller')
         
         self.mode = mode
         self.use_real_hardware = (mode == 'real')
+        self.ws_manager = ws_manager or WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, default_timeout=5.0)
         
-        # Create velocity controller publisher (for simulation)
-        self.velocity_pub = self.create_publisher(
-            Float64MultiArray, 
-            '/forward_velocity_controller/commands', 
-            10
-        )
-        
-        # Create cmd_vel publisher (for real hardware motor driver)
-        self.cmd_vel_pub = self.create_publisher(
-            Twist, 
-            'cmd_vel', 
-            10
-        )
-        
-        self.get_logger().info(f'Wheel controller initialized in {mode} mode')
+        print(f'Wheel controller initialized in {mode} mode')
     
     def send_command_real(self, linear_x, angular_z, log=True):
         """Send command to real hardware using Twist message"""
-        msg = Twist()
-        msg.linear.x = linear_x
-        msg.angular.z = angular_z
-        
+        # Apply wheel inversion if needed
         if WHEELS_INVERTED:
-            msg.linear.x = -msg.linear.x
-            msg.angular.z = -msg.angular.z
+            linear_x = -linear_x
+            angular_z = -angular_z
         
-        self.cmd_vel_pub.publish(msg)
+        twist_msg = {
+            "linear": {"x": float(linear_x), "y": 0.0, "z": 0.0},
+            "angular": {"x": 0.0, "y": 0.0, "z": float(angular_z)}
+        }
+        
+        result = publish_once_websocket(
+            self.ws_manager,
+            "cmd_vel",
+            "geometry_msgs/msg/Twist",
+            twist_msg
+        )
+        
         if log:
-            self.get_logger().info(f'Real hardware command: linear.x={msg.linear.x}, angular.z={msg.angular.z}')
+            if "error" in result:
+                print(f'Error sending real hardware command: {result.get("error")}')
+            else:
+                print(f'Real hardware command: linear.x={linear_x}, angular.z={angular_z}')
+        
+        return result
     
     def send_command_sim(self, linear_speed, angular_speed, log=True):
         """Send command to simulation using Float64MultiArray message"""
@@ -80,14 +131,14 @@ class WheelController(Node):
         sim_linear = linear_speed * 10.0
         sim_angular = angular_speed * 10.0
         
-        msg = Float64MultiArray()
+        msg_data = []
         
         if abs(angular_speed) < 0.01:  # Pure linear motion
             # Forward/backward motion: [left, -right, left, -right]
-            msg.data = [sim_linear, -sim_linear, sim_linear, -sim_linear]
+            msg_data = [sim_linear, -sim_linear, sim_linear, -sim_linear]
         elif abs(linear_speed) < 0.01:  # Pure rotation
             # Pure turning: all wheels same direction
-            msg.data = [sim_angular, sim_angular, sim_angular, sim_angular]
+            msg_data = [sim_angular, sim_angular, sim_angular, sim_angular]
         else:  # Combined motion (arc)
             # Combine linear and angular: differential drive
             # Left wheels: linear + angular, Right wheels: linear - angular
@@ -95,45 +146,71 @@ class WheelController(Node):
             # Right wheels need to be negated for forward/backward pattern
             left_speed = sim_linear + sim_angular
             right_speed = sim_linear - sim_angular
-            msg.data = [left_speed, -right_speed, left_speed, -right_speed]
+            msg_data = [left_speed, -right_speed, left_speed, -right_speed]
         
         # Apply wheel inversion compensation if needed
         if WHEELS_INVERTED:
-            msg.data = [-x for x in msg.data]
+            msg_data = [-x for x in msg_data]
         
-        self.velocity_pub.publish(msg)
+        msg = {"data": msg_data}
+        
+        result = publish_once_websocket(
+            self.ws_manager,
+            "/forward_velocity_controller/commands",
+            "std_msgs/msg/Float64MultiArray",
+            msg
+        )
+        
         if log:
-            self.get_logger().info(f'Simulation command: {msg.data}')
+            if "error" in result:
+                print(f'Error sending simulation command: {result.get("error")}')
+            else:
+                print(f'Simulation command: {msg_data}')
+        
+        return result
     
     def move_custom(self, linear=0.0, angular=0.0, duration=0.0):
         """Move with custom linear and angular velocities"""
         # Send command once
         if self.use_real_hardware:
-            self.send_command_real(linear, angular)
+            result = self.send_command_real(linear, angular)
         else:
-            self.send_command_sim(linear, angular)
+            result = self.send_command_sim(linear, angular)
+        
+        if "error" in result:
+            return result
         
         # If duration > 0, wait for that duration then stop
         # If duration is 0.0, command is sent and robot continues until stopped externally
         if duration and duration > 0.0:
             time.sleep(duration)
-            self.stop()
+            return self.stop()
+        
+        return {"success": True}
     
     def stop(self):
         """Stop all motion - send stop command multiple times to ensure it's received"""
         # Send stop command multiple times to ensure it's received
-        for _ in range(5):
+        for i in range(5):
             if self.use_real_hardware:
-                self.send_command_real(0.0, 0.0, log=(_ == 0))  # Only log first time
+                result = self.send_command_real(0.0, 0.0, log=(i == 0))  # Only log first time
             else:
-                msg = Float64MultiArray()
-                msg.data = [0.0, 0.0, 0.0, 0.0]
-                self.velocity_pub.publish(msg)
-                if _ == 0:
-                    self.get_logger().info('Stop command sent')
+                msg = {"data": [0.0, 0.0, 0.0, 0.0]}
+                result = publish_once_websocket(
+                    self.ws_manager,
+                    "/forward_velocity_controller/commands",
+                    "std_msgs/msg/Float64MultiArray",
+                    msg
+                )
+                if i == 0:
+                    print('Stop command sent')
             
-            rclpy.spin_once(self, timeout_sec=0.01)
+            if "error" in result and i == 0:
+                return result
+            
             time.sleep(0.02)  # Small delay between stop commands
+        
+        return {"success": True}
 
 
 def main():
@@ -185,23 +262,22 @@ Examples:
     
     args = parser.parse_args()
     
-    # Initialize ROS2
-    rclpy.init()
-    
     try:
-        # Create wheel controller node
+        # Create wheel controller
         controller = WheelController(mode=args.mode)
         
-        # Give publisher time to establish connection (DDS discovery)
-        for _ in range(20):  # Wait up to 2 seconds for discovery
-            rclpy.spin_once(controller, timeout_sec=0.1)
-        time.sleep(0.5)  # Additional buffer for DDS discovery
+        # Give websocket time to establish connection
+        time.sleep(0.5)
         
         # Execute the requested action
         if args.linear == 0.0 and args.angular == 0.0:
-            controller.stop()
+            result = controller.stop()
         else:
-            controller.move_custom(linear=args.linear, angular=args.angular, duration=args.duration)
+            result = controller.move_custom(linear=args.linear, angular=args.angular, duration=args.duration)
+        
+        if "error" in result:
+            print(f"Error: {result.get('error')}")
+            return 1
         
         # If duration was 0.0, we already sent the command and it will keep moving
         # If duration > 0, we already stopped in move_custom
@@ -209,17 +285,8 @@ Examples:
             # Keep the command active by publishing periodically
             # This allows the agent to control duration externally
             print(f"Command sent. Robot will continue until stopped. Use 'stop' command to halt.")
-            # Spin a few times to ensure message delivery
-            for _ in range(10):
-                rclpy.spin_once(controller, timeout_sec=0.1)
-        else:
-            # Spin a few times to process callbacks and ensure message delivery
-            for _ in range(10):
-                rclpy.spin_once(controller, timeout_sec=0.1)
-        
-        # Clean shutdown
-        controller.destroy_node()
-        rclpy.shutdown()
+            # Give some time for message delivery
+            time.sleep(0.5)
         
         return 0
         
@@ -228,8 +295,6 @@ Examples:
         # Make sure to stop the robot
         try:
             controller.stop()
-            controller.destroy_node()
-            rclpy.shutdown()
         except:
             pass
         return 1
@@ -237,14 +302,8 @@ Examples:
         print(f'Error: {e}')
         import traceback
         traceback.print_exc()
-        try:
-            controller.destroy_node()
-            rclpy.shutdown()
-        except:
-            pass
         return 1
 
 
 if __name__ == '__main__':
     exit(main())
-

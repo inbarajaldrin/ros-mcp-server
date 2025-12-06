@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import socket
 import threading
 from typing import Optional, Union
 
@@ -193,8 +194,23 @@ class WebSocketManager:
                     self.ws.settimeout(actual_timeout)
                     raw = self.ws.recv()  # rosbridge sends JSON as a string
                     return raw
+                except (socket.timeout, websocket.WebSocketTimeoutException) as e:
+                    # Timeout is normal - rosbridge doesn't always send responses for publish operations
+                    # Don't close connection on timeout, just return None
+                    return None
+                except OSError as e:
+                    # Check if it's a timeout-related OSError
+                    error_str = str(e).lower()
+                    if "timeout" in error_str or "timed out" in error_str:
+                        # Timeout is normal, don't close connection
+                        return None
+                    # Real OSError (connection broken, etc.) should close the connection
+                    print(f"[WebSocket] Receive error: {e}")
+                    self.close()
+                    return None
                 except Exception as e:
-                    print(f"[WebSocket] Receive error or timeout: {e}")
+                    # Real errors (connection broken, etc.) should close the connection
+                    print(f"[WebSocket] Receive error: {e}")
                     self.close()
                     return None
             return None
