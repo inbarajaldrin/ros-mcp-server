@@ -219,114 +219,33 @@ class MoveToClearSpace(Node):
         
         # Determine target orientation based on mode
         if self.mode == 'hover':
-            # Hover mode: Use specific quaternion orientation (0, -1, 0, 0)
-            # Change to top-down (face-down) orientation
-            target_quat = np.array([0.0, -1.0, 0.0, 0.0])  # [x, y, z, w] format
-            target_rotation = Rot.from_quat(target_quat)
-            target_rot_matrix = target_rotation.as_matrix()
+            # Hover mode: Use same approach as move_home - use compute_ik with RPY [0, 180, 0]
+            # Import compute_ik for hover mode
+            from ik_solver import compute_ik, rpy_to_matrix
             
-            target_rpy_from_quat = target_rotation.as_euler('xyz', degrees=True)
-            self.get_logger().info(f"Hover mode: Setting orientation to quaternion [0, 1, 0, 0] (RPY: [{target_rpy_from_quat[0]:.1f}, {target_rpy_from_quat[1]:.1f}, {target_rpy_from_quat[2]:.1f}]°)")
-        else:
-            # Move mode: Keep the current orientation (don't change it, just move to target position)
-            target_rotation = Rot.from_quat(current_quat)
-            target_quat = current_quat
-            target_rot_matrix = target_rotation.as_matrix()
+            # Calculate TCP position from gripper center position using offset calculation
+            # Same approach as move mode - use rotation matrix to get gripper Z-axis
+            # For RPY [0, 180, 0], create rotation matrix to calculate offset properly
+            target_rpy = [0, 180, 0]
+            target_rot_matrix = rpy_to_matrix(target_rpy)
             
-            self.get_logger().info(f"Move mode: Keeping current orientation")
-        
-        # Calculate TCP position from gripper center position
-        # The gripper Z-axis points from TCP to gripper center
-        # Apply offset only to X and Y, keep Z constant
-        gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
-        offset_vector = -self.tcp_to_gripper_center_offset * gripper_z_axis
-        tcp_position = np.array(self.target_gripper_center_position) + offset_vector
-        tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
-        
-        self.get_logger().info(f"Calculated TCP position: {tcp_position}")
-        self.get_logger().info(f"TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm along gripper Z-axis")
-        
-        if self.mode == 'hover':
-            target_rpy = target_rotation.as_euler('xyz', degrees=True)
-            self.get_logger().info(f"Target orientation: quaternion [0, -1, 0, 0] (RPY: [{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}]°)")
-        else:
-            self.get_logger().info(f"Target orientation: keeping current quaternion (no RPY conversion)")
-        
-        # Compute inverse kinematics for target pose
-        # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
-        try:
-            # Create target pose with quaternion-derived rotation matrix
-            target_pose = np.eye(4)
-            target_pose[:3, 3] = tcp_position
-            target_pose[:3, :3] = target_rot_matrix
+            # Calculate TCP position from gripper center position
+            # The gripper Z-axis points from TCP to gripper center
+            # Apply offset using the same method as move mode
+            gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
+            offset_vector = -self.tcp_to_gripper_center_offset * gripper_z_axis
+            tcp_position = np.array(self.target_gripper_center_position) + offset_vector
+            tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
             
-            self.get_logger().info(f"Computing IK for TCP position: {tcp_position}")
-            self.get_logger().info(f"Using quaternion-derived rotation matrix directly (NO RPY conversion)")
+            self.get_logger().info(f"Hover mode: Using compute_ik (same as move_home)")
+            self.get_logger().info(f"Target gripper center position: {self.target_gripper_center_position}")
+            self.get_logger().info(f"Calculated TCP position: {tcp_position}")
+            self.get_logger().info(f"TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm along gripper Z-axis")
+            self.get_logger().info(f"Target RPY: [0, 180, 0]")
             
-            # Use quaternion-based IK directly - no RPY conversion at all!
-            joint_angles = None
-            best_result = None
-            best_cost = float('inf')
-            max_tries = 5
-            dx = 0.001
-            
-            # Primary seed: use current joint angles from joint state subscription
-            if self.current_joint_angles is None:
-                self.get_logger().error("Current joint angles not available! Cannot compute IK.")
-                rclpy.shutdown()
-                return
-            
-            q_guess = self.current_joint_angles.copy()
-            self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
-            
-            # Try IK with current joint angles and position perturbations
-            solution_found = False
-            for i in range(max_tries):
-                if solution_found:
-                    break
-                    
-                # Try small x-shift each iteration (helps with workspace boundaries)
-                perturbed_position = np.array(tcp_position).copy()
-                perturbed_position[0] += i * dx
-                
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-                
-                joint_bounds = [(-np.pi, np.pi)] * 6
-                
-                # Use quaternion-based objective directly - NO RPY conversion!
-                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
-                                method='L-BFGS-B', bounds=joint_bounds)
-                
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
-                    
-                    # Check if this is a good solution
-                    if cost < 0.01:
-                        self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
-                        joint_angles = result.x
-                        solution_found = True
-                        
-                        # Verify orientation accuracy
-                        T_result = forward_kinematics(dh_params, joint_angles)
-                        orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                        self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-                        break
-                    
-                    # Keep track of best solution
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-            
-            # If we found any reasonable solution, use it
-            if joint_angles is None and best_result is not None and best_cost < 0.1:
-                self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
-                joint_angles = best_result
-                
-                # Verify orientation accuracy
-                T_result = forward_kinematics(dh_params, joint_angles)
-                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+            # Use compute_ik exactly like move_home does
+            # compute_ik(position, rpy, q_guess=None, max_tries=5, dx=0.001)
+            joint_angles = compute_ik(tcp_position, [0, 180, 0])
             
             if joint_angles is None:
                 self.get_logger().error("IK failed: couldn't compute clear space position")
@@ -335,11 +254,11 @@ class MoveToClearSpace(Node):
                 
             self.get_logger().info(f"Computed joint angles: {joint_angles}")
             
-            # Create trajectory point
+            # Create trajectory point - same duration as move_home (5 seconds)
             point = JointTrajectoryPoint(
                 positions=[float(x) for x in joint_angles],
                 velocities=[0.0] * 6,
-                time_from_start=Duration(sec=5)  # 5 seconds movement
+                time_from_start=Duration(sec=5)  # 5 seconds movement (same as HOME_MOVEMENT_DURATION)
             )
             
             # Create and send trajectory
@@ -351,13 +270,136 @@ class MoveToClearSpace(Node):
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
             
-            self.get_logger().info("Sending trajectory to clear space position...")
+            self.get_logger().info("Sending trajectory to clear space position (hover mode)...")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
+            return  # Exit early for hover mode
+        else:
+            # Move mode: Keep the current orientation (don't change it, just move to target position)
+            target_rotation = Rot.from_quat(current_quat)
+            target_quat = current_quat
+            target_rot_matrix = target_rotation.as_matrix()
             
-        except Exception as e:
-            self.get_logger().error(f"Failed to compute IK: {e}")
-            rclpy.shutdown()
+            self.get_logger().info(f"Move mode: Keeping current orientation")
+            
+            # Calculate TCP position from gripper center position
+            # The gripper Z-axis points from TCP to gripper center
+            # Apply offset only to X and Y, keep Z constant
+            gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
+            offset_vector = -self.tcp_to_gripper_center_offset * gripper_z_axis
+            tcp_position = np.array(self.target_gripper_center_position) + offset_vector
+            tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
+            
+            self.get_logger().info(f"Calculated TCP position: {tcp_position}")
+            self.get_logger().info(f"TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm along gripper Z-axis")
+            self.get_logger().info(f"Target orientation: keeping current quaternion (no RPY conversion)")
+            
+            # Compute inverse kinematics for target pose
+            # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
+            try:
+                # Create target pose with quaternion-derived rotation matrix
+                target_pose = np.eye(4)
+                target_pose[:3, 3] = tcp_position
+                target_pose[:3, :3] = target_rot_matrix
+                
+                self.get_logger().info(f"Computing IK for TCP position: {tcp_position}")
+                self.get_logger().info(f"Using quaternion-derived rotation matrix directly (NO RPY conversion)")
+                
+                # Use quaternion-based IK directly - no RPY conversion at all!
+                joint_angles = None
+                best_result = None
+                best_cost = float('inf')
+                max_tries = 5
+                dx = 0.001
+                
+                # Primary seed: use current joint angles from joint state subscription
+                if self.current_joint_angles is None:
+                    self.get_logger().error("Current joint angles not available! Cannot compute IK.")
+                    rclpy.shutdown()
+                    return
+                
+                q_guess = self.current_joint_angles.copy()
+                self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
+                
+                # Try IK with current joint angles and position perturbations
+                solution_found = False
+                for i in range(max_tries):
+                    if solution_found:
+                        break
+                        
+                    # Try small x-shift each iteration (helps with workspace boundaries)
+                    perturbed_position = np.array(tcp_position).copy()
+                    perturbed_position[0] += i * dx
+                    
+                    perturbed_pose = target_pose.copy()
+                    perturbed_pose[:3, 3] = perturbed_position
+                    
+                    joint_bounds = [(-np.pi, np.pi)] * 6
+                    
+                    # Use quaternion-based objective directly - NO RPY conversion!
+                    result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+                                    method='L-BFGS-B', bounds=joint_bounds)
+                    
+                    if result.success:
+                        cost = ik_objective_quaternion(result.x, perturbed_pose)
+                        
+                        # Check if this is a good solution
+                        if cost < 0.01:
+                            self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
+                            joint_angles = result.x
+                            solution_found = True
+                            
+                            # Verify orientation accuracy
+                            T_result = forward_kinematics(dh_params, joint_angles)
+                            orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                            self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                            break
+                        
+                        # Keep track of best solution
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_result = result.x
+                
+                # If we found any reasonable solution, use it
+                if joint_angles is None and best_result is not None and best_cost < 0.1:
+                    self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
+                    joint_angles = best_result
+                    
+                    # Verify orientation accuracy
+                    T_result = forward_kinematics(dh_params, joint_angles)
+                    orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                    self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                
+                if joint_angles is None:
+                    self.get_logger().error("IK failed: couldn't compute clear space position")
+                    rclpy.shutdown()
+                    return
+                    
+                self.get_logger().info(f"Computed joint angles: {joint_angles}")
+                
+                # Create trajectory point
+                point = JointTrajectoryPoint(
+                    positions=[float(x) for x in joint_angles],
+                    velocities=[0.0] * 6,
+                    time_from_start=Duration(sec=5)  # 5 seconds movement
+                )
+                
+                # Create and send trajectory
+                goal = FollowJointTrajectory.Goal()
+                traj = JointTrajectory()
+                traj.joint_names = self.joint_names
+                traj.points = [point]
+                
+                goal.trajectory = traj
+                goal.goal_time_tolerance = Duration(sec=1)
+                
+                self.get_logger().info("Sending trajectory to clear space position...")
+                self._send_goal_future = self.action_client.send_goal_async(goal)
+                self._send_goal_future.add_done_callback(self.goal_response)
+                
+            except Exception as e:
+                self.get_logger().error(f"Failed to compute IK: {e}")
+                rclpy.shutdown()
 
     def goal_response(self, future):
         """Handle goal response"""
