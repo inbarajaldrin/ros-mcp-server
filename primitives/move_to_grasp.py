@@ -1254,6 +1254,27 @@ class DirectObjectMove(Node):
         
         self.get_logger().info(f"🎯 Final target EE position: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
         
+        # Check convergence in step 2: if robot is close enough to target, count stable readings and exit
+        if self.step1_completed:
+            distance_to_target = np.linalg.norm(current_ee_position - target_ee_position)
+            self.get_logger().info(f"📏 Distance to target: {distance_to_target*100:.2f} cm (threshold: {self.convergence_distance_threshold*100:.2f} cm)")
+            
+            if distance_to_target <= self.convergence_distance_threshold:
+                self.convergence_stable_count += 1
+                self.get_logger().info(f"✅ Within convergence threshold! Stable count: {self.convergence_stable_count}/{self.convergence_stable_threshold}")
+                
+                if self.convergence_stable_count >= self.convergence_stable_threshold:
+                    self.get_logger().info(f"✅ Converged! Robot is within {self.convergence_distance_threshold*100:.2f}cm of target for {self.convergence_stable_threshold} consecutive readings. Exiting step 2.")
+                    self.movement_completed = True
+                    self.should_exit = True
+                    self._print_final_object_pose()
+                    return  # Exit early, don't send trajectory
+            else:
+                # Reset stable count if we're not within threshold
+                if self.convergence_stable_count > 0:
+                    self.get_logger().info(f"⚠️ Moved outside convergence threshold. Resetting stable count.")
+                    self.convergence_stable_count = 0
+        
         # If waiting at last known location, mark that we've sent the trajectory
         if self.waiting_at_last_known and not self.last_known_target_sent:
             self.last_known_target_sent = True
