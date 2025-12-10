@@ -45,22 +45,41 @@ ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_ass
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
-HOVER_HEIGHT = 0.15  # Height to hover above base before descending
+HOVER_HEIGHT = 0.25  # Height to hover above base before descending
 
 # Default base position and orientation (used if not provided via command line)
 DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
 
 class TranslateForAssembly(Node):
-    def __init__(self, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
+    def __init__(self, mode=None, base_topic=None, object_topic=None, ee_topic=EE_TOPIC):
         super().__init__('translate_for_assembly')
+        
+        # Mode must be explicitly specified
+        if mode is None:
+            raise ValueError("Mode must be explicitly specified. Use 'sim' or 'real'.")
+        if mode not in ['sim', 'real']:
+            raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
+        
+        self.mode = mode  # 'sim' or 'real'
         
         # Load assembly configuration
         self.assembly_config = self.load_assembly_config()
         
         # Subscribers for pose data
-        self.base_sub = self.create_subscription(TFMessage, base_topic, self.base_callback, 10)
-        self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
+        # In sim mode, subscribe to topics; in real mode, no topic subscriptions needed
+        if self.mode == 'sim':
+            if base_topic is None:
+                base_topic = BASE_TOPIC
+            if object_topic is None:
+                object_topic = OBJECT_TOPIC
+            self.base_sub = self.create_subscription(TFMessage, base_topic, self.base_callback, 10)
+            self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
+        else:
+            # Real mode: no topic subscriptions
+            self.base_sub = None
+            self.object_sub = None
+        
         self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, 10)
         
         # Subscriber for joint states to get current joint angles (use as IK seed)
@@ -86,7 +105,7 @@ class TranslateForAssembly(Node):
         ]
         self.action_client = ActionClient(self, FollowJointTrajectory, '/scaled_joint_trajectory_controller/follow_joint_trajectory')
         
-        self.get_logger().info("TranslateForAssembly node initialized")
+        self.get_logger().info(f"TranslateForAssembly node initialized (Mode: {self.mode})")
         # self.get_logger().info(f"Assembly config loaded with {len(self.assembly_config.get('components', []))} components")
         # self.get_logger().info(f"Hover height set to: {HOVER_HEIGHT}m")
     
@@ -389,28 +408,124 @@ class TranslateForAssembly(Node):
         self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None
     
-    def translate_for_target(self, object_name, base_name, duration=20.0, 
-                            final_base_pos=None, final_base_orientation=None,
-                            target_object_pos=None, use_default_base=False):
+    def translate_for_target_sim(self, object_name, base_name, duration=20.0):
         """
-        Calculate and execute EE translation to final position with height offset.
+        Sim mode: Calculate and execute EE translation to hover position (step 1 only).
+        Uses topics to get base and object poses.
+        """
+        # Wait for pose data
+        if not self.current_poses or self.current_ee_pose is None:
+            self.get_logger().error("No pose data available")
+            return False
         
-        Algorithm:
-        1. Get current object position from topic
-        2. Get current base pose (T_base) - either from topic or provided
-        3. Get target object position and orientation from JSON (relative to base)
-        4. Transform target to world frame using base pose
-        5. Calculate final EE position to place object at target (with height offset)
-        6. Keep current EE orientation unchanged (assumed correct from reorient step)
-        7. Move to final position
+        # Get current EE pose
+        if self.current_ee_pose is None:
+            self.get_logger().error("End-effector pose not available")
+            return False
+        
+        # Check if object exists
+        obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
+        if obj_key not in self.current_poses:
+            self.get_logger().error(f"Object {object_name} not found")
+            return False
+        
+        # Check if base exists
+        base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
+        if base_key not in self.current_poses:
+            self.get_logger().error(f"Base {base_name} not found")
+            return False
+        
+        # Convert poses to matrices
+        T_EE_current = self.pose_to_matrix(self.current_ee_pose.pose)
+        T_object_current = self.transform_to_matrix(self.current_poses[obj_key].transform)
+        T_base_current = self.transform_to_matrix(self.current_poses[base_key].transform)
+        
+        # Calculate grasp transformation
+        T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
+        
+        # Get current positions
+        ee_current_position, ee_current_rpy = self.matrix_to_rpy(T_EE_current)
+        base_current_position, base_current_rpy = self.matrix_to_rpy(T_base_current)
+        
+        # Get target object position from JSON (relative to base)
+        target_position_relative = self.get_object_target_position(object_name)
+        if target_position_relative is None:
+            self.get_logger().error(f"No target position found for {object_name} in JSON")
+            return False
+        
+        # Transform target position from base frame to world frame
+        R_base_current = T_base_current[:3, :3]
+        target_object_position_abs = base_current_position + R_base_current @ target_position_relative
+        
+        # Create target object transformation (keep current orientation)
+        T_object_target = np.eye(4)
+        T_object_target[:3, :3] = T_object_current[:3, :3]  # Keep current orientation
+        T_object_target[:3, 3] = target_object_position_abs
+        
+        # Calculate required EE position to place object at target
+        T_EE_target = T_object_target @ np.linalg.inv(T_grasp)
+        
+        # Extract target position and quaternion
+        ee_target_position = T_EE_target[:3, 3]
+        ee_target_rot_matrix = T_EE_target[:3, :3]
+        ee_target_rotation = R.from_matrix(ee_target_rot_matrix)
+        ee_target_quat = ee_target_rotation.as_quat()
+        
+        # Create hover position (same XY as target, but at HOVER_HEIGHT above base)
+        hover_position = ee_target_position.copy()
+        hover_position[2] = base_current_position[2] + HOVER_HEIGHT
+        
+        # Read current joint angles before computing IK
+        if self.current_joint_angles is None:
+            joint_angles = self.read_current_joint_angles()
+            if joint_angles is None:
+                self.get_logger().error("Could not read current joint angles")
+                return False
+        
+        # Step 1: Move to hover position only (no step 2 in sim mode)
+        self.get_logger().info(f"Moving to hover position: {hover_position} (height: {HOVER_HEIGHT}m above base)")
+        
+        # Compute IK for hover position
+        hover_computed_joint_angles = self.compute_ik_with_current_seed(
+            hover_position.tolist(),
+            ee_target_quat.tolist(),
+            max_tries=5,
+            dx=0.001
+        )
+        
+        if hover_computed_joint_angles is None:
+            self.get_logger().error("Failed to compute IK for hover position")
+            return False
+        
+        # Create hover trajectory
+        hover_trajectory = [{
+            "positions": [float(x) for x in hover_computed_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=int(duration))
+        }]
+        
+        success = self.execute_trajectory({"traj1": hover_trajectory})
+        if not success:
+            self.get_logger().error("Failed to reach hover position")
+            return False
+        
+        self.get_logger().info("Reached hover position")
+        return success
+    
+    def translate_for_target_real(self, object_name, base_name, duration=20.0, 
+                            final_base_pos=None, final_base_orientation=None,
+                            use_default_base=False):
+        """
+        Real mode: Calculate and execute EE translation to hover position (step 1 only).
+        Uses provided base position/orientation (no topics).
         
         Args:
             object_name: Name of the object being held
             base_name: Name of the base object (e.g., 'base')
             duration: Duration for trajectory execution
-            final_base_pos: Optional [x, y, z] final base position (overrides topic)
-            final_base_orientation: Optional [x, y, z, w] final base orientation quaternion (overrides topic)
-            target_object_pos: Optional [x, y, z] target object position in world frame (overrides JSON)
+            final_base_pos: [x, y, z] final base position (required in real mode)
+            final_base_orientation: [x, y, z, w] final base orientation quaternion (required in real mode)
+            use_default_base: Use default base position/orientation if True
         """
         # Get current EE pose (always needed from topic)
         if self.current_ee_pose is None:
@@ -456,37 +571,27 @@ class TranslateForAssembly(Node):
         ee_current_position, ee_current_rpy = self.matrix_to_rpy(T_EE_current)
         base_current_position, base_current_rpy = self.matrix_to_rpy(T_base_current)
         
-        # Get target object position and orientation from JSON
-        if target_object_pos is not None:
-            # Use provided target position directly (assumed to be in world frame)
-            target_object_position_abs = np.array(target_object_pos)
-            self.get_logger().info(f"Using provided target object position: {target_object_pos}")
-            # Still need to get orientation from JSON
-            target_orientation_relative = self.get_object_target_orientation(object_name)
-            if target_orientation_relative is None:
-                self.get_logger().warn(f"No target orientation found for {object_name} in JSON, using identity")
-                target_orientation_relative = np.array([0.0, 0.0, 0.0, 1.0])
-        else:
-            # Get target object position from JSON (relative to base)
-            target_position_relative = self.get_object_target_position(object_name)
-            if target_position_relative is None:
-                self.get_logger().error(f"No target position found for {object_name} in JSON")
-                return None
-            
-            # Get target object orientation from JSON (relative to base)
-            target_orientation_relative = self.get_object_target_orientation(object_name)
-            if target_orientation_relative is None:
-                self.get_logger().warn(f"No target orientation found for {object_name} in JSON, using identity")
-                target_orientation_relative = np.array([0.0, 0.0, 0.0, 1.0])
-            
-            # Transform target position and orientation from base frame to world frame
-            R_base_current = T_base_current[:3, :3]
-            target_object_position_abs = base_current_position + R_base_current @ target_position_relative
-            
-            # Transform target orientation from base frame to world frame
-            R_target_relative = R.from_quat(target_orientation_relative).as_matrix()
-            R_target_abs = R_base_current @ R_target_relative
-            target_orientation_abs = R.from_matrix(R_target_abs).as_quat()
+        # Get target object position and orientation from JSON (auto-calculated)
+        # Get target object position from JSON (relative to base)
+        target_position_relative = self.get_object_target_position(object_name)
+        if target_position_relative is None:
+            self.get_logger().error(f"No target position found for {object_name} in JSON")
+            return None
+        
+        # Get target object orientation from JSON (relative to base)
+        target_orientation_relative = self.get_object_target_orientation(object_name)
+        if target_orientation_relative is None:
+            self.get_logger().warn(f"No target orientation found for {object_name} in JSON, using identity")
+            target_orientation_relative = np.array([0.0, 0.0, 0.0, 1.0])
+        
+        # Transform target position and orientation from base frame to world frame
+        R_base_current = T_base_current[:3, :3]
+        target_object_position_abs = base_current_position + R_base_current @ target_position_relative
+        
+        # Transform target orientation from base frame to world frame
+        R_target_relative = R.from_quat(target_orientation_relative).as_matrix()
+        R_target_abs = R_base_current @ R_target_relative
+        target_orientation_abs = R.from_matrix(R_target_abs).as_quat()
         
         self.get_logger().info(f"Target object position (world): {target_object_position_abs}")
         self.get_logger().info(f"Target object orientation (world): {target_orientation_abs}")
@@ -509,15 +614,15 @@ class TranslateForAssembly(Node):
         ee_target_position = gripper_center_position.copy()
         ee_target_position[2] += tcp_to_gripper_center_offset
         
-        # Apply height offset - add HOVER_HEIGHT above base
-        final_position = ee_target_position.copy()
-        final_position[2] = base_current_position[2] + HOVER_HEIGHT
+        # Apply height offset - add HOVER_HEIGHT above base (step 1: hover position only)
+        hover_position = ee_target_position.copy()
+        hover_position[2] = base_current_position[2] + HOVER_HEIGHT
         
         self.get_logger().info(f"Calculated EE position from target object position:")
         self.get_logger().info(f"  Target object: {target_object_position_abs}")
         self.get_logger().info(f"  Gripper center: {gripper_center_position}")
         self.get_logger().info(f"  EE (TCP) position: {ee_target_position}")
-        self.get_logger().info(f"  Final position (with {HOVER_HEIGHT}m height offset): {final_position}")
+        self.get_logger().info(f"  Hover position (with {HOVER_HEIGHT}m height offset): {hover_position}")
         
         # Read current joint angles before computing IK
         if self.current_joint_angles is None:
@@ -526,35 +631,34 @@ class TranslateForAssembly(Node):
                 self.get_logger().error("Could not read current joint angles")
                 return False
         
-        # Move to final position (with height offset, keeping current EE orientation)
-        self.get_logger().info(f"Moving to final position: {final_position} (height offset: {HOVER_HEIGHT}m above base)")
+        # Step 1: Move to hover position only (no step 2 in real mode)
+        self.get_logger().info(f"Moving to hover position: {hover_position} (height: {HOVER_HEIGHT}m above base)")
         
-        # Compute IK for final position using current joint angles as seed
-        # Keep current EE orientation unchanged (from reorient step)
-        final_computed_joint_angles = self.compute_ik_with_current_seed(
-            final_position.tolist(),
+        # Compute IK for hover position using current joint angles as seed
+        hover_computed_joint_angles = self.compute_ik_with_current_seed(
+            hover_position.tolist(),
             ee_target_quat.tolist(),
             max_tries=5,
             dx=0.001
         )
         
-        if final_computed_joint_angles is None:
-            self.get_logger().error("Failed to compute IK for final position")
+        if hover_computed_joint_angles is None:
+            self.get_logger().error("Failed to compute IK for hover position")
             return False
         
         # Create trajectory
-        final_trajectory = [{
-            "positions": [float(x) for x in final_computed_joint_angles],
+        hover_trajectory = [{
+            "positions": [float(x) for x in hover_computed_joint_angles],
             "velocities": [0.0] * 6,
             "time_from_start": Duration(sec=int(duration))
         }]
         
-        success = self.execute_trajectory({"traj1": final_trajectory})
+        success = self.execute_trajectory({"traj1": hover_trajectory})
         if not success:
-            self.get_logger().error("Failed to reach final position")
+            self.get_logger().error("Failed to reach hover position")
             return False
         
-        self.get_logger().info("Reached final position (with height offset)")
+        self.get_logger().info("Reached hover position")
         return success
     
     def execute_trajectory(self, trajectory):
@@ -605,63 +709,63 @@ class TranslateForAssembly(Node):
 
 
 def main(args=None):
-    parser = argparse.ArgumentParser(description='Translate for Assembly - Move object to target position')
+    parser = argparse.ArgumentParser(description='Translate for Assembly - Move object to hover position')
+    parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
+                       help='Mode: sim (uses topics) or real (requires base position/orientation)')
     parser.add_argument('--object-name', type=str, required=True, help='Name of the object being held')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
-    parser.add_argument('--duration', type=float, default=5.0, help='Movement duration in seconds')
     
-    # Optional: Specify final base position directly, or use defaults with flag
+    # Real mode arguments
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'), 
-                       help=f'Final base position [x, y, z] in meters')
+                       help='Final base position [x, y, z] in meters (required in real mode)')
     parser.add_argument('--final-base-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
-                       help='Final base orientation quaternion [x, y, z, w]')
+                       help='Final base orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--use-default-base', action='store_true',
                        help=f'Use default base position ({DEFAULT_BASE_POSITION}) and orientation ({DEFAULT_BASE_ORIENTATION})')
-    parser.add_argument('--target-object-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
-                       help='Target object position [x, y, z] in world frame (overrides JSON)')
     
     args = parser.parse_args()
     
-    rclpy.init()
-    node = TranslateForAssembly()
+    # Validate arguments based on mode
+    if args.mode == 'real':
+        if not args.use_default_base and args.final_base_pos is None:
+            parser.error("In real mode, either --final-base-pos or --use-default-base is required")
     
-    # node.get_logger().info("Waiting for action server...")
+    rclpy.init()
+    node = TranslateForAssembly(mode=args.mode)
+    
     node.action_client.wait_for_server()
-    # node.get_logger().info("Action server available!")
     
     try:
-        # Wait for pose data (wait indefinitely until received)
-        # node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
-        # start_time = time.time()
-        # last_log_time = start_time
-        
         # Always need EE pose from topic
-        # Note: We don't need base pose from topic - we use defaults or provided values
-        # Note: We don't need current object position - we use target from JSON
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
             time.sleep(0.1)
-            
-            # Log every 5 seconds to show we're still waiting
-            # current_time = time.time()
-            # if current_time - last_log_time >= 5.0:
-            #     elapsed = current_time - start_time
-            #     node.get_logger().info(f"Still waiting for pose data... ({elapsed:.1f}s elapsed)")
-            #     last_log_time = current_time
         
-        # elapsed = time.time() - start_time
-        # node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
+        # In sim mode, wait for object and base poses from topics
+        if args.mode == 'sim':
+            while not node.current_poses:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                time.sleep(0.1)
         
-        # Execute translation (step 1 only: hover position, translation only, no rotation)
-        success = node.translate_for_target(
-            args.object_name,
-            args.base_name,
-            duration=args.duration,
-            final_base_pos=args.final_base_pos,
-            final_base_orientation=args.final_base_orientation,
-            target_object_pos=args.target_object_pos,
-            use_default_base=args.use_default_base
-        )
+        # Default duration
+        duration = 5.0
+        
+        # Execute translation (step 1 only: hover position)
+        if args.mode == 'sim':
+            success = node.translate_for_target_sim(
+                args.object_name,
+                args.base_name,
+                duration=duration
+            )
+        else:  # real mode
+            success = node.translate_for_target_real(
+                args.object_name,
+                args.base_name,
+                duration=duration,
+                final_base_pos=args.final_base_pos,
+                final_base_orientation=args.final_base_orientation,
+                use_default_base=args.use_default_base
+            )
         
         if success:
             node.get_logger().info("Translation successful!")

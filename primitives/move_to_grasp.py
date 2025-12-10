@@ -622,10 +622,10 @@ class DirectObjectMove(Node):
             self.current_ee_pose.pose.position.z
         ])
         
-        # In real mode, if current EE position is below 0.25, skip straight to step 2
-        if self.mode == 'real' and not self.step1_completed:
+        # If current EE position is below 0.25, skip straight to step 2 (both sim and real modes)
+        if not self.step1_completed:
             if current_ee_position[2] < 0.25:
-                self.get_logger().info(f"📌 Real mode: Current EE Z position ({current_ee_position[2]:.3f}m) is below 0.25m. Skipping step 1 and going straight to step 2.")
+                self.get_logger().info(f"📌 {self.mode.upper()} mode: Current EE Z position ({current_ee_position[2]:.3f}m) is below 0.25m. Skipping step 1 and going straight to step 2.")
                 self.step1_completed = True
                 # Switch to faster timer period for step 2
                 self.update_timer.cancel()
@@ -1241,7 +1241,11 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"✅ Calculated distance from TCP to offset point: {calculated_distance*100:.2f} cm")
             
             # Verify the offset matches expected value
+            # In Step 1 (sim mode), account for the 0.05m z offset that was added
             expected_distance = self.tcp_to_gripper_center_offset
+            if self.mode == 'sim' and not self.step1_completed:
+                expected_distance += 0.05  # Account for Step 1 offset
+            
             distance_error = abs(calculated_distance - expected_distance)
             if distance_error > 0.001:  # 1mm tolerance
                 self.get_logger().warn(f"⚠️ TCP offset verification error: {distance_error*1000:.2f}mm (expected {expected_distance*100:.1f}cm, got {calculated_distance*100:.1f}cm)")

@@ -2693,12 +2693,25 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
         }
 
 @mcp.tool()
-def reorient_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Reorient object for assembly."""
+def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+    """Reorient object for assembly.
+    
+    Args:
+        object_name: Name of the object to reorient
+        base_name: Name of the base object
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    """
     try:
         import subprocess
         import sys
         import os
+        
+        # Validate mode parameter
+        if mode not in ["sim", "real"]:
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
+            }
         
         script_dir = os.path.dirname(os.path.abspath(__file__))
         reorient_path = os.path.join(script_dir, "primitives", "reorient_for_assembly.py")
@@ -2708,7 +2721,7 @@ def reorient_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
             f"source {WS_SRC}",
             "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
-            f"timeout 90 /usr/bin/python3 reorient_for_assembly.py --object-name \"{object_name}\" --base-name \"{base_name}\""
+            f"timeout 90 /usr/bin/python3 reorient_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
         ]
         
         cmd = "\n".join(cmd_parts)
@@ -2737,7 +2750,8 @@ def reorient_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
                 "message": "Reorient for assembly executed successfully",
                 "parameters": {
                     "object_name": object_name,
-                    "base_name": base_name
+                    "base_name": base_name,
+                    "mode": mode
                 }
             }
         else:
@@ -2760,12 +2774,25 @@ def reorient_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-def translate_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Translate object to target position for assembly."""
+def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+    """Translate object to target position for assembly.
+    
+    Args:
+        object_name: Name of the object being held
+        base_name: Name of the base object
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    """
     try:
         import subprocess
         import sys
         import os
+        
+        # Validate mode parameter
+        if mode not in ["sim", "real"]:
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
+            }
         
         script_dir = os.path.dirname(os.path.abspath(__file__))
         translate_path = os.path.join(script_dir, "primitives", "translate_for_assembly.py")
@@ -2775,7 +2802,7 @@ def translate_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
             f"source {WS_SRC}",
             "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
-            f"timeout 90 /usr/bin/python3 translate_for_assembly.py --object-name \"{object_name}\" --base-name \"{base_name}\""
+            f"timeout 90 /usr/bin/python3 translate_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
         ]
         
         cmd = "\n".join(cmd_parts)
@@ -2804,7 +2831,8 @@ def translate_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
                 "message": "Translate for assembly executed successfully",
                 "parameters": {
                     "object_name": object_name,
-                    "base_name": base_name
+                    "base_name": base_name,
+                    "mode": mode
                 }
             }
         else:
@@ -2824,6 +2852,106 @@ def translate_for_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
         return {
             "status": "error",
             "message": f"Failed to execute translate for assembly: {str(e)}"
+        }
+
+@mcp.tool()
+def force_compliant_move_down(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
+    """Move down with force compliance (sim mode) or force-compliant movement (real mode).
+    
+    Args:
+        mode: Mode to use - "sim" for simulation or "real" for real robot (required)
+        object_name: Name of the object being held (required in sim mode)
+        base_name: Name of the base object (required in sim mode)
+    """
+    try:
+        import subprocess
+        import sys
+        import os
+        
+        # Validate mode parameter
+        if mode not in ["sim", "real"]:
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
+            }
+        
+        # Validate sim mode requirements
+        if mode == "sim":
+            if object_name is None or base_name is None:
+                return {
+                    "status": "error",
+                    "message": "In sim mode, object_name and base_name are required"
+                }
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        force_compliant_path = os.path.join(script_dir, "primitives", "force_compliant_move_down.py")
+        
+        # Build command based on mode
+        if mode == "sim":
+            cmd_parts = [
+                f"source {ROS_SRC}",
+                f"source {WS_SRC}",
+                "export ROS_DOMAIN_ID=0",
+                f"cd {script_dir}/primitives",
+                f"timeout 90 /usr/bin/python3 force_compliant_move_down.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+            ]
+        else:  # real mode - only mode parameter, use defaults for all others
+            cmd_parts = [
+                f"source {ROS_SRC}",
+                f"source {WS_SRC}",
+                "export ROS_DOMAIN_ID=0",
+                f"cd {script_dir}/primitives",
+                f"timeout 300 /usr/bin/python3 force_compliant_move_down.py --mode {mode}"
+            ]
+        
+        cmd = "\n".join(cmd_parts)
+        
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True,
+            timeout=310 if mode == "real" else 100  # Real mode can take longer
+        )
+        
+        # Check for error messages in output even if returncode is 0
+        output_lower = (result.stdout + result.stderr).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "no pose data" in output_lower or
+            "not found" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
+            return {
+                "status": "success",
+                "message": "Force compliant move down executed successfully",
+                "output": result.stdout,
+                "parameters": {
+                    "mode": mode,
+                    "object_name": object_name if mode == "sim" else None,
+                    "base_name": base_name if mode == "sim" else None
+                }
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Force compliant move down failed with return code {result.returncode}" if result.returncode != 0 else "Force compliant move down failed (error detected in output)",
+                "error": result.stderr,
+                "output": result.stdout
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "message": f"Force compliant move down timed out after {'5 minutes' if mode == 'real' else '90 seconds'}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to execute force compliant move down: {str(e)}"
         }
 
 @mcp.tool()

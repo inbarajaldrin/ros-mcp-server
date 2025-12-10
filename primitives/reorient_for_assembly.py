@@ -273,13 +273,34 @@ class FoldSymmetry:
 
 
 class ReorientForAssembly(Node):
-    def __init__(self, object_topic=DEFAULT_OBJECT_TOPIC, ee_topic=DEFAULT_EE_TOPIC):
+    def __init__(self, mode=None, object_topic=None, ee_topic=DEFAULT_EE_TOPIC):
         super().__init__('reorient_for_assembly')
+        
+        # Mode must be explicitly specified
+        if mode is None:
+            raise ValueError("Mode must be explicitly specified. Use 'sim' or 'real'.")
+        if mode not in ['sim', 'real']:
+            raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
+        
+        self.mode = mode  # 'sim' or 'real'
+        
+        # Set default object topic based on mode if not provided
+        if object_topic is None:
+            if self.mode == 'sim':
+                object_topic = DEFAULT_OBJECT_TOPIC  # "/objects_poses_sim"
+            else:
+                # Real mode: no object topic needed (orientations provided via arguments)
+                object_topic = None
         
         self.assembly_config = self.load_assembly_config()
         self.symmetry_dir = SYMMETRY_DIR
         
-        self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
+        # Only subscribe to object topic in sim mode
+        if object_topic is not None:
+            self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
+        else:
+            self.object_sub = None
+        
         self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, 10)
         self.joint_state_sub = self.create_subscription(JointState, '/joint_states', self.joint_state_callback, 10)
         
@@ -301,7 +322,7 @@ class ReorientForAssembly(Node):
         self.cardinal_error_threshold_increment = 10.0  # Increment threshold by this amount each retry
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
         
-        self.get_logger().info("ReorientForAssembly initialized (Fold Symmetry + 24-Cardinal with Intermediary)")
+        self.get_logger().info(f"ReorientForAssembly initialized (Mode: {self.mode}, Fold Symmetry + 24-Cardinal with Intermediary)")
     
     def load_assembly_config(self):
         try:
@@ -799,6 +820,14 @@ class ReorientForAssembly(Node):
                 return False
             R_object_current = self.get_rotation_from_transform(self.current_poses[obj_key].transform)
         
+        # === Log initial object orientation in RPY ===
+        initial_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
+        self.get_logger().info("=" * 70)
+        self.get_logger().info(f"📊 INITIAL OBJECT ORIENTATION:")
+        self.get_logger().info(f"   Object: {object_name}")
+        self.get_logger().info(f"   RPY: [{initial_obj_rpy[0]:.1f}, {initial_obj_rpy[1]:.1f}, {initial_obj_rpy[2]:.1f}] degrees")
+        self.get_logger().info("=" * 70)
+        
         # === Get base orientation ===
         if target_base_orientation is not None:
             R_base = self.get_rotation_from_quat(target_base_orientation)
@@ -837,10 +866,19 @@ class ReorientForAssembly(Node):
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
         R_grasp = R_EE_current.T @ R_object_current
         
-        # === Transform target to world frame ===
+        # === Transform target to world frame (for logging) ===
         # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.
         R_target_relative = R.from_quat(target_quat).as_matrix()
         R_object_target_world = R_base @ R_target_relative
+        
+        # === Transform to base-relative frame for cardinal calculation ===
+        # Cardinal calculation should be done assuming base is at identity [0,0,0,1]
+        # Transform current object and EE to base-relative frame
+        R_object_current_base_relative = R_base.T @ R_object_current
+        R_EE_current_base_relative = R_base.T @ R_EE_current
+        
+        # Target in base-relative frame (same as R_target_relative)
+        R_object_target_base_relative = R_target_relative
         
         # Log current state
         current_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
@@ -858,37 +896,65 @@ class ReorientForAssembly(Node):
             f"[{target_world_rpy[0]:.1f}, {target_world_rpy[1]:.1f}, {target_world_rpy[2]:.1f}]"
         )
         
-        # === Try cardinal-to-cardinal optimization first ===
+        # === Try cardinal-to-cardinal optimization first (in base-relative frame) ===
         self.get_logger().info("-" * 70)
         self.get_logger().info("  Attempting cardinal-to-cardinal optimization...")
-        (optimization_success, best_quat, resulting_object_R, 
-         matched_target_R, object_error) = self.compute_cardinal_to_cardinal_adjustment(
-            R_object_current, R_object_target_world, R_EE_current, R_grasp, fold_data
+        (optimization_success, best_quat_base_relative, resulting_object_R_base_relative, 
+         matched_target_R_base_relative, object_error) = self.compute_cardinal_to_cardinal_adjustment(
+            R_object_current_base_relative, R_object_target_base_relative, R_EE_current_base_relative, R_grasp, fold_data
         )
         
         candidates = None  # Will store alternative cardinals if optimization fails
         
         if optimization_success:
+            # Transform result back to world frame
+            R_EE_result_base_relative = R.from_quat(best_quat_base_relative).as_matrix()
+            R_EE_result_world = R_base @ R_EE_result_base_relative
+            best_quat = R.from_matrix(R_EE_result_world).as_quat()
+            
+            # Transform resulting object and matched target back to world frame
+            resulting_object_R = R_base @ resulting_object_R_base_relative
+            matched_target_R = R_base @ matched_target_R_base_relative
+            
             # Find the cardinal name for logging
-            R_EE_result = R.from_quat(best_quat).as_matrix()
             best_cardinal_name, _, _ = ExtendedCardinalOrientations.find_closest_cardinal(
-                R_EE_result, threshold_deg=180.0  # Always find closest
+                R_EE_result_base_relative, threshold_deg=180.0  # Check in base-relative frame
             )
             if best_cardinal_name is None:
                 best_cardinal_name = "computed_adjustment"
             best_cardinal = best_cardinal_name
-            best_quat_cardinal = best_quat  # Already a cardinal from compute_cardinal_to_cardinal_adjustment
+            best_quat_cardinal = best_quat  # Already transformed to world frame
             # Use the values already computed from optimization
             cardinal_object_error = object_error
             self.get_logger().info("  ✓ Using cardinal-to-cardinal optimization")
         else:
-            # === Fall back to full search ===
+            # === Fall back to full search (in base-relative frame) ===
             self.get_logger().info("  → Falling back to full cardinal search...")
-            (best_cardinal, best_quat_cardinal, resulting_object_R, 
-             matched_target_R, object_error, candidates) = self.find_best_cardinal_for_assembly(
-                R_object_target_world, R_grasp, fold_data, R_object_current, R_EE_current
+            (best_cardinal, best_quat_cardinal_base_relative, resulting_object_R_base_relative, 
+             matched_target_R_base_relative, object_error, candidates) = self.find_best_cardinal_for_assembly(
+                R_object_target_base_relative, R_grasp, fold_data, R_object_current_base_relative, R_EE_current_base_relative
             )
-            # best_quat_cardinal is already a cardinal quaternion from find_best_cardinal_for_assembly
+            
+            # Transform result back to world frame
+            R_EE_cardinal_base_relative = R.from_quat(best_quat_cardinal_base_relative).as_matrix()
+            R_EE_cardinal_world = R_base @ R_EE_cardinal_base_relative
+            best_quat_cardinal = R.from_matrix(R_EE_cardinal_world).as_quat()
+            
+            resulting_object_R = R_base @ resulting_object_R_base_relative
+            matched_target_R = R_base @ matched_target_R_base_relative
+            
+            # Transform candidates back to world frame for later use
+            if candidates is not None:
+                transformed_candidates = []
+                for card_name, card_quat_base_rel, card_obj_R_base_rel, card_target_R_base_rel, card_error, ee_rot_dist in candidates:
+                    R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
+                    R_EE_cand_world = R_base @ R_EE_cand_base_rel
+                    card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
+                    card_obj_R_world = R_base @ card_obj_R_base_rel
+                    card_target_R_world = R_base @ card_target_R_base_rel
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist))
+                candidates = transformed_candidates
+            
             cardinal_object_error = object_error
         
         # === Try cardinals with threshold increment (ALWAYS use canonical) ===
@@ -1099,7 +1165,18 @@ class ReorientForAssembly(Node):
             "time_from_start": Duration(sec=int(duration))
         }]}
         
-        return self.execute_trajectory(trajectory)
+        success = self.execute_trajectory(trajectory)
+        
+        # === Log final object orientation in RPY ===
+        if success:
+            final_obj_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
+            self.get_logger().info("=" * 70)
+            self.get_logger().info(f"📊 FINAL OBJECT ORIENTATION:")
+            self.get_logger().info(f"   Object: {object_name}")
+            self.get_logger().info(f"   RPY: [{final_obj_rpy[0]:.1f}, {final_obj_rpy[1]:.1f}, {final_obj_rpy[2]:.1f}] degrees")
+            self.get_logger().info("=" * 70)
+        
+        return success
     
     def execute_trajectory(self, trajectory):
         try:
@@ -1149,33 +1226,45 @@ class ReorientForAssembly(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Reorient for Assembly (Fold Symmetry + 24-Cardinal with Intermediary)')
-    parser.add_argument('--object-name', type=str, required=True)
-    parser.add_argument('--base-name', type=str, required=True)
-    parser.add_argument('--duration', type=float, default=5.0)
+    parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
+                       help='Mode: sim (reads from topic) or real (requires orientations)')
+    parser.add_argument('--object-name', type=str, required=True,
+                       help='Name of the object to reorient')
+    parser.add_argument('--base-name', type=str, required=True,
+                       help='Name of the base object')
+    
+    # In real mode, orientations are required; in sim mode, they're optional (read from topic)
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
-                       help='Current object orientation quaternion [x, y, z, w] (overrides topic)')
+                       help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--target-base-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
-                       help='Target base orientation quaternion [x, y, z, w] (overrides topic)')
-    parser.add_argument('--object-topic', type=str, default=DEFAULT_OBJECT_TOPIC)
-    parser.add_argument('--ee-topic', type=str, default=DEFAULT_EE_TOPIC)
+                       help='Target base orientation quaternion [x, y, z, w] (required in real mode)')
     
     args = parser.parse_args()
     
+    # Validate arguments based on mode
+    if args.mode == 'real':
+        if args.current_object_orientation is None or args.target_base_orientation is None:
+            parser.error("--current-object-orientation and --target-base-orientation are required in real mode")
+    
     rclpy.init()
-    node = ReorientForAssembly(args.object_topic, args.ee_topic)
+    node = ReorientForAssembly(mode=args.mode)
     node.action_client.wait_for_server()
     
     try:
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
         
-        # Check if we need to wait for poses (only if not provided via arguments)
-        if args.current_object_orientation is None or args.target_base_orientation is None:
+        # In sim mode, wait for poses from topic if not provided
+        # In real mode, orientations should be provided via arguments
+        if args.mode == 'sim' and (args.current_object_orientation is None or args.target_base_orientation is None):
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
         
+        # Default duration is 5.0 seconds
+        duration = 5.0
+        
         success = node.reorient_for_target(
-            args.object_name, args.base_name, args.duration,
+            args.object_name, args.base_name, duration,
             args.current_object_orientation, args.target_base_orientation
         )
         

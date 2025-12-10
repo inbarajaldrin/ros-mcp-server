@@ -38,7 +38,11 @@ IK_SOLVER_PATH = "/home/aaugus11/Desktop/ros2_ws/src/ur_asu-main/ur_asu/custom_l
 if IK_SOLVER_PATH not in sys.path:
     sys.path.append(IK_SOLVER_PATH)
 
-from ik_solver import compute_ik
+from ik_solver import compute_ik, ik_objective_quaternion
+from scipy.optimize import minimize
+from tf2_msgs.msg import TFMessage
+import json
+import os
 
 
 class ForceCompliantMoveDownController(Node):
@@ -48,8 +52,35 @@ class ForceCompliantMoveDownController(Node):
     Z-direction moves down regardless of force.
     """
     
-    def __init__(self, speed, gain, deadband, max_vel, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0):
+    def __init__(self, mode=None, speed=0.005, gain=1.67, deadband=1.0, max_vel=15.0, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0, object_name=None, base_name=None):
         super().__init__('force_compliant_move_down_controller')
+        
+        # Mode must be explicitly specified
+        if mode is None:
+            raise ValueError("Mode must be explicitly specified. Use 'sim' or 'real'.")
+        if mode not in ['sim', 'real']:
+            raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
+        
+        self.mode = mode  # 'sim' or 'real'
+        
+        # For sim mode, we need object and base names
+        if self.mode == 'sim':
+            if object_name is None or base_name is None:
+                raise ValueError("In sim mode, object_name and base_name are required")
+            self.object_name = object_name
+            self.base_name = base_name
+            # Load assembly config for sim mode
+            ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_assembly.json"
+            self.assembly_config = self.load_assembly_config(ASSEMBLY_JSON_FILE)
+            # Subscribe to object poses topic
+            self.current_poses = {}
+            self.object_sub = self.create_subscription(TFMessage, "/objects_poses_sim", self.object_callback, 10)
+        else:
+            self.object_name = None
+            self.base_name = None
+            self.assembly_config = None
+            self.current_poses = {}
+            self.object_sub = None
         
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
@@ -108,12 +139,22 @@ class ForceCompliantMoveDownController(Node):
         
         self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', self._pose_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
-        self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10)
+        
+        # Only subscribe to force sensor in real mode
+        if self.mode == 'real':
+            self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10)
+        else:
+            self.force = np.array([0.0, 0.0, 0.0])  # Dummy force for sim mode
         
         # Wait for data
-        self.get_logger().info("Waiting for robot data...")
-        while self.pos is None or self.force is None or self.joints is None:
+        self.get_logger().info(f"Waiting for robot data (mode: {self.mode})...")
+        while self.pos is None or self.joints is None:
             rclpy.spin_once(self, timeout_sec=0.1)
+        
+        # In real mode, also wait for force data
+        if self.mode == 'real':
+            while self.force is None:
+                rclpy.spin_once(self, timeout_sec=0.1)
         
         # Capture and store fixed orientation
         if self.rpy is not None:
@@ -131,17 +172,20 @@ class ForceCompliantMoveDownController(Node):
             self.start_y = self.pos[1]
             self.get_logger().info(f"Starting position: X={self.start_x*1000:.2f} mm, Y={self.start_y*1000:.2f} mm (will be maintained until contact)")
         
-        # Get baseline force (average over 2 seconds)
-        self.get_logger().info("Calibrating force sensor (2 sec)...")
-        samples = []
-        start = time.time()
-        while time.time() - start < 2.0:
-            rclpy.spin_once(self, timeout_sec=0.05)
-            if self.force is not None:
-                samples.append(self.force.copy())
-            time.sleep(0.05)
-        self.baseline = np.mean(samples, axis=0)
-        self.get_logger().info(f"Baseline: [{self.baseline[0]:.2f}, {self.baseline[1]:.2f}, {self.baseline[2]:.2f}] N")
+        # Get baseline force (average over 2 seconds) - only in real mode
+        if self.mode == 'real':
+            self.get_logger().info("Calibrating force sensor (2 sec)...")
+            samples = []
+            start = time.time()
+            while time.time() - start < 2.0:
+                rclpy.spin_once(self, timeout_sec=0.05)
+                if self.force is not None:
+                    samples.append(self.force.copy())
+                time.sleep(0.05)
+            self.baseline = np.mean(samples, axis=0)
+            self.get_logger().info(f"Baseline: [{self.baseline[0]:.2f}, {self.baseline[1]:.2f}, {self.baseline[2]:.2f}] N")
+        else:
+            self.baseline = np.array([0.0, 0.0, 0.0])  # No baseline needed for sim mode
         
         self.get_logger().info("=" * 60)
         self.get_logger().info("FORCE COMPLIANT MOVE DOWN CONTROLLER INITIALIZED")
@@ -203,6 +247,360 @@ class ForceCompliantMoveDownController(Node):
             
             if len(ordered_positions) == 6:
                 self.joints = np.array(ordered_positions)
+    
+    def object_callback(self, msg):
+        """Callback for object poses (sim mode only)"""
+        for transform in msg.transforms:
+            frame_id = transform.child_frame_id
+            self.current_poses[frame_id] = transform
+    
+    def load_assembly_config(self, json_file):
+        """Load assembly configuration from JSON file"""
+        try:
+            with open(json_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.get_logger().error(f"Assembly file not found: {json_file}")
+            return {}
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f"Error parsing assembly JSON: {e}")
+            return {}
+    
+    def get_object_target_position(self, object_name):
+        """Get target position for object from assembly configuration"""
+        for component in self.assembly_config.get('components', []):
+            if component.get('name') == object_name or component.get('name') == f"{object_name}_scaled70":
+                position = component.get('position', {})
+                return np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
+        return None
+    
+    def transform_to_matrix(self, transform):
+        """Convert ROS Transform to 4x4 transformation matrix"""
+        t = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
+        q = np.array([transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w])
+        r = R.from_quat(q)
+        rotation_matrix = r.as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = rotation_matrix
+        T[:3, 3] = t
+        return T
+    
+    def pose_to_matrix(self, pose):
+        """Convert ROS Pose to 4x4 transformation matrix"""
+        t = np.array([pose.position.x, pose.position.y, pose.position.z])
+        q = np.array([pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+        r = R.from_quat(q)
+        rotation_matrix = r.as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = rotation_matrix
+        T[:3, 3] = t
+        return T
+    
+    def matrix_to_rpy(self, T):
+        """Convert 4x4 transformation matrix to position and RPY (degrees)"""
+        position = T[:3, 3]
+        rotation_matrix = T[:3, :3]
+        r = R.from_matrix(rotation_matrix)
+        rpy_rad = r.as_euler('xyz')
+        rpy_deg = np.degrees(rpy_rad)
+        return position, rpy_deg
+    
+    def read_current_joint_angles(self):
+        """Read current joint angles using ROS2 subscriber"""
+        timeout_count = 0
+        max_timeout = 100
+        while rclpy.ok() and timeout_count < max_timeout:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            timeout_count += 1
+        return self.joints.copy() if self.joints is not None else None
+    
+    def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
+        """
+        Compute IK using current joint angles as seed (exactly like translate_for_assembly_old step 2)
+        
+        Args:
+            target_position: [x, y, z] target position
+            target_quat: [x, y, z, w] target orientation quaternion
+            max_tries: Number of position perturbations to try
+            dx: Position perturbation step size
+            
+        Returns:
+            Joint angles if successful, None otherwise
+        """
+        # Convert quaternion to rotation matrix
+        target_rotation = R.from_quat(target_quat)
+        target_rot_matrix = target_rotation.as_matrix()
+        
+        # Create target pose
+        target_pose = np.eye(4)
+        target_pose[:3, 3] = target_position
+        target_pose[:3, :3] = target_rot_matrix
+        
+        # Use current joint angles as seed
+        if self.joints is None:
+            self.get_logger().error("Current joint angles not available! Cannot compute IK.")
+            return None
+        
+        q_guess = self.joints.copy()
+        
+        # Try IK with current joint angles and position perturbations
+        solution_found = False
+        best_result = None
+        best_cost = float('inf')
+        
+        for i in range(max_tries):
+            if solution_found:
+                break
+                
+            # Try small x-shift each iteration (helps with workspace boundaries)
+            perturbed_position = np.array(target_position).copy()
+            perturbed_position[0] += i * dx
+            
+            perturbed_pose = target_pose.copy()
+            perturbed_pose[:3, 3] = perturbed_position
+            
+            joint_bounds = [(-np.pi, np.pi)] * 6
+            
+            # Use quaternion-based objective
+            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+                            method='L-BFGS-B', bounds=joint_bounds)
+            
+            if result.success:
+                cost = ik_objective_quaternion(result.x, perturbed_pose)
+                
+                # Check if this is a good solution
+                if cost < 0.01:
+                    return result.x
+                
+                # Keep track of best solution
+                if cost < best_cost:
+                    best_cost = cost
+                    best_result = result.x
+        
+        # If we found any reasonable solution, use it
+        if best_result is not None and best_cost < 0.1:
+            return best_result
+        
+        # Fallback: Try multiple predefined seeds if current seed failed
+        # Convert target quaternion to RPY for seed generation
+        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
+        target_rpy_deg = target_rpy_deg.tolist()
+        
+        # Generate diverse seed configurations (same as translate_for_assembly_old)
+        seed_configs = [
+            # Standard seeds
+            np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
+            np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
+            np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
+            np.radians([180, -90, 90, -90, -90, target_rpy_deg[2]]),
+            # Elbow-up configurations
+            np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
+            np.radians([85, -60, 60, -90, -90, target_rpy_deg[2]]),
+            # Wrist variations
+            np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
+            np.radians([85, -80, 90, -90, -180, target_rpy_deg[2]]),
+            # Additional variations for pitch
+            np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
+            np.radians([85, -90, 100, -100, -90, target_rpy_deg[2]]),
+        ]
+        
+        best_result = None
+        best_cost = float('inf')
+        
+        for seed_idx, q_guess_fallback in enumerate(seed_configs):
+            for i in range(max_tries):
+                # Try small x-shift each iteration
+                perturbed_position = np.array(target_position).copy()
+                perturbed_position[0] += i * dx
+                
+                perturbed_pose = target_pose.copy()
+                perturbed_pose[:3, 3] = perturbed_position
+                
+                joint_bounds = [(-np.pi, np.pi)] * 6
+                
+                # Use quaternion-based objective
+                result = minimize(ik_objective_quaternion, q_guess_fallback, args=(perturbed_pose,), 
+                                method='L-BFGS-B', bounds=joint_bounds)
+                
+                if result.success:
+                    cost = ik_objective_quaternion(result.x, perturbed_pose)
+                    
+                    # Check if this is a good solution
+                    if cost < 0.01:
+                        return result.x
+                    
+                    # Keep track of best solution
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_result = result.x
+        
+        # If we found any reasonable solution with fallback seeds, use it
+        if best_result is not None and best_cost < 0.1:
+            return best_result
+        
+        self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+        return None
+    
+    def execute_trajectory_sim(self, trajectory):
+        """Execute trajectory and wait for completion (sim mode)"""
+        try:
+            if 'traj1' not in trajectory or not trajectory['traj1']:
+                return False
+            
+            point = trajectory['traj1'][0]
+            positions = point['positions']
+            duration = point['time_from_start'].sec
+            
+            traj_msg = JointTrajectory()
+            traj_msg.joint_names = self.joint_names
+            
+            traj_point = JointTrajectoryPoint()
+            traj_point.positions = positions
+            traj_point.velocities = [0.0] * 6
+            traj_point.time_from_start = Duration(sec=duration)
+            traj_msg.points.append(traj_point)
+            
+            goal = FollowJointTrajectory.Goal()
+            goal.trajectory = traj_msg
+            goal.goal_time_tolerance = Duration(sec=1)
+            
+            future = self.traj_client.send_goal_async(goal)
+            rclpy.spin_until_future_complete(self, future)
+            goal_handle = future.result()
+            
+            if not goal_handle.accepted:
+                self.get_logger().error("Trajectory goal rejected")
+                return False
+            
+            result_future = goal_handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future)
+            result = result_future.result()
+            
+            if result.status == 4:  # SUCCEEDED
+                return True
+            else:
+                self.get_logger().error(f"Trajectory failed with status: {result.status}")
+                return False
+        except Exception as e:
+            self.get_logger().error(f"Trajectory execution error: {e}")
+            return False
+    
+    def move_down_sim(self, duration=10.0):
+        """Sim mode: Move down to final position (step 2 from translate_for_assembly)"""
+        # Wait for pose data
+        if not self.current_poses:
+            self.get_logger().error("No pose data available")
+            return False
+        
+        # Get current EE pose
+        if self.pos is None:
+            self.get_logger().error("End-effector pose not available")
+            return False
+        
+        # Check if object exists
+        obj_key = self.object_name if self.object_name in self.current_poses else f"{self.object_name}_scaled70"
+        if obj_key not in self.current_poses:
+            self.get_logger().error(f"Object {self.object_name} not found")
+            return False
+        
+        # Check if base exists
+        base_key = self.base_name if self.base_name in self.current_poses else f"{self.base_name}_scaled70"
+        if base_key not in self.current_poses:
+            self.get_logger().error(f"Base {self.base_name} not found")
+            return False
+        
+        # Get current EE pose as PoseStamped-like structure
+        # Use actual current EE orientation from topic (maintain current orientation like old code)
+        if self.rpy is None:
+            self.get_logger().error("EE RPY not available from topic")
+            return False
+        
+        current_ee_pose_msg = PoseStamped()
+        current_ee_pose_msg.pose.position.x = self.pos[0]
+        current_ee_pose_msg.pose.position.y = self.pos[1]
+        current_ee_pose_msg.pose.position.z = self.pos[2]
+        
+        # Use current EE orientation from topic (self.rpy), not fixed orientation
+        quat = R.from_euler('xyz', self.rpy, degrees=True).as_quat()
+        current_ee_pose_msg.pose.orientation.x = quat[0]
+        current_ee_pose_msg.pose.orientation.y = quat[1]
+        current_ee_pose_msg.pose.orientation.z = quat[2]
+        current_ee_pose_msg.pose.orientation.w = quat[3]
+        
+        # Convert poses to matrices
+        T_EE_current = self.pose_to_matrix(current_ee_pose_msg.pose)
+        T_object_current = self.transform_to_matrix(self.current_poses[obj_key].transform)
+        T_base_current = self.transform_to_matrix(self.current_poses[base_key].transform)
+        
+        # Calculate grasp transformation
+        T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
+        
+        # Get current positions
+        ee_current_position, ee_current_rpy = self.matrix_to_rpy(T_EE_current)
+        base_current_position, base_current_rpy = self.matrix_to_rpy(T_base_current)
+        
+        # Get target object position from JSON (relative to base)
+        target_position_relative = self.get_object_target_position(self.object_name)
+        if target_position_relative is None:
+            self.get_logger().error(f"No target position found for {self.object_name} in JSON")
+            return False
+        
+        # Transform target position from base frame to world frame
+        R_base_current = T_base_current[:3, :3]
+        target_object_position_abs = base_current_position + R_base_current @ target_position_relative
+        
+        # Create target object transformation (keep current orientation)
+        T_object_target = np.eye(4)
+        T_object_target[:3, :3] = T_object_current[:3, :3]  # Keep current orientation
+        T_object_target[:3, 3] = target_object_position_abs
+        
+        # Calculate required EE position to place object at target
+        T_EE_target = T_object_target @ np.linalg.inv(T_grasp)
+        
+        # Extract target position and quaternion
+        ee_target_position = T_EE_target[:3, 3]
+        ee_target_rot_matrix = T_EE_target[:3, :3]
+        ee_target_rotation = R.from_matrix(ee_target_rot_matrix)
+        ee_target_quat = ee_target_rotation.as_quat()
+        
+        self.get_logger().info(f"Step 2: Moving down to final position: {ee_target_position}")
+        
+        # Read current joint angles before computing IK
+        if self.joints is None:
+            self.read_current_joint_angles()
+            if self.joints is None:
+                self.get_logger().error("Could not read current joint angles")
+                return False
+        
+        # Compute IK for final position
+        final_computed_joint_angles = self.compute_ik_with_current_seed(
+            ee_target_position.tolist(),
+            ee_target_quat.tolist(),
+            max_tries=5,
+            dx=0.001
+        )
+        
+        if final_computed_joint_angles is None:
+            self.get_logger().error("Failed to compute IK for final position")
+            return False
+        
+        # Create final trajectory
+        final_trajectory = [{
+            "positions": [float(x) for x in final_computed_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=int(duration))
+        }]
+        
+        success = self.execute_trajectory_sim({"traj1": final_trajectory})
+        
+        if success:
+            # Wait for poses to update (same as old code)
+            time.sleep(0.5)
+            self.get_logger().info("Reached final position")
+        else:
+            self.get_logger().error("Failed to reach final position")
+        
+        return success
     
     def _wrench_cb(self, msg):
         self.force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
@@ -345,6 +743,20 @@ class ForceCompliantMoveDownController(Node):
         return (next_x, next_y, next_z)
     
     def run(self):
+        """Main run method - different behavior for sim vs real mode"""
+        if self.mode == 'sim':
+            # Sim mode: execute step 2 (move down to final position)
+            # Wait for object and base poses from topics
+            self.get_logger().info("Waiting for object and base poses from topics...")
+            while not self.current_poses:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                time.sleep(0.1)
+            return self.move_down_sim(duration=10.0)
+        else:
+            # Real mode: original force-compliant movement
+            return self.run_real()
+    
+    def run_real(self):
         self.get_logger().info("Starting force compliant move down. Press Ctrl+C to stop.")
         
         if not self.traj_client.wait_for_server(timeout_sec=5.0):
@@ -794,54 +1206,85 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with defaults
-  python3 force_compliant_move_down.py
+  # Real mode with defaults
+  python3 force_compliant_move_down.py --mode real
 
-  # Custom speed and compliance parameters
-  python3 force_compliant_move_down.py --speed 0.01 --gain 5.0 --deadband 3.0
+  # Sim mode (step 2 from translate_for_assembly)
+  python3 force_compliant_move_down.py --mode sim --object-name fork_orange --base-name base
 
-  # Reverse force response directions
-  python3 force_compliant_move_down.py --reverse
+  # Real mode with custom speed and compliance parameters
+  python3 force_compliant_move_down.py --mode real --speed 0.01 --gain 5.0 --deadband 3.0
 
-  # Peg-in-hole insertion with custom Z threshold
-  python3 force_compliant_move_down.py --z-threshold -8.0
+  # Real mode: Reverse force response directions
+  python3 force_compliant_move_down.py --mode real --reverse
+
+  # Real mode: Peg-in-hole insertion with custom Z threshold
+  python3 force_compliant_move_down.py --mode real --z-threshold -8.0
         """
     )
+    parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
+                       help='Mode: sim (step 2 from translate_for_assembly) or real (force-compliant movement)')
+    
+    # Sim mode arguments
+    parser.add_argument('--object-name', type=str, help='Name of the object being held (required in sim mode)')
+    parser.add_argument('--base-name', type=str, help='Name of the base object (required in sim mode)')
+    
+    # Real mode arguments
     parser.add_argument('--speed', type=float, default=0.005,
-                        help='Downward speed in m/s (default: 0.005 = 5mm/s)')
+                        help='Downward speed in m/s (default: 0.005 = 5mm/s, real mode only)')
     parser.add_argument('--gain', type=float, default=1.67,
-                        help='X/Y compliance gain in mm/s per Newton (default: 1.67)')
+                        help='X/Y compliance gain in mm/s per Newton (default: 1.67, real mode only)')
     parser.add_argument('--deadband', type=float, default=1.0,
-                        help='X/Y force deadband in N (default: 1.0)')
+                        help='X/Y force deadband in N (default: 1.0, real mode only)')
     parser.add_argument('--max-vel', type=float, default=15.0,
-                        help='X/Y max compliance velocity in mm/s (default: 15.0)')
+                        help='X/Y max compliance velocity in mm/s (default: 15.0, real mode only)')
     parser.add_argument('--reverse', action='store_true',
-                        help='Reverse X/Y force response directions (default: False)')
+                        help='Reverse X/Y force response directions (default: False, real mode only)')
     parser.add_argument('--z-threshold', type=float, default=-10.0,
-                        help='Z force threshold in N to detect contact (default: -8.0 N, negative = upward resistance)')
+                        help='Z force threshold in N to detect contact (default: -10.0 N, negative = upward resistance, real mode only)')
     parser.add_argument('--xy-threshold', type=float, default=1.0,
-                        help='Minimum X/Y force magnitude required to enter alignment mode (default: 1.0 N)')
+                        help='Minimum X/Y force magnitude required to enter alignment mode (default: 1.0 N, real mode only)')
     args = parser.parse_args()
+    
+    # Validate arguments based on mode
+    if args.mode == 'sim':
+        if args.object_name is None or args.base_name is None:
+            parser.error("In sim mode, --object-name and --base-name are required")
     
     rclpy.init()
     
     try:
-        node = ForceCompliantMoveDownController(
-            speed=args.speed,
-            gain=args.gain,
-            deadband=args.deadband,
-            max_vel=args.max_vel,
-            reverse=args.reverse,
-            z_threshold=args.z_threshold,
-            xy_force_threshold=args.xy_threshold
-        )
+        if args.mode == 'sim':
+            node = ForceCompliantMoveDownController(
+                mode=args.mode,
+                object_name=args.object_name,
+                base_name=args.base_name
+            )
+        else:
+            node = ForceCompliantMoveDownController(
+                mode=args.mode,
+                speed=args.speed,
+                gain=args.gain,
+                deadband=args.deadband,
+                max_vel=args.max_vel,
+                reverse=args.reverse,
+                z_threshold=args.z_threshold,
+                xy_force_threshold=args.xy_threshold
+            )
         
         # Give system time to stabilize
         time.sleep(0.5)
         
-        # Execute trajectory (runs continuously)
+        # Execute trajectory
         try:
-            node.run()
+            if args.mode == 'sim':
+                success = node.run()
+                if success:
+                    node.get_logger().info("Move down completed successfully!")
+                else:
+                    node.get_logger().error("Move down failed")
+            else:
+                node.run()
         except KeyboardInterrupt:
             # Set running flag to stop the loop
             if hasattr(node, 'running'):
