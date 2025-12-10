@@ -48,13 +48,13 @@ class ForceCompliantMoveDownController(Node):
     Z-direction moves down regardless of force.
     """
     
-    JOINT_NAMES = [
-        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-    ]
-    
-    def __init__(self, speed, gain, deadband, max_vel, reverse=False, z_threshold=-5.0, xy_force_threshold=1.0):
+    def __init__(self, speed, gain, deadband, max_vel, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0):
         super().__init__('force_compliant_move_down_controller')
+        
+        self.joint_names = [
+            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
+        ]
         
         self.speed = speed          # m/s downward speed
         self.gain = gain            # mm/s per Newton for X/Y compliance
@@ -90,11 +90,15 @@ class ForceCompliantMoveDownController(Node):
         self.just_detected_contact = False  # Flag to trigger trajectory cancellation
         self.current_goal_handle = None  # Current trajectory goal handle (for cancellation)
         self.alignment_start_time = None  # Time when alignment mode started
-        self.alignment_stop_timeout = 10.0  # Stop alignment after this many seconds
+        self.alignment_stop_timeout = 20.0  # Stop alignment after this many seconds
         self.alignment_min_duration = 1.0  # Minimum time in alignment mode before checking for completion
         self.low_force_start_time = None  # Time when X/Y forces first went low (after min duration)
-        self.low_force_threshold = 1.0  # X/Y force magnitude threshold to consider "low"
+        self.low_force_threshold = deadband  # X/Y force magnitude threshold to consider "low" (use deadband value)
         self.low_force_required_duration = 2.0  # How long forces must be low before stopping
+        
+        # Safety limits to prevent excessive forces
+        self.max_z_force = -5.0  # Maximum Z force (N) - stop if exceeded
+        self.max_xy_force = 10.0  # Maximum X/Y force (N) - stop if exceeded
         
         # Setup
         self.traj_client = ActionClient(
@@ -113,12 +117,13 @@ class ForceCompliantMoveDownController(Node):
         
         # Capture and store fixed orientation
         if self.rpy is not None:
-            self.fixed_rpy = self.rpy.copy()
-            self.get_logger().info(f"Fixed orientation: R={self.fixed_rpy[0]:.1f}°, P={self.fixed_rpy[1]:.1f}°, Y={self.fixed_rpy[2]:.1f}°")
+            # Set fixed orientation to [0, 180, 0.01] - face down with yaw = 0.01°
+            self.fixed_rpy = np.array([0.0, 180.0, 0.01])
+            self.get_logger().info(f"Fixed orientation: R={self.fixed_rpy[0]:.1f}°, P={self.fixed_rpy[1]:.1f}°, Y={self.fixed_rpy[2]:.2f}°")
         else:
-            # Default orientation: face down
-            self.fixed_rpy = np.array([0.0, 180.0, 0.0])
-            self.get_logger().info("Using default orientation: R=0.0°, P=180.0°, Y=0.0°")
+            # Default orientation: face down with yaw = 0.01°
+            self.fixed_rpy = np.array([0.0, 180.0, 0.01])
+            self.get_logger().info("Using default orientation: R=0.0°, P=180.0°, Y=0.01°")
         
         # Store starting X and Y position (will be maintained during search phase)
         if self.pos is not None:
@@ -187,8 +192,17 @@ class ForceCompliantMoveDownController(Node):
         self.rpy = self._canonicalize_euler(raw_rpy)
     
     def _joint_cb(self, msg):
-        if len(msg.position) >= 6:
-            self.joints = np.array(msg.position[:6])
+        # Extract joint angles in the correct order (must match DH parameters)
+        if len(msg.name) >= 6 and len(msg.position) >= 6:
+            joint_dict = dict(zip(msg.name, msg.position))
+            # Map joint names to positions in correct order
+            ordered_positions = []
+            for joint_name in self.joint_names:
+                if joint_name in joint_dict:
+                    ordered_positions.append(joint_dict[joint_name])
+            
+            if len(ordered_positions) == 6:
+                self.joints = np.array(ordered_positions)
     
     def _wrench_cb(self, msg):
         self.force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
@@ -262,6 +276,7 @@ class ForceCompliantMoveDownController(Node):
         
         if self.alignment_mode:
             # In alignment mode: very slow downward movement (1% of normal speed)
+            # Always moves down regardless of X/Y forces (like old code)
             dz = -self.speed * dt * 0.01  # 1% of normal speed for very slow insertion
         else:
             # Normal mode: move down at full speed
@@ -273,7 +288,7 @@ class ForceCompliantMoveDownController(Node):
         # Before contact: maintain starting X/Y position (no force compliance)
         if self.alignment_mode:
             # In alignment mode: adjust X/Y based on force compliance
-            # Don't use deadband to be more sensitive to small forces
+            # Don't use deadband to be more sensitive to small forces (like old code)
             f_xy_raw = self.get_force_xy(use_deadband=False)
             
             # Apply exponential moving average smoothing to reduce oscillation
@@ -336,72 +351,346 @@ class ForceCompliantMoveDownController(Node):
             self.get_logger().error("Trajectory server not available!")
             return
         
-        # Mark when movement starts
+        # First, run the search phase with precomputed waypoints
         self.running = True
-        waypoint_count = 0
-        last_log_time = time.time()
-        last_trajectory_time = 0.0
-        min_trajectory_interval = 0.1  # Minimum 100ms between trajectory sends
+        search_complete = self.run_search_phase()
+        
+        if not self.running:
+            self.get_logger().info("Stopped during search phase.")
+            return
+        
+        # If contact detected with misalignment, run alignment phase
+        if self.contact_detected and self.alignment_mode:
+            self.run_alignment_phase()
+        
+        self.get_logger().info("Stopped.")
+    
+    def run_search_phase(self):
+        """
+        Search phase: Pre-compute all waypoints (Z moving down, X/Y fixed) and send as single trajectory.
+        Monitors force during execution and cancels if contact is detected.
+        Returns True if completed, False if interrupted.
+        """
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("SEARCH PHASE: Pre-computing all waypoints")
+        self.get_logger().info("=" * 60)
+        
+        if self.pos is None or self.joints is None:
+            self.get_logger().error("Position or joint angles not available!")
+            return False
+        
+        # Calculate how far we want to move down
+        start_z = self.pos[2]
+        target_z = 0.0  # Workspace base (or until contact)
+        distance_to_move = start_z - target_z
+        
+        if distance_to_move <= 0.001:
+            self.get_logger().info(f"Already at or below target Z position ({start_z:.3f}m). Exiting.")
+            return True
+        
+        # Calculate number of waypoints based on speed and trajectory duration
+        dt = 0.6  # Duration per waypoint (matches time_from_start)
+        dz_per_waypoint = self.speed * dt  # Distance moved per waypoint
+        num_waypoints = max(10, int(distance_to_move / dz_per_waypoint))
+        
+        self.get_logger().info(f"Pre-computing {num_waypoints} waypoints")
+        self.get_logger().info(f"Moving from Z={start_z:.3f}m to Z={target_z:.3f}m")
+        self.get_logger().info(f"Maintaining X={self.start_x:.4f}, Y={self.start_y:.4f}")
+        
+        # Pre-compute all waypoints
+        waypoints = []
+        joint_trajectory = []
+        
+        current_z = start_z
+        q_guess = self.joints.copy()  # Use current joint angles as seed
+        
+        for i in range(num_waypoints):
+            # Calculate next Z position
+            current_z = start_z - (i + 1) * dz_per_waypoint
+            if current_z < target_z:
+                current_z = target_z
+            
+            # X and Y stay fixed at starting position
+            waypoint = [self.start_x, self.start_y, current_z]
+            waypoints.append(waypoint)
+            
+            # Compute IK for this waypoint
+            target_rpy = list(self.fixed_rpy)
+            joint_angles = compute_ik(waypoint, target_rpy, q_guess=q_guess)
+            
+            if joint_angles is None:
+                self.get_logger().warn(f"IK failed at waypoint {i}, truncating trajectory at waypoint {i-1}")
+                break
+            
+            joint_trajectory.append(joint_angles)
+            q_guess = joint_angles  # Use this solution as seed for next waypoint
+            
+            # Stop if we've reached target Z
+            if current_z <= target_z + 0.001:
+                break
+        
+        if len(joint_trajectory) == 0:
+            self.get_logger().error("Failed to compute any waypoints! Aborting.")
+            return False
+        
+        self.get_logger().info(f"Computed {len(joint_trajectory)} waypoints successfully")
+        
+        # Calculate total trajectory duration
+        trajectory_duration = len(joint_trajectory) * dt
+        self.get_logger().info(f"Trajectory duration: {trajectory_duration:.1f}s")
+        
+        # Create trajectory message with all waypoints
+        trajectory = JointTrajectory()
+        trajectory.joint_names = self.joint_names
+        
+        for i, joint_angles in enumerate(joint_trajectory):
+            point = JointTrajectoryPoint()
+            point.positions = [float(j) for j in joint_angles]
+            point.velocities = [0.0] * 6
+            
+            # Distribute time evenly across waypoints
+            t = (i + 1) * dt
+            point.time_from_start = Duration(
+                sec=int(t),
+                nanosec=int((t - int(t)) * 1e9)
+            )
+            trajectory.points.append(point)
+        
+        # Send trajectory
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = trajectory
+        goal.goal_time_tolerance = Duration(sec=2)
+        
+        self.get_logger().info(f"Sending trajectory with {len(trajectory.points)} waypoints...")
+        
+        future = self.traj_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        goal_handle = future.result()
+        if not goal_handle or not goal_handle.accepted:
+            self.get_logger().error("Trajectory goal rejected!")
+            return False
+        
+        self.current_goal_handle = goal_handle
+        self.get_logger().info("Trajectory accepted. Monitoring force during execution...")
+        
+        # Monitor force during trajectory execution
+        start_time = time.time()
+        last_log_time = start_time
         
         while self.running and rclpy.ok():
-            try:
-                # Update robot state
-                rclpy.spin_once(self, timeout_sec=0.1)
+            rclpy.spin_once(self, timeout_sec=0.02)  # 50Hz monitoring
+            
+            # Check force for contact detection
+            f_z = self.get_force_z()
+            f_xy = self.get_force_xy(use_deadband=False)
+            f_xy_mag = np.linalg.norm(f_xy)
+            
+            # Check for contact
+            z_contact = f_z <= self.z_threshold
+            xy_misalignment = f_xy_mag >= self.xy_force_threshold
+            
+            if z_contact:
+                self.contact_detected = True
                 
-                # Check if contact just detected - cancel current trajectory
-                if self.just_detected_contact:
-                    # Just detected contact, cancel current goal
-                    if self.current_goal_handle is not None:
-                        try:
-                            cancel_future = self.current_goal_handle.cancel_goal_async()
-                            rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=0.5)
-                            self.get_logger().info("Cancelled current trajectory goal")
-                        except Exception as e:
-                            self.get_logger().warn(f"Error cancelling goal: {e}")
+                # Cancel trajectory
+                if self.current_goal_handle is not None:
+                    try:
+                        cancel_future = self.current_goal_handle.cancel_goal_async()
+                        rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=0.5)
+                        self.get_logger().info("Cancelled search trajectory due to contact")
+                    except Exception as e:
+                        self.get_logger().warn(f"Error cancelling trajectory: {e}")
+                
+                if xy_misalignment:
+                    self.get_logger().info("=" * 60)
+                    self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
+                    self.get_logger().info(f"MISALIGNMENT DETECTED: X/Y force = {f_xy_mag:.2f} N (threshold: {self.xy_force_threshold:.1f} N)")
+                    self.get_logger().info("Entering ALIGNMENT MODE")
+                    self.get_logger().info("=" * 60)
                     self.alignment_mode = True
                     self.alignment_start_time = time.time()
                     self.low_force_start_time = None  # Reset low force timer when entering alignment
                     self.smoothed_force_xy = np.array([0.0, 0.0])  # Reset smoothed force when entering alignment
-                    self.just_detected_contact = False  # Reset flag
-                    self.get_logger().info("Entered ALIGNMENT MODE: Moving down slowly while adjusting X/Y")
-                
-                # Check if we should stop in alignment mode
-                if self.alignment_mode:
-                    if self.alignment_start_time is not None:
-                        elapsed = time.time() - self.alignment_start_time
+                else:
+                    self.get_logger().info("=" * 60)
+                    self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
+                    self.get_logger().info(f"NO MISALIGNMENT: X/Y force = {f_xy_mag:.2f} N (below threshold)")
+                    self.get_logger().info("Moving down until Z force reaches -5N to confirm no misalignment...")
+                    self.get_logger().info("=" * 60)
+                    
+                    # Move down until Z force reaches -5N to confirm no misalignment
+                    confirm_z_target = -5.0  # Target Z force in N
+                    dt_confirm = 0.6  # Trajectory duration for confirmation steps
+                    confirm_waypoint_count = 0
+                    last_confirm_trajectory_time = 0.0
+                    min_trajectory_interval = 0.1
+                    
+                    while self.running and rclpy.ok():
+                        rclpy.spin_once(self, timeout_sec=0.1)
                         
-                        # Only check for low forces after minimum alignment duration
-                        # This prevents false triggers from forces that were low before contact
-                        if elapsed >= self.alignment_min_duration:
-                            # Check if X/Y forces are low for sufficient duration
-                            # Use smoothed forces to be consistent with movement calculations
-                            f_xy_raw = self.get_force_xy(use_deadband=False)
-                            # Update smoothed force (same as in get_next_waypoint)
-                            self.smoothed_force_xy = (self.force_smoothing_alpha * f_xy_raw + 
-                                                     (1.0 - self.force_smoothing_alpha) * self.smoothed_force_xy)
-                            f_xy_mag = np.linalg.norm(self.smoothed_force_xy)
-                            current_time_check = time.time()
+                        if self.pos is None or self.fixed_rpy is None:
+                            break
+                        
+                        # Check current Z force
+                        f_z_current = self.get_force_z()
+                        
+                        # Stop if we've reached target Z force
+                        if f_z_current <= confirm_z_target:
+                            # Check forces at target Z force
+                            f_xy_confirm = self.get_force_xy(use_deadband=False)
+                            f_xy_mag_confirm = np.linalg.norm(f_xy_confirm)
                             
-                            if f_xy_mag < self.low_force_threshold:
-                                if self.low_force_start_time is None:
-                                    self.low_force_start_time = current_time_check
-                                else:
-                                    low_force_duration = current_time_check - self.low_force_start_time
-                                    if low_force_duration >= self.low_force_required_duration:
-                                        self.get_logger().info("=" * 60)
-                                        self.get_logger().info(f"ALIGNMENT COMPLETE: X/Y forces below {self.low_force_threshold:.1f} N for {low_force_duration:.1f} seconds")
-                                        self.get_logger().info(f"Final X/Y force magnitude: {f_xy_mag:.2f} N")
-                                        self.get_logger().info("=" * 60)
-                                        self.running = False
-                                        break
+                            self.get_logger().info(f"Reached Z force = {f_z_current:.2f} N")
+                            self.get_logger().info(f"X/Y force = {f_xy_mag_confirm:.2f} N")
+                            
+                            # Check if misalignment appeared
+                            if f_xy_mag_confirm >= self.xy_force_threshold:
+                                self.get_logger().info("=" * 60)
+                                self.get_logger().info(f"MISALIGNMENT DETECTED: X/Y force = {f_xy_mag_confirm:.2f} N")
+                                self.get_logger().info("Entering ALIGNMENT MODE")
+                                self.get_logger().info("=" * 60)
+                                self.alignment_mode = True
+                                self.alignment_start_time = time.time()
+                                self.low_force_start_time = None
+                                self.smoothed_force_xy = np.array([0.0, 0.0])
+                                # Continue to alignment phase
                             else:
-                                self.low_force_start_time = None  # Reset if forces increase
+                                self.get_logger().info("=" * 60)
+                                self.get_logger().info("Contact confirmed - no misalignment at Z force = -5N")
+                                self.get_logger().info("=" * 60)
+                                self.running = False
+                            break
+                        
+                        # Rate limit trajectory sends
+                        current_time = time.time()
+                        if current_time - last_confirm_trajectory_time < min_trajectory_interval:
+                            time.sleep(0.05)
+                            continue
+                        last_confirm_trajectory_time = current_time
+                        
+                        # Move down slowly (same speed as alignment phase: 0.5% of search speed)
+                        current_pos = self.pos.copy()
+                        dz = -self.speed * dt_confirm * 0.005  # 0.5% of search speed
+                        next_z = current_pos[2] + dz
+                        target_rpy = list(self.fixed_rpy)
+                        
+                        # Compute IK
+                        if self.joints is not None:
+                            joint_angles = compute_ik([current_pos[0], current_pos[1], next_z], target_rpy)
+                            
+                            if joint_angles is not None:
+                                # Create and send trajectory
+                                trajectory = JointTrajectory()
+                                trajectory.joint_names = self.joint_names
+                                
+                                point = JointTrajectoryPoint()
+                                point.positions = [float(j) for j in joint_angles]
+                                point.velocities = [0.0] * 6
+                                point.time_from_start = Duration(sec=0, nanosec=600000000)
+                                trajectory.points.append(point)
+                                
+                                goal = FollowJointTrajectory.Goal()
+                                goal.trajectory = trajectory
+                                goal.goal_time_tolerance = Duration(sec=1)
+                                
+                                future = self.traj_client.send_goal_async(goal)
+                                rclpy.spin_until_future_complete(self, future, timeout_sec=0.5)
+                                
+                                goal_handle = future.result()
+                                if goal_handle and goal_handle.accepted:
+                                    time.sleep(0.2)
+                                    confirm_waypoint_count += 1
+                                else:
+                                    self.get_logger().warn(f"Confirmation trajectory rejected at waypoint {confirm_waypoint_count}")
+                            else:
+                                self.get_logger().warn(f"IK failed for confirmation waypoint {confirm_waypoint_count}")
+                                time.sleep(0.1)
+                        
+                        rclpy.spin_once(self, timeout_sec=0.1)
+                    
+                    # If we're not entering alignment mode, return True to exit search phase
+                    if not self.alignment_mode:
+                        return True
+                
+                return True
+            
+            # Check if trajectory completed (check position)
+            if self.pos is not None and self.pos[2] <= target_z + 0.005:
+                self.get_logger().info(f"Reached target Z position ({self.pos[2]:.3f}m) without contact.")
+                return True
+            
+            # Periodic logging
+            current_time = time.time()
+            if current_time - last_log_time >= 2.0:
+                if self.pos is not None:
+                    self.get_logger().info(
+                        f"Search: Z={self.pos[2]*1000:.1f}mm, "
+                        f"Force Z={f_z:+.2f}N, X/Y={f_xy_mag:.2f}N"
+                    )
+                last_log_time = current_time
+        
+        return True
+    
+    def run_alignment_phase(self):
+        """
+        Alignment phase: Slow movement with X/Y force compliance.
+        Uses one-by-one waypoints for responsive force-based adjustment.
+        """
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("ALIGNMENT PHASE: Slow movement with X/Y compliance")
+        self.get_logger().info("=" * 60)
+        
+        self.low_force_start_time = None
+        self.smoothed_force_xy = np.array([0.0, 0.0])
+        
+        dt = 0.6  # Trajectory duration for alignment steps
+        last_log_time = time.time()
+        waypoint_count = 0
+        last_trajectory_time = 0.0
+        min_trajectory_interval = 0.1
+        
+        while self.running and rclpy.ok():
+            try:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                
+                # Check safety limits first (before any other checks)
+                f_z_current = self.get_force_z()
+                f_xy_raw = self.get_force_xy(use_deadband=False)  # Get raw forces for safety check
+                f_xy_mag_raw = np.linalg.norm(f_xy_raw)
+                
+                # Check alignment completion
+                if self.alignment_start_time is not None:
+                    elapsed = time.time() - self.alignment_start_time
+                    
+                    # Check for low forces after minimum duration
+                    if elapsed >= self.alignment_min_duration:
+                        # Check if X/Y forces are low for sufficient duration
+                        # Use smoothed forces to be consistent with movement calculations
+                        f_xy_raw = self.get_force_xy(use_deadband=False)
+                        # Update smoothed force (same as in get_next_waypoint)
+                        self.smoothed_force_xy = (self.force_smoothing_alpha * f_xy_raw + 
+                                                 (1.0 - self.force_smoothing_alpha) * self.smoothed_force_xy)
+                        f_xy_mag = np.linalg.norm(self.smoothed_force_xy)
+                        
+                        if f_xy_mag < self.low_force_threshold:
+                            if self.low_force_start_time is None:
+                                self.low_force_start_time = time.time()
+                            else:
+                                low_force_duration = time.time() - self.low_force_start_time
+                                if low_force_duration >= self.low_force_required_duration:
+                                    self.get_logger().info("=" * 60)
+                                    self.get_logger().info(f"ALIGNMENT COMPLETE: X/Y forces below {self.low_force_threshold:.1f}N for {low_force_duration:.1f}s")
+                                    self.get_logger().info(f"Final X/Y force magnitude: {f_xy_mag:.2f} N")
+                                    self.get_logger().info("=" * 60)
+                                    break
+                        else:
+                            self.low_force_start_time = None  # Reset if forces increase
                 
                 # Get next waypoint
                 waypoint = self.get_next_waypoint()
                 
                 if waypoint is None:
-                    # Wait a bit and try again
                     for _ in range(10):
                         if not self.running:
                             break
@@ -426,7 +715,6 @@ class ForceCompliantMoveDownController(Node):
                         f"IK failed at waypoint {waypoint_count}: "
                         f"pos=[{x*1000:.1f}, {y*1000:.1f}, {z*1000:.1f}] mm"
                     )
-                    # Use shorter sleep and check running flag
                     for _ in range(10):
                         if not self.running:
                             break
@@ -442,7 +730,7 @@ class ForceCompliantMoveDownController(Node):
                 
                 # Create trajectory with single waypoint
                 trajectory = JointTrajectory()
-                trajectory.joint_names = self.JOINT_NAMES
+                trajectory.joint_names = self.joint_names
                 
                 point = JointTrajectoryPoint()
                 point.positions = [float(j) for j in joint_angles]
@@ -456,7 +744,6 @@ class ForceCompliantMoveDownController(Node):
                 goal.goal_time_tolerance = Duration(sec=1, nanosec=0)
                 
                 future = self.traj_client.send_goal_async(goal)
-                # Use shorter timeout and check running flag
                 rclpy.spin_until_future_complete(self, future, timeout_sec=0.5)
                 
                 if not self.running:
@@ -464,9 +751,7 @@ class ForceCompliantMoveDownController(Node):
                 
                 goal_handle = future.result()
                 if goal_handle and goal_handle.accepted:
-                    # Store goal handle for potential cancellation
                     self.current_goal_handle = goal_handle
-                    # Wait a bit for trajectory to start executing, but check running flag
                     for _ in range(20):
                         if not self.running:
                             break
@@ -484,15 +769,15 @@ class ForceCompliantMoveDownController(Node):
             
             # Periodically log status
             current_time = time.time()
-            if current_time - last_log_time >= 2.0:  # Log every 2 seconds
+            if current_time - last_log_time >= 2.0:
                 if self.pos is not None:
                     f = self.force - self.baseline if self.force is not None else np.array([0.0, 0.0, 0.0])
+                    # Log forces with deadband applied (same as used for compliance)
                     f_xy = self.get_force_xy()
                     f_xy_mag = np.linalg.norm(f_xy)
                     f_z = self.get_force_z()
-                    mode_str = "ALIGNMENT" if self.alignment_mode else "SEARCH"
                     self.get_logger().info(
-                        f"Waypoint {waypoint_count} [{mode_str}]: "
+                        f"Waypoint {waypoint_count} [ALIGNMENT]: "
                         f"Pos=[{self.pos[0]*1000:.1f}, {self.pos[1]*1000:.1f}, {self.pos[2]*1000:.1f}] mm, "
                         f"X/Y Force magnitude={f_xy_mag:.2f} N, "
                         f"X/Y Force=[{f_xy[0]:+.2f}, {f_xy[1]:+.2f}] N, "
@@ -501,8 +786,6 @@ class ForceCompliantMoveDownController(Node):
                 last_log_time = current_time
             
             waypoint_count += 1
-        
-        self.get_logger().info("Stopped.")
 
 
 def main():
@@ -528,14 +811,14 @@ Examples:
                         help='Downward speed in m/s (default: 0.005 = 5mm/s)')
     parser.add_argument('--gain', type=float, default=1.67,
                         help='X/Y compliance gain in mm/s per Newton (default: 1.67)')
-    parser.add_argument('--deadband', type=float, default=5.0,
-                        help='X/Y force deadband in N (default: 5.0)')
+    parser.add_argument('--deadband', type=float, default=1.0,
+                        help='X/Y force deadband in N (default: 1.0)')
     parser.add_argument('--max-vel', type=float, default=15.0,
                         help='X/Y max compliance velocity in mm/s (default: 15.0)')
     parser.add_argument('--reverse', action='store_true',
                         help='Reverse X/Y force response directions (default: False)')
-    parser.add_argument('--z-threshold', type=float, default=-5.0,
-                        help='Z force threshold in N to detect contact (default: -5.0 N, negative = upward resistance)')
+    parser.add_argument('--z-threshold', type=float, default=-10.0,
+                        help='Z force threshold in N to detect contact (default: -8.0 N, negative = upward resistance)')
     parser.add_argument('--xy-threshold', type=float, default=1.0,
                         help='Minimum X/Y force magnitude required to enter alignment mode (default: 1.0 N)')
     args = parser.parse_args()
@@ -593,4 +876,3 @@ Examples:
 
 if __name__ == '__main__':
     main()
-
