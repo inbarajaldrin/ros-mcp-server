@@ -3222,6 +3222,85 @@ def move_to_safe_height() -> Dict[str, Any]:
         }
 
 @mcp.tool()
+def move_to_place_down(mode: str = "move") -> Dict[str, Any]:
+    """Move robot to clear space position (place down position).
+    
+    Args:
+        mode: Mode to use - "move" to keep current end-effector orientation (default) or "hover" for top-down (face-down) orientation
+    """
+    try:
+        import subprocess
+        import sys
+        import os
+        
+        # Validate mode parameter
+        if mode not in ["move", "hover"]:
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'. Must be 'move' or 'hover'"
+            }
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        move_to_place_down_path = os.path.join(script_dir, "primitives", "move_to_place_down.py")
+        
+        # Build command based on mode
+        if mode == "hover":
+            cmd_parts = [
+                f"source {ROS_SRC}",
+                f"source {WS_SRC}",
+                "export ROS_DOMAIN_ID=0",
+                f"cd {script_dir}/primitives",
+                f"timeout 45 /usr/bin/python3 move_to_place_down.py --hover"
+            ]
+        else:  # move mode (default)
+            cmd_parts = [
+                f"source {ROS_SRC}",
+                f"source {WS_SRC}",
+                "export ROS_DOMAIN_ID=0",
+                f"cd {script_dir}/primitives",
+                f"timeout 45 /usr/bin/python3 move_to_place_down.py --move"
+            ]
+        
+        cmd = "\n".join(cmd_parts)
+        
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True,
+            timeout=50
+        )
+        
+        if result.returncode == 0:
+            return {
+                "status": "success",
+                "message": "Move to place down executed successfully",
+                "output": result.stdout,
+                "parameters": {
+                    "mode": mode
+                }
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Move to place down failed with return code {result.returncode}",
+                "error": result.stderr,
+                "output": result.stdout
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "message": "Move to place down timed out after 45 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to execute move to place down: {str(e)}"
+        }
+
+@mcp.tool()
 def close_connections():
     """
     Manually close WebSocket connections when needed.
