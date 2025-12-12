@@ -1808,7 +1808,18 @@ cd {primitives_dir}
             timeout=timeout
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": f"Primitive script '{script_name}' executed successfully",
@@ -1819,7 +1830,7 @@ cd {primitives_dir}
         else:
             return {
                 "status": "error",
-                "message": f"Script execution failed with return code {result.returncode}",
+                "message": f"Script execution failed with return code {result.returncode}" if result.returncode != 0 else f"Script execution failed (error detected in output)",
                 "script_path": script_path,
                 "output": result.stdout if result.stdout else None,
                 "stderr": result.stderr,
@@ -1923,7 +1934,18 @@ timeout {duration + 5} /usr/bin/python3 visual_servo.py --topic {topic_name} --h
             timeout=duration + 10  # Add buffer for startup/shutdown
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": f"Visual servo pick completed successfully for {duration} seconds",
@@ -1936,7 +1958,7 @@ timeout {duration + 5} /usr/bin/python3 visual_servo.py --topic {topic_name} --h
         else:
             return {
                 "status": "error",
-                "message": f"Visual servo pick failed with return code {result.returncode}",
+                "message": f"Visual servo pick failed with return code {result.returncode}" if result.returncode != 0 else "Visual servo pick failed (error detected in output)",
                 "topic_name": topic_name,
                 "hover_height": hover_height,
                 "duration": duration,
@@ -2042,12 +2064,23 @@ def visual_servo_yoloe(topic_name: str = "/objects_poses", object_name: str = "b
             timeout=duration + 10  # Add buffer for startup/shutdown
         )
         
-        if result.returncode == 0:
-            # Check if the script actually completed successfully by looking for completion message
-            output = result.stdout.strip() if result.stdout else ""
-            success_indicators = ["Direct movement completed", "Trajectory sent successfully", "Exiting"]
-            is_completed = any(indicator in output for indicator in success_indicators)
-            
+        # Check for error messages in output even if returncode is 0
+        output = result.stdout.strip() if result.stdout else ""
+        output_lower = (output + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        # Check if the script actually completed successfully by looking for completion message
+        success_indicators = ["Direct movement completed", "Trajectory sent successfully", "Exiting"]
+        is_completed = any(indicator in output for indicator in success_indicators)
+        
+        if result.returncode == 0 and not has_error and is_completed:
             return {
                 "status": "success",
                 "message": "Visual servo YOLO completed successfully",
@@ -2064,9 +2097,9 @@ def visual_servo_yoloe(topic_name: str = "/objects_poses", object_name: str = "b
         else:
             return {
                 "status": "error",
-                "message": "Visual servo YOLO failed",
+                "message": "Visual servo YOLO failed" if result.returncode != 0 else "Visual servo YOLO failed (error detected in output or movement not completed)",
                 "error": result.stderr.strip() if result.stderr else "Unknown error",
-                "output": result.stdout.strip() if result.stdout else None,
+                "output": output,
                 "topic_name": topic_name,
                 "object_name": object_name,
                 "hover_height": hover_height,
@@ -2074,7 +2107,8 @@ def visual_servo_yoloe(topic_name: str = "/objects_poses", object_name: str = "b
                 "movement_duration": movement_duration,
                 "target_xyz": target_xyz,
                 "target_xyzw": target_xyzw,
-                "return_code": result.returncode
+                "return_code": result.returncode,
+                "movement_completed": is_completed
             }
             
     except subprocess.TimeoutExpired:
@@ -2427,7 +2461,19 @@ def push_primitive(initial_x: float, initial_y: float, initial_z: float, initial
             timeout=70  # Add buffer for startup/shutdown
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        # Some primitives exit with code 0 even on failure
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Push primitive executed successfully",
@@ -2446,7 +2492,7 @@ def push_primitive(initial_x: float, initial_y: float, initial_z: float, initial
         else:
             return {
                 "status": "error",
-                "message": f"Push primitive failed with return code {result.returncode}",
+                "message": f"Push primitive failed with return code {result.returncode}" if result.returncode != 0 else "Push primitive failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -2521,7 +2567,18 @@ def push_real(object_name: str = "jenga_4", final_x: float = 0.0, final_y: float
             timeout=70  # Add buffer for startup/shutdown
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Push real primitive executed successfully with automatic object detection and calibration offsets",
@@ -2544,7 +2601,7 @@ def push_real(object_name: str = "jenga_4", final_x: float = 0.0, final_y: float
         else:
             return {
                 "status": "error",
-                "message": f"Push real primitive failed with return code {result.returncode}",
+                "message": f"Push real primitive failed with return code {result.returncode}" if result.returncode != 0 else "Push real primitive failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -2590,7 +2647,18 @@ def move_home() -> Dict[str, Any]:
             timeout=50
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Move home executed successfully",
@@ -2599,7 +2667,7 @@ def move_home() -> Dict[str, Any]:
         else:
             return {
                 "status": "error",
-                "message": f"Move home failed with return code {result.returncode}",
+                "message": f"Move home failed with return code {result.returncode}" if result.returncode != 0 else "Move home failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -2662,7 +2730,18 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
             timeout=70
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Move to grasp executed successfully",
@@ -2676,7 +2755,7 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
         else:
             return {
                 "status": "error",
-                "message": f"Move to grasp failed with return code {result.returncode}",
+                "message": f"Move to grasp failed with return code {result.returncode}" if result.returncode != 0 else "Move to grasp failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -3067,7 +3146,18 @@ def move_down(mode: str = "real") -> Dict[str, Any]:
             timeout=300  # 5 minutes - move_down can run incrementally until force threshold
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Move down executed successfully",
@@ -3079,7 +3169,7 @@ def move_down(mode: str = "real") -> Dict[str, Any]:
         else:
             return {
                 "status": "error",
-                "message": f"Move down failed with return code {result.returncode}",
+                "message": f"Move down failed with return code {result.returncode}" if result.returncode != 0 else "Move down failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -3165,7 +3255,18 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
             timeout=70
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Gripper control executed successfully",
@@ -3178,7 +3279,7 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
         else:
             return {
                 "status": "error",
-                "message": f"Gripper control failed with return code {result.returncode}",
+                "message": f"Gripper control failed with return code {result.returncode}" if result.returncode != 0 else "Gripper control failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -3224,7 +3325,18 @@ def move_to_safe_height() -> Dict[str, Any]:
             timeout=35
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Move to safe height executed successfully",
@@ -3233,7 +3345,7 @@ def move_to_safe_height() -> Dict[str, Any]:
         else:
             return {
                 "status": "error",
-                "message": f"Move to safe height failed with return code {result.returncode}",
+                "message": f"Move to safe height failed with return code {result.returncode}" if result.returncode != 0 else "Move to safe height failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
@@ -3300,7 +3412,18 @@ def move_to_place_down(mode: str = "move") -> Dict[str, Any]:
             timeout=50
         )
         
-        if result.returncode == 0:
+        # Check for error messages in output even if returncode is 0
+        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
+        has_error = (
+            "error" in output_lower or 
+            "failed" in output_lower or 
+            "❌" in output_lower or
+            "timeout" in output_lower or
+            "rejected" in output_lower or
+            "aborted" in output_lower
+        )
+        
+        if result.returncode == 0 and not has_error:
             return {
                 "status": "success",
                 "message": "Move to place down executed successfully",
@@ -3312,7 +3435,7 @@ def move_to_place_down(mode: str = "move") -> Dict[str, Any]:
         else:
             return {
                 "status": "error",
-                "message": f"Move to place down failed with return code {result.returncode}",
+                "message": f"Move to place down failed with return code {result.returncode}" if result.returncode != 0 else "Move to place down failed (error detected in output)",
                 "error": result.stderr,
                 "output": result.stdout
             }
