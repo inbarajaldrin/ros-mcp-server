@@ -3097,23 +3097,51 @@ def move_down(mode: str = "real") -> Dict[str, Any]:
 
 @mcp.tool()
 def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
-    """Control gripper with verification."""
+    """Control gripper with verification.
+    
+    Supports "open", "close", or numeric values 0-110 (representing 0-11cm width).
+    
+    Args:
+        command: Gripper command - "open", "close", or numeric value 0-110 (width in mm, representing 0-11cm)
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    
+    Returns:
+        Dictionary with execution status and results
+    """
     try:
         import subprocess
         import sys
         import os
         
-        if command.lower() not in ["open", "close"]:
-            return {
-                "status": "error",
-                "message": f"Invalid command '{command}'. Use 'open' or 'close'."
-            }
-        
+        # Validate mode
         if mode not in ["sim", "real"]:
             return {
                 "status": "error",
                 "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
             }
+        
+        # Validate command: "open", "close", or numeric value 0-110
+        command_lower = command.lower()
+        command_value = None
+        
+        if command_lower in ["open", "close"]:
+            command_value = command_lower
+        else:
+            # Try to parse as numeric value
+            try:
+                numeric_value = float(command)
+                if 0 <= numeric_value <= 110:
+                    command_value = str(numeric_value)
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Invalid numeric value '{command}'. Use 0-110 (representing 0-11cm width), 'open', or 'close'."
+                    }
+            except ValueError:
+                return {
+                    "status": "error",
+                    "message": f"Invalid command '{command}'. Use 'open', 'close', or numeric value 0-110 (representing 0-11cm width)."
+                }
         
         script_dir = os.path.dirname(os.path.abspath(__file__))
         control_gripper_path = os.path.join(script_dir, "primitives", "control_gripper.py")
@@ -3123,7 +3151,7 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
             f"source {WS_SRC}",
             "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
-            f"timeout 60 /usr/bin/python3 control_gripper.py {command.lower()} --mode {mode}"
+            f"timeout 60 /usr/bin/python3 control_gripper.py {command_value} --mode {mode}"
         ]
         
         cmd = "\n".join(cmd_parts)
@@ -3143,7 +3171,7 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
                 "message": "Gripper control executed successfully",
                 "output": result.stdout,
                 "parameters": {
-                    "command": command.lower(),
+                    "command": command_value,
                     "mode": mode
                 }
             }
