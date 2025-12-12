@@ -309,7 +309,7 @@ class MoveToClearSpace(Node):
                 joint_angles = None
                 best_result = None
                 best_cost = float('inf')
-                max_tries = 5
+                max_tries = 10  # Increased from 5 to 10
                 dx = 0.001
                 
                 # Primary seed: use current joint angles from joint state subscription
@@ -321,44 +321,105 @@ class MoveToClearSpace(Node):
                 q_guess = self.current_joint_angles.copy()
                 self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
                 
-                # Try IK with current joint angles and position perturbations
+                # Try IK with multiple strategies:
+                # 1. Current joint angles with position perturbations (both positive and negative)
+                # 2. Try with slightly perturbed joint angles as seeds
                 solution_found = False
+                
+                # Strategy 1: Position perturbations with current joint angles
                 for i in range(max_tries):
                     if solution_found:
                         break
-                        
-                    # Try small x-shift each iteration (helps with workspace boundaries)
-                    perturbed_position = np.array(tcp_position).copy()
-                    perturbed_position[0] += i * dx
                     
-                    perturbed_pose = target_pose.copy()
-                    perturbed_pose[:3, 3] = perturbed_position
+                    # Try both positive and negative perturbations
+                    perturbations = [i * dx, -i * dx] if i > 0 else [0]
                     
-                    joint_bounds = [(-np.pi, np.pi)] * 6
-                    
-                    # Use quaternion-based objective directly - NO RPY conversion!
-                    result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
-                                    method='L-BFGS-B', bounds=joint_bounds)
-                    
-                    if result.success:
-                        cost = ik_objective_quaternion(result.x, perturbed_pose)
-                        
-                        # Check if this is a good solution
-                        if cost < 0.01:
-                            self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
-                            joint_angles = result.x
-                            solution_found = True
-                            
-                            # Verify orientation accuracy
-                            T_result = forward_kinematics(dh_params, joint_angles)
-                            orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                            self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                    for perturbation in perturbations:
+                        if solution_found:
                             break
+                            
+                        # Try small x-shift (helps with workspace boundaries)
+                        perturbed_position = np.array(tcp_position).copy()
+                        perturbed_position[0] += perturbation
                         
-                        # Keep track of best solution
-                        if cost < best_cost:
-                            best_cost = cost
-                            best_result = result.x
+                        # Also try y-shift if x-shift doesn't work
+                        if i > max_tries // 2:
+                            perturbed_position[1] += perturbation * 0.5
+                        
+                        perturbed_pose = target_pose.copy()
+                        perturbed_pose[:3, 3] = perturbed_position
+                        
+                        joint_bounds = [(-np.pi, np.pi)] * 6
+                        
+                        # Use quaternion-based objective directly - NO RPY conversion!
+                        result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+                                        method='L-BFGS-B', bounds=joint_bounds)
+                        
+                        if result.success:
+                            cost = ik_objective_quaternion(result.x, perturbed_pose)
+                            
+                            # Check if this is a good solution
+                            if cost < 0.01:
+                                self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {perturbation:.6f}), cost={cost:.6f}")
+                                joint_angles = result.x
+                                solution_found = True
+                                
+                                # Verify orientation accuracy
+                                T_result = forward_kinematics(dh_params, joint_angles)
+                                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                                break
+                            
+                            # Keep track of best solution
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_result = result.x
+                
+                # Strategy 2: Try with slightly perturbed joint angles as seeds if first strategy failed
+                if not solution_found:
+                    self.get_logger().info("Trying with perturbed joint angle seeds...")
+                    # Try different joint angle seeds by adding small deterministic perturbations
+                    seed_perturbations = [
+                        [0.1, 0, 0, 0, 0, 0],
+                        [-0.1, 0, 0, 0, 0, 0],
+                        [0, 0.1, 0, 0, 0, 0],
+                        [0, -0.1, 0, 0, 0, 0],
+                        [0, 0, 0.1, 0, 0, 0],
+                        [0, 0, -0.1, 0, 0, 0],
+                        [0.05, 0.05, 0, 0, 0, 0],
+                        [-0.05, -0.05, 0, 0, 0, 0]
+                    ]
+                    
+                    for seed_pert in seed_perturbations:
+                        if solution_found:
+                            break
+                            
+                        # Create perturbed seed
+                        q_perturbed = q_guess.copy()
+                        q_perturbed += np.array(seed_pert)
+                        
+                        # Try with original position first
+                        result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,), 
+                                        method='L-BFGS-B', bounds=joint_bounds)
+                        
+                        if result.success:
+                            cost = ik_objective_quaternion(result.x, target_pose)
+                            
+                            if cost < 0.01:
+                                self.get_logger().info(f"Quaternion-based IK succeeded with perturbed seed (pert={seed_pert}), cost={cost:.6f}")
+                                joint_angles = result.x
+                                solution_found = True
+                                
+                                # Verify orientation accuracy
+                                T_result = forward_kinematics(dh_params, joint_angles)
+                                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                                break
+                            
+                            # Keep track of best solution
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_result = result.x
                 
                 # If we found any reasonable solution, use it
                 if joint_angles is None and best_result is not None and best_cost < 0.1:
