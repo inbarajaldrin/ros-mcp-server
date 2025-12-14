@@ -1,3 +1,11 @@
+import sys
+import os
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
@@ -5,7 +13,7 @@ from rclpy.action import ActionClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 import time
-from action_libraries import home
+from primitives.utils.action_libraries import home
 from threading import Timer
 
 ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'

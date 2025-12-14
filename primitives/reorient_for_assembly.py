@@ -12,6 +12,14 @@ KEY: The symmetry rotations define object-frame rotations that result in
 identical appearance. So target rotated by symmetry = visually same assembly.
 """
 
+import sys
+import os
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
@@ -27,20 +35,9 @@ from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize
 import argparse
 import time
-import sys
-import os
 import glob
 
-# Add custom libraries to Python path for IK solver
-custom_lib_path = "/home/aaugus11/Desktop/ros2_ws/src/ur_asu-main/ur_asu/custom_libraries"
-if custom_lib_path not in sys.path:
-    sys.path.append(custom_lib_path)
-
-try:
-    from ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-except ImportError as e:
-    print(f"Failed to import IK solver: {e}")
-    sys.exit(1)
+from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
 
 # Configuration
 ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"

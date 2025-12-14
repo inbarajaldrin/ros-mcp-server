@@ -1,3 +1,11 @@
+import sys
+import os
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
@@ -8,22 +16,11 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
-import sys
-import os
 import re
 import json
 import yaml
 
-# Add custom libraries to Python path
-custom_lib_path = "/home/aaugus11/Desktop/ros2_ws/src/ur_asu-main/ur_asu/custom_libraries"
-if custom_lib_path not in sys.path:
-    sys.path.append(custom_lib_path)
-
-try:
-    from ik_solver import compute_ik, compute_ik_robust
-except ImportError as e:
-    print(f"Failed to import IK solver: {e}")
-    sys.exit(1)
+from primitives.utils.ik_solver import compute_ik, compute_ik_robust
 
 class MoveToSafeHeight(Node):
     def __init__(self):
@@ -203,7 +200,7 @@ class MoveToSafeHeight(Node):
         # Convert quaternion directly to rotation matrix to avoid precision loss from RPY conversion
         from scipy.spatial.transform import Rotation as Rot
         from scipy.optimize import minimize
-        from ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+        from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
         
         # Keep the current orientation (don't change it, just move to safe height)
         # Convert quaternion directly to rotation matrix for more accurate IK

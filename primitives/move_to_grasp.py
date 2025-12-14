@@ -6,6 +6,14 @@ Includes calibration offset correction for accurate positioning
 Supports grasp point selection from /grasp_points_sim (sim mode) or /grasp_points_real (real mode) topics
 """
 
+import sys
+import os
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -17,16 +25,15 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 import math
-import sys
 import argparse
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 # Import from local action_libraries file
-from action_libraries import hover_over_grasp_quat
+from primitives.utils.action_libraries import hover_over_grasp_quat
 
 # Import quaternion controller for gimbal-lock-free gripper orientation
-from quaternion_orientation_controller import QuaternionOrientationController
+from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
 
 # Import the new message types
 try:
@@ -1377,7 +1384,7 @@ class DirectObjectMove(Node):
         Returns:
             Tuple of (canonical_quat, match_found, distance)
         """
-        from quaternion_orientation_controller import QuaternionOrientationController
+        from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         # Load fold symmetry data

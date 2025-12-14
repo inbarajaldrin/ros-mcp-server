@@ -6,6 +6,14 @@ Stops when any axis force exceeds -10N (like in simulation).
 Supports both simulation and real robot modes via --mode argument.
 """
 
+import sys
+import os
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
@@ -17,8 +25,6 @@ from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
-import sys
-import os
 import re
 import json
 import yaml
@@ -26,24 +32,8 @@ import argparse
 import threading
 import time
 
-# Add custom libraries to Python path
-custom_lib_path = "/home/aaugus11/Desktop/ros2_ws/src/ur_asu-main/ur_asu/custom_libraries"
-if custom_lib_path not in sys.path:
-    sys.path.append(custom_lib_path)
-
 try:
-    from ik_solver import compute_ik, compute_ik_robust
-except ImportError as e:
-    print(f"Failed to import IK solver: {e}")
-    sys.exit(1)
-
-# Add primitives directory to path for action_libraries
-primitives_path = os.path.dirname(os.path.abspath(__file__))
-if primitives_path not in sys.path:
-    sys.path.append(primitives_path)
-
-try:
-    from action_libraries import move_robust
+    from primitives.utils.action_libraries import move_robust
 except ImportError:
     # Fallback if action_libraries not in path
     move_robust = None
@@ -99,7 +89,7 @@ class MoveDown(Node):
             self.current_torque_x = 0.0
             self.current_torque_y = 0.0
             self.current_torque_z = 0.0
-            # Store baseline force values (calibrated over 2 seconds, like force_compliant_move_down)
+            # Store baseline force values (calibrated over 2 seconds, like perform_insert)
             self.baseline_force_x = None
             self.baseline_force_y = None
             self.baseline_force_z = None
@@ -418,7 +408,7 @@ class MoveDown(Node):
                 self.baseline_force_z is None):
                 return  # Wait for baseline values to be set
             
-            # Calculate forces after baseline removal (like force_compliant_move_down)
+            # Calculate forces after baseline removal (like perform_insert)
             f_x = self.current_force_x - self.baseline_force_x
             f_y = self.current_force_y - self.baseline_force_y
             f_z = self.current_force_z - self.baseline_force_z
@@ -620,7 +610,7 @@ class MoveDown(Node):
         # Compute inverse kinematics
         try:
             from scipy.optimize import minimize
-            from ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+            from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
             
             target_pose = np.eye(4)
             target_pose[:3, 3] = target_position
@@ -831,7 +821,7 @@ def main(args=None):
     node = MoveDown(known_args.height, known_args.mode)
     
     try:
-        # Use regular spin() like move_down_yoloe.py - rclpy.shutdown() will cause spin to exit
+        # Use regular spin() - rclpy.shutdown() will cause spin to exit
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().info("Move down interrupted by user")
