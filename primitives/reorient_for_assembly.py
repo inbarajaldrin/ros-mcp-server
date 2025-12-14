@@ -43,10 +43,57 @@ except ImportError as e:
     sys.exit(1)
 
 # Configuration
-ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_assembly.json"
+ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
 SYMMETRY_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data/symmetry"
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
+
+
+def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
+    """
+    Find the assembly JSON file that contains the given base name.
+    
+    Args:
+        base_name: Name of the base object to search for
+        data_dir: Directory to search for JSON files
+        logger: Optional logger for debug output
+        
+    Returns:
+        Path to the matching JSON file, or None if not found
+    """
+    if not os.path.exists(data_dir):
+        if logger:
+            logger.error(f"Data directory not found: {data_dir}")
+        return None
+    
+    # Search for all JSON files in the data directory
+    json_files = glob.glob(os.path.join(data_dir, "*.json"))
+    
+    # Try exact match first, then with _scaled70 suffix
+    base_name_variants = [base_name, f"{base_name}_scaled70"]
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+            
+            # Check if any component matches the base name
+            components = config.get('components', [])
+            for component in components:
+                comp_name = component.get('name', '')
+                if comp_name in base_name_variants:
+                    if logger:
+                        logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
+                    return json_file
+        except (json.JSONDecodeError, IOError) as e:
+            # Skip invalid JSON files
+            if logger:
+                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
+            continue
+    
+    if logger:
+        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
+    return None
 
 
 class ExtendedCardinalOrientations:
@@ -292,7 +339,9 @@ class ReorientForAssembly(Node):
                 # Real mode: no object topic needed (orientations provided via arguments)
                 object_topic = None
         
-        self.assembly_config = self.load_assembly_config()
+        self.assembly_config = {}
+        self.assembly_json_file = None
+        self.loaded_base_name = None
         self.symmetry_dir = SYMMETRY_DIR
         
         # Only subscribe to object topic in sim mode
@@ -324,12 +373,43 @@ class ReorientForAssembly(Node):
         
         self.get_logger().info(f"ReorientForAssembly initialized (Mode: {self.mode}, Fold Symmetry + 24-Cardinal with Intermediary)")
     
-    def load_assembly_config(self):
+    def load_assembly_config(self, base_name=None):
+        """
+        Load assembly configuration from JSON file.
+        If base_name is provided, automatically finds the matching JSON file.
+        
+        Args:
+            base_name: Optional base name to search for matching JSON file
+            
+        Returns:
+            Assembly configuration dictionary
+        """
+        # If base_name is provided, find the matching JSON file
+        if base_name is not None:
+            json_file = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file:
+                self.assembly_json_file = json_file
+                self.loaded_base_name = base_name
+            else:
+                self.get_logger().error(f"Could not find assembly JSON for base '{base_name}'")
+                return {}
+        
+        # Use found file or fall back to default behavior
+        json_file = self.assembly_json_file
+        if json_file is None:
+            # Fallback: try to find any assembly JSON (for backward compatibility)
+            json_file = find_assembly_json_by_base_name("base", ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file is None:
+                self.get_logger().error("No assembly JSON file found")
+                return {}
+        
         try:
-            with open(ASSEMBLY_JSON_FILE, 'r') as f:
-                return json.load(f)
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+                self.get_logger().info(f"Loaded assembly config from: {json_file}")
+                return config
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            self.get_logger().error(f"Error loading assembly config: {e}")
+            self.get_logger().error(f"Error loading assembly config from {json_file}: {e}")
             return {}
     
     def object_callback(self, msg):
@@ -799,6 +879,13 @@ class ReorientForAssembly(Node):
     def reorient_for_target(self, object_name, base_name, duration=5.0,
                             current_object_orientation=None, target_base_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
+        
+        # Load assembly config based on base_name if not already loaded for this base
+        if self.loaded_base_name != base_name:
+            self.assembly_config = self.load_assembly_config(base_name=base_name)
+            if not self.assembly_config:
+                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                return False
         
         self.get_logger().info(f"Reorienting {object_name} relative to {base_name}")
         self.get_logger().info("Mode: Fold Symmetry + 24-Cardinal Snap")

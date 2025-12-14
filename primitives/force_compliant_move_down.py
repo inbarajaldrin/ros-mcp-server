@@ -43,6 +43,58 @@ from scipy.optimize import minimize
 from tf2_msgs.msg import TFMessage
 import json
 import os
+import glob
+
+
+# Configuration
+ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
+
+
+def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
+    """
+    Find the assembly JSON file that contains the given base name.
+    
+    Args:
+        base_name: Name of the base object to search for
+        data_dir: Directory to search for JSON files
+        logger: Optional logger for debug output
+        
+    Returns:
+        Path to the matching JSON file, or None if not found
+    """
+    if not os.path.exists(data_dir):
+        if logger:
+            logger.error(f"Data directory not found: {data_dir}")
+        return None
+    
+    # Search for all JSON files in the data directory
+    json_files = glob.glob(os.path.join(data_dir, "*.json"))
+    
+    # Try exact match first, then with _scaled70 suffix
+    base_name_variants = [base_name, f"{base_name}_scaled70"]
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+            
+            # Check if any component matches the base name
+            components = config.get('components', [])
+            for component in components:
+                comp_name = component.get('name', '')
+                if comp_name in base_name_variants:
+                    if logger:
+                        logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
+                    return json_file
+        except (json.JSONDecodeError, IOError) as e:
+            # Skip invalid JSON files
+            if logger:
+                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
+            continue
+    
+    if logger:
+        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
+    return None
 
 
 class ForceCompliantMoveDownController(Node):
@@ -69,9 +121,13 @@ class ForceCompliantMoveDownController(Node):
                 raise ValueError("In sim mode, object_name and base_name are required")
             self.object_name = object_name
             self.base_name = base_name
-            # Load assembly config for sim mode
-            ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_assembly.json"
-            self.assembly_config = self.load_assembly_config(ASSEMBLY_JSON_FILE)
+            # Find and load assembly config for sim mode based on base_name
+            assembly_json_file = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+            if assembly_json_file:
+                self.assembly_config = self.load_assembly_config(assembly_json_file)
+            else:
+                self.get_logger().error(f"Could not find assembly JSON for base '{base_name}'")
+                self.assembly_config = {}
             # Subscribe to object poses topic
             self.current_poses = {}
             self.object_sub = self.create_subscription(TFMessage, "/objects_poses_sim", self.object_callback, 10)

@@ -28,6 +28,7 @@ import argparse
 import time
 import sys
 import os
+import glob
 
 # Add custom libraries to Python path for IK solver
 custom_lib_path = "/home/aaugus11/Desktop/ros2_ws/src/ur_asu-main/ur_asu/custom_libraries"
@@ -41,7 +42,7 @@ except ImportError as e:
     sys.exit(1)
 
 # Configuration
-ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_assembly.json"
+ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
@@ -50,6 +51,54 @@ HOVER_HEIGHT = 0.25  # Height to hover above base before descending
 # Default base position and orientation (used if not provided via command line)
 DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
+
+
+def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
+    """
+    Find the assembly JSON file that contains the given base name.
+    
+    Args:
+        base_name: Name of the base object to search for
+        data_dir: Directory to search for JSON files
+        logger: Optional logger for debug output
+        
+    Returns:
+        Path to the matching JSON file, or None if not found
+    """
+    if not os.path.exists(data_dir):
+        if logger:
+            logger.error(f"Data directory not found: {data_dir}")
+        return None
+    
+    # Search for all JSON files in the data directory
+    json_files = glob.glob(os.path.join(data_dir, "*.json"))
+    
+    # Try exact match first, then with _scaled70 suffix
+    base_name_variants = [base_name, f"{base_name}_scaled70"]
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+            
+            # Check if any component matches the base name
+            components = config.get('components', [])
+            for component in components:
+                comp_name = component.get('name', '')
+                if comp_name in base_name_variants:
+                    if logger:
+                        logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
+                    return json_file
+        except (json.JSONDecodeError, IOError) as e:
+            # Skip invalid JSON files
+            if logger:
+                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
+            continue
+    
+    if logger:
+        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
+    return None
+
 
 class TranslateForAssembly(Node):
     def __init__(self, mode=None, base_topic=None, object_topic=None, ee_topic=EE_TOPIC):
@@ -63,8 +112,10 @@ class TranslateForAssembly(Node):
         
         self.mode = mode  # 'sim' or 'real'
         
-        # Load assembly configuration
-        self.assembly_config = self.load_assembly_config()
+        # Load assembly configuration (will be loaded when base_name is available)
+        self.assembly_config = {}
+        self.assembly_json_file = None
+        self.loaded_base_name = None
         
         # Subscribers for pose data
         # In sim mode, subscribe to topics; in real mode, no topic subscriptions needed
@@ -109,13 +160,43 @@ class TranslateForAssembly(Node):
         # self.get_logger().info(f"Assembly config loaded with {len(self.assembly_config.get('components', []))} components")
         # self.get_logger().info(f"Hover height set to: {HOVER_HEIGHT}m")
     
-    def load_assembly_config(self):
-        """Load the assembly configuration from JSON file"""
+    def load_assembly_config(self, base_name=None):
+        """
+        Load the assembly configuration from JSON file.
+        If base_name is provided, automatically finds the matching JSON file.
+        
+        Args:
+            base_name: Optional base name to search for matching JSON file
+            
+        Returns:
+            Assembly configuration dictionary
+        """
+        # If base_name is provided, find the matching JSON file
+        if base_name is not None:
+            json_file = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file:
+                self.assembly_json_file = json_file
+                self.loaded_base_name = base_name
+            else:
+                self.get_logger().error(f"Could not find assembly JSON for base '{base_name}'")
+                return {}
+        
+        # Use found file or fall back to default behavior
+        json_file = self.assembly_json_file
+        if json_file is None:
+            # Fallback: try to find any assembly JSON (for backward compatibility)
+            json_file = find_assembly_json_by_base_name("base", ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file is None:
+                self.get_logger().error("No assembly JSON file found")
+                return {}
+        
         try:
-            with open(ASSEMBLY_JSON_FILE, 'r') as f:
-                return json.load(f)
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+                self.get_logger().info(f"Loaded assembly config from: {json_file}")
+                return config
         except FileNotFoundError:
-            self.get_logger().error(f"Assembly file not found: {ASSEMBLY_JSON_FILE}")
+            self.get_logger().error(f"Assembly file not found: {json_file}")
             return {}
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Error parsing assembly JSON: {e}")
@@ -413,6 +494,13 @@ class TranslateForAssembly(Node):
         Sim mode: Calculate and execute EE translation to hover position (step 1 only).
         Uses topics to get base and object poses.
         """
+        # Load assembly config based on base_name if not already loaded for this base
+        if self.loaded_base_name != base_name:
+            self.assembly_config = self.load_assembly_config(base_name=base_name)
+            if not self.assembly_config:
+                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                return False
+        
         # Wait for pose data
         if not self.current_poses or self.current_ee_pose is None:
             self.get_logger().error("No pose data available")
@@ -527,6 +615,13 @@ class TranslateForAssembly(Node):
             final_base_orientation: [x, y, z, w] final base orientation quaternion (required in real mode)
             use_default_base: Use default base position/orientation if True
         """
+        # Load assembly config based on base_name if not already loaded for this base
+        if self.loaded_base_name != base_name:
+            self.assembly_config = self.load_assembly_config(base_name=base_name)
+            if not self.assembly_config:
+                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                return None
+        
         # Get current EE pose (always needed from topic)
         if self.current_ee_pose is None:
             self.get_logger().error("End-effector pose not available")

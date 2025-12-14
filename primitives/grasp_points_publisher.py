@@ -272,19 +272,9 @@ class GraspPointsPublisher(Node):
         # Create rotation matrix from quaternion
         r_object_world = R.from_quat(obj_quaternion)
         rot_matrix = r_object_world.as_matrix()
-        
-        # Coordinate system transformation matrix (same as wireframe)
-        coord_transform = np.array([
-            [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-            [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-            [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-        ])
-
-        # Apply coordinate system transformation (same as wireframe)
-        grasp_pos_transformed = coord_transform @ pos_local
 
         # Transform position to world frame
-        pos_base = obj_translation + rot_matrix @ grasp_pos_transformed
+        pos_base = obj_translation + rot_matrix @ pos_local
 
         # Grasp point inherits object's orientation directly - no conversion needed
         # 
