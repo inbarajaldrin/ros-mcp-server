@@ -480,18 +480,25 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
     return _run_primitive("move_to_grasp.py", f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}", timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
-def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", target_object_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
     """Reorient object for assembly.
     
     Args:
         object_name: Name of the object to reorient
-        base_name: Name of the base object
+        base_name: Name of the base object (ignored if target_object_orientation is provided)
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        target_object_orientation: Optional target object orientation quaternion [x, y, z, w] in world frame.
+                                   If provided, skips base pose and JSON lookup, uses this orientation directly.
     
     Returns:
         Raw output from the reorient for assembly primitive script
     """
-    return _run_primitive("reorient_for_assembly.py", f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=90, error_prefix="Reorient for assembly")
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+    if target_object_orientation is not None:
+        if len(target_object_orientation) != 4:
+            raise ValueError("target_object_orientation must be a quaternion [x, y, z, w] with 4 elements")
+        cmd += f" --target-object-orientation {' '.join(str(x) for x in target_object_orientation)}"
+    return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
 
 @mcp.tool()
 def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:

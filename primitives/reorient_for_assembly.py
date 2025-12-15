@@ -844,17 +844,33 @@ class ReorientForAssembly(Node):
                 best_matched_target_R, best_object_error, candidates)
     
     def reorient_for_target(self, object_name, base_name, duration=5.0,
-                            current_object_orientation=None, target_base_orientation=None):
-        """Reorient EE so OBJECT ends up at a valid assembly pose."""
+                            current_object_orientation=None, target_base_orientation=None,
+                            target_object_orientation=None):
+        """Reorient EE so OBJECT ends up at a valid assembly pose.
         
-        # Load assembly config based on base_name if not already loaded for this base
-        if self.loaded_base_name != base_name:
-            self.assembly_config = self.load_assembly_config(base_name=base_name)
-            if not self.assembly_config:
-                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
-                return False
+        Args:
+            object_name: Name of the object to reorient
+            base_name: Name of the base object (used for JSON lookup if target_object_orientation not provided)
+            duration: Trajectory duration in seconds
+            current_object_orientation: Current object orientation quaternion [x,y,z,w] (optional)
+            target_base_orientation: Target base orientation quaternion [x,y,z,w] (optional, used if target_object_orientation not provided)
+            target_object_orientation: Target object orientation quaternion [x,y,z,w] (optional, if provided, skips base pose and JSON lookup)
+        """
         
-        self.get_logger().info(f"Reorienting {object_name} relative to {base_name}")
+        # If target_object_orientation is provided, we don't need base_name or JSON config
+        use_direct_target = target_object_orientation is not None
+        
+        if not use_direct_target:
+            # Load assembly config based on base_name if not already loaded for this base
+            if self.loaded_base_name != base_name:
+                self.assembly_config = self.load_assembly_config(base_name=base_name)
+                if not self.assembly_config:
+                    self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                    return False
+            
+            self.get_logger().info(f"Reorienting {object_name} relative to {base_name}")
+        else:
+            self.get_logger().info(f"Reorienting {object_name} to target orientation (direct mode)")
         
         # === Get current EE pose ===
         if self.current_ee_pose is None:
@@ -872,23 +888,48 @@ class ReorientForAssembly(Node):
                 return False
             R_object_current = self.get_rotation_from_transform(self.current_poses[obj_key].transform)
         
-        # === Get base orientation ===
-        if target_base_orientation is not None:
-            R_base = self.get_rotation_from_quat(target_base_orientation)
+        # === Get target orientation ===
+        if use_direct_target:
+            # Direct mode: use provided target_object_orientation directly (assumed to be in world frame)
+            R_object_target_world = self.get_rotation_from_quat(target_object_orientation)
+            # In direct mode, we work in world frame (base is identity)
+            R_base = np.eye(3)
+            R_object_current_base_relative = R_object_current
+            R_EE_current_base_relative = R_EE_current
+            R_object_target_base_relative = R_object_target_world
         else:
-            base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
-            if base_key not in self.current_poses:
-                self.get_logger().error(f"Base {base_name} not found")
+            # Original mode: get base orientation and target from JSON
+            # === Get base orientation ===
+            if target_base_orientation is not None:
+                R_base = self.get_rotation_from_quat(target_base_orientation)
+            else:
+                base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
+                if base_key not in self.current_poses:
+                    self.get_logger().error(f"Base {base_name} not found")
+                    return False
+                R_base = self.get_rotation_from_transform(self.current_poses[base_key].transform)
+            
+            # === Get target orientation from JSON (relative to base, quaternion) ===
+            target_quat = self.get_object_target_orientation(object_name)
+            if target_quat is None:
+                target_quat = self.get_object_target_orientation(f"{object_name}_scaled70")
+            if target_quat is None:
+                self.get_logger().error(f"No target orientation for {object_name}")
                 return False
-            R_base = self.get_rotation_from_transform(self.current_poses[base_key].transform)
-        
-        # === Get target orientation from JSON (relative to base, quaternion) ===
-        target_quat = self.get_object_target_orientation(object_name)
-        if target_quat is None:
-            target_quat = self.get_object_target_orientation(f"{object_name}_scaled70")
-        if target_quat is None:
-            self.get_logger().error(f"No target orientation for {object_name}")
-            return False
+            
+            # === Transform target to world frame ===
+            # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.
+            R_target_relative = R.from_quat(target_quat).as_matrix()
+            R_object_target_world = R_base @ R_target_relative
+            
+            # === Transform to base-relative frame for cardinal calculation ===
+            # Cardinal calculation should be done assuming base is at identity [0,0,0,1]
+            # Transform current object and EE to base-relative frame
+            R_object_current_base_relative = R_base.T @ R_object_current
+            R_EE_current_base_relative = R_base.T @ R_EE_current
+            
+            # Target in base-relative frame (same as R_target_relative)
+            R_object_target_base_relative = R_target_relative
         
         # === Load fold symmetry ===
         fold_data = FoldSymmetry.load_symmetry_data(object_name, self.symmetry_dir)
@@ -898,20 +939,6 @@ class ReorientForAssembly(Node):
         # === Calculate grasp rotation ===
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
         R_grasp = R_EE_current.T @ R_object_current
-        
-        # === Transform target to world frame ===
-        # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.
-        R_target_relative = R.from_quat(target_quat).as_matrix()
-        R_object_target_world = R_base @ R_target_relative
-        
-        # === Transform to base-relative frame for cardinal calculation ===
-        # Cardinal calculation should be done assuming base is at identity [0,0,0,1]
-        # Transform current object and EE to base-relative frame
-        R_object_current_base_relative = R_base.T @ R_object_current
-        R_EE_current_base_relative = R_base.T @ R_EE_current
-        
-        # Target in base-relative frame (same as R_target_relative)
-        R_object_target_base_relative = R_target_relative
         
         # Log initial object orientation
         initial_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
@@ -1002,9 +1029,16 @@ class ReorientForAssembly(Node):
             R_object_from_cardinal = R_EE_cardinal @ R_grasp
             
             # Find the closest equivalent target to the object orientation from cardinal EE
+            # Use base-relative target for symmetry generation if in original mode, otherwise use world target
+            target_for_symmetry = R_object_target_base_relative if not use_direct_target else R_object_target_world
             equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-                R_object_target_world, fold_data, None
+                target_for_symmetry, fold_data, None
             )
+            
+            # If in direct mode, equivalent targets are already in world frame
+            # If in original mode, we need to transform them to world frame
+            if not use_direct_target:
+                equivalent_targets = [R_base @ R_eq for R_eq in equivalent_targets]
             cardinal_object_error = float('inf')
             best_cardinal_target_R = None
             for R_target_equiv in equivalent_targets:
@@ -1077,9 +1111,14 @@ class ReorientForAssembly(Node):
             resulting_object_R = R_EE_redirected_matrix @ R_grasp
             
             # Find closest equivalent target to verify alignment is still good
+            # Use base-relative target for symmetry generation if in original mode, otherwise use world target
+            target_for_symmetry_redirect = R_object_target_base_relative if not use_direct_target else R_object_target_world
             equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-                R_object_target_world, fold_data, None
+                target_for_symmetry_redirect, fold_data, None
             )
+            # If in original mode, transform equivalent targets to world frame
+            if not use_direct_target:
+                equivalent_targets = [R_base @ R_eq for R_eq in equivalent_targets]
             object_error_redirected = float('inf')
             best_target_R_redirected = None
             for R_target_equiv in equivalent_targets:
@@ -1227,7 +1266,9 @@ def main(args=None):
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--target-base-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
-                       help='Target base orientation quaternion [x, y, z, w] (required in real mode)')
+                       help='Target base orientation quaternion [x, y, z, w] (required in real mode, ignored if --target-object-orientation is provided)')
+    parser.add_argument('--target-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
+                       help='Target object orientation quaternion [x, y, z, w] in world frame (if provided, skips base pose and JSON lookup)')
     
     args = parser.parse_args()
     
@@ -1255,7 +1296,8 @@ def main(args=None):
         
         success = node.reorient_for_target(
             args.object_name, args.base_name, duration,
-            args.current_object_orientation, args.target_base_orientation
+            args.current_object_orientation, args.target_base_orientation,
+            args.target_object_orientation
         )
         
         if success:
