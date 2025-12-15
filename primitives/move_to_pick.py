@@ -23,7 +23,6 @@ class PickRunner(Node):
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
         ]
         self.client = ActionClient(self, FollowJointTrajectory, '/scaled_joint_trajectory_controller/follow_joint_trajectory')
-        self.get_logger().info("Waiting for action server...")
         self.client.wait_for_server()
         self.send_pick_trajectory()
 
@@ -56,12 +55,12 @@ class PickRunner(Node):
             rclpy.shutdown()
             return
 
-        self.get_logger().info("Pick trajectory accepted.")
+        self.get_logger().info("Trajectory sent and accepted")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
 
     def goal_result(self, future):
-        self.get_logger().info("Pick movement complete.")
+        self.get_logger().info("Movement completed successfully")
         rclpy.shutdown()
 
 def main(args=None):

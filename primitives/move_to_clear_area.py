@@ -73,8 +73,10 @@ class MoveToClearArea(Node):
             10
         )
         
-        self.get_logger().info("Waiting for action server...")
         self.action_client.wait_for_server()
+        
+        # Log mode
+        self.get_logger().info(f"Using {self.mode.upper()} mode")
         
         # Execute movement
         self.move_to_clear_space()
@@ -134,8 +136,6 @@ class MoveToClearArea(Node):
 
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber"""
-        self.get_logger().info("Reading current end-effector pose and joint angles...")
-        
         # Reset the flags
         self.ee_pose_received = False
         self.joint_angles_received = False
@@ -154,7 +154,7 @@ class MoveToClearArea(Node):
                     status.append("EE pose")
                 if not self.joint_angles_received:
                     status.append("joint angles")
-                self.get_logger().info(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
+                self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
         
         if not self.ee_pose_received:
             self.get_logger().error("Timeout waiting for EE pose message")
@@ -176,9 +176,6 @@ class MoveToClearArea(Node):
         position = self.ee_position.tolist()
         orientation = self.ee_quat.tolist()
         
-        self.get_logger().info(f"Successfully read pose: position={position}, orientation={orientation}")
-        self.get_logger().info(f"Successfully read joint angles: {self.current_joint_angles}")
-        
         return {
             'position': position,
             'orientation': orientation
@@ -186,8 +183,6 @@ class MoveToClearArea(Node):
 
     def move_to_clear_space(self):
         """Move to clear space position while maintaining current end-effector orientation"""
-        # Read current end-effector pose
-        self.get_logger().info("Reading current end-effector pose...")
         pose_data = self.read_current_ee_pose()
         
         if pose_data is None:
@@ -201,18 +196,6 @@ class MoveToClearArea(Node):
         # Convert quaternion directly to rotation matrix to avoid precision loss from RPY conversion
         from scipy.spatial.transform import Rotation as Rot
         from scipy.optimize import minimize
-        
-        # Also compute RPY for logging purposes
-        current_rpy = self.quaternion_to_rpy(
-            current_quat[0], current_quat[1], 
-            current_quat[2], current_quat[3]
-        )
-        
-        self.get_logger().info(f"Current EE position (TCP): {current_pos}")
-        self.get_logger().info(f"Current EE quaternion: {current_quat}")
-        self.get_logger().info(f"Current EE RPY (deg): {current_rpy}")
-        self.get_logger().info(f"Target gripper center position: {self.target_gripper_center_position}")
-        self.get_logger().info(f"Mode: {self.mode}")
         
         # Determine target orientation based on mode
         if self.mode == 'hover':
@@ -234,12 +217,6 @@ class MoveToClearArea(Node):
             tcp_position = np.array(self.target_gripper_center_position) + offset_vector
             tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
             
-            self.get_logger().info(f"Hover mode: Using compute_ik (same as move_home)")
-            self.get_logger().info(f"Target gripper center position: {self.target_gripper_center_position}")
-            self.get_logger().info(f"Calculated TCP position: {tcp_position}")
-            self.get_logger().info(f"TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm along gripper Z-axis")
-            self.get_logger().info(f"Target RPY: [0, 180, 0]")
-            
             # Use compute_ik exactly like move_home does
             # compute_ik(position, rpy, q_guess=None, max_tries=5, dx=0.001)
             joint_angles = compute_ik(tcp_position, [0, 180, 0])
@@ -248,8 +225,6 @@ class MoveToClearArea(Node):
                 self.get_logger().error("IK failed: couldn't compute clear space position")
                 rclpy.shutdown()
                 return
-                
-            self.get_logger().info(f"Computed joint angles: {joint_angles}")
             
             # Create trajectory point - same duration as move_home (5 seconds)
             point = JointTrajectoryPoint(
@@ -267,7 +242,7 @@ class MoveToClearArea(Node):
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
             
-            self.get_logger().info("Sending trajectory to clear space position (hover mode)...")
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             return  # Exit early for hover mode
@@ -277,8 +252,6 @@ class MoveToClearArea(Node):
             target_quat = current_quat
             target_rot_matrix = target_rotation.as_matrix()
             
-            self.get_logger().info(f"Move mode: Keeping current orientation")
-            
             # Calculate TCP position from gripper center position
             # The gripper Z-axis points from TCP to gripper center
             # Apply offset only to X and Y, keep Z constant
@@ -287,10 +260,6 @@ class MoveToClearArea(Node):
             tcp_position = np.array(self.target_gripper_center_position) + offset_vector
             tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
             
-            self.get_logger().info(f"Calculated TCP position: {tcp_position}")
-            self.get_logger().info(f"TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm along gripper Z-axis")
-            self.get_logger().info(f"Target orientation: keeping current quaternion (no RPY conversion)")
-            
             # Compute inverse kinematics for target pose
             # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
             try:
@@ -298,9 +267,6 @@ class MoveToClearArea(Node):
                 target_pose = np.eye(4)
                 target_pose[:3, 3] = tcp_position
                 target_pose[:3, :3] = target_rot_matrix
-                
-                self.get_logger().info(f"Computing IK for TCP position: {tcp_position}")
-                self.get_logger().info(f"Using quaternion-derived rotation matrix directly (NO RPY conversion)")
                 
                 # Use quaternion-based IK directly - no RPY conversion at all!
                 joint_angles = None
@@ -316,7 +282,6 @@ class MoveToClearArea(Node):
                     return
                 
                 q_guess = self.current_joint_angles.copy()
-                self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
                 
                 # Try IK with multiple strategies:
                 # 1. Current joint angles with position perturbations (both positive and negative)
@@ -357,14 +322,8 @@ class MoveToClearArea(Node):
                             
                             # Check if this is a good solution
                             if cost < 0.01:
-                                self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {perturbation:.6f}), cost={cost:.6f}")
                                 joint_angles = result.x
                                 solution_found = True
-                                
-                                # Verify orientation accuracy
-                                T_result = forward_kinematics(dh_params, joint_angles)
-                                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
                                 break
                             
                             # Keep track of best solution
@@ -374,7 +333,6 @@ class MoveToClearArea(Node):
                 
                 # Strategy 2: Try with slightly perturbed joint angles as seeds if first strategy failed
                 if not solution_found:
-                    self.get_logger().info("Trying with perturbed joint angle seeds...")
                     # Try different joint angle seeds by adding small deterministic perturbations
                     seed_perturbations = [
                         [0.1, 0, 0, 0, 0, 0],
@@ -403,14 +361,8 @@ class MoveToClearArea(Node):
                             cost = ik_objective_quaternion(result.x, target_pose)
                             
                             if cost < 0.01:
-                                self.get_logger().info(f"Quaternion-based IK succeeded with perturbed seed (pert={seed_pert}), cost={cost:.6f}")
                                 joint_angles = result.x
                                 solution_found = True
-                                
-                                # Verify orientation accuracy
-                                T_result = forward_kinematics(dh_params, joint_angles)
-                                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
                                 break
                             
                             # Keep track of best solution
@@ -420,20 +372,12 @@ class MoveToClearArea(Node):
                 
                 # If we found any reasonable solution, use it
                 if joint_angles is None and best_result is not None and best_cost < 0.1:
-                    self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
                     joint_angles = best_result
-                    
-                    # Verify orientation accuracy
-                    T_result = forward_kinematics(dh_params, joint_angles)
-                    orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                    self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
                 
                 if joint_angles is None:
                     self.get_logger().error("IK failed: couldn't compute clear space position")
                     rclpy.shutdown()
                     return
-                    
-                self.get_logger().info(f"Computed joint angles: {joint_angles}")
                 
                 # Create trajectory point
                 point = JointTrajectoryPoint(
@@ -451,7 +395,7 @@ class MoveToClearArea(Node):
                 goal.trajectory = traj
                 goal.goal_time_tolerance = Duration(sec=1)
                 
-                self.get_logger().info("Sending trajectory to clear space position...")
+                self.get_logger().info("Trajectory sent and accepted")
                 self._send_goal_future = self.action_client.send_goal_async(goal)
                 self._send_goal_future.add_done_callback(self.goal_response)
                 
@@ -467,7 +411,6 @@ class MoveToClearArea(Node):
             rclpy.shutdown()
             return
 
-        self.get_logger().info("Clear space trajectory accepted")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
 
@@ -475,7 +418,7 @@ class MoveToClearArea(Node):
         """Handle goal result"""
         result = future.result()
         if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("Successfully moved to clear space position")
+            self.get_logger().info("Movement completed successfully")
         else:
             self.get_logger().error(f"Trajectory failed with status: {result.status}")
         rclpy.shutdown()

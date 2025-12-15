@@ -324,360 +324,58 @@ def perform_ik(target_position: List[float], target_rpy: List[float],
         duration: Time to complete the movement in seconds (default: 5.0)
         
     Returns:
-        Dictionary with execution result including joint angles and trajectory execution status.
+        Raw output from the perform IK primitive script
     """
-    try:
-        import sys
-        
-        # Import the IK solver from utils package
-        try:
-            from primitives.utils.ik_solver import compute_ik
-        except ImportError as e:
-            return {
-                "status": "error",
-                "message": f"Failed to import ik_solver: {str(e)}. Check if primitives.utils.ik_solver is available."
-            }
-        
-        # Solve IK
-        try:
-            joint_angles = compute_ik(position=target_position, rpy=target_rpy)
-        except Exception as ik_error:
-            return {
-                "status": "error",
-                "message": f"IK solver raised an exception: {str(ik_error)}",
-                "target_position": target_position,
-                "target_rpy": target_rpy,
-                "duration": duration
-            }
-        
-        if joint_angles is not None:
-            joint_angles_deg = np.degrees(joint_angles)
-            
-            # Execute joint trajectory using ROS2 action directly
-            trajectory_result = execute_joint_trajectory(joint_angles.tolist(), duration)
-            
-            if trajectory_result.get("status") == "success":
-                return {
-                    "status": "success",
-                    "message": "IK solved and trajectory executed successfully",
-                    "target_position": target_position,
-                    "target_rpy": target_rpy,
-                    "joint_angles_rad": joint_angles.tolist(),
-                    "joint_angles_deg": joint_angles_deg.tolist(),
-                    "duration": duration,
-                    "trajectory_status": "executed"
-                }
-            else:
-                return {
-                    "status": "partial_success",
-                    "message": f"IK solved but trajectory execution failed: {trajectory_result.get('message', 'Unknown error')}. The action server may be temporarily unavailable or busy. Please try running the trajectory again with the same joint angles.",
-                    "target_position": target_position,
-                    "target_rpy": target_rpy,
-                    "joint_angles_rad": joint_angles.tolist(),
-                    "joint_angles_deg": joint_angles_deg.tolist(),
-                    "duration": duration,
-                    "trajectory_status": "failed",
-                    "trajectory_error": trajectory_result.get("message"),
-                    "trajectory_output": trajectory_result.get("ros_output"),
-                    "trajectory_stderr": trajectory_result.get("stderr"),
-                    "suggestion": "Try executing the trajectory again using execute_joint_trajectory with the same joint_angles_rad values. The IK solution is valid, only the trajectory execution failed."
-                }
-        else:
-            return {
-                "status": "error",
-                "message": "IK solver failed to find a solution for the given target pose",
-                "target_position": target_position,
-                "target_rpy": target_rpy,
-                "duration": duration
-            }
-            
-    except Exception as e:
-        import traceback
-        return {
-            "status": "error",
-            "message": f"Unexpected error in IK computation: {str(e)}",
-            "traceback": traceback.format_exc()
-        }
+    timeout_seconds = int(duration) + 10  # Add buffer for communication overhead
+    args = f"--target-position {target_position[0]} {target_position[1]} {target_position[2]} --target-rpy {target_rpy[0]} {target_rpy[1]} {target_rpy[2]} --duration {duration}"
+    return _run_primitive("perform_ik.py", args, timeout=timeout_seconds, error_prefix="Perform IK")
 
 @mcp.tool()
 def get_ee_pose(joint_angles: List[float] = None) -> Dict[str, Any]:
     """
-    Get end-effector pose using forward kinematics from specified or current joint angles.
-    Perform ros2 topic echo --once /joint_states to get current joint angles.
+    Get end-effector pose from ROS topic /tcp_pose_broadcaster/pose.
     
     Args:
-        joint_angles: Optional joint angles in radians. If None, gets current from ROS2
+        joint_angles: This parameter is ignored. The pose is read directly from ROS topic.
         
     Returns:
-        Dictionary with end-effector position, orientation, and joint angles used.
+        Raw output from the get EE pose primitive script
     """
-    try:
-        import sys
-        
-        # Import the IK solver module from utils package
-        try:
-            from primitives.utils.ik_solver import forward_kinematics, dh_params
-        except ImportError as e:
-            return {
-                "status": "error",
-                "message": f"Failed to import from ik_solver: {str(e)}"
-            }
-        
-        # Get joint angles (either provided or current from ROS2)
-        if joint_angles is None:
-            # Use your existing read_topic function to get current joint states
-            joint_result = read_topic("/joint_states", timeout=5)
-            
-            if joint_result.get("status") != "success":
-                return {
-                    "status": "error",
-                    "message": f"Failed to get current joint states: {joint_result.get('error', 'Unknown error')}"
-                }
-            
-            # Parse joint positions from the topic data
-            # This is a simplified parser - you might need to improve it based on your message format
-            try:
-                import re
-                output = joint_result.get("message_data", "")
-                positions_match = re.search(r'position:\s*\[(.*?)\]', output, re.DOTALL)
-                if positions_match:
-                    positions_str = positions_match.group(1)
-                    joint_angles = [float(x.strip()) for x in positions_str.split(',')]
-                    source = "current_ros2_joint_states"
-                else:
-                    return {
-                        "status": "error",
-                        "message": "Could not parse joint positions from ROS2 joint_states topic"
-                    }
-            except Exception as e:
-                return {
-                    "status": "error",
-                    "message": f"Failed to parse joint states: {str(e)}"
-                }
-        else:
-            joint_angles = np.array(joint_angles)
-            source = "provided_joint_angles"
-        
-        # Convert to numpy array
-        joint_angles = np.array(joint_angles)
-        
-        # Compute forward kinematics
-        try:
-            T_ee = forward_kinematics(dh_params, joint_angles)
-            
-            # Extract position and orientation
-            ee_position = T_ee[:3, 3]
-            ee_rotation_matrix = T_ee[:3, :3]
-            
-            # Convert rotation matrix to RPY
-            rotation = R.from_matrix(ee_rotation_matrix)
-            ee_rpy_rad = rotation.as_euler('xyz', degrees=False)
-            ee_rpy_deg = rotation.as_euler('xyz', degrees=True)
-            ee_quaternion = rotation.as_quat()  # [x, y, z, w]
-            
-            # Convert joint angles to degrees
-            joint_angles_deg = np.degrees(joint_angles)
-            
-            return {
-                "status": "success",
-                "message": "Forward kinematics computed successfully",
-                "joint_angles_source": source,
-                "joint_angles_rad": joint_angles.tolist(),
-                "joint_angles_deg": joint_angles_deg.tolist(),
-                "ee_position": ee_position.tolist(),  # [x, y, z] in meters
-                "ee_rpy_rad": ee_rpy_rad.tolist(),   # [roll, pitch, yaw] in radians
-                "ee_rpy_deg": ee_rpy_deg.tolist(),   # [roll, pitch, yaw] in degrees
-                "ee_quaternion_xyzw": ee_quaternion.tolist(),  # [x, y, z, w]
-                "transformation_matrix": T_ee.tolist()
-            }
-            
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Failed to compute forward kinematics: {str(e)}",
-                "joint_angles_rad": joint_angles.tolist() if joint_angles is not None else None
-            }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Unexpected error in forward kinematics computation: {str(e)}"
-        }
-
-@mcp.tool()
-def verify_grasp(timeout: int = 5) -> Dict[str, Any]:
-    """
-    Get gripper width information including fully open, fully closed, and current width.
-    
-    Args:
-        timeout: Maximum time to wait for gripper reading (default: 5 seconds)
-        
-    Returns:
-        Dictionary with gripper width information:
-        - fully_open_width: Gripper width when fully open (110.0)
-        - fully_closed_width: Gripper width when fully closed (9.0)
-        - current_width: Current gripper width
-        - status: "success" or "error"
-    """
-    try:
-        import subprocess
-        import re
-        
-        # Gripper width constants
-        FULLY_OPEN_WIDTH = 110.0
-        FULLY_CLOSED_WIDTH = 9.0
-        
-        # Run the verify_grasp.py script
-        script_path = f"{MCP_SRV_DIR}/primitives/verify_grasp.py"
-        cmd = f"python {script_path} {timeout}"
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=timeout + 5
-        )
-        
-        if result.returncode == 0:
-            # Parse the output to extract current width
-            output = result.stdout.strip()
-            current_width = None
-            
-            # Look for the current width line
-            for line in output.split('\n'):
-                if 'Gripper current width:' in line:
-                    try:
-                        current_width = float(line.split(':')[1].strip())
-                        break
-                    except (ValueError, IndexError):
-                        pass
-            
-            if current_width is not None:
-                return {
-                    "status": "success",
-                    "fully_open_width": FULLY_OPEN_WIDTH,
-                    "fully_closed_width": FULLY_CLOSED_WIDTH,
-                    "current_width": current_width,
-                    "raw_output": output
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Could not parse current width from output: {output}",
-                    "raw_output": output
-                }
-        else:
-            return {
-                "status": "error",
-                "message": f"Script failed with return code {result.returncode}",
-                "stderr": result.stderr.strip() if result.stderr else None,
-                "stdout": result.stdout.strip() if result.stdout else None
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": f"Script timed out after {timeout + 5} seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Unexpected error: {str(e)}"
-        }
-
-def _get_all_mcp_tools():
-    """
-    Dynamically discover all available MCP tools in the current module.
-    Returns a dictionary of tool_name -> function mappings.
-    """
-    import sys
-    import inspect
-    
-    current_module = sys.modules[__name__]
-    available_tools = {}
-    
-    # Get all functions that could be MCP tools
-    for name, obj in inspect.getmembers(current_module, inspect.isfunction):
-        if (not name.startswith('_') and 
-            callable(obj) and 
-            obj.__module__ == current_module.__name__ and
-            # Exclude the execution tools themselves to avoid recursion
-            name not in ['execute_python_code', 'execute_code_with_server_access', 'start_background_task']):
-            available_tools[name] = obj
-    
-    return available_tools
+    return _run_primitive("get_ee_pose.py", timeout=10, error_prefix="Get EE pose")
 
 @mcp.tool()
 def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
-    """
-    Execute Python code dynamically with access to all server functions and libraries.
-    Claude can write custom logic on-the-fly based on conversation context.
+    """Execute Python code for calculations and math operations.
+    
+    This tool allows the agent to execute Python code for performing calculations,
+    math operations, data processing, or any other Python computations.
     
     Args:
         code: Python code to execute
-        timeout: Maximum execution time in seconds
+        timeout: Maximum execution time in seconds (default: 30)
         
     Returns:
-        Dictionary with execution results including output, errors, and status
+        Dictionary with output from the executed Python code (stdout + stderr)
     """
+    import subprocess
+    import tempfile
+    import os
+    import sys
+    
     try:
-        import tempfile
-        import subprocess
-        import sys
-        import os
-        
         # Create a temporary Python file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            # Get all available tools dynamically
-            available_tools = _get_all_mcp_tools()
-            tool_imports = ", ".join(available_tools.keys())
-            
-            # Add imports and context that Claude might need
-            code_with_context = f"""
-import sys
-import os
-import traceback
-sys.path.append('{MCP_SRV_DIR}')
-
-# Set up ROS2 environment
-os.environ['ROS_DOMAIN_ID'] = '0'
-os.environ['ROS_VERSION'] = '2'
-os.environ['ROS_DISTRO'] = 'humble'
-
-# Run ROS2 commands - assumes ROS2 environment is already sourced
-def run_ros2_command(cmd_list, **kwargs):
-    \"\"\"Run ROS2 commands (ROS2 environment should already be sourced)\"\"\"
-    import subprocess
-    if isinstance(cmd_list, str):
-        cmd = cmd_list
-        return subprocess.run(cmd, shell=True, executable='/bin/bash', **kwargs)
-    else:
-        cmd = ' '.join(cmd_list)
-        return subprocess.run(cmd, shell=True, executable='/bin/bash', **kwargs)
-
-# Import all the existing functions Claude can use (dynamically discovered)
-try:
-    from server import {tool_imports}
-    from msgs.geometry_msgs import Twist, PoseStamped
-    from msgs.sensor_msgs import JointState, Image as RosImage
-except ImportError:
-    # Fallback imports if running standalone
-    pass
-
-import json
-import time
+            # Wrap code with common imports and print result if it's an expression
+            code_with_imports = f"""import math
 import numpy as np
 from datetime import datetime, timedelta
-import threading
-import subprocess
-import re
+import json
+import sys
 
-# User's dynamic code starts here:
+# User's code:
 {code}
 """
-            f.write(code_with_context)
+            f.write(code_with_imports)
             temp_file = f.name
         
         # Execute the code
@@ -686,106 +384,82 @@ import re
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd='{MCP_SRV_DIR}'
+            cwd=os.path.dirname(os.path.abspath(__file__))
         )
         
         # Clean up
-        os.unlink(temp_file)
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
         
-        if result.returncode == 0:
-            return {
-                "status": "success",
-                "output": result.stdout,
-                "stderr": result.stderr if result.stderr else None,
-                "execution_time": f"Completed within {timeout}s timeout"
-            }
-        else:
-            return {
-                "status": "error",
-                "output": result.stdout if result.stdout else None,
-                "stderr": result.stderr,
-                "return_code": result.returncode
-            }
-            
+        # Return combined stdout and stderr
+        output = result.stdout if result.stdout else ""
+        if result.stderr:
+            output += result.stderr
+        
+        return {"output": output}
+        
     except subprocess.TimeoutExpired:
         # Clean up the temp file
         try:
             os.unlink(temp_file)
         except:
             pass
-        return {
-            "status": "timeout",
-            "error": f"Code execution timed out after {timeout} seconds"
-        }
+        return {"output": f"Error: Code execution timed out after {timeout} seconds"}
     except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
+        return {"output": f"Error: Failed to execute Python code: {str(e)}"}
 
-@mcp.tool()
-def move_home() -> Dict[str, Any]:
-    """Move robot to home position."""
+def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
+    """Helper function to run primitive scripts and return raw output.
+    
+    Args:
+        script_name: Name of the primitive script (e.g., "move_home.py", "control_gripper.py")
+        command_args: Optional command-line arguments to pass to the script
+        timeout: Timeout for the subprocess (default: 60 seconds)
+        error_prefix: Prefix for error messages (default: "Primitive")
+    
+    Returns:
+        Dictionary with output from the primitive script (stdout + stderr)
+    """
+    import subprocess
+    import os
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    cmd_parts = [
+        f"cd {script_dir}/primitives",
+        f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
+    ]
+    
+    cmd = "\n".join(cmd_parts)
+    
     try:
-        import subprocess
-        import sys
-        import os
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        move_home_path = os.path.join(script_dir, "primitives", "move_home.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 45 /usr/bin/python3 move_home.py"
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
         result = subprocess.run(
             cmd,
             shell=True,
             executable='/bin/bash',
             capture_output=True,
             text=True,
-            timeout=50
+            timeout=timeout + 10  # Add buffer for subprocess timeout
         )
         
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
+        # Return combined stdout and stderr (primitive handles its own output formatting)
+        output = result.stdout if result.stdout else ""
+        if result.stderr:
+            output += result.stderr
         
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Move home executed successfully",
-                "output": result.stdout
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Move home failed with return code {result.returncode}" if result.returncode != 0 else "Move home failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
+        return {"output": output}
+        
     except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Move home timed out after 45 seconds"
-        }
+        return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute move home: {str(e)}"
-        }
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+
+@mcp.tool()
+def move_home() -> Dict[str, Any]:
+    """Move robot to home position."""
+    return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
 
 @mcp.tool()
 def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[str, Any]:
@@ -799,78 +473,11 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
         object_name: Name of the object to grasp
         grasp_id: ID of the grasp point to use
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    
+    Returns:
+        Raw output from the move to grasp primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        move_to_grasp_path = os.path.join(script_dir, "primitives", "move_to_grasp.py")
-        
-        # Validate mode parameter
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 60 /usr/bin/python3 move_to_grasp.py --object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=70
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Move to grasp executed successfully",
-                "output": result.stdout,
-                "parameters": {
-                    "object_name": object_name,
-                    "grasp_id": grasp_id,
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Move to grasp failed with return code {result.returncode}" if result.returncode != 0 else "Move to grasp failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Move to grasp timed out after 60 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute move to grasp: {str(e)}"
-        }
+    return _run_primitive("move_to_grasp.py", f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}", timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
 def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
@@ -880,75 +487,11 @@ def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim") -
         object_name: Name of the object to reorient
         base_name: Name of the base object
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    
+    Returns:
+        Raw output from the reorient for assembly primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        # Validate mode parameter
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        reorient_path = os.path.join(script_dir, "primitives", "reorient_for_assembly.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 90 /usr/bin/python3 reorient_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=100
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = (result.stdout + result.stderr).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "no pose data" in output_lower or
-            "not found" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Reorient for assembly executed successfully",
-                "parameters": {
-                    "object_name": object_name,
-                    "base_name": base_name,
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Reorient for assembly failed with return code {result.returncode}" if result.returncode != 0 else "Reorient for assembly failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Reorient for assembly timed out after 90 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute reorient for assembly: {str(e)}"
-        }
+    return _run_primitive("reorient_for_assembly.py", f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=90, error_prefix="Reorient for assembly")
 
 @mcp.tool()
 def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
@@ -958,75 +501,11 @@ def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") 
         object_name: Name of the object being held
         base_name: Name of the base object
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    
+    Returns:
+        Raw output from the translate for assembly primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        # Validate mode parameter
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        translate_path = os.path.join(script_dir, "primitives", "translate_for_assembly.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 90 /usr/bin/python3 translate_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=100
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = (result.stdout + result.stderr).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "no pose data" in output_lower or
-            "not found" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Translate for assembly executed successfully",
-                "parameters": {
-                    "object_name": object_name,
-                    "base_name": base_name,
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Translate for assembly failed with return code {result.returncode}" if result.returncode != 0 else "Translate for assembly failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Translate for assembly timed out after 90 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute translate for assembly: {str(e)}"
-        }
+    return _run_primitive("translate_for_assembly.py", f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=90, error_prefix="Translate for assembly")
 
 @mcp.tool()
 def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
@@ -1036,237 +515,44 @@ def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Opti
         mode: Mode to use - "sim" for simulation or "real" for real robot (required)
         object_name: Name of the object being held (required in sim mode)
         base_name: Name of the base object (required in sim mode)
+    
+    Returns:
+        Raw output from the perform insert primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        # Validate mode parameter
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        # Validate sim mode requirements
-        if mode == "sim":
-            if object_name is None or base_name is None:
-                return {
-                    "status": "error",
-                    "message": "In sim mode, object_name and base_name are required"
-                }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        perform_insert_path = os.path.join(script_dir, "primitives", "perform_insert.py")
-        
-        # Build command based on mode
-        if mode == "sim":
-            cmd_parts = [
-                f"cd {script_dir}/primitives",
-                f"timeout 90 /usr/bin/python3 perform_insert.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-            ]
-        else:  # real mode - only mode parameter, use defaults for all others
-            cmd_parts = [
-                f"cd {script_dir}/primitives",
-                f"timeout 300 /usr/bin/python3 perform_insert.py --mode {mode}"
-            ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=310 if mode == "real" else 100  # Real mode can take longer
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = (result.stdout + result.stderr).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "no pose data" in output_lower or
-            "not found" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Force compliant move down executed successfully",
-                "output": result.stdout,
-                "parameters": {
-                    "mode": mode,
-                    "object_name": object_name if mode == "sim" else None,
-                    "base_name": base_name if mode == "sim" else None
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Force compliant move down failed with return code {result.returncode}" if result.returncode != 0 else "Force compliant move down failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": f"Force compliant move down timed out after {'5 minutes' if mode == 'real' else '90 seconds'}"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute force compliant move down: {str(e)}"
-        }
+    # Build command based on mode
+    if mode == "sim":
+        args = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+        timeout = 90
+    else:  # real mode
+        args = f"--mode {mode}"
+        timeout = 300
+    
+    return _run_primitive("perform_insert.py", args, timeout=timeout, error_prefix="Perform insert")
 
 @mcp.tool()
 def verify_final_assembly_pose(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Verify if object is in correct final assembly pose relative to base."""
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        verify_path = os.path.join(script_dir, "primitives", "verify_final_assembly_pose.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 30 /usr/bin/python3 verify_final_assembly_pose.py --object-name \"{object_name}\" --base-name \"{base_name}\""
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=40
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = (result.stdout + result.stderr).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "no pose data" in output_lower or
-            "not found" in output_lower or
-            "verification failed" in output_lower or
-            "placement failed" in output_lower
-        )
-        
-        # Check for success indicators
-        has_success = (
-            "verification successful" in output_lower or
-            "verification: success" in output_lower
-        )
-        
-        if result.returncode == 0 and has_success and not has_error:
-            return {
-                "status": "success",
-                "message": "Object is in correct final assembly pose",
-                "output": result.stdout,
-                "parameters": {
-                    "object_name": object_name,
-                    "base_name": base_name
-                }
-            }
-        else:
-            # If returncode is 1 or verification failed, return error
-            return {
-                "status": "error",
-                "message": "Placement failed - Object is NOT in correct final assembly pose" if (result.returncode == 1 or "verification failed" in output_lower) else f"Verify final assembly pose failed with return code {result.returncode}",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Verify final assembly pose timed out after 30 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute verify final assembly pose: {str(e)}"
-        }
+    """Verify if object is in correct final assembly pose relative to base.
+    
+    Args:
+        object_name: Name of the object
+        base_name: Name of the base object
+    
+    Returns:
+        Raw output from the verify final assembly pose primitive script
+    """
+    return _run_primitive("verify_final_assembly_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify final assembly pose")
 
 @mcp.tool()
 def move_down(mode: str = "real") -> Dict[str, Any]:
-    """Move robot down with force monitoring."""
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        move_down_path = os.path.join(script_dir, "primitives", "move_down.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"/usr/bin/python3 move_down.py --mode {mode}"
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutes - move_down can run incrementally until force threshold
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Move down executed successfully",
-                "output": result.stdout,
-                "parameters": {
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Move down failed with return code {result.returncode}" if result.returncode != 0 else "Move down failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Move down timed out after 5 minutes. The robot may still be moving - check robot status."
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute move down: {str(e)}"
-        }
+    """Move robot down with force monitoring.
+    
+    Args:
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "real")
+    
+    Returns:
+        Raw output from the move down primitive script
+    """
+    return _run_primitive("move_down.py", f"--mode {mode}", timeout=300, error_prefix="Move down")
 
 @mcp.tool()
 def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
@@ -1279,164 +565,18 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
     
     Returns:
-        Dictionary with execution status and results
+        Raw output from the gripper control primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        # Validate mode
-        if mode not in ["sim", "real"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'sim' or 'real'"
-            }
-        
-        # Validate command: "open", "close", or numeric value 0-110
-        command_lower = command.lower()
-        command_value = None
-        
-        if command_lower in ["open", "close"]:
-            command_value = command_lower
-        else:
-            # Try to parse as numeric value
-            try:
-                numeric_value = float(command)
-                if 0 <= numeric_value <= 110:
-                    command_value = str(numeric_value)
-                else:
-                    return {
-                        "status": "error",
-                        "message": f"Invalid numeric value '{command}'. Use 0-110 (representing 0-11cm width), 'open', or 'close'."
-                    }
-            except ValueError:
-                return {
-                    "status": "error",
-                    "message": f"Invalid command '{command}'. Use 'open', 'close', or numeric value 0-110 (representing 0-11cm width)."
-                }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        control_gripper_path = os.path.join(script_dir, "primitives", "control_gripper.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 60 /usr/bin/python3 control_gripper.py {command_value} --mode {mode}"
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=70
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Gripper control executed successfully",
-                "output": result.stdout,
-                "parameters": {
-                    "command": command_value,
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Gripper control failed with return code {result.returncode}" if result.returncode != 0 else "Gripper control failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Gripper control timed out after 60 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute gripper control: {str(e)}"
-        }
+    return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 @mcp.tool()
 def move_to_safe_height() -> Dict[str, Any]:
-    """Move robot to safe height."""
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        move_to_safe_height_path = os.path.join(script_dir, "primitives", "move_to_safe_height.py")
-        
-        cmd_parts = [
-            f"cd {script_dir}/primitives",
-            f"timeout 30 /usr/bin/python3 move_to_safe_height.py"
-        ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=35
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Move to safe height executed successfully",
-                "output": result.stdout
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Move to safe height failed with return code {result.returncode}" if result.returncode != 0 else "Move to safe height failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Move to safe height timed out after 30 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute move to safe height: {str(e)}"
-        }
+    """Move robot to safe height.
+    
+    Returns:
+        Raw output from the move to safe height primitive script
+    """
+    return _run_primitive("move_to_safe_height.py", timeout=30, error_prefix="Move to safe height")
 
 @mcp.tool()
 def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
@@ -1444,83 +584,11 @@ def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
     
     Args:
         mode: Mode to use - "move" to keep current end-effector orientation (default) or "hover" for top-down (face-down) orientation
+    
+    Returns:
+        Raw output from the move to clear area primitive script
     """
-    try:
-        import subprocess
-        import sys
-        import os
-        
-        # Validate mode parameter
-        if mode not in ["move", "hover"]:
-            return {
-                "status": "error",
-                "message": f"Invalid mode '{mode}'. Must be 'move' or 'hover'"
-            }
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        move_to_clear_area_path = os.path.join(script_dir, "primitives", "move_to_clear_area.py")
-        
-        # Build command based on mode
-        if mode == "hover":
-            cmd_parts = [
-                f"cd {script_dir}/primitives",
-                f"timeout 45 /usr/bin/python3 move_to_clear_area.py --hover"
-            ]
-        else:  # move mode (default)
-            cmd_parts = [
-                f"cd {script_dir}/primitives",
-                f"timeout 45 /usr/bin/python3 move_to_clear_area.py --move"
-            ]
-        
-        cmd = "\n".join(cmd_parts)
-        
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=50
-        )
-        
-        # Check for error messages in output even if returncode is 0
-        output_lower = ((result.stdout or "") + (result.stderr or "")).lower()
-        has_error = (
-            "error" in output_lower or 
-            "failed" in output_lower or 
-            "❌" in output_lower or
-            "timeout" in output_lower or
-            "rejected" in output_lower or
-            "aborted" in output_lower
-        )
-        
-        if result.returncode == 0 and not has_error:
-            return {
-                "status": "success",
-                "message": "Move to place down executed successfully",
-                "output": result.stdout,
-                "parameters": {
-                    "mode": mode
-                }
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Move to place down failed with return code {result.returncode}" if result.returncode != 0 else "Move to place down failed (error detected in output)",
-                "error": result.stderr,
-                "output": result.stdout
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "message": "Move to place down timed out after 45 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to execute move to place down: {str(e)}"
-        }
+    return _run_primitive("move_to_clear_area.py", f"--{mode}", timeout=45, error_prefix="Move to clear area")
 
 
 if __name__ == "__main__":

@@ -80,8 +80,6 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
             for component in components:
                 comp_name = component.get('name', '')
                 if comp_name in base_name_variants:
-                    if logger:
-                        logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -301,18 +299,11 @@ class FoldSymmetry:
         """
         symmetry_rotations = FoldSymmetry.get_symmetry_rotations_as_matrices(fold_data)
         
-        if logger:
-            logger.info(f"  Generating equivalent targets from {len(symmetry_rotations)} symmetry rotations")
-        
         equivalent_targets = []
         for i, R_sym in enumerate(symmetry_rotations):
             # Apply symmetry in object frame: R_equiv = R_target × R_sym
             R_equivalent = R_target_world @ R_sym
             equivalent_targets.append(R_equivalent)
-            
-            if logger:
-                rpy = R.from_matrix(R_equivalent).as_euler('xyz', degrees=True)
-                logger.info(f"    Equivalent target {i}: RPY = [{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}]")
         
         return equivalent_targets
 
@@ -369,7 +360,7 @@ class ReorientForAssembly(Node):
         self.cardinal_error_threshold_increment = 10.0  # Increment threshold by this amount each retry
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
         
-        self.get_logger().info(f"ReorientForAssembly initialized (Mode: {self.mode}, Fold Symmetry + 24-Cardinal with Intermediary)")
+        self.get_logger().info(f"Using {self.mode.upper()} mode")
     
     def load_assembly_config(self, base_name=None):
         """
@@ -404,7 +395,6 @@ class ReorientForAssembly(Node):
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-                self.get_logger().info(f"Loaded assembly config from: {json_file}")
                 return config
         except (FileNotFoundError, json.JSONDecodeError) as e:
             self.get_logger().error(f"Error loading assembly config from {json_file}: {e}")
@@ -568,10 +558,7 @@ class ReorientForAssembly(Node):
             ExtendedCardinalOrientations.find_closest_cardinal(R_object_current, CARDINAL_THRESHOLD)
         
         if current_cardinal_name is None:
-            self.get_logger().info(f"  Current object not in cardinal pose (closest: {current_dist:.1f}°)")
             return (False, None, None, None, float('inf'))
-        
-        self.get_logger().info(f"  ✓ Current object is in cardinal pose: {current_cardinal_name} (error: {current_dist:.1f}°)")
         
         # Generate equivalent targets and check if any is close to a cardinal
         equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
@@ -593,10 +580,7 @@ class ReorientForAssembly(Node):
                 best_target_cardinal_quat = target_cardinal_quat
         
         if best_target_cardinal is None:
-            self.get_logger().info(f"  Target not in cardinal pose (closest: {best_target_dist:.1f}°)")
             return (False, None, None, None, float('inf'))
-        
-        self.get_logger().info(f"  ✓ Target is in cardinal pose: {best_target_cardinal} (error: {best_target_dist:.1f}°)")
         
         # Now find the equivalent target that's closest to the CURRENT object orientation
         # This ensures we make the smallest possible adjustment
@@ -685,21 +669,9 @@ class ReorientForAssembly(Node):
             R_object_result = R_object_from_cardinal
             object_error = cardinal_object_error
             best_target_R = best_cardinal_target_R
-            
-            if cardinal_object_error > original_object_error:
-                self.get_logger().info(f"  → Snapped EE to cardinal: {EE_cardinal_name} (EE error: {EE_cardinal_dist:.1f}°, object error increased from {original_object_error:.1f}° to {cardinal_object_error:.1f}°)")
-            else:
-                self.get_logger().info(f"  → Snapped EE to cardinal: {EE_cardinal_name} (EE error: {EE_cardinal_dist:.1f}°, object error: {object_error:.1f}°)")
         
         # Convert to quaternion
         best_quat = R.from_matrix(R_EE_new).as_quat()
-        
-        # Log the adjustment
-        if current_cardinal_name == best_target_cardinal:
-            self.get_logger().info(f"  → Targeted adjustment: {current_cardinal_name} → {best_target_cardinal} (same cardinal, {adjustment_angle:.1f}° rotation needed)")
-        else:
-            self.get_logger().info(f"  → Targeted adjustment: {current_cardinal_name} → {best_target_cardinal} ({adjustment_angle:.1f}° rotation)")
-        self.get_logger().info(f"  → Final object error: {object_error:.1f}°")
         
         return (True, best_quat, R_object_result, best_target_R, object_error)
     
@@ -749,7 +721,6 @@ class ReorientForAssembly(Node):
             
             # If current object is already close to canonical (within 15°), prefer minimal adjustment
             if min_distance_to_current < 15.0:
-                self.get_logger().info(f"  Current object is close to canonical ({min_distance_to_current:.1f}°). Preferring minimal adjustment...")
                 
                 # Calculate current EE orientation from current object and grasp
                 # R_object_current = R_EE_current @ R_grasp
@@ -784,11 +755,9 @@ class ReorientForAssembly(Node):
                     
                     # If this gives reasonable error, use it
                     if min_error_for_cardinal < 30.0:  # Reasonable threshold
-                        self.get_logger().info(f"  → Using minimal adjustment cardinal: {EE_cardinal_name} (object error: {min_error_for_cardinal:.1f}°)")
                         return (EE_cardinal_name, EE_cardinal_quat, R_object_from_cardinal,
                                 best_target_for_cardinal, min_error_for_cardinal, None)
         
-        self.get_logger().info(f"  Testing {len(cardinals)} cardinals × {len(equivalent_targets)} equivalent targets...")
         
         # Collect all candidates with their errors and EE rotation distances
         candidates = []
@@ -886,7 +855,6 @@ class ReorientForAssembly(Node):
                 return False
         
         self.get_logger().info(f"Reorienting {object_name} relative to {base_name}")
-        self.get_logger().info("Mode: Fold Symmetry + 24-Cardinal Snap")
         
         # === Get current EE pose ===
         if self.current_ee_pose is None:
@@ -897,7 +865,6 @@ class ReorientForAssembly(Node):
         # === Get current object orientation ===
         if current_object_orientation is not None:
             R_object_current = self.get_rotation_from_quat(current_object_orientation)
-            self.get_logger().info(f"  Using provided object orientation")
         else:
             obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
             if obj_key not in self.current_poses:
@@ -905,18 +872,9 @@ class ReorientForAssembly(Node):
                 return False
             R_object_current = self.get_rotation_from_transform(self.current_poses[obj_key].transform)
         
-        # === Log initial object orientation in RPY ===
-        initial_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
-        self.get_logger().info("=" * 70)
-        self.get_logger().info(f"📊 INITIAL OBJECT ORIENTATION:")
-        self.get_logger().info(f"   Object: {object_name}")
-        self.get_logger().info(f"   RPY: [{initial_obj_rpy[0]:.1f}, {initial_obj_rpy[1]:.1f}, {initial_obj_rpy[2]:.1f}] degrees")
-        self.get_logger().info("=" * 70)
-        
         # === Get base orientation ===
         if target_base_orientation is not None:
             R_base = self.get_rotation_from_quat(target_base_orientation)
-            self.get_logger().info(f"  Using provided base orientation")
         else:
             base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
             if base_key not in self.current_poses:
@@ -937,21 +895,11 @@ class ReorientForAssembly(Node):
         if fold_data is None:
             fold_data = FoldSymmetry.load_symmetry_data(f"{object_name}_scaled70", self.symmetry_dir)
         
-        self.get_logger().info("=" * 70)
-        if fold_data:
-            self.get_logger().info(f"  Loaded fold symmetry for {object_name}:")
-            for axis, data in fold_data.get('fold_axes', {}).items():
-                fold_count = data.get('fold', 1)
-                if fold_count > 1:
-                    self.get_logger().info(f"    {axis.upper()}-axis: {fold_count}-fold symmetry")
-        else:
-            self.get_logger().info("  No fold symmetry data (identity only)")
-        
         # === Calculate grasp rotation ===
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
         R_grasp = R_EE_current.T @ R_object_current
         
-        # === Transform target to world frame (for logging) ===
+        # === Transform target to world frame ===
         # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.
         R_target_relative = R.from_quat(target_quat).as_matrix()
         R_object_target_world = R_base @ R_target_relative
@@ -965,25 +913,11 @@ class ReorientForAssembly(Node):
         # Target in base-relative frame (same as R_target_relative)
         R_object_target_base_relative = R_target_relative
         
-        # Log current state
-        current_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
-        target_world_rpy = R.from_matrix(R_object_target_world).as_euler('xyz', degrees=True)
-        # For logging: derive the relative target RPY from the quaternion
-        target_relative_rpy = R.from_quat(target_quat).as_euler('xyz', degrees=True)
-        
-        self.get_logger().info(f"  Current object RPY: [{current_obj_rpy[0]:.1f}, {current_obj_rpy[1]:.1f}, {current_obj_rpy[2]:.1f}]")
-        self.get_logger().info(
-            f"  Target (relative to base, RPY from quat): "
-            f"[{target_relative_rpy[0]:.1f}, {target_relative_rpy[1]:.1f}, {target_relative_rpy[2]:.1f}]"
-        )
-        self.get_logger().info(
-            f"  Target (world frame, RPY): "
-            f"[{target_world_rpy[0]:.1f}, {target_world_rpy[1]:.1f}, {target_world_rpy[2]:.1f}]"
-        )
+        # Log initial object orientation
+        initial_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
+        self.get_logger().info(f"Initial object orientation (RPY, degrees): [{initial_obj_rpy[0]:.1f}, {initial_obj_rpy[1]:.1f}, {initial_obj_rpy[2]:.1f}]")
         
         # === Try cardinal-to-cardinal optimization first (in base-relative frame) ===
-        self.get_logger().info("-" * 70)
-        self.get_logger().info("  Attempting cardinal-to-cardinal optimization...")
         (optimization_success, best_quat_base_relative, resulting_object_R_base_relative, 
          matched_target_R_base_relative, object_error) = self.compute_cardinal_to_cardinal_adjustment(
             R_object_current_base_relative, R_object_target_base_relative, R_EE_current_base_relative, R_grasp, fold_data
@@ -1011,10 +945,8 @@ class ReorientForAssembly(Node):
             best_quat_cardinal = best_quat  # Already transformed to world frame
             # Use the values already computed from optimization
             cardinal_object_error = object_error
-            self.get_logger().info("  ✓ Using cardinal-to-cardinal optimization")
         else:
             # === Fall back to full search (in base-relative frame) ===
-            self.get_logger().info("  → Falling back to full cardinal search...")
             (best_cardinal, best_quat_cardinal_base_relative, resulting_object_R_base_relative, 
              matched_target_R_base_relative, object_error, candidates) = self.find_best_cardinal_for_assembly(
                 R_object_target_base_relative, R_grasp, fold_data, R_object_current_base_relative, R_EE_current_base_relative
@@ -1064,8 +996,6 @@ class ReorientForAssembly(Node):
             # Get current candidate (now includes EE rotation distance as 6th element)
             card_name, card_quat, card_object_R, card_target_R, card_error, _ = candidate_list[candidate_index]
             
-            if candidate_index > 0:
-                self.get_logger().info(f"  🔄 Trying alternative cardinal {candidate_index + 1}/{len(candidate_list)}: {card_name} (object error: {card_error:.1f}°)")
             
             # Recalculate object error from this cardinal to ensure consistency
             R_EE_cardinal = R.from_quat(card_quat).as_matrix()
@@ -1096,10 +1026,8 @@ class ReorientForAssembly(Node):
                         self.current_cardinal_error_threshold + self.cardinal_error_threshold_increment,
                         self.cardinal_error_threshold_max
                     )
-                    self.get_logger().info(f"  🔄 Cardinal object error ({cardinal_object_error:.1f}°) > threshold ({old_threshold:.1f}°), incrementing to {self.current_cardinal_error_threshold:.1f}°...")
                 else:
                     # Max threshold reached for this candidate - try next candidate
-                    self.get_logger().info(f"  ⚠️ Max threshold reached for {card_name} (object error: {cardinal_object_error:.1f}°). Trying next candidate...")
                     break
             
             # Check if this candidate is acceptable
@@ -1116,7 +1044,6 @@ class ReorientForAssembly(Node):
         
         if not cardinal_found:
             # All candidates exhausted - use the best one anyway (always use canonical)
-            self.get_logger().warn(f"  ⚠️ All {len(candidate_list)} candidates exhausted. Using best cardinal anyway (object error: {cardinal_object_error:.1f}°)")
             best_cardinal = candidate_list[0][0]
             best_quat_cardinal = candidate_list[0][1]
             R_EE_cardinal = R.from_quat(best_quat_cardinal).as_matrix()
@@ -1131,26 +1058,8 @@ class ReorientForAssembly(Node):
         best_quat = best_quat_cardinal
         object_error = cardinal_object_error
         
-        if self.current_cardinal_error_threshold > self.cardinal_error_threshold_initial:
-            self.get_logger().info(f"  → Using cardinal: {best_cardinal} (object error: {cardinal_object_error:.1f}°, threshold: {self.current_cardinal_error_threshold:.1f}°)")
-        else:
-            self.get_logger().info(f"  → Using cardinal: {best_cardinal} (object error: {cardinal_object_error:.1f}°)")
-        
-        # === Log results ===
-        resulting_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
-        matched_rpy = R.from_matrix(matched_target_R).as_euler('xyz', degrees=True)
+        # === Calculate RPY for redirect check ===
         EE_rpy = R.from_matrix(R.from_quat(best_quat).as_matrix()).as_euler('xyz', degrees=True)
-        
-        self.get_logger().info("-" * 70)
-        self.get_logger().info(f"  RESULT:")
-        self.get_logger().info(f"    Best cardinal: {best_cardinal}")
-        self.get_logger().info(f"    Cardinal RPY: {ExtendedCardinalOrientations.get_cardinal_rpy(best_cardinal)}")
-        self.get_logger().info(f"    Calculated EE RPY: [{EE_rpy[0]:.1f}, {EE_rpy[1]:.1f}, {EE_rpy[2]:.1f}]")
-        self.get_logger().info(f"    Matched equivalent target RPY: [{matched_rpy[0]:.1f}, {matched_rpy[1]:.1f}, {matched_rpy[2]:.1f}]")
-        self.get_logger().info(f"    Resulting object RPY: [{resulting_rpy[0]:.1f}, {resulting_rpy[1]:.1f}, {resulting_rpy[2]:.1f}]")
-        self.get_logger().info(f"    OBJECT alignment error: {object_error:.1f}°")
-        self.get_logger().info(f"    EE Position: {ee_position} (unchanged)")
-        self.get_logger().info("=" * 70)
         
         # === Redirect EE orientation if facing towards robot base ===
         # Check if EE RPY is approximately (90, 0, 180) and redirect to (90, 0, 0)
@@ -1159,7 +1068,6 @@ class ReorientForAssembly(Node):
         if (abs(EE_rpy[0] - 90.0) < rpy_tolerance and 
             abs(EE_rpy[1] - 0.0) < rpy_tolerance and 
             abs(EE_rpy[2] - 180.0) < rpy_tolerance):
-            self.get_logger().info(f"  🔄 Redirecting EE from (90, 0, 180) to (90, 0, 0) to avoid facing robot base")
             # Create new quaternion from (90, 0, 0) RPY
             R_EE_redirected = R.from_euler('xyz', [90.0, 0.0, 0.0], degrees=True)
             best_quat = R_EE_redirected.as_quat()
@@ -1191,12 +1099,9 @@ class ReorientForAssembly(Node):
             resulting_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
             matched_rpy = R.from_matrix(matched_target_R).as_euler('xyz', degrees=True)
             
-            self.get_logger().info(f"  ✅ Redirected EE RPY: [{EE_rpy[0]:.1f}, {EE_rpy[1]:.1f}, {EE_rpy[2]:.1f}]")
-            self.get_logger().info(f"  ✅ Updated object alignment error: {object_error:.1f}°")
-        
         # === Check if error is acceptable ===
         if object_error > 30.0:
-            self.get_logger().warn(f"⚠️ High alignment error ({object_error:.1f}°) - result may not be ideal")
+            self.get_logger().warn(f"High alignment error ({object_error:.1f}°) - result may not be ideal")
         
         # === Compute IK ===
         if self.current_joint_angles is None:
@@ -1209,7 +1114,6 @@ class ReorientForAssembly(Node):
         
         # If IK fails and we have alternative candidates, try them
         if joint_angles is None and candidates is not None:
-            self.get_logger().warn(f"  ⚠️ IK failed for best cardinal '{best_cardinal}'. Trying alternatives...")
             for i, (card_name, card_quat, card_object_R, card_target_R, card_error, _) in enumerate(candidates[1:6], 1):  # Try top 5 alternatives
                 # Snap to exact equivalent target
                 R_EE_card_exact = card_target_R @ R_grasp.T
@@ -1226,7 +1130,6 @@ class ReorientForAssembly(Node):
                     card_object_R = R_object_card_exact
                     card_error = card_exact_error
                 
-                self.get_logger().info(f"  Trying alternative {i}: {card_name} (object error: {card_error:.1f}°)")
                 joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), card_quat.tolist())
                 
                 if joint_angles is not None:
@@ -1236,7 +1139,6 @@ class ReorientForAssembly(Node):
                     resulting_object_R = card_object_R
                     matched_target_R = card_target_R
                     object_error = card_error
-                    self.get_logger().info(f"  ✅ IK succeeded with alternative: {card_name}")
                     break
         
         if joint_angles is None:
@@ -1252,14 +1154,10 @@ class ReorientForAssembly(Node):
         
         success = self.execute_trajectory(trajectory)
         
-        # === Log final object orientation in RPY ===
+        # Log final object orientation
         if success:
             final_obj_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
-            self.get_logger().info("=" * 70)
-            self.get_logger().info(f"📊 FINAL OBJECT ORIENTATION:")
-            self.get_logger().info(f"   Object: {object_name}")
-            self.get_logger().info(f"   RPY: [{final_obj_rpy[0]:.1f}, {final_obj_rpy[1]:.1f}, {final_obj_rpy[2]:.1f}] degrees")
-            self.get_logger().info("=" * 70)
+            self.get_logger().info(f"Final object orientation (RPY, degrees): [{final_obj_rpy[0]:.1f}, {final_obj_rpy[1]:.1f}, {final_obj_rpy[2]:.1f}]")
         
         return success
     
@@ -1283,11 +1181,17 @@ class ReorientForAssembly(Node):
             self.trajectory_completed = False
             self.trajectory_success = False
             
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response_callback)
             
             while rclpy.ok() and not self.trajectory_completed:
                 rclpy.spin_once(self, timeout_sec=0.1)
+            
+            if self.trajectory_success:
+                self.get_logger().info("Movement completed successfully")
+            else:
+                self.get_logger().error("Trajectory failed")
             
             return self.trajectory_success
         except Exception as e:
@@ -1297,6 +1201,7 @@ class ReorientForAssembly(Node):
     def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
+            self.get_logger().error("Trajectory goal rejected")
             self.trajectory_completed = True
             self.trajectory_success = False
             return
@@ -1353,7 +1258,10 @@ def main(args=None):
             args.current_object_orientation, args.target_base_orientation
         )
         
-        node.get_logger().info("✅ Success!" if success else "❌ Failed")
+        if success:
+            node.get_logger().info("Movement completed successfully")
+        else:
+            node.get_logger().error("Reorientation failed")
         
         time.sleep(0.5)
         node.destroy_node()

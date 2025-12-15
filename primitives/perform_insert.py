@@ -206,7 +206,6 @@ class PerformInsertController(Node):
             self.force = np.array([0.0, 0.0, 0.0])  # Dummy force for sim mode
         
         # Wait for data
-        self.get_logger().info(f"Waiting for robot data (mode: {self.mode})...")
         while self.pos is None or self.joints is None:
             rclpy.spin_once(self, timeout_sec=0.1)
         
@@ -219,21 +218,17 @@ class PerformInsertController(Node):
         if self.rpy is not None:
             # Set fixed orientation to [0, 180, 0.01] - face down with yaw = 0.01°
             self.fixed_rpy = np.array([0.0, 180.0, 0.01])
-            self.get_logger().info(f"Fixed orientation: R={self.fixed_rpy[0]:.1f}°, P={self.fixed_rpy[1]:.1f}°, Y={self.fixed_rpy[2]:.2f}°")
         else:
             # Default orientation: face down with yaw = 0.01°
             self.fixed_rpy = np.array([0.0, 180.0, 0.01])
-            self.get_logger().info("Using default orientation: R=0.0°, P=180.0°, Y=0.01°")
         
         # Store starting X and Y position (will be maintained during search phase)
         if self.pos is not None:
             self.start_x = self.pos[0]
             self.start_y = self.pos[1]
-            self.get_logger().info(f"Starting position: X={self.start_x*1000:.2f} mm, Y={self.start_y*1000:.2f} mm (will be maintained until contact)")
         
         # Get baseline force (average over 2 seconds) - only in real mode
         if self.mode == 'real':
-            self.get_logger().info("Calibrating force sensor (2 sec)...")
             samples = []
             start = time.time()
             while time.time() - start < 2.0:
@@ -242,22 +237,10 @@ class PerformInsertController(Node):
                     samples.append(self.force.copy())
                 time.sleep(0.05)
             self.baseline = np.mean(samples, axis=0)
-            self.get_logger().info(f"Baseline: [{self.baseline[0]:.2f}, {self.baseline[1]:.2f}, {self.baseline[2]:.2f}] N")
         else:
             self.baseline = np.array([0.0, 0.0, 0.0])  # No baseline needed for sim mode
         
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("FORCE COMPLIANT MOVE DOWN CONTROLLER INITIALIZED")
-        self.get_logger().info("=" * 60)
-        self.get_logger().info(f"Downward speed: {self.speed * 1000:.1f} mm/s")
-        self.get_logger().info(f"X/Y compliance gain: {gain} mm/s per N")
-        self.get_logger().info(f"X/Y force deadband: {deadband} N")
-        self.get_logger().info(f"X/Y max velocity: {max_vel} mm/s")
-        self.get_logger().info(f"Force direction reversed: {'YES' if self.reverse else 'NO'}")
-        self.get_logger().info(f"Z force threshold: {z_threshold:.1f} N (contact detection, negative = upward resistance)")
-        self.get_logger().info(f"X/Y force threshold: {self.xy_force_threshold:.1f} N (minimum required for alignment entry)")
-        self.get_logger().info(f"Fixed orientation: R={self.fixed_rpy[0]:.1f}°, P={self.fixed_rpy[1]:.1f}°, Y={self.fixed_rpy[2]:.1f}°")
-        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"Using {self.mode.upper()} mode")
     
     def _canonicalize_euler(self, orientation):
         """
@@ -622,7 +605,6 @@ class PerformInsertController(Node):
         ee_target_rotation = R.from_matrix(ee_target_rot_matrix)
         ee_target_quat = ee_target_rotation.as_quat()
         
-        self.get_logger().info(f"Step 2: Moving down to final position: {ee_target_position}")
         
         # Read current joint angles before computing IK
         if self.joints is None:
@@ -655,7 +637,7 @@ class PerformInsertController(Node):
         if success:
             # Wait for poses to update (same as old code)
             time.sleep(0.5)
-            self.get_logger().info("Reached final position")
+            self.get_logger().info("Movement completed successfully")
         else:
             self.get_logger().error("Failed to reach final position")
         
@@ -720,12 +702,7 @@ class PerformInsertController(Node):
             if z_contact and xy_misalignment:
                 self.contact_detected = True
                 self.just_detected_contact = True  # Flag to trigger cancellation in run loop
-                self.get_logger().info("=" * 60)
-                self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
-                self.get_logger().info(f"MISALIGNMENT DETECTED: X/Y force magnitude = {f_xy_mag:.2f} N (threshold: {self.xy_force_threshold:.1f} N)")
-                self.get_logger().info("Will stop current trajectory and enter ALIGNMENT MODE")
-                self.get_logger().info("Will move down very slowly while adjusting X/Y to minimize forces")
-                self.get_logger().info("=" * 60)
+                self.get_logger().info(f"Contact detected: Z force = {f_z:.2f}N, X/Y force = {f_xy_mag:.2f}N. Entering alignment mode.")
         
         # TODO: Fix move down speed till first contact - adjust search phase speed if needed
         # Z-direction movement
@@ -806,7 +783,6 @@ class PerformInsertController(Node):
         if self.mode == 'sim':
             # Sim mode: execute step 2 (move down to final position)
             # Wait for object and base poses from topics
-            self.get_logger().info("Waiting for object and base poses from topics...")
             while not self.current_poses:
                 rclpy.spin_once(self, timeout_sec=0.1)
                 time.sleep(0.1)
@@ -816,7 +792,6 @@ class PerformInsertController(Node):
             return self.run_real()
     
     def run_real(self):
-        self.get_logger().info("Starting force compliant move down. Press Ctrl+C to stop.")
         
         if not self.traj_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("Trajectory server not available!")
@@ -827,14 +802,13 @@ class PerformInsertController(Node):
         search_complete = self.run_search_phase()
         
         if not self.running:
-            self.get_logger().info("Stopped during search phase.")
             return
         
         # If contact detected with misalignment, run alignment phase
         if self.contact_detected and self.alignment_mode:
             self.run_alignment_phase()
         
-        self.get_logger().info("Stopped.")
+        self.get_logger().info("Movement completed successfully")
     
     def run_search_phase(self):
         """
@@ -842,9 +816,6 @@ class PerformInsertController(Node):
         Monitors force during execution and cancels if contact is detected.
         Returns True if completed, False if interrupted.
         """
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("SEARCH PHASE: Pre-computing all waypoints")
-        self.get_logger().info("=" * 60)
         
         if self.pos is None or self.joints is None:
             self.get_logger().error("Position or joint angles not available!")
@@ -864,10 +835,7 @@ class PerformInsertController(Node):
         dz_per_waypoint = self.speed * dt  # Distance moved per waypoint
         num_waypoints = max(10, int(distance_to_move / dz_per_waypoint))
         
-        self.get_logger().info(f"Pre-computing {num_waypoints} waypoints")
         self.get_logger().info(f"Moving from Z={start_z:.3f}m to Z={target_z:.3f}m")
-        self.get_logger().info(f"Maintaining X={self.start_x:.4f}, Y={self.start_y:.4f}")
-        
         # Pre-compute all waypoints
         waypoints = []
         joint_trajectory = []
@@ -904,7 +872,6 @@ class PerformInsertController(Node):
             self.get_logger().error("Failed to compute any waypoints! Aborting.")
             return False
         
-        self.get_logger().info(f"Computed {len(joint_trajectory)} waypoints successfully")
         
         # Calculate total trajectory duration
         trajectory_duration = len(joint_trajectory) * dt
@@ -932,7 +899,7 @@ class PerformInsertController(Node):
         goal.trajectory = trajectory
         goal.goal_time_tolerance = Duration(sec=2)
         
-        self.get_logger().info(f"Sending trajectory with {len(trajectory.points)} waypoints...")
+        self.get_logger().info("Trajectory sent and accepted")
         
         future = self.traj_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
@@ -976,8 +943,7 @@ class PerformInsertController(Node):
                 if xy_misalignment:
                     self.get_logger().info("=" * 60)
                     self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
-                    self.get_logger().info(f"MISALIGNMENT DETECTED: X/Y force = {f_xy_mag:.2f} N (threshold: {self.xy_force_threshold:.1f} N)")
-                    self.get_logger().info("Entering ALIGNMENT MODE")
+                    self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag:.2f}N. Entering alignment mode.")
                     self.get_logger().info("=" * 60)
                     self.alignment_mode = True
                     self.alignment_start_time = time.time()
@@ -986,7 +952,6 @@ class PerformInsertController(Node):
                 else:
                     self.get_logger().info("=" * 60)
                     self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
-                    self.get_logger().info(f"NO MISALIGNMENT: X/Y force = {f_xy_mag:.2f} N (below threshold)")
                     self.get_logger().info("Moving down until Z force reaches -5N to confirm no misalignment...")
                     self.get_logger().info("=" * 60)
                     
@@ -1018,8 +983,7 @@ class PerformInsertController(Node):
                             # Check if misalignment appeared
                             if f_xy_mag_confirm >= self.xy_force_threshold:
                                 self.get_logger().info("=" * 60)
-                                self.get_logger().info(f"MISALIGNMENT DETECTED: X/Y force = {f_xy_mag_confirm:.2f} N")
-                                self.get_logger().info("Entering ALIGNMENT MODE")
+                                self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag_confirm:.2f}N. Entering alignment mode.")
                                 self.get_logger().info("=" * 60)
                                 self.alignment_mode = True
                                 self.alignment_start_time = time.time()
@@ -1109,7 +1073,6 @@ class PerformInsertController(Node):
         Uses one-by-one waypoints for responsive force-based adjustment.
         """
         self.get_logger().info("=" * 60)
-        self.get_logger().info("ALIGNMENT PHASE: Slow movement with X/Y compliance")
         self.get_logger().info("=" * 60)
         
         self.low_force_start_time = None
@@ -1151,7 +1114,7 @@ class PerformInsertController(Node):
                                 low_force_duration = time.time() - self.low_force_start_time
                                 if low_force_duration >= self.low_force_required_duration:
                                     self.get_logger().info("=" * 60)
-                                    self.get_logger().info(f"ALIGNMENT COMPLETE: X/Y forces below {self.low_force_threshold:.1f}N for {low_force_duration:.1f}s")
+                                    self.get_logger().info("Alignment complete")
                                     self.get_logger().info(f"Final X/Y force magnitude: {f_xy_mag:.2f} N")
                                     self.get_logger().info("=" * 60)
                                     break

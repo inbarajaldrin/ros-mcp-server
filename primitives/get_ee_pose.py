@@ -31,9 +31,6 @@ class EEPoseReader:
             qos_profile
         )
         
-        print("EE Pose Reader started.")
-        print("Waiting for EE pose data...")
-    
     def ee_pose_callback(self, msg: PoseStamped):
         self.ee_position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         self.ee_quat = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
@@ -55,7 +52,6 @@ class EEPoseReader:
         print(f"EE xyz: ({1000*self.ee_position[0]:.1f}, {1000*self.ee_position[1]:.1f}, {1000*self.ee_position[2]:.1f}) mm")
         print(f"EE rpy: ({ee_euler[0]: 5.1f}, {ee_euler[1]: 5.1f}, {ee_euler[2]: 5.1f}) deg")
         print(f"EE quat: ({self.ee_quat[0]: 8.6f}, {self.ee_quat[1]: 8.6f}, {self.ee_quat[2]: 8.6f}, {self.ee_quat[3]: 8.6f}) [x,y,z,w]")
-        print("-" * 50)
     
     def run(self):
         try:
@@ -65,12 +61,11 @@ class EEPoseReader:
             
             # Print the pose once and exit
             if self.received_message:
-                print("-" * 50)
                 self.print_ee_pose()
             else:
                 print("No message received.")
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            pass
         finally:
             self.node.destroy_node()
             rclpy.shutdown()

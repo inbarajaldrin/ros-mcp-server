@@ -49,98 +49,6 @@ except ImportError:
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
 
-class PoseKalmanFilter:
-    """Kalman filter for pose estimation and smoothing"""
-    
-    def __init__(self, process_noise=0.01, measurement_noise=0.1):
-        # State vector: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw]
-        self.state_dim = 12
-        self.measurement_dim = 6  # [x, y, z, roll, pitch, yaw]
-        
-        # State vector
-        self.x = np.zeros(self.state_dim)
-        self.P = np.eye(self.state_dim) * 10  # Initial covariance
-        
-        # Process noise
-        self.Q = np.eye(self.state_dim) * process_noise
-        
-        # Measurement noise
-        self.R = np.eye(self.measurement_dim) * measurement_noise
-        
-        # Measurement matrix (we only measure position and orientation)
-        self.H = np.zeros((self.measurement_dim, self.state_dim))
-        self.H[:6, :6] = np.eye(6)
-        
-        # State transition matrix (constant velocity model)
-        self.F = np.eye(self.state_dim)
-        dt = 1.0  # Time step (will be updated dynamically)
-        self.F[:6, 6:] = np.eye(6) * dt
-        
-        self.initialized = False
-        
-    def quaternion_to_rpy(self, x, y, z, w):
-        """Convert quaternion to roll, pitch, yaw in degrees"""
-        # Roll
-        sinr_cosp = 2 * (w * x + y * z)
-        cosr_cosp = 1 - 2 * (x * x + y * y)
-        roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
-        
-        # Pitch
-        sinp = 2 * (w * y - z * x)
-        if abs(sinp) >= 1:
-            pitch = math.degrees(math.copysign(math.pi / 2, sinp))
-        else:
-            pitch = math.degrees(math.asin(sinp))
-        
-        # Yaw
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
-        
-        return [roll, pitch, yaw]
-    
-    def update(self, pose_msg, dt=1.0):
-        """Update Kalman filter with new pose measurement"""
-        # Extract measurement
-        position = [pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z]
-        rpy = self.quaternion_to_rpy(
-            pose_msg.pose.orientation.x,
-            pose_msg.pose.orientation.y,
-            pose_msg.pose.orientation.z,
-            pose_msg.pose.orientation.w
-        )
-        
-        measurement = np.array(position + rpy)
-        
-        # Update state transition matrix with current dt
-        self.F[:6, 6:] = np.eye(6) * dt
-        
-        if not self.initialized:
-            # Initialize state
-            self.x[:6] = measurement
-            self.initialized = True
-            return self.x[:6], self.x[6:12]  # Return position and velocity
-        
-        # Predict step
-        self.x = self.F @ self.x
-        self.P = self.F @ self.P @ self.F.T + self.Q
-        
-        # Update step
-        y = measurement - self.H @ self.x  # Innovation
-        S = self.H @ self.P @ self.H.T + self.R  # Innovation covariance
-        K = self.P @ self.H.T @ np.linalg.inv(S)  # Kalman gain
-        
-        self.x = self.x + K @ y
-        self.P = (np.eye(self.state_dim) - K @ self.H) @ self.P
-        
-        return self.x[:6], self.x[6:12]  # Return filtered position and velocity
-    
-    def get_filtered_pose(self):
-        """Get current filtered pose"""
-        if not self.initialized:
-            return None, None
-        return self.x[:6], self.x[6:12]
-
 class DirectObjectMove(Node):
     def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, movement_duration=5.0, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
         super().__init__('direct_object_move')
@@ -221,14 +129,10 @@ class DirectObjectMove(Node):
         # When offset increases, gripper center moves further down, TCP moves down
         self.object_to_gripper_center_offset = offset if offset is not None else 0.123  # Default: 0.123m = 12.3cm
         
-        # Initialize Kalman filter
-        self.kalman_filter = PoseKalmanFilter(process_noise=0.005, measurement_noise=0.05)
-        self.last_update_time = None
-        
         # Initialize Quaternion Orientation Controller for gimbal-lock-free gripper control
         # This ensures stable gripper orientation at pitch=180° (face down) for any yaw angle
         self.quat_controller = QuaternionOrientationController()
-        self.get_logger().info("✅ Quaternion orientation controller initialized (gimbal-lock-free mode)")
+        self.get_logger().info("Quaternion orientation controller initialized (gimbal-lock-free mode)")
         
         # Fold symmetry directory for canonical pose matching (auto-discovered)
         self.symmetry_dir = str(get_symmetry_dir())
@@ -287,7 +191,7 @@ class DirectObjectMove(Node):
                 self.grasp_points_callback,
                 5
             )
-            self.get_logger().info(f"🎯 Grasp point mode: Looking for grasp_id {grasp_id} on topic {self.grasp_points_topic}")
+            self.get_logger().info(f"Grasp point mode: Looking for grasp_id {grasp_id} on topic {self.grasp_points_topic}")
         else:
             self.grasp_points_sub = None
         
@@ -350,17 +254,12 @@ class DirectObjectMove(Node):
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
         
-        self.get_logger().info(f"🤖 Direct object movement started for object '{object_name}' on topic {topic_name}")
-        if height is not None:
-            self.get_logger().info(f"📏 Target height: {height}m (offset will be ignored)")
-        else:
-            self.get_logger().info(f"📏 Using {self.tcp_to_gripper_center_offset*100:.1f}cm TCP to gripper center offset (along gripper Z-axis)")
-            self.get_logger().info(f"📏 Using {self.object_to_gripper_center_offset*100:.1f}cm object to gripper center offset")
-        self.get_logger().info(f"⏱️ Movement duration: {movement_duration}s")
+        mode_str = self.mode.upper()
         if self.grasp_id is not None:
-            self.get_logger().info(f"🎯 Grasp point mode: Using grasp_id {grasp_id} from topic {self.grasp_points_topic}")
+            self.get_logger().info(f"Using {mode_str} mode: Moving to object '{object_name}' (grasp_id: {grasp_id})")
         else:
-            self.get_logger().info(f"🎯 Object center mode: Moving to object center")
+            self.get_logger().info(f"Using {mode_str} mode: Moving to object '{object_name}'")
+        self.get_logger().info(f"Movement duration: {movement_duration}s")
         
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees"""
@@ -497,7 +396,7 @@ class DirectObjectMove(Node):
             self.latest_pose = pose_stamped
         else:
             # Object not found in this message
-            self.get_logger().warn(f"Object '{self.object_name}' not found in current message")
+            self.get_logger().debug(f"Object '{self.object_name}' not found in current message")
             self.latest_pose = None
     
     def tf_message_callback(self, msg):
@@ -512,14 +411,14 @@ class DirectObjectMove(Node):
         if target_transform is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
-                self.get_logger().info(f"🔄 Fresh object pose data received during step 2! Cancelling current trajectory and recomputing...")
+                self.get_logger().debug("Fresh object pose data received during step 2! Cancelling current trajectory and recomputing...")
                 # Cancel current trajectory
                 if self.current_goal_handle is not None:
                     try:
                         cancel_future = self.current_goal_handle.cancel_goal_async()
-                        self.get_logger().info("Cancelling current trajectory...")
+                        self.get_logger().debug("Cancelling current trajectory...")
                     except Exception as e:
-                        self.get_logger().warn(f"Could not cancel trajectory: {e}")
+                        self.get_logger().debug(f"Could not cancel trajectory: {e}")
                 # Reset trajectory flag so timer callback can recompute step 2
                 self.trajectory_in_progress = False
                 self.using_stale_data_step2 = False
@@ -563,20 +462,19 @@ class DirectObjectMove(Node):
         if target_marker is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
-                self.get_logger().info(f"🔄 Fresh grasp point data received during step 2! Cancelling current trajectory and recomputing...")
+                self.get_logger().debug("Fresh grasp point data received during step 2! Cancelling current trajectory and recomputing...")
                 # Cancel current trajectory
                 if self.current_goal_handle is not None:
                     try:
                         # Set flag BEFORE cancelling to ensure it's set when goal_result is called
                         self.cancelled_for_fresh_data = True
-                        self.get_logger().info(f"Setting cancelled_for_fresh_data=True before cancelling")
                         cancel_future = self.current_goal_handle.cancel_goal_async()
-                        self.get_logger().info("Cancelling current trajectory...")
+                        self.get_logger().debug("Cancelling current trajectory...")
                     except Exception as e:
-                        self.get_logger().warn(f"Could not cancel trajectory: {e}")
+                        self.get_logger().debug(f"Could not cancel trajectory: {e}")
                         self.cancelled_for_fresh_data = False
                 else:
-                    self.get_logger().warn("No goal handle available to cancel")
+                    self.get_logger().debug("No goal handle available to cancel")
                 # Reset trajectory flag so timer callback can recompute step 2
                 self.trajectory_in_progress = False
                 self.using_stale_data_step2 = False
@@ -611,7 +509,7 @@ class DirectObjectMove(Node):
         
         # Wait for end-effector pose if not received yet
         if not self.ee_pose_received or self.current_ee_pose is None:
-            self.get_logger().warn("Waiting for end-effector pose...")
+            self.get_logger().debug("Waiting for end-effector pose...")
             return
         
         # Get current end-effector position
@@ -624,7 +522,7 @@ class DirectObjectMove(Node):
         # If current EE position is below 0.25, skip straight to step 2 (both sim and real modes)
         if not self.step1_completed:
             if current_ee_position[2] < 0.25:
-                self.get_logger().info(f"📌 {self.mode.upper()} mode: Current EE Z position ({current_ee_position[2]:.3f}m) is below 0.25m. Skipping step 1 and going straight to step 2.")
+                self.get_logger().info(f"Current EE Z position ({current_ee_position[2]:.3f}m) is below 0.25m. Skipping step 1 and going straight to step 2.")
                 self.step1_completed = True
                 # Switch to faster timer period for step 2
                 self.update_timer.cancel()
@@ -639,7 +537,7 @@ class DirectObjectMove(Node):
         )
         
         if not has_explicit_mode:
-            self.get_logger().error("❌ No explicit mode specified. Must provide one of: target_xyz/xyzw, grasp_id, or object detection. Exiting.")
+            self.get_logger().error("No explicit mode specified. Must provide one of: target_xyz/xyzw, grasp_id, or object detection. Exiting.")
             self.should_exit = True
             return
         
@@ -648,7 +546,6 @@ class DirectObjectMove(Node):
             self.target_xyz is None and self.grasp_id is None and 
             self.latest_pose is None and 
             (self.mode != 'real' or self.last_known_object_position is None)):
-            self.get_logger().debug("Waiting for object pose to be received...")
             return
         
         # Check if we have optional target position/orientation
@@ -680,11 +577,8 @@ class DirectObjectMove(Node):
             # Extract yaw from canonical quaternion if match found, otherwise from provided quaternion
             if canonical_match:
                 object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
-                match_status = f"✅ Canonical match (threshold: {self.current_canonical_threshold:.3f}, distance: {match_distance:.4f})"
-                yaw_source = "canonical quaternion (fold symmetry normalized)"
                 # Exit retry mode if we were in it, but keep the threshold that worked
                 if self.canonical_retry_mode:
-                    self.get_logger().info(f"✅ Canonical match found with threshold {self.current_canonical_threshold:.3f}! Keeping threshold for future detections.")
                     self.canonical_retry_mode = False
                     self.canonical_retry_count = 0
                     # Keep current_canonical_threshold - don't reset it!
@@ -693,7 +587,6 @@ class DirectObjectMove(Node):
             else:
                 # No canonical match - trigger retry mode or continue retrying
                 if not self.canonical_retry_mode:
-                    self.get_logger().warn("⚠️ No canonical match found. Starting threshold adjustment...")
                     self.canonical_retry_mode = True
                     self.canonical_retry_count = 0
                     self.current_canonical_threshold = self.canonical_threshold_initial
@@ -708,27 +601,21 @@ class DirectObjectMove(Node):
                         self.current_canonical_threshold + self.canonical_threshold_increment,
                         self.canonical_threshold_max
                     )
-                    self.get_logger().info(f"🔄 Retry {self.canonical_retry_count}/{self.max_canonical_retries}: Adjusting threshold to {self.current_canonical_threshold:.3f}...")
                     return  # Try again with new threshold
                 else:
                     # Max threshold reached - use best match found or fallback
                     if self.best_canonical_match is not None:
-                        self.get_logger().warn(f"⚠️ Using best match found (distance: {self.best_canonical_distance:.4f}) as canonical pose.")
                         canonical_quat = self.best_canonical_match
                         object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
-                        match_status = f"⚠️ Using best canonical match (distance: {self.best_canonical_distance:.4f})"
-                        yaw_source = "best canonical quaternion found"
                         self.canonical_retry_mode = False
                         self.canonical_retry_count = 0
                         # Keep the threshold that gave us the best match (don't reset to initial)
                         self.best_canonical_match = None
                         self.best_canonical_distance = float('inf')
                     else:
-                        self.get_logger().error(f"❌ Max threshold ({self.canonical_threshold_max:.3f}) reached. Using provided quaternion as fallback.")
+                        self.get_logger().error(f"Max threshold ({self.canonical_threshold_max:.3f}) reached. Using provided quaternion as fallback.")
                         self.canonical_retry_mode = False
                         object_yaw = self.quat_controller.extract_yaw_from_quaternion(provided_quat)
-                        match_status = "⚠️ No canonical match (using provided - max threshold exceeded)"
-                        yaw_source = "provided quaternion"
                         # Reset threshold only when we completely fail
                         self.current_canonical_threshold = self.canonical_threshold_initial
                         self.best_canonical_match = None
@@ -736,20 +623,13 @@ class DirectObjectMove(Node):
             
             target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
             
-            self.get_logger().info(f"🎯 Using provided target position: {object_position}")
-            self.get_logger().info(f"🎯 Provided quaternion: q=[{provided_quat[0]:.6f}, {provided_quat[1]:.6f}, "
-                                 f"{provided_quat[2]:.6f}, {provided_quat[3]:.6f}]")
-            if canonical_match:
-                self.get_logger().info(f"🎯 Provided quaternion (canonical match): q=[{canonical_quat[0]:.6f}, {canonical_quat[1]:.6f}, "
-                                     f"{canonical_quat[2]:.6f}, {canonical_quat[3]:.6f}] - {match_status}")
-            else:
-                self.get_logger().info(f"🎯 {match_status}")
-            self.get_logger().info(f"🎯 Target gripper quaternion: q=[{target_quaternion[0]:.6f}, {target_quaternion[1]:.6f}, "
-                                 f"{target_quaternion[2]:.6f}, {target_quaternion[3]:.6f}] (yaw: {object_yaw:.1f}° extracted from {yaw_source})")
+            step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
+            self.get_logger().info(step_msg)
+            self.get_logger().info(f"Object at: ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
         elif self.grasp_id is not None:
             # Grasp point mode: must have selected_grasp_point, exit if not available
             if self.selected_grasp_point is None:
-                self.get_logger().error(f"❌ Grasp point {self.grasp_id} not found. Cannot proceed in grasp point mode. Exiting.")
+                self.get_logger().error(f"Grasp point {self.grasp_id} not found. Cannot proceed in grasp point mode. Exiting.")
                 self.should_exit = True
                 return
             
@@ -786,15 +666,7 @@ class DirectObjectMove(Node):
             
             # Log the exact grasp point being used
             if using_stale_grasp_point:
-                self.get_logger().warn(f"⚠️ Using stale grasp point {self.grasp_id} (topic is empty): "
-                                      f"x={self.selected_grasp_point.pose.position.x:.6f}, "
-                                      f"y={self.selected_grasp_point.pose.position.y:.6f}, "
-                                      f"z={self.selected_grasp_point.pose.position.z:.6f}")
-            else:
-                self.get_logger().info(f"📍 Using grasp point {self.grasp_id} from message: "
-                                      f"x={self.selected_grasp_point.pose.position.x:.6f}, "
-                                      f"y={self.selected_grasp_point.pose.position.y:.6f}, "
-                                      f"z={self.selected_grasp_point.pose.position.z:.6f}")
+                self.get_logger().debug(f"Using stale grasp point {self.grasp_id} (topic is empty)")
             
             # Apply calibration offset to correct systematic detection bias (only for real mode)
             if self.mode == 'real':
@@ -818,7 +690,7 @@ class DirectObjectMove(Node):
                 self.last_known_object_position = object_position.copy()
                 # Reset tracking lost count since we have a detection
                 if self.tracking_lost_count > 0:
-                    self.get_logger().info(f"✅ Tracking recovered after {self.tracking_lost_count} lost frames")
+                    self.get_logger().info(f"Tracking recovered after {self.tracking_lost_count} lost frames")
                 self.tracking_lost_count = 0
                 self.recovery_mode = False
             
@@ -835,7 +707,7 @@ class DirectObjectMove(Node):
             
             if not grasp_point_has_orientation:
                 # Grasp point orientation is required - exit if not available
-                self.get_logger().error(f"❌ Grasp point {self.grasp_id} does not have valid orientation. Cannot proceed. Exiting.")
+                self.get_logger().error(f"Grasp point {self.grasp_id} does not have valid orientation. Cannot proceed. Exiting.")
                 self.should_exit = True
                 return
             
@@ -856,11 +728,10 @@ class DirectObjectMove(Node):
                 # Extract yaw from canonical quaternion if match found, otherwise from detected quaternion
                 if canonical_match:
                     grasp_point_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
-                    match_status = f"✅ Canonical match (threshold: {self.current_canonical_threshold:.3f}, distance: {match_distance:.4f})"
+                    match_status = f"Canonical match (threshold: {self.current_canonical_threshold:.3f}, distance: {match_distance:.4f})"
                     yaw_source = "canonical quaternion (fold symmetry normalized)"
                     # Exit retry mode if we were in it, but keep the threshold that worked
                     if self.canonical_retry_mode:
-                        self.get_logger().info(f"✅ Canonical match found with threshold {self.current_canonical_threshold:.3f}! Keeping threshold for future detections.")
                         self.canonical_retry_mode = False
                         self.canonical_retry_count = 0
                         # Keep current_canonical_threshold - don't reset it!
@@ -869,18 +740,11 @@ class DirectObjectMove(Node):
                 else:
                     # No canonical match - trigger retry mode or continue retrying
                     if not self.canonical_retry_mode:
-                        self.get_logger().warn(f"⚠️ No canonical match found with current threshold {self.current_canonical_threshold:.3f}. Starting threshold adjustment...")
                         self.canonical_retry_mode = True
                         self.canonical_retry_count = 0
                         # Start from current threshold (which might be higher than initial if we had a previous match)
-                        # Only reset to initial if we're starting fresh
                         if self.current_canonical_threshold == self.canonical_threshold_initial:
-                            # Already at initial, start incrementing
                             pass
-                        else:
-                            # We had a higher threshold that worked before, but now it doesn't work
-                            # Try incrementing from current threshold
-                            self.get_logger().info(f"📊 Previous threshold {self.current_canonical_threshold:.3f} no longer works, incrementing...")
                         self.best_canonical_match = None
                         self.best_canonical_distance = float('inf')
                         return  # Exit early to trigger retry
@@ -892,27 +756,21 @@ class DirectObjectMove(Node):
                             self.current_canonical_threshold + self.canonical_threshold_increment,
                             self.canonical_threshold_max
                         )
-                        self.get_logger().info(f"🔄 Retry {self.canonical_retry_count}/{self.max_canonical_retries}: Adjusting threshold to {self.current_canonical_threshold:.3f}...")
                         return  # Try again with new threshold
                     else:
                         # Max threshold reached - use best match found or fallback
                         if self.best_canonical_match is not None:
-                            self.get_logger().warn(f"⚠️ Using best match found (distance: {self.best_canonical_distance:.4f}) as canonical pose.")
                             canonical_quat = self.best_canonical_match
                             grasp_point_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
-                            match_status = f"⚠️ Using best canonical match (distance: {self.best_canonical_distance:.4f})"
-                            yaw_source = "best canonical quaternion found"
                             self.canonical_retry_mode = False
                             self.canonical_retry_count = 0
                             # Keep the threshold that gave us the best match (don't reset to initial)
                             self.best_canonical_match = None
                             self.best_canonical_distance = float('inf')
                         else:
-                            self.get_logger().error(f"❌ Max threshold ({self.canonical_threshold_max:.3f}) reached. Using grasp point quaternion as fallback.")
+                            self.get_logger().error(f"Max threshold ({self.canonical_threshold_max:.3f}) reached. Using grasp point quaternion as fallback.")
                             self.canonical_retry_mode = False
                             grasp_point_yaw = self.quat_controller.extract_yaw_from_quaternion(grasp_point_quat)
-                            match_status = "⚠️ No canonical match (using grasp point - max threshold exceeded)"
-                            yaw_source = "detected quaternion"
                             # Reset threshold only when we completely fail
                             self.current_canonical_threshold = self.canonical_threshold_initial
                             self.best_canonical_match = None
@@ -921,31 +779,22 @@ class DirectObjectMove(Node):
                 # Create face-down quaternion with grasp point yaw (QUATERNION-BASED, no gimbal lock)
                 target_quaternion = self.quat_controller.face_down_quaternion(grasp_point_yaw)
                 
-                self.get_logger().info(f"🎯 Using grasp point {self.grasp_id} position: {grasp_point_position}")
-                self.get_logger().info(f"🎯 Grasp point quaternion (detected): q=[{grasp_point_quat[0]:.6f}, {grasp_point_quat[1]:.6f}, "
-                                     f"{grasp_point_quat[2]:.6f}, {grasp_point_quat[3]:.6f}]")
-                if canonical_match:
-                    self.get_logger().info(f"🎯 Grasp point quaternion (canonical match): q=[{canonical_quat[0]:.6f}, {canonical_quat[1]:.6f}, "
-                                         f"{canonical_quat[2]:.6f}, {canonical_quat[3]:.6f}] - {match_status}")
-                else:
-                    self.get_logger().info(f"🎯 {match_status}")
-                self.get_logger().info(f"🎯 Gripper orientation (quaternion-based, no gimbal lock):\n"
-                                     f"   q=[{target_quaternion[0]:.6f}, {target_quaternion[1]:.6f}, "
-                                     f"{target_quaternion[2]:.6f}, {target_quaternion[3]:.6f}]\n"
-                                     f"   Aligned with grasp point yaw: {grasp_point_yaw:.1f}° (extracted from {yaw_source})")
+                step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
+                self.get_logger().info(step_msg)
+                self.get_logger().info(f"Object at: ({grasp_point_position[0]:.3f}, {grasp_point_position[1]:.3f}, {grasp_point_position[2]:.3f})")
         elif self.latest_pose is not None:
             # Use detected object pose
             # Check if we were using stale data in step 2 (using last_known_object_position)
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
-                self.get_logger().info(f"🔄 Fresh object pose data received during step 2! Cancelling current trajectory and recomputing...")
+                self.get_logger().debug("Fresh object pose data received during step 2! Cancelling current trajectory and recomputing...")
                 # Cancel current trajectory
                 if self.current_goal_handle is not None:
                     try:
                         self.cancelled_for_fresh_data = True  # Mark that we're cancelling for fresh data
                         cancel_future = self.current_goal_handle.cancel_goal_async()
-                        self.get_logger().info("Cancelling current trajectory...")
+                        self.get_logger().debug("Cancelling current trajectory...")
                     except Exception as e:
-                        self.get_logger().warn(f"Could not cancel trajectory: {e}")
+                        self.get_logger().debug(f"Could not cancel trajectory: {e}")
                         self.cancelled_for_fresh_data = False
                 # Reset trajectory flag so timer callback can recompute step 2
                 self.trajectory_in_progress = False
@@ -956,7 +805,7 @@ class DirectObjectMove(Node):
             if self.mode == 'real':
                 was_tracking_lost = self.tracking_lost_count > 0 or self.waiting_at_last_known
                 if was_tracking_lost:
-                    self.get_logger().info(f"✅ Tracking recovered after {self.tracking_lost_count} lost frames")
+                    self.get_logger().info(f"Tracking recovered after {self.tracking_lost_count} lost frames")
                     # Reset recovery flags
                     self.tracking_lost_count = 0
                     self.recovery_mode = False
@@ -967,28 +816,18 @@ class DirectObjectMove(Node):
                     if self.smoothed_object_z is None and self.last_known_object_position is not None:
                         # Initialize smoothed Z with last known Z to prevent jump
                         self.smoothed_object_z = self.last_known_object_position[2]
-                        self.get_logger().info(f"🔄 Initializing Z smoothing with last known Z: {self.smoothed_object_z:.3f}m")
+                        self.get_logger().info(f"Initializing Z smoothing with last known Z: {self.smoothed_object_z:.3f}m")
                 else:
                     self.tracking_lost_count = 0
             
-            # Calculate time delta for Kalman filter
-            current_time = self.get_clock().now().nanoseconds / 1e9
-            if self.last_update_time is not None:
-                dt = current_time - self.last_update_time
-            else:
-                dt = 1.0  # Default time step
-            self.last_update_time = current_time
+            # Extract position directly from latest_pose (no filtering)
+            object_position = np.array([
+                self.latest_pose.pose.position.x,
+                self.latest_pose.pose.position.y,
+                self.latest_pose.pose.position.z
+            ])
             
-            # Update Kalman filter with new measurement
-            filtered_pose, velocity = self.kalman_filter.update(self.latest_pose, dt)
-            
-            if filtered_pose is None:
-                return
-                
-            # Extract filtered position (Kalman filter still used for position smoothing)
-            object_position = np.array(filtered_pose[:3])
-            
-            # Extract quaternion directly from latest_pose (bypass Kalman filter for orientation)
+            # Extract quaternion directly from latest_pose
             # This ensures we work with pure quaternions, avoiding gimbal lock
             detected_object_quat = np.array([
                 self.latest_pose.pose.orientation.x,
@@ -1008,7 +847,7 @@ class DirectObjectMove(Node):
                 yaw_source = "canonical quaternion (fold symmetry normalized)"
                 # Exit retry mode if we were in it, but keep the threshold that worked
                 if self.canonical_retry_mode:
-                    self.get_logger().info(f"✅ Canonical match found with threshold {self.current_canonical_threshold:.3f}! Keeping threshold for future detections.")
+                    self.get_logger().info(f"Canonical match found with threshold {self.current_canonical_threshold:.3f}! Keeping threshold for future detections.")
                     self.canonical_retry_mode = False
                     self.canonical_retry_count = 0
                     # Keep current_canonical_threshold - don't reset it!
@@ -1017,7 +856,7 @@ class DirectObjectMove(Node):
             else:
                 # No canonical match - trigger retry mode or continue retrying
                 if not self.canonical_retry_mode:
-                    self.get_logger().warn(f"⚠️ No canonical match found with current threshold {self.current_canonical_threshold:.3f}. Starting threshold adjustment...")
+                    self.get_logger().warn(f"No canonical match found with current threshold {self.current_canonical_threshold:.3f}. Starting threshold adjustment...")
                     self.canonical_retry_mode = True
                     self.canonical_retry_count = 0
                     # Start from current threshold (which might be higher than initial if we had a previous match)
@@ -1028,7 +867,7 @@ class DirectObjectMove(Node):
                     else:
                         # We had a higher threshold that worked before, but now it doesn't work
                         # Try incrementing from current threshold
-                        self.get_logger().info(f"📊 Previous threshold {self.current_canonical_threshold:.3f} no longer works, incrementing...")
+                        self.get_logger().info(f"Previous threshold {self.current_canonical_threshold:.3f} no longer works, incrementing...")
                     self.best_canonical_match = None
                     self.best_canonical_distance = float('inf')
                     return  # Exit early to trigger retry
@@ -1040,12 +879,12 @@ class DirectObjectMove(Node):
                         self.current_canonical_threshold + self.canonical_threshold_increment,
                         self.canonical_threshold_max
                     )
-                    self.get_logger().info(f"🔄 Retry {self.canonical_retry_count}/{self.max_canonical_retries}: Adjusting threshold to {self.current_canonical_threshold:.3f}...")
+                    self.get_logger().info(f"Retry {self.canonical_retry_count}/{self.max_canonical_retries}: Adjusting threshold to {self.current_canonical_threshold:.3f}...")
                     return  # Try again with new threshold
                 else:
                     # Max threshold reached - use best match found or fallback
                     if self.best_canonical_match is not None:
-                        self.get_logger().warn(f"⚠️ Using best match found (distance: {self.best_canonical_distance:.4f}) as canonical pose.")
+                        self.get_logger().warn(f"Using best match found (distance: {self.best_canonical_distance:.4f}) as canonical pose.")
                         canonical_quat = self.best_canonical_match
                         object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
                         yaw_source = "best canonical quaternion found"
@@ -1055,7 +894,7 @@ class DirectObjectMove(Node):
                         self.best_canonical_match = None
                         self.best_canonical_distance = float('inf')
                     else:
-                        self.get_logger().error(f"❌ Max threshold ({self.canonical_threshold_max:.3f}) reached. Using detected quaternion as fallback.")
+                        self.get_logger().error(f"Max threshold ({self.canonical_threshold_max:.3f}) reached. Using detected quaternion as fallback.")
                         self.canonical_retry_mode = False
                         object_yaw = self.quat_controller.extract_yaw_from_quaternion(detected_object_quat)
                         yaw_source = "detected quaternion"
@@ -1089,12 +928,12 @@ class DirectObjectMove(Node):
                     self.recovery_z_update_count += 1
                     
                     if self.recovery_z_update_count < self.recovery_z_smoothing_steps:
-                        self.get_logger().info(f"🔄 Smoothing Z after recovery: detected={detected_z:.3f}m, smoothed={self.smoothed_object_z:.3f}m "
+                        self.get_logger().info(f"Smoothing Z after recovery: detected={detected_z:.3f}m, smoothed={self.smoothed_object_z:.3f}m "
                                               f"({self.recovery_z_update_count}/{self.recovery_z_smoothing_steps})")
                     else:
                         # Done smoothing, use detected Z directly
                         self.smoothed_object_z = None
-                        self.get_logger().info(f"✅ Z smoothing complete, using detected Z: {detected_z:.3f}m")
+                        self.get_logger().info(f"Z smoothing complete, using detected Z: {detected_z:.3f}m")
                 else:
                     # First detection after recovery, initialize smoothed Z
                     self.smoothed_object_z = object_position[2]
@@ -1110,17 +949,17 @@ class DirectObjectMove(Node):
             target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
             
             # Log fold symmetry matching result
-            match_status = "✅ Canonical match" if canonical_match else "⚠️ No canonical match (using detected)"
+            match_status = "Canonical match" if canonical_match else "No canonical match (using detected)"
             
-            self.get_logger().info(f"🎯 Detected object at ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
-            self.get_logger().info(f"🎯 Object quaternion (detected): q=[{detected_object_quat[0]:.6f}, {detected_object_quat[1]:.6f}, "
+            self.get_logger().info(f"Detected object at ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
+            self.get_logger().info(f"Object quaternion (detected): q=[{detected_object_quat[0]:.6f}, {detected_object_quat[1]:.6f}, "
                                  f"{detected_object_quat[2]:.6f}, {detected_object_quat[3]:.6f}]")
             if canonical_match:
-                self.get_logger().info(f"🎯 Object quaternion (canonical match): q=[{canonical_quat[0]:.6f}, {canonical_quat[1]:.6f}, "
+                self.get_logger().info(f"Object quaternion (canonical match): q=[{canonical_quat[0]:.6f}, {canonical_quat[1]:.6f}, "
                                      f"{canonical_quat[2]:.6f}, {canonical_quat[3]:.6f}] - {match_status}")
             else:
-                self.get_logger().info(f"🎯 {match_status}")
-            self.get_logger().info(f"🎯 EE orientation (quaternion-based, no gimbal lock):\n"
+                self.get_logger().info(f"{match_status}")
+            self.get_logger().info(f"EE orientation (quaternion-based, no gimbal lock):\n"
                                  f"   q=[{target_quaternion[0]:.6f}, {target_quaternion[1]:.6f}, "
                                  f"{target_quaternion[2]:.6f}, {target_quaternion[3]:.6f}]\n"
                                  f"   Aligned with object yaw: {object_yaw:.1f}° (extracted from {yaw_source})")
@@ -1129,14 +968,14 @@ class DirectObjectMove(Node):
             if self.mode == 'real' and self.last_known_object_position is not None:
                 # Real mode: handle tracking loss
                 self.tracking_lost_count += 1
-                self.get_logger().warn(f"⚠️ Tracking lost! (consecutive misses: {self.tracking_lost_count}/{self.max_tracking_lost})")
+                self.get_logger().warn(f"Tracking lost! (consecutive misses: {self.tracking_lost_count}/{self.max_tracking_lost})")
                 
                 if self.tracking_lost_count >= self.max_tracking_lost:
                     # Move to last known location and wait
                     if not self.waiting_at_last_known:
                         self.waiting_at_last_known = True
                         self.recovery_mode = True
-                        self.get_logger().warn(f"🔄 Moving to last known location and waiting for tracking recovery...")
+                        self.get_logger().warn(f"Moving to last known location and waiting for tracking recovery...")
                     
                     # Use last known position (QUATERNION-BASED, no gimbal lock)
                     object_position = self.last_known_object_position.copy()
@@ -1150,11 +989,11 @@ class DirectObjectMove(Node):
                     
                     # Only send trajectory once to last known location
                     if not self.last_known_target_sent:
-                        self.get_logger().info(f"📍 Moving to last known position: ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
+                        self.get_logger().info(f"Moving to last known position: ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
                         # Continue to calculate and send trajectory (will be sent once)
                     else:
                         # Already sent trajectory to last known location, just wait
-                        self.get_logger().info("⏸️ Waiting at last known location for tracking recovery...")
+                        self.get_logger().info("Waiting at last known location for tracking recovery...")
                         return  # Don't send new trajectories, just wait
                 else:
                     # Not enough consecutive misses yet, use last known position (QUATERNION-BASED)
@@ -1168,9 +1007,9 @@ class DirectObjectMove(Node):
                         if self.step1_completed:
                             self.using_stale_data_step2 = True
                         
-                        self.get_logger().warn(f"⚠️ Using last known position (miss {self.tracking_lost_count}/{self.max_tracking_lost})")
+                        self.get_logger().warn(f"Using last known position (miss {self.tracking_lost_count}/{self.max_tracking_lost})")
                     else:
-                        self.get_logger().error("❌ No target position provided, no object detected, and no last known position. Cannot proceed. Exiting.")
+                        self.get_logger().error("No target position provided, no object detected, and no last known position. Cannot proceed. Exiting.")
                         self.should_exit = True
                         return
             else:
@@ -1180,23 +1019,16 @@ class DirectObjectMove(Node):
                     self.get_logger().debug("Waiting for object pose to be received...")
                     return
                 # Otherwise, no explicit mode specified: exit
-                self.get_logger().error("❌ No explicit mode specified (no target_xyz/xyzw, no grasp_id) and no object detected. Cannot proceed. Exiting.")
+                self.get_logger().error("No explicit mode specified (no target_xyz/xyzw, no grasp_id) and no object detected. Cannot proceed. Exiting.")
                 self.should_exit = True
                 return
         
         # Verify that we have a valid target position and orientation (safety check)
         if 'object_position' not in locals() or 'target_quaternion' not in locals():
-            self.get_logger().error("❌ Failed to determine target position or orientation. Cannot proceed. Exiting.")
+            self.get_logger().error("Failed to determine target position or orientation. Cannot proceed. Exiting.")
             self.should_exit = True
             return
         
-        # Calculate direction vector from object to current end-effector
-        direction_vector = current_ee_position - object_position
-        current_distance = np.linalg.norm(direction_vector)
-        
-        self.get_logger().info(f"📏 Current distance between object and EE: {current_distance*100:.2f} cm")
-        self.get_logger().info(f"📍 Current EE position: ({current_ee_position[0]:.3f}, {current_ee_position[1]:.3f}, {current_ee_position[2]:.3f})")
-        self.get_logger().info(f"📍 Object position: ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
         
         # Calculate target end-effector position using simple vertical offsets
         # Since gripper is always face-down (pitch=180°), all offsets are vertical in world Z-axis
@@ -1208,7 +1040,6 @@ class DirectObjectMove(Node):
                 object_position[1],
                 self.height
             ])
-            self.get_logger().info(f"📏 Using specified height={self.height:.3f}m (offset ignored)")
         else:
             # Calculate positions: Object -> Gripper Center -> TCP
             # 1. Subtract offset from object Z to get gripper center (offset point) - gripper center is BELOW object
@@ -1223,60 +1054,29 @@ class DirectObjectMove(Node):
             # Then calculate TCP position from offset point (simple vertical offset since gripper is face-down)
             target_ee_position = offset_point.copy()
             target_ee_position[2] += self.tcp_to_gripper_center_offset  # TCP is above gripper center
-            
-            self.get_logger().info(f"📏 Offset point (gripper center): ({offset_point[0]:.3f}, {offset_point[1]:.3f}, {offset_point[2]:.3f})")
-            self.get_logger().info(f"📏 TCP to gripper center offset: {self.tcp_to_gripper_center_offset*100:.1f}cm (vertical, world Z-axis)")
-            self.get_logger().info(f"🎯 Target TCP position: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
         
         # For sim mode step 1: add z offset of 0.05
         if self.mode == 'sim' and not self.step1_completed:
             target_ee_position[2] += 0.05  # Add 0.05m z offset for step 1
-            self.get_logger().info(f"📌 Sim mode Step 1: Adding 0.05m z offset. Target Z: {target_ee_position[2]:.3f}m")
         
-        # Verify the target distance (from TCP to offset point)
-        if self.height is None:
-            # Simple vertical offset verification (no quaternion needed)
-            calculated_distance = abs(target_ee_position[2] - offset_point[2])
-            self.get_logger().info(f"✅ Calculated distance from TCP to offset point: {calculated_distance*100:.2f} cm")
-            
-            # Verify the offset matches expected value
-            # In Step 1 (sim mode), account for the 0.05m z offset that was added
-            expected_distance = self.tcp_to_gripper_center_offset
-            if self.mode == 'sim' and not self.step1_completed:
-                expected_distance += 0.05  # Account for Step 1 offset
-            
-            distance_error = abs(calculated_distance - expected_distance)
-            if distance_error > 0.001:  # 1mm tolerance
-                self.get_logger().warn(f"⚠️ TCP offset verification error: {distance_error*1000:.2f}mm (expected {expected_distance*100:.1f}cm, got {calculated_distance*100:.1f}cm)")
-            else:
-                self.get_logger().info(f"✅ TCP offset verification passed: {calculated_distance*100:.1f}cm (error = {distance_error*1000:.3f}mm)")
-        else:
-            # For explicit height, just show distance to object
-            calculated_distance = np.linalg.norm(target_ee_position - object_position)
-            self.get_logger().info(f"✅ Calculated target distance: {calculated_distance*100:.2f} cm")
-        
-        self.get_logger().info(f"🎯 Final target EE position: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
+        self.get_logger().info(f"Target TCP: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
         
         # Check convergence in step 2: if robot is close enough to target, count stable readings and exit
         if self.step1_completed:
             distance_to_target = np.linalg.norm(current_ee_position - target_ee_position)
-            self.get_logger().info(f"📏 Distance to target: {distance_to_target*100:.2f} cm (threshold: {self.convergence_distance_threshold*100:.2f} cm)")
             
             if distance_to_target <= self.convergence_distance_threshold:
                 self.convergence_stable_count += 1
-                self.get_logger().info(f"✅ Within convergence threshold! Stable count: {self.convergence_stable_count}/{self.convergence_stable_threshold}")
                 
                 if self.convergence_stable_count >= self.convergence_stable_threshold:
-                    self.get_logger().info(f"✅ Converged! Robot is within {self.convergence_distance_threshold*100:.2f}cm of target for {self.convergence_stable_threshold} consecutive readings. Exiting step 2.")
+                    self.get_logger().info(f"Converged! Within {self.convergence_distance_threshold*100:.2f}cm of target for {self.convergence_stable_threshold} consecutive readings.")
                     self.movement_completed = True
                     self.should_exit = True
                     self._print_final_object_pose()
                     return  # Exit early, don't send trajectory
             else:
                 # Reset stable count if we're not within threshold
-                if self.convergence_stable_count > 0:
-                    self.get_logger().info(f"⚠️ Moved outside convergence threshold. Resetting stable count.")
-                    self.convergence_stable_count = 0
+                self.convergence_stable_count = 0
         
         # If waiting at last known location, mark that we've sent the trajectory
         if self.waiting_at_last_known and not self.last_known_target_sent:
@@ -1292,16 +1092,11 @@ class DirectObjectMove(Node):
         # Use specified movement duration (same for both modes)
         movement_duration = self.movement_duration
         
-        self.get_logger().info(f"🎯 Final gripper orientation (PURE QUATERNION, no gimbal lock):")
-        self.get_logger().info(f"   q=[{target_quaternion[0]:.6f}, {target_quaternion[1]:.6f}, "
-                             f"{target_quaternion[2]:.6f}, {target_quaternion[3]:.6f}]")
-        
         trajectory = hover_over_grasp_quat(target_pose_quat, target_ee_position[2], movement_duration)
         
         # For step 1: store Z position for step 2 (both sim and real modes)
         if not self.step1_completed:
             self.step1_z_position = target_ee_position[2]
-            self.get_logger().info(f"📌 Step 1: Storing Z position {self.step1_z_position:.3f}m for step 2")
         
         # Execute trajectory (same for both modes: mark as in progress and wait for completion)
         self.trajectory_in_progress = True
@@ -1342,12 +1137,12 @@ class DirectObjectMove(Node):
             goal.goal_time_tolerance = Duration(sec=1)
             
             # Send trajectory using callbacks to track completion (same for both modes)
-            self.get_logger().info(f"Sending trajectory ({self.mode} mode)...")
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
         except Exception as e:
-            self.get_logger().error(f"❌ Trajectory execution error: {e}")
+            self.get_logger().error(f"Trajectory execution error: {e}")
             self.trajectory_in_progress = False  # Clear flag on error
             self.movement_completed = True
             self.should_exit = True
@@ -1363,7 +1158,6 @@ class DirectObjectMove(Node):
             self.should_exit = True
             return
 
-        self.get_logger().info("Trajectory goal accepted")
         self.current_goal_handle = goal_handle  # Store goal handle for potential cancellation
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
@@ -1454,20 +1248,10 @@ class DirectObjectMove(Node):
     
     def _print_final_object_pose(self):
         """Print the final object pose recorded before exit"""
-        self.get_logger().info("=" * 80)
-        self.get_logger().info("📊 FINAL OBJECT POSE RECORDED:")
-        
         if self.final_object_pose is not None:
             # Print object detection pose (regardless of mode)
             pose = self.final_object_pose
-            self.get_logger().info(f"   Object: {self.object_name}")
-            self.get_logger().info(f"   Position: x={pose.pose.position.x:.6f}, y={pose.pose.position.y:.6f}, z={pose.pose.position.z:.6f}")
-            self.get_logger().info(f"   Orientation (quaternion): x={pose.pose.orientation.x:.6f}, y={pose.pose.orientation.y:.6f}, "
-                                 f"z={pose.pose.orientation.z:.6f}, w={pose.pose.orientation.w:.6f}")
-        else:
-            self.get_logger().warn("   ⚠️ No final object pose recorded (pose data not available)")
-        
-        self.get_logger().info("=" * 80)
+            self.get_logger().info(f"Final object pose: position=({pose.pose.position.x:.6f}, {pose.pose.position.y:.6f}, {pose.pose.position.z:.6f}), quaternion=({pose.pose.orientation.x:.6f}, {pose.pose.orientation.y:.6f}, {pose.pose.orientation.z:.6f}, {pose.pose.orientation.w:.6f})")
     
     def goal_result(self, future):
         """Handle goal result (used for both sim and real modes)"""
@@ -1477,16 +1261,13 @@ class DirectObjectMove(Node):
         
         # Check if this was a cancellation due to fresh data in step 2
         if result.status == 5:  # CANCELED
-            self.get_logger().info(f"Trajectory cancelled (status 5). cancelled_for_fresh_data={self.cancelled_for_fresh_data}, step1_completed={self.step1_completed}")
             if self.cancelled_for_fresh_data:
                 # This was cancelled because fresh data arrived - don't exit, let timer recompute
-                self.get_logger().info("✅ Trajectory cancelled due to fresh data arrival. Recomputing step 2...")
                 self.cancelled_for_fresh_data = False  # Reset flag
                 return  # Don't exit, timer callback will recompute step 2
             elif self.step1_completed:
                 # In step 2 and cancelled (but flag not set) - might be due to fresh data, don't exit
                 # This handles race conditions where flag might not be set yet
-                self.get_logger().info("✅ Trajectory cancelled during step 2. Assuming fresh data arrival. Recomputing step 2...")
                 return  # Don't exit, timer callback will recompute step 2
             else:
                 # Cancelled for other reasons (not in step 2)
@@ -1496,19 +1277,13 @@ class DirectObjectMove(Node):
                 return
         
         if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("✅ Trajectory completed successfully")
-            
             # Check if step 1 completed, trigger step 2 (both sim and real modes)
             if not self.step1_completed:
                 self.step1_completed = True
                 # Switch to faster timer period for step 2 to get more frequent pose updates
                 self.update_timer.cancel()
                 self.update_timer = self.create_timer(self.timer_period_step2, self.timer_callback)
-                if self.mode == 'real':
-                    self.get_logger().info(f"📌 Step 1 completed. Starting step 2: fixing Z at {self.step1_z_position:.3f}m, applying fine offsets (X: {self.fine_offset_x:.3f}m, Y: {self.fine_offset_y:.3f}m)")
-                    self.get_logger().info(f"📌 Step 2: Monitoring latest object pose (timer period: {self.timer_period_step2}s)")
-                else:  # sim mode
-                    self.get_logger().info(f"📌 Sim mode Step 1 completed. Starting step 2: moving to final position (removing 0.05m z offset)")
+                self.get_logger().info("Step 1 completed. Starting Step 2: fine positioning")
                 # Don't exit - let timer callback trigger step 2 with latest pose
                 return
         else:
@@ -1520,7 +1295,7 @@ class DirectObjectMove(Node):
         # Set exit flags after trajectory completes (or if step 2 completed)
         self.movement_completed = True
         self.should_exit = True
-        self.get_logger().info("✅ Direct movement completed. Exiting.")
+        self.get_logger().info("Movement completed successfully")
     
 
 

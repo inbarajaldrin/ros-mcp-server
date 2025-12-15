@@ -132,7 +132,6 @@ class MoveDown(Node):
                 self.gripper_force_callback,
                 10
             )
-            self.get_logger().info(f"Using mode: {self.mode}, gripper force topic: /gripper_force")
         else:
             # Real mode: use force/torque sensor topic (WrenchStamped)
             self.force_sub = self.create_subscription(
@@ -141,7 +140,6 @@ class MoveDown(Node):
                 self.force_callback,
                 10
             )
-            self.get_logger().info(f"Using mode: {self.mode}, force/torque topic: /force_torque_sensor_broadcaster/wrench")
         
         # Subscriber for EE pose data
         # Use VOLATILE durability (default for most publishers) to avoid QoS incompatibility warnings
@@ -166,8 +164,10 @@ class MoveDown(Node):
             10
         )
         
-        self.get_logger().info("Waiting for action server...")
         self.action_client.wait_for_server()
+        
+        # Log mode
+        self.get_logger().info(f"Using {self.mode.upper()} mode")
         
         # Execute movement
         self.move_down()
@@ -227,8 +227,6 @@ class MoveDown(Node):
 
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber"""
-        self.get_logger().info("Reading current end-effector pose and joint angles...")
-        
         # Reset the flags
         self.ee_pose_received = False
         self.joint_angles_received = False
@@ -247,7 +245,7 @@ class MoveDown(Node):
                     status.append("EE pose")
                 if not self.joint_angles_received:
                     status.append("joint angles")
-                self.get_logger().info(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
+                self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
         
         if not self.ee_pose_received:
             self.get_logger().error("Timeout waiting for EE pose message")
@@ -268,9 +266,6 @@ class MoveDown(Node):
         # Extract position and orientation
         position = self.ee_position.tolist()
         orientation = self.ee_quat.tolist()
-        
-        self.get_logger().info(f"Successfully read pose: position={position}, orientation={orientation}")
-        self.get_logger().info(f"Successfully read joint angles: {self.current_joint_angles}")
         
         return {
             'position': position,
@@ -320,45 +315,14 @@ class MoveDown(Node):
             # Record movement start time for grace period
             self.movement_start_time = time.time()
             
-            # Log baseline force values
-            self.get_logger().info("="*70)
-            self.get_logger().info("Initial Force Parameters (Baseline - Zeroed):")
-            self.get_logger().info(f"  Fx: {self.baseline_force_x:.2f}N")
-            self.get_logger().info(f"  Fy: {self.baseline_force_y:.2f}N")
-            self.get_logger().info(f"  Fz: {self.baseline_force_z:.2f}N")
-            self.get_logger().info(f"  Tx: {self.baseline_torque_x:.2f}N·m")
-            self.get_logger().info(f"  Ty: {self.baseline_torque_y:.2f}N·m")
-            self.get_logger().info(f"  Tz: {self.baseline_torque_z:.2f}N·m")
-            self.get_logger().info("="*70)
-            self.get_logger().info(
-                f"Force monitoring started - Z threshold: {Z_FORCE_THRESHOLD}N (negative = upward resistance)"
-            )
-            self.get_logger().info(
-                f"  Other axes threshold: |force| > {FORCE_THRESHOLD}N after baseline removal"
-            )
-        
         if self.force_monitor_timer is None:
             self.force_monitor_timer = self.create_timer(FORCE_CHECK_INTERVAL, self.check_force_during_execution)
-            if self.mode == 'sim':
-                self.get_logger().info("Started gripper force monitoring during execution")
-            else:
-                self.get_logger().info(f"Started force monitoring during execution (baseline-subtracted)")
-                self.get_logger().info(
-                    f"  Monitoring: Fx, Fy, Fz, Tx, Ty, Tz"
-                )
-                self.get_logger().info(
-                    f"  Z force threshold: {Z_FORCE_THRESHOLD}N (negative = upward resistance)"
-                )
-                self.get_logger().info(
-                    f"  Other axes threshold: |force| > {FORCE_THRESHOLD}N after baseline removal"
-                )
 
     def stop_force_monitoring(self):
         """Stop force monitoring"""
         if self.force_monitor_timer:
             self.force_monitor_timer.cancel()
             self.force_monitor_timer = None
-            self.get_logger().info("Stopped force monitoring")
     
     def schedule_next_movement(self):
         """Schedule the next movement using a ROS2 one-shot timer (non-blocking)"""
@@ -461,7 +425,6 @@ class MoveDown(Node):
         if self._current_goal_handle is not None:
             try:
                 self._current_goal_handle.cancel_goal_async()
-                self.get_logger().info("Trajectory cancellation requested")
             except Exception as e:
                 self.get_logger().error(f"Failed to cancel trajectory: {e}")
         
@@ -526,7 +489,6 @@ class MoveDown(Node):
         # Initialize current Z position if not set
         if self.current_z_position is None:
             # Read current end-effector pose
-            self.get_logger().info("Reading current end-effector pose...")
             pose_data = self.read_current_ee_pose()
             
             if pose_data is None:
@@ -539,7 +501,6 @@ class MoveDown(Node):
             self.current_z_position = current_pos[2]
         else:
             # Use stored position and read fresh pose for orientation
-            self.get_logger().info("Reading current end-effector pose for orientation...")
             pose_data = self.read_current_ee_pose()
             
             if pose_data is None:
@@ -564,29 +525,21 @@ class MoveDown(Node):
         
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
-        current_rpy = self.quaternion_to_rpy(current_quat[0], current_quat[1], current_quat[2], current_quat[3])
-        
-        self.get_logger().info(f"Current EE position: {current_pos}")
-        self.get_logger().info(f"Current EE quaternion: {current_quat}")
-        self.get_logger().info(f"Current EE RPY (deg): {current_rpy}")
 
         target_position = list(current_pos)
         
         if self.target_height is not None:
             target_position[2] = self.target_height
-            self.get_logger().info(f"Using specified target height: {self.target_height}m")
         else:
             # Move to base workspace height (MIN_WORKSPACE_Z)
             target_position[2] = MIN_WORKSPACE_Z
-            distance_to_move = self.current_z_position - MIN_WORKSPACE_Z
-            self.get_logger().info(f"Moving down {distance_to_move:.3f}m from {self.current_z_position:.3f}m to workspace base height {MIN_WORKSPACE_Z}m")
             self.current_z_position = target_position[2]  # Update for next movement
         
         # Check if we're already at the target (or very close)
         current_z = current_pos[2]
         distance_to_target = abs(current_z - target_position[2])
         if distance_to_target < 0.001:  # Already at target (within 1mm)
-            self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Target: {target_position[2]:.3f}m. Exiting.")
+            self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Exiting.")
             rclpy.shutdown()
             return
         
@@ -595,17 +548,6 @@ class MoveDown(Node):
             self.get_logger().error(f"Target Z position ({target_position[2]:.3f}m) is below workspace limit ({MIN_WORKSPACE_Z}m). Cannot proceed.")
             rclpy.shutdown()
             return
-        
-        self.get_logger().info(f"Target position: {target_position}")
-        if self.mode == 'sim':
-            self.get_logger().info(f"Gripper force threshold: {GRIPPER_FORCE_THRESHOLD}")
-        else:
-            self.get_logger().info(
-                f"Force threshold (baseline-subtracted): Z force <= {Z_FORCE_THRESHOLD}N (negative = upward resistance)"
-            )
-            self.get_logger().info(
-                f"  Other axes: |force| > {FORCE_THRESHOLD}N after baseline removal (Fx, Fy, Tx, Ty, Tz)"
-            )
 
         # Compute inverse kinematics
         try:
@@ -616,15 +558,12 @@ class MoveDown(Node):
             target_pose[:3, 3] = target_position
             target_pose[:3, :3] = target_rot_matrix
             
-            self.get_logger().info(f"Computing IK for position: {target_position}")
-            
             if self.current_joint_angles is None:
                 self.get_logger().error("Current joint angles not available! Cannot compute IK.")
                 rclpy.shutdown()
                 return
             
             q_guess = self.current_joint_angles.copy()
-            self.get_logger().info(f"Using current joint angles as seed: {q_guess}")
             
             joint_angles = None
             best_result = None
@@ -646,11 +585,7 @@ class MoveDown(Node):
                     cost = ik_objective_quaternion(result.x, perturbed_pose)
                     
                     if cost < 0.01:
-                        self.get_logger().info(f"IK succeeded (perturbation {i}), cost={cost:.6f}")
                         joint_angles = result.x
-                        T_result = forward_kinematics(dh_params, joint_angles)
-                        orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                        self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
                         break
                     
                     if cost < best_cost:
@@ -714,7 +649,6 @@ class MoveDown(Node):
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
             
-            self.get_logger().info("Sending trajectory to move down...")
             self.moving = True
             
             # Clear old futures/callbacks before sending new goal
@@ -722,6 +656,7 @@ class MoveDown(Node):
             self._send_goal_future = None
             self._get_result_future = None
             
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
@@ -740,10 +675,6 @@ class MoveDown(Node):
             return
 
         self._current_goal_handle = goal_handle
-        if self.mode == 'sim':
-            self.get_logger().info("Move down trajectory accepted. Monitoring gripper force...")
-        else:
-            self.get_logger().info("Move down trajectory accepted. Monitoring force on all axes...")
         
         # Start force monitoring AFTER goal is accepted
         self.start_force_monitoring()
@@ -761,11 +692,11 @@ class MoveDown(Node):
             
             # Handle different trajectory completion statuses
             if result.status == 1:  # SUCCEEDED
-                status_msg = "Movement completed successfully"
+                pass  # Continue to check force threshold
             elif result.status == 5:  # PREEMPTED
-                status_msg = "Trajectory was preempted"
+                pass  # Continue to check force threshold
             elif result.status == 4:  # ABORTED
-                status_msg = "Trajectory was aborted by controller"
+                pass  # Continue to check force threshold
             else:
                 self.get_logger().error(f"Trajectory failed with status: {result.status}")
                 rclpy.shutdown()
@@ -773,7 +704,7 @@ class MoveDown(Node):
             
             # Check if force threshold was reached
             if self.force_threshold_reached:
-                self.get_logger().info(f"{status_msg}: Force threshold reached. Stopping.")
+                self.get_logger().info("Movement completed successfully: Force threshold reached. Stopping.")
                 if self.ee_position is not None:
                     self.current_z_position = self.ee_position[2]
                 rclpy.shutdown()
@@ -785,18 +716,11 @@ class MoveDown(Node):
                     distance_to_target = abs(current_z - target_z)
                     
                     if distance_to_target < 0.001:  # Already at target (within 1mm)
-                        self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Target: {target_z:.3f}m. Exiting.")
+                        self.get_logger().info("Movement completed successfully")
                         rclpy.shutdown()
                         return
                 
                 # Continue with next movement
-                if result.status == 5:
-                    self.get_logger().warn(f"{status_msg} (not due to force). Continuing...")
-                elif result.status == 4:
-                    self.get_logger().info(f"{status_msg} (not due to force). Continuing...")
-                else:
-                    self.get_logger().info(f"{status_msg}. Continuing with next {MOVE_DOWN_INCREMENT}m increment...")
-                
                 self.force_threshold_reached = False
                 self.schedule_next_movement()
                 

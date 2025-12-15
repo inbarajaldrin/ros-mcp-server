@@ -72,7 +72,6 @@ class MoveToSafeHeight(Node):
             10
         )
         
-        self.get_logger().info("Waiting for action server...")
         self.action_client.wait_for_server()
         
         # Execute movement
@@ -133,8 +132,6 @@ class MoveToSafeHeight(Node):
 
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber"""
-        self.get_logger().info("Reading current end-effector pose and joint angles...")
-        
         # Reset the flags
         self.ee_pose_received = False
         self.joint_angles_received = False
@@ -153,7 +150,7 @@ class MoveToSafeHeight(Node):
                     status.append("EE pose")
                 if not self.joint_angles_received:
                     status.append("joint angles")
-                self.get_logger().info(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
+                self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
         
         if not self.ee_pose_received:
             self.get_logger().error("Timeout waiting for EE pose message")
@@ -175,9 +172,6 @@ class MoveToSafeHeight(Node):
         position = self.ee_position.tolist()
         orientation = self.ee_quat.tolist()
         
-        self.get_logger().info(f"Successfully read pose: position={position}, orientation={orientation}")
-        self.get_logger().info(f"Successfully read joint angles: {self.current_joint_angles}")
-        
         return {
             'position': position,
             'orientation': orientation
@@ -185,8 +179,6 @@ class MoveToSafeHeight(Node):
 
     def move_to_safe_height(self):
         """Move to safe height while maintaining current position and orientation"""
-        # Read current end-effector pose using MCP read_topic
-        self.get_logger().info("Reading current end-effector pose...")
         pose_data = self.read_current_ee_pose()
         
         if pose_data is None:
@@ -206,23 +198,10 @@ class MoveToSafeHeight(Node):
         # Convert quaternion directly to rotation matrix for more accurate IK
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
-        
-        # Also compute RPY for logging purposes
-        current_rpy = self.quaternion_to_rpy(
-            current_quat[0], current_quat[1], 
-            current_quat[2], current_quat[3]
-        )
-        
-        self.get_logger().info(f"Current EE position: {current_pos}")
-        self.get_logger().info(f"Current EE quaternion: {current_quat}")
-        self.get_logger().info(f"Current EE RPY (deg): {current_rpy}")
-        self.get_logger().info(f"Target orientation: keeping current quaternion (no RPY conversion)")
 
-        # Create target position with safe height (same x,y but z=0.481)
+        # Create target position with safe height (same x,y but z=0.3)
         target_position = current_pos.copy()
         target_position[2] = self.safe_height  # Set z to safe height
-        
-        self.get_logger().info(f"Target position: {target_position}")
 
         # Compute inverse kinematics for target pose
         # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
@@ -231,9 +210,6 @@ class MoveToSafeHeight(Node):
             target_pose = np.eye(4)
             target_pose[:3, 3] = target_position
             target_pose[:3, :3] = target_rot_matrix
-            
-            self.get_logger().info(f"Computing IK for position: {target_position}")
-            self.get_logger().info(f"Using quaternion-derived rotation matrix directly (NO RPY conversion)")
             
             # Use quaternion-based IK directly - no RPY conversion at all!
             # Since we're only moving up to safe height, current joint angles should be very close to the solution
@@ -251,7 +227,6 @@ class MoveToSafeHeight(Node):
                 return
             
             q_guess = self.current_joint_angles.copy()
-            self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
             
             # Try IK with current joint angles and position perturbations
             solution_found = False
@@ -277,14 +252,8 @@ class MoveToSafeHeight(Node):
                     
                     # Check if this is a good solution
                     if cost < 0.01:
-                        self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
                         joint_angles = result.x
                         solution_found = True
-                        
-                        # Verify orientation accuracy
-                        T_result = forward_kinematics(dh_params, joint_angles)
-                        orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                        self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
                         break
                     
                     # Keep track of best solution
@@ -294,20 +263,12 @@ class MoveToSafeHeight(Node):
             
             # If we found any reasonable solution, use it
             if joint_angles is None and best_result is not None and best_cost < 0.1:
-                self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
                 joint_angles = best_result
-                
-                # Verify orientation accuracy
-                T_result = forward_kinematics(dh_params, joint_angles)
-                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
             
             if joint_angles is None:
                 self.get_logger().error("IK failed: couldn't compute safe height position")
                 rclpy.shutdown()
                 return
-                
-            self.get_logger().info(f"Computed joint angles: {joint_angles}")
             
             # Create trajectory point
             point = JointTrajectoryPoint(
@@ -325,7 +286,7 @@ class MoveToSafeHeight(Node):
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
             
-            self.get_logger().info("Sending trajectory to safe height...")
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
@@ -341,7 +302,6 @@ class MoveToSafeHeight(Node):
             rclpy.shutdown()
             return
 
-        self.get_logger().info("Safe height trajectory accepted")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
 
@@ -349,7 +309,7 @@ class MoveToSafeHeight(Node):
         """Handle goal result"""
         result = future.result()
         if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("Successfully moved to safe height")
+            self.get_logger().info("Movement completed successfully")
         else:
             self.get_logger().error(f"Trajectory failed with status: {result.status}")
         rclpy.shutdown()

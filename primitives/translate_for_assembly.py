@@ -84,8 +84,6 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
             for component in components:
                 comp_name = component.get('name', '')
                 if comp_name in base_name_variants:
-                    if logger:
-                        logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -154,7 +152,7 @@ class TranslateForAssembly(Node):
         ]
         self.action_client = ActionClient(self, FollowJointTrajectory, '/scaled_joint_trajectory_controller/follow_joint_trajectory')
         
-        self.get_logger().info(f"TranslateForAssembly node initialized (Mode: {self.mode})")
+        self.get_logger().info(f"Using {self.mode.upper()} mode")
         # self.get_logger().info(f"Assembly config loaded with {len(self.assembly_config.get('components', []))} components")
         # self.get_logger().info(f"Hover height set to: {HOVER_HEIGHT}m")
     
@@ -191,7 +189,6 @@ class TranslateForAssembly(Node):
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-                self.get_logger().info(f"Loaded assembly config from: {json_file}")
                 return config
         except FileNotFoundError:
             self.get_logger().error(f"Assembly file not found: {json_file}")
@@ -561,6 +558,9 @@ class TranslateForAssembly(Node):
         hover_position = ee_target_position.copy()
         hover_position[2] = base_current_position[2] + HOVER_HEIGHT
         
+        # Log final object position
+        self.get_logger().info(f"Final object position: [{target_object_position_abs[0]:.4f}, {target_object_position_abs[1]:.4f}, {target_object_position_abs[2]:.4f}]")
+        
         # Read current joint angles before computing IK
         if self.current_joint_angles is None:
             joint_angles = self.read_current_joint_angles()
@@ -569,7 +569,6 @@ class TranslateForAssembly(Node):
                 return False
         
         # Step 1: Move to hover position only (no step 2 in sim mode)
-        self.get_logger().info(f"Moving to hover position: {hover_position} (height: {HOVER_HEIGHT}m above base)")
         
         # Compute IK for hover position
         hover_computed_joint_angles = self.compute_ik_with_current_seed(
@@ -595,7 +594,6 @@ class TranslateForAssembly(Node):
             self.get_logger().error("Failed to reach hover position")
             return False
         
-        self.get_logger().info("Reached hover position")
         return success
     
     def translate_for_target_real(self, object_name, base_name, duration=20.0, 
@@ -725,7 +723,6 @@ class TranslateForAssembly(Node):
                 return False
         
         # Step 1: Move to hover position only (no step 2 in real mode)
-        self.get_logger().info(f"Moving to hover position: {hover_position} (height: {HOVER_HEIGHT}m above base)")
         
         # Compute IK for hover position using current joint angles as seed
         hover_computed_joint_angles = self.compute_ik_with_current_seed(
@@ -751,7 +748,6 @@ class TranslateForAssembly(Node):
             self.get_logger().error("Failed to reach hover position")
             return False
         
-        self.get_logger().info("Reached hover position")
         return success
     
     def execute_trajectory(self, trajectory):
@@ -785,13 +781,13 @@ class TranslateForAssembly(Node):
                 self.get_logger().error("Trajectory goal rejected")
                 return False
             
-            # self.get_logger().info("Trajectory goal accepted, waiting for completion...")
+            self.get_logger().info("Trajectory sent and accepted")
             result_future = goal_handle.get_result_async()
             rclpy.spin_until_future_complete(self, result_future)
             result = result_future.result()
             
             if result.status == 4:  # SUCCEEDED
-                # self.get_logger().info("Trajectory completed successfully")
+                self.get_logger().info("Movement completed successfully")
                 return True
             else:
                 self.get_logger().error(f"Trajectory failed with status: {result.status}")

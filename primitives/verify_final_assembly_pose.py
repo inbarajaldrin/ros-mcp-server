@@ -169,9 +169,6 @@ class VerifyFinalAssemblyPose(Node):
         self.current_poses = {}
         self.current_ee_pose = None
         
-        self.get_logger().info("VerifyFinalAssemblyPose node initialized")
-        self.get_logger().info(f"Assembly config loaded with {len(self.assembly_config.get('components', []))} components")
-        self.get_logger().info(f"Position tolerance: {POSITION_TOLERANCE}m, Orientation tolerance: {ORIENTATION_TOLERANCE_DEG}°")
     
     def load_assembly_config(self):
         """Load the assembly configuration from JSON file"""
@@ -304,8 +301,6 @@ class VerifyFinalAssemblyPose(Node):
         Returns:
             True if object is in correct pose, False otherwise
         """
-        self.get_logger().info(f"Verifying assembly pose for {object_name} relative to {base_name}")
-        
         # Wait for pose data
         if not self.current_poses:
             self.get_logger().error("No pose data available")
@@ -383,55 +378,19 @@ class VerifyFinalAssemblyPose(Node):
         
         orientation_error_deg = min_orientation_error_deg
         
-        # Log the verification details
-        self.get_logger().info("=" * 80)
-        self.get_logger().info("ASSEMBLY POSE VERIFICATION:")
-        self.get_logger().info("")
-        
-        # Log fold symmetry info
-        if fold_data:
-            self.get_logger().info(f"Fold symmetry loaded for {original_object_name}:")
-            for axis, data in fold_data.get('fold_axes', {}).items():
-                fold_count = data.get('fold', 1)
-                if fold_count > 1:
-                    self.get_logger().info(f"  {axis.upper()}-axis: {fold_count}-fold symmetry")
-            self.get_logger().info(f"  Checking against {len(equivalent_targets)} equivalent target orientations")
-        else:
-            self.get_logger().info("No fold symmetry data (checking canonical target only)")
-        
-        self.get_logger().info("")
-        self.get_logger().info("CURRENT RELATIVE POSE:")
-        self.get_logger().info(f"  Position (relative to base): {object_relative_position}")
-        self.get_logger().info(f"  Orientation (relative to base, RPY): {np.degrees(object_relative_rpy_rad)}°")
-        self.get_logger().info("")
-        self.get_logger().info("TARGET RELATIVE POSE (from JSON):")
-        self.get_logger().info(f"  Position (relative to base): {target_position_relative}")
-        target_rpy = R.from_quat(target_quat).as_euler('xyz', degrees=True)
-        self.get_logger().info(f"  Orientation (relative to base, RPY): {target_rpy}°")
-        if best_match_idx >= 0 and best_match_idx < len(equivalent_targets):
-            best_match_rpy = R.from_matrix(equivalent_targets[best_match_idx]).as_euler('xyz', degrees=True)
-            self.get_logger().info(f"  Best matching equivalent target #{best_match_idx} RPY: {best_match_rpy}°")
-        self.get_logger().info("")
-        self.get_logger().info("ERRORS:")
-        self.get_logger().info(f"  Position error: {position_error:.6f}m (tolerance: {POSITION_TOLERANCE}m)")
-        self.get_logger().info(f"  Orientation error: {orientation_error_deg:.2f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°)")
-        self.get_logger().info("")
-        
         # Check if within tolerance
         position_ok = position_error <= POSITION_TOLERANCE
         orientation_ok = orientation_error_deg <= ORIENTATION_TOLERANCE_DEG
         
         if position_ok and orientation_ok:
-            self.get_logger().info("✅ VERIFICATION SUCCESSFUL: Object is in correct assembly pose")
-            self.get_logger().info("=" * 80)
+            self.get_logger().info("Verification successful: Object is in correct assembly pose")
             return True
         else:
-            self.get_logger().error("❌ VERIFICATION FAILED: Object is NOT in correct assembly pose")
+            self.get_logger().error("Verification failed: Object is NOT in correct assembly pose")
             if not position_ok:
-                self.get_logger().error(f"  - Position error ({position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m)")
+                self.get_logger().error(f"Position error ({position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m)")
             if not orientation_ok:
-                self.get_logger().error(f"  - Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
-            self.get_logger().info("=" * 80)
+                self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
             return False
 
 
