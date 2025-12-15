@@ -31,20 +31,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_msgs.msg import TFMessage
 from std_msgs.msg import Header
 from geometry_msgs.msg import Pose, Point, Quaternion
+from visualization_msgs.msg import Marker, MarkerArray
 import json
 import math
 from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-
-# Import grasp points message type
-try:
-    from max_camera_msgs.msg import GraspPointArray, GraspPoint
-except ImportError:
-    print("Error: max_camera_msgs not found. Please install the max_camera_msgs package.")
-    print("This script requires max_camera_msgs.msg.GraspPointArray and GraspPoint")
-    raise
+from .data_path_finder import get_aruco_data_dir
 
 
 class GraspPointsPublisher(Node):
@@ -61,9 +55,9 @@ class GraspPointsPublisher(Node):
         
         # Set up data directory
         if data_dir is None:
-            # Default to data/grasp relative to this file
-            script_dir = Path(__file__).parent.parent.parent
-            self.data_dir = Path("/home/aaugus11/Projects/aruco-grasp-annotator/data/grasp")
+            # Auto-discover aruco-grasp-annotator data directory
+            aruco_data_dir = get_aruco_data_dir()
+            self.data_dir = aruco_data_dir / "grasp"
         else:
             self.data_dir = Path(data_dir)
         
@@ -109,12 +103,12 @@ class GraspPointsPublisher(Node):
             
             # Create publishers for both sim and real
             self.grasp_pub_sim = self.create_publisher(
-                GraspPointArray,
+                MarkerArray,
                 self.grasp_points_topic_sim,
                 qos_profile
             )
             self.grasp_pub_real = self.create_publisher(
-                GraspPointArray,
+                MarkerArray,
                 self.grasp_points_topic_real,
                 qos_profile
             )
@@ -150,7 +144,7 @@ class GraspPointsPublisher(Node):
             
             # Create single publisher
             self.grasp_pub = self.create_publisher(
-                GraspPointArray,
+                MarkerArray,
                 self.grasp_points_topic,
                 qos_profile
             )
@@ -166,6 +160,7 @@ class GraspPointsPublisher(Node):
         
         self.get_logger().info(f"Data directory: {self.data_dir}")
         self.get_logger().info(f"Loaded grasp data for {len(self.grasp_data)} objects")
+        self.get_logger().info(f"Using standard ROS2 visualization_msgs/MarkerArray")
     
     def load_grasp_data(self):
         """Load all grasp points JSON files from data directory"""
@@ -236,16 +231,6 @@ class GraspPointsPublisher(Node):
                 'header': transform.header
             }
 
-    def quaternion_to_rpy(self, x, y, z, w):
-        """Convert quaternion to roll, pitch, yaw in degrees
-
-        Handles gimbal lock cases (when pitch is near ±90°) gracefully.
-        Scipy automatically sets the third angle to zero when gimbal lock is detected.
-        """
-        r = R.from_quat([x, y, z, w])
-        roll, pitch, yaw = r.as_euler('xyz', degrees=True)
-        return roll, pitch, yaw
-
     def transform_grasp_point(self, grasp_point_local, object_pose):
         """
         Transform grasp point from CAD center frame to base frame using object pose.
@@ -289,15 +274,13 @@ class GraspPointsPublisher(Node):
         return pos_base, quat_base
 
     def _create_grasp_array_from_poses(self, object_poses_dict):
-        """Create a GraspPointArray message from a dictionary of object poses"""
-        grasp_array = GraspPointArray()
+        """Create a MarkerArray message from a dictionary of object poses"""
+        marker_array = MarkerArray()
         now = self.get_clock().now()
-        grasp_array.header.stamp = now.to_msg()
-        grasp_array.header.frame_id = "base"
         
         # If no object poses or no grasp data, return empty array
         if not object_poses_dict or not self.grasp_data:
-            return grasp_array
+            return marker_array
         
         # Process each object with a pose
         for object_name_topic, object_pose in object_poses_dict.items():
@@ -314,44 +297,68 @@ class GraspPointsPublisher(Node):
                 try:
                     pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose)
                     
-                    grasp_point = GraspPoint()
-                    grasp_point.header.stamp = now.to_msg()
-                    grasp_point.header.frame_id = "base"
-                    grasp_point.object_name = object_name_topic
-                    grasp_point.grasp_id = gp_local.get('id', 0)
-                    grasp_point.grasp_type = gp_local.get('type', 'center_point')
-                    grasp_point.pose.position.x = float(pos_base[0])
-                    grasp_point.pose.position.y = float(pos_base[1])
-                    grasp_point.pose.position.z = float(pos_base[2])
-                    grasp_point.pose.orientation.x = float(quat_base[0])
-                    grasp_point.pose.orientation.y = float(quat_base[1])
-                    grasp_point.pose.orientation.z = float(quat_base[2])
-                    grasp_point.pose.orientation.w = float(quat_base[3])
-                    grasp_point.roll = 0.0
-                    grasp_point.pitch = 0.0
-                    grasp_point.yaw = 0.0
+                    marker = Marker()
+                    marker.header.stamp = now.to_msg()
+                    marker.header.frame_id = "base"
                     
-                    grasp_array.grasp_points.append(grasp_point)
+                    # Store object name in namespace
+                    marker.ns = object_name_topic
+                    
+                    # Store grasp ID
+                    marker.id = gp_local.get('id', 0)
+                    
+                    # Marker visualization settings
+                    marker.type = Marker.SPHERE
+                    marker.action = Marker.ADD
+                    
+                    # Position
+                    marker.pose.position.x = float(pos_base[0])
+                    marker.pose.position.y = float(pos_base[1])
+                    marker.pose.position.z = float(pos_base[2])
+                    
+                    # Orientation (from object pose)
+                    marker.pose.orientation.x = float(quat_base[0])
+                    marker.pose.orientation.y = float(quat_base[1])
+                    marker.pose.orientation.z = float(quat_base[2])
+                    marker.pose.orientation.w = float(quat_base[3])
+                    
+                    # Visualization settings - small green spheres
+                    marker.scale.x = 0.02  # 2cm diameter
+                    marker.scale.y = 0.02
+                    marker.scale.z = 0.02
+                    
+                    # Color: Green with full opacity
+                    marker.color.r = 0.0
+                    marker.color.g = 1.0
+                    marker.color.b = 0.0
+                    marker.color.a = 1.0
+                    
+                    # Lifetime (0 = forever)
+                    marker.lifetime.sec = 0
+                    marker.lifetime.nanosec = 0
+                    
+                    marker_array.markers.append(marker)
+                    
                 except Exception as e:
                     self.get_logger().error(f"Error transforming grasp point {gp_local.get('id')} for {object_name_topic}: {e}")
         
-        return grasp_array
+        return marker_array
     
     def publish_grasp_points(self):
         """Publish grasp points for all objects with known poses"""
         if self.mode == 'default' or self.mode == 'auto':
             # Default mode: publish to both sim and real topics
-            grasp_array_sim = self._create_grasp_array_from_poses(self.object_poses_sim)
-            grasp_array_real = self._create_grasp_array_from_poses(self.object_poses_real)
+            marker_array_sim = self._create_grasp_array_from_poses(self.object_poses_sim)
+            marker_array_real = self._create_grasp_array_from_poses(self.object_poses_real)
             
             # Always publish to both (even if empty arrays)
-            self.grasp_pub_sim.publish(grasp_array_sim)
-            self.grasp_pub_real.publish(grasp_array_real)
+            self.grasp_pub_sim.publish(marker_array_sim)
+            self.grasp_pub_real.publish(marker_array_real)
         else:
             # Single mode: publish to single topic
-            grasp_array = self._create_grasp_array_from_poses(self.object_poses)
+            marker_array = self._create_grasp_array_from_poses(self.object_poses)
             # Always publish (even if empty array)
-            self.grasp_pub.publish(grasp_array)
+            self.grasp_pub.publish(marker_array)
 
 
 def main(args=None):

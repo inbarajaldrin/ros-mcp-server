@@ -2,8 +2,6 @@ from mcp.server.fastmcp import FastMCP, Image
 from typing import List, Any, Optional, Union
 from pathlib import Path
 import json
-import yaml
-from box import Box
 import base64
 from utils.websocket_manager import WebSocketManager
 from msgs.geometry_msgs import Twist, PoseStamped
@@ -31,29 +29,17 @@ import traceback
 import re
 
 
-# Configs containing paths of ROS and other related filepaths
-config_path = Path(__file__).parent / "SERVER_PATHS_CFGS.yaml"
-with open(config_path, "r") as f:
-    yaml_cfg = Box(yaml.safe_load(f))
-
-
-# Set Up WebSocket Manager for ROSBRIDGE
-LOCAL_IP = yaml_cfg.rosbridge.local_ip  # Replace with your local IP address
-ROSBRIDGE_IP = yaml_cfg.rosbridge.rosbridge_ip  # Replace with your rosbridge server IP address
-ROSBRIDGE_PORT = yaml_cfg.rosbridge.rosbridge_port
+# Configuration using environment variables with defaults (similar to newer version)
+# ROS Bridge connection settings
+LOCAL_IP = os.getenv("ROSBRIDGE_LOCAL_IP", "127.0.0.1")  # Default: localhost
+ROSBRIDGE_IP = os.getenv("ROSBRIDGE_IP", "127.0.0.1")  # Default: localhost
+ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))  # Default: rosbridge port
 
 # This is Global WebSocket manager - don't close it after every operation
 ws_manager = WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, LOCAL_IP)
 
-# ROS Paths from YAML Config
-ROS_SRC = yaml_cfg.ros_paths.ros_src_path
-WS_SRC = yaml_cfg.ros_paths.ws_src_path
-CUSTOM_LIBS_PATH = yaml_cfg.ros_paths.custom_lib_path
-PRIMITIVE_LIBS_PATH = yaml_cfg.ros_paths.primitive_libs_path
-
-
-# MCP Directory
-MCP_SRV_DIR = yaml_cfg.mcp_wrkdir
+# MCP Directory - use script directory
+MCP_SRV_DIR = str(Path(__file__).parent.absolute())
 # Initialize MCP 
 mcp = FastMCP("ros-mcp-server")
 
@@ -279,8 +265,8 @@ def read_topic(topic_name: str, timeout: int = 5):
     }
     
     try:
-        # Source ROS2 and run the command in bash
-        cmd = f"source {ROS_SRC} && source {WS_SRC} && timeout {timeout} ros2 topic echo {topic_name} --once"
+        # Run command - ROS2 environment should already be sourced
+        cmd = f"timeout {timeout} ros2 topic echo {topic_name} --once"
         
         process_result = subprocess.run(
             cmd,
@@ -328,8 +314,7 @@ def read_topic(topic_name: str, timeout: int = 5):
 
 @mcp.tool()
 def perform_ik(target_position: List[float], target_rpy: List[float], 
-               duration: float = 5.0, 
-               custom_lib_path: str = f"{MCP_SRV_DIR}/primitives") -> Dict[str, Any]:
+               duration: float = 5.0) -> Dict[str, Any]:
     """
     Perform inverse kinematics and execute smooth trajectory movement using ROS2.
     
@@ -337,7 +322,6 @@ def perform_ik(target_position: List[float], target_rpy: List[float],
         target_position: [x, y, z] target position in meters
         target_rpy: [roll, pitch, yaw] target orientation in degrees
         duration: Time to complete the movement in seconds (default: 5.0)
-        custom_lib_path: Path to your custom IK solver library
         
     Returns:
         Dictionary with execution result including joint angles and trajectory execution status.
@@ -416,15 +400,13 @@ def perform_ik(target_position: List[float], target_rpy: List[float],
         }
 
 @mcp.tool()
-def get_ee_pose(joint_angles: List[float] = None,
-                custom_lib_path: str = f"{CUSTOM_LIBS_PATH}") -> Dict[str, Any]:
+def get_ee_pose(joint_angles: List[float] = None) -> Dict[str, Any]:
     """
     Get end-effector pose using forward kinematics from specified or current joint angles.
     Perform ros2 topic echo --once /joint_states to get current joint angles.
     
     Args:
         joint_angles: Optional joint angles in radians. If None, gets current from ROS2
-        custom_lib_path: Path to your custom IK solver library
         
     Returns:
         Dictionary with end-effector position, orientation, and joint angles used.
@@ -547,7 +529,7 @@ def verify_grasp(timeout: int = 5) -> Dict[str, Any]:
         
         # Run the verify_grasp.py script
         script_path = f"{MCP_SRV_DIR}/primitives/verify_grasp.py"
-        cmd = f"source {ROS_SRC} && source {WS_SRC} && python {script_path} {timeout}"
+        cmd = f"python {script_path} {timeout}"
         
         result = subprocess.run(
             cmd,
@@ -664,15 +646,15 @@ os.environ['ROS_DOMAIN_ID'] = '0'
 os.environ['ROS_VERSION'] = '2'
 os.environ['ROS_DISTRO'] = 'humble'
 
-# Source ROS2 setup in subprocess calls
+# Run ROS2 commands - assumes ROS2 environment is already sourced
 def run_ros2_command(cmd_list, **kwargs):
-    \"\"\"Run ROS2 commands with proper environment sourcing\"\"\"
+    \"\"\"Run ROS2 commands (ROS2 environment should already be sourced)\"\"\"
     import subprocess
     if isinstance(cmd_list, str):
-        cmd = f"source {ROS_SRC} && source {WS_SRC} && source ~/ros2/install/setup.bash && {{cmd_list}}"
+        cmd = cmd_list
         return subprocess.run(cmd, shell=True, executable='/bin/bash', **kwargs)
     else:
-        cmd = f"source {ROS_SRC} && source {WS_SRC} && source ~/ros2/install/setup.bash && {{' '.join(cmd_list)}}"
+        cmd = ' '.join(cmd_list)
         return subprocess.run(cmd, shell=True, executable='/bin/bash', **kwargs)
 
 # Import all the existing functions Claude can use (dynamically discovered)
@@ -754,9 +736,6 @@ def move_home() -> Dict[str, Any]:
         move_home_path = os.path.join(script_dir, "primitives", "move_home.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 45 /usr/bin/python3 move_home.py"
         ]
@@ -837,9 +816,6 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
             }
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 60 /usr/bin/python3 move_to_grasp.py --object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
         ]
@@ -921,9 +897,6 @@ def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim") -
         reorient_path = os.path.join(script_dir, "primitives", "reorient_for_assembly.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 90 /usr/bin/python3 reorient_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
         ]
@@ -1002,9 +975,6 @@ def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") 
         translate_path = os.path.join(script_dir, "primitives", "translate_for_assembly.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 90 /usr/bin/python3 translate_for_assembly.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
         ]
@@ -1093,17 +1063,11 @@ def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Opti
         # Build command based on mode
         if mode == "sim":
             cmd_parts = [
-                f"source {ROS_SRC}",
-                f"source {WS_SRC}",
-                "export ROS_DOMAIN_ID=0",
                 f"cd {script_dir}/primitives",
                 f"timeout 90 /usr/bin/python3 perform_insert.py --mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
             ]
         else:  # real mode - only mode parameter, use defaults for all others
             cmd_parts = [
-                f"source {ROS_SRC}",
-                f"source {WS_SRC}",
-                "export ROS_DOMAIN_ID=0",
                 f"cd {script_dir}/primitives",
                 f"timeout 300 /usr/bin/python3 perform_insert.py --mode {mode}"
             ]
@@ -1170,9 +1134,6 @@ def verify_final_assembly_pose(object_name: str, base_name: str) -> Dict[str, An
         verify_path = os.path.join(script_dir, "primitives", "verify_final_assembly_pose.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 30 /usr/bin/python3 verify_final_assembly_pose.py --object-name \"{object_name}\" --base-name \"{base_name}\""
         ]
@@ -1253,9 +1214,6 @@ def move_down(mode: str = "real") -> Dict[str, Any]:
         move_down_path = os.path.join(script_dir, "primitives", "move_down.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"/usr/bin/python3 move_down.py --mode {mode}"
         ]
@@ -1362,9 +1320,6 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
         control_gripper_path = os.path.join(script_dir, "primitives", "control_gripper.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 60 /usr/bin/python3 control_gripper.py {command_value} --mode {mode}"
         ]
@@ -1432,9 +1387,6 @@ def move_to_safe_height() -> Dict[str, Any]:
         move_to_safe_height_path = os.path.join(script_dir, "primitives", "move_to_safe_height.py")
         
         cmd_parts = [
-            f"source {ROS_SRC}",
-            f"source {WS_SRC}",
-            "export ROS_DOMAIN_ID=0",
             f"cd {script_dir}/primitives",
             f"timeout 30 /usr/bin/python3 move_to_safe_height.py"
         ]
@@ -1511,17 +1463,11 @@ def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
         # Build command based on mode
         if mode == "hover":
             cmd_parts = [
-                f"source {ROS_SRC}",
-                f"source {WS_SRC}",
-                "export ROS_DOMAIN_ID=0",
                 f"cd {script_dir}/primitives",
                 f"timeout 45 /usr/bin/python3 move_to_clear_area.py --hover"
             ]
         else:  # move mode (default)
             cmd_parts = [
-                f"source {ROS_SRC}",
-                f"source {WS_SRC}",
-                "export ROS_DOMAIN_ID=0",
                 f"cd {script_dir}/primitives",
                 f"timeout 45 /usr/bin/python3 move_to_clear_area.py --move"
             ]

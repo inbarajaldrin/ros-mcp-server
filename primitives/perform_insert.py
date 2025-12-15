@@ -45,10 +45,11 @@ from tf2_msgs.msg import TFMessage
 import json
 import os
 import glob
+from primitives.utils.data_path_finder import get_assembly_data_dir
 
 
-# Configuration
-ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
+# Configuration (auto-discovered)
+ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):

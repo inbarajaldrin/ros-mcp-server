@@ -37,9 +37,10 @@ import time
 import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.utils.data_path_finder import get_assembly_data_dir
 
-# Configuration
-ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
+# Configuration (auto-discovered)
+ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"

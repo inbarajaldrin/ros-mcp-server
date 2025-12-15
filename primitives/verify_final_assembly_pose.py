@@ -22,10 +22,12 @@ import time
 import sys
 import os
 import glob
+from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
-# Configuration
-ASSEMBLY_JSON_FILE = "/home/aaugus11/Projects/aruco-grasp-annotator/data/fmb_assembly.json"
-SYMMETRY_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data/symmetry"
+# Configuration (auto-discovered)
+ASSEMBLY_DATA_DIR = get_assembly_data_dir()
+ASSEMBLY_JSON_FILE = str(ASSEMBLY_DATA_DIR / "fmb_assembly.json")
+SYMMETRY_DIR = str(get_symmetry_dir())
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"

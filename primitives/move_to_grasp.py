@@ -35,6 +35,9 @@ from primitives.utils.action_libraries import hover_over_grasp_quat
 # Import quaternion controller for gimbal-lock-free gripper orientation
 from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
 
+# Import path finder for auto-discovering aruco-grasp-annotator data directory
+from primitives.utils.data_path_finder import get_symmetry_dir
+
 # Import the new message types
 try:
     from max_camera_msgs.msg import ObjectPoseArray
@@ -43,14 +46,8 @@ except ImportError:
     print("Warning: max_camera_msgs not found. Using geometry_msgs.PoseStamped as fallback.")
     ObjectPoseArray = None
 
-# Import grasp points message type
-try:
-    from max_camera_msgs.msg import GraspPointArray, GraspPoint
-except ImportError:
-    # Fallback if the message type is not available
-    print("Warning: max_camera_msgs GraspPointArray not found. Using geometry_msgs.PoseStamped as fallback.")
-    GraspPointArray = None
-    GraspPoint = None
+# Import grasp points message type (using standard visualization_msgs MarkerArray)
+from visualization_msgs.msg import MarkerArray, Marker
 
 class PoseKalmanFilter:
     """Kalman filter for pose estimation and smoothing"""
@@ -233,8 +230,8 @@ class DirectObjectMove(Node):
         self.quat_controller = QuaternionOrientationController()
         self.get_logger().info("✅ Quaternion orientation controller initialized (gimbal-lock-free mode)")
         
-        # Fold symmetry directory for canonical pose matching
-        self.symmetry_dir = "/home/aaugus11/Projects/aruco-grasp-annotator/data/symmetry"
+        # Fold symmetry directory for canonical pose matching (auto-discovered)
+        self.symmetry_dir = str(get_symmetry_dir())
         
         # Store latest grasp points
         self.latest_grasp_points = None
@@ -283,9 +280,9 @@ class DirectObjectMove(Node):
         )
         
         # Subscribe to grasp points topic if grasp_id is provided
-        if self.grasp_id is not None and GraspPointArray is not None:
+        if self.grasp_id is not None:
             self.grasp_points_sub = self.create_subscription(
-                GraspPointArray,
+                MarkerArray,
                 self.grasp_points_topic,
                 self.grasp_points_callback,
                 5
@@ -293,8 +290,6 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"🎯 Grasp point mode: Looking for grasp_id {grasp_id} on topic {self.grasp_points_topic}")
         else:
             self.grasp_points_sub = None
-            if self.grasp_id is not None:
-                self.get_logger().warn(f"⚠️ Grasp point mode requested but GraspPointArray not available. Falling back to object center.")
         
         # Add timer to control update frequency (same for both modes)
         # Use shorter period for step 2 to get more frequent updates as robot gets closer
@@ -553,22 +548,19 @@ class DirectObjectMove(Node):
         self.final_object_pose = msg
     
     def grasp_points_callback(self, msg):
-        """Handle GraspPointArray message and find target grasp point"""
-        if GraspPointArray is None:
-            return
-        
-        # Store all grasp points
+        """Handle MarkerArray message and find target grasp point"""
+        # Store all grasp points (markers)
         self.latest_grasp_points = msg
         
-        # Find the grasp point with the specified ID and object name
-        target_grasp_point = None
-        for grasp_point in msg.grasp_points:
-            if (grasp_point.grasp_id == self.grasp_id and 
-                grasp_point.object_name == self.object_name):
-                target_grasp_point = grasp_point
+        # Find the marker with the specified ID and object name (ns)
+        target_marker = None
+        for marker in msg.markers:
+            if (marker.id == self.grasp_id and 
+                marker.ns == self.object_name):
+                target_marker = marker
                 break
         
-        if target_grasp_point is not None:
+        if target_marker is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
                 self.get_logger().info(f"🔄 Fresh grasp point data received during step 2! Cancelling current trajectory and recomputing...")
@@ -590,7 +582,7 @@ class DirectObjectMove(Node):
                 self.using_stale_data_step2 = False
             
             # Update grasp point in real-time (like object poses)
-            self.selected_grasp_point = target_grasp_point
+            self.selected_grasp_point = target_marker
             # Track update time to ensure we use fresh data
             self.last_grasp_point_update_time = self.get_clock().now()
             # Don't unsubscribe - keep receiving updates in real-time
@@ -768,15 +760,15 @@ class DirectObjectMove(Node):
                 if self.latest_grasp_points is None:
                     # No message received yet - using stale data from step 1
                     using_stale_grasp_point = True
-                elif len(self.latest_grasp_points.grasp_points) == 0:
+                elif len(self.latest_grasp_points.markers) == 0:
                     # Message is empty - using stale data
                     using_stale_grasp_point = True
                 else:
                     # Check if our grasp point is in the current message
                     grasp_point_found = False
-                    for grasp_point in self.latest_grasp_points.grasp_points:
-                        if (grasp_point.grasp_id == self.grasp_id and 
-                            grasp_point.object_name == self.object_name):
+                    for marker in self.latest_grasp_points.markers:
+                        if (marker.id == self.grasp_id and 
+                            marker.ns == self.object_name):
                             grasp_point_found = True
                             break
                     # If not found in current message, we're using stale data

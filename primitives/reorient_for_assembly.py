@@ -38,10 +38,11 @@ import time
 import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
-# Configuration
-ASSEMBLY_DATA_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data"
-SYMMETRY_DIR = "/home/aaugus11/Projects/aruco-grasp-annotator/data/symmetry"
+# Configuration (auto-discovered)
+ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
+SYMMETRY_DIR = str(get_symmetry_dir())
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
