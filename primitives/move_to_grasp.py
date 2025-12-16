@@ -38,14 +38,6 @@ from primitives.utils.quaternion_orientation_controller import QuaternionOrienta
 # Import path finder for auto-discovering aruco-grasp-annotator data directory
 from primitives.utils.data_path_finder import get_symmetry_dir
 
-# Import the new message types
-try:
-    from max_camera_msgs.msg import ObjectPoseArray
-except ImportError:
-    # Fallback if the message type is not available
-    print("Warning: max_camera_msgs not found. Using geometry_msgs.PoseStamped as fallback.")
-    ObjectPoseArray = None
-
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
 
@@ -375,29 +367,6 @@ class DirectObjectMove(Node):
         angle_diff_degrees = math.degrees(angle_diff_radians)
         
         return angle_diff_degrees <= self.angle_threshold
-    
-    def objects_poses_callback(self, msg):
-        """Handle ObjectPoseArray message and find target object"""
-        if ObjectPoseArray is None:
-            return
-            
-        # Find the object with the specified name
-        target_object = None
-        for obj in msg.objects:
-            if obj.object_name == self.object_name:
-                target_object = obj
-                break
-        
-        if target_object is not None:
-            # Convert ObjectPose to PoseStamped for compatibility
-            pose_stamped = PoseStamped()
-            pose_stamped.header = target_object.header
-            pose_stamped.pose = target_object.pose
-            self.latest_pose = pose_stamped
-        else:
-            # Object not found in this message
-            self.get_logger().debug(f"Object '{self.object_name}' not found in current message")
-            self.latest_pose = None
     
     def tf_message_callback(self, msg):
         """Handle TFMessage and find target object by child_frame_id"""

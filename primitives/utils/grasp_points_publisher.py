@@ -14,6 +14,13 @@ Usage:
 """
 
 import sys
+from pathlib import Path
+
+# Add project root to Python path if running as script
+if __name__ == "__main__":
+    project_root = Path(__file__).parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 # Check Python version - ROS2 Humble requires Python 3.10
 if sys.version_info[:2] != (3, 10):
@@ -38,7 +45,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from .data_path_finder import get_aruco_data_dir
+from primitives.utils.data_path_finder import get_aruco_data_dir
 
 
 class GraspPointsPublisher(Node):

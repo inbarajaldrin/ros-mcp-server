@@ -7,6 +7,7 @@ from utils.websocket_manager import WebSocketManager
 from msgs.geometry_msgs import Twist, PoseStamped
 from msgs.sensor_msgs import Image as RosImage, JointState
 import subprocess
+import sys
 
 #camera
 import time
@@ -38,8 +39,17 @@ ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))  # Default: rosbridge 
 # This is Global WebSocket manager - don't close it after every operation
 ws_manager = WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, LOCAL_IP)
 
-# MCP Directory - use script directory
-MCP_SRV_DIR = str(Path(__file__).parent.absolute())
+# Output directories - use MCP_CLIENT_OUTPUT_DIR if set, otherwise use relative paths
+# Directories are created lazily when needed by tools
+BASE_OUTPUT_DIR = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
+import sys
+if BASE_OUTPUT_DIR:
+    SCREENSHOTS_DIR = os.path.join(BASE_OUTPUT_DIR, "screenshots")
+    PYTHON_EXECUTIONS_DIR = os.path.join(BASE_OUTPUT_DIR, "python_executions")
+else:
+    SCREENSHOTS_DIR = "screenshots"
+    PYTHON_EXECUTIONS_DIR = "python_executions"
+
 # Initialize MCP 
 mcp = FastMCP("ros-mcp-server")
 
@@ -171,8 +181,8 @@ def capture_camera_image(topic_name: str, timeout: int = 10):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             # Clean topic name for filename
             topic_clean = topic_name.replace("/", "_").replace(":", "_")
-            filename = f"screenshots/{timestamp}_{topic_clean}.jpg"
-            os.makedirs("screenshots", exist_ok=True)
+            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+            filename = os.path.join(SCREENSHOTS_DIR, f"{timestamp}_{topic_clean}.jpg")
             bgr_image = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
             cv2.imwrite(filename, bgr_image)
             
@@ -192,11 +202,10 @@ def capture_camera_image(topic_name: str, timeout: int = 10):
             result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
             
             try:
-                screenshot_path = "screenshots"
-                if os.path.exists(screenshot_path):
-                    files = sorted([f for f in os.listdir(screenshot_path) if f.endswith('.jpg') or f.endswith('.png')])
+                if os.path.exists(SCREENSHOTS_DIR):
+                    files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
                     if files:
-                        latest_file = os.path.join(screenshot_path, files[-1])
+                        latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
                         with open(latest_file, 'rb') as f:
                             raw_data = f.read()
                         mcp_image = Image(data=raw_data, format="jpeg")
@@ -218,11 +227,10 @@ def capture_camera_image(topic_name: str, timeout: int = 10):
         
         # Try fallback to screenshot
         try:
-            screenshot_path = "screenshots"
-            if os.path.exists(screenshot_path):
-                files = sorted([f for f in os.listdir(screenshot_path) if f.endswith('.jpg') or f.endswith('.png')])
+            if os.path.exists(SCREENSHOTS_DIR):
+                files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
                 if files:
-                    latest_file = os.path.join(screenshot_path, files[-1])
+                    latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
                     with open(latest_file, 'rb') as f:
                         raw_data = f.read()
                     mcp_image = Image(data=raw_data, format="jpeg")
@@ -355,14 +363,21 @@ def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
         timeout: Maximum execution time in seconds (default: 30)
         
     Returns:
-        Dictionary with output from the executed Python code (stdout + stderr)
+        Dictionary with output from the executed Python code (stdout + stderr) and file information
     """
     import subprocess
     import tempfile
     import os
     import sys
+    import shutil
     
     try:
+        # Create python_executions directory if it doesn't exist
+        os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
+        
+        # Get list of files before execution
+        files_before = set(os.listdir(PYTHON_EXECUTIONS_DIR))
+        
         # Create a temporary Python file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             # Wrap code with common imports and print result if it's an expression
@@ -378,13 +393,13 @@ import sys
             f.write(code_with_imports)
             temp_file = f.name
         
-        # Execute the code
+        # Execute the code in the python_executions directory
         result = subprocess.run(
             [sys.executable, temp_file],
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            cwd=PYTHON_EXECUTIONS_DIR
         )
         
         # Clean up
@@ -393,12 +408,23 @@ import sys
         except:
             pass
         
+        # Get list of files after execution
+        files_after = set(os.listdir(PYTHON_EXECUTIONS_DIR))
+        created_files = files_after - files_before
+        
         # Return combined stdout and stderr
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
         
-        return {"output": output}
+        result_dict = {"output": output}
+        
+        # Files are already in the correct location (PYTHON_EXECUTIONS_DIR uses MCP_CLIENT_OUTPUT_DIR if set)
+        if created_files:
+            result_dict["files_created"] = list(created_files)
+            result_dict["files_location"] = PYTHON_EXECUTIONS_DIR
+        
+        return result_dict
         
     except subprocess.TimeoutExpired:
         # Clean up the temp file
@@ -480,39 +506,71 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[st
     return _run_primitive("move_to_grasp.py", f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}", timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
-def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", target_object_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
+def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
     """Reorient object for assembly.
-    
+
     Args:
         object_name: Name of the object to reorient
-        base_name: Name of the base object (ignored if target_object_orientation is provided)
+        base_name: Name of the base object
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        target_object_orientation: Optional target object orientation quaternion [x, y, z, w] in world frame.
-                                   If provided, skips base pose and JSON lookup, uses this orientation directly.
-    
+        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
+        target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
+
     Returns:
         Raw output from the reorient for assembly primitive script
     """
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-    if target_object_orientation is not None:
-        if len(target_object_orientation) != 4:
-            raise ValueError("target_object_orientation must be a quaternion [x, y, z, w] with 4 elements")
-        cmd += f" --target-object-orientation {' '.join(str(x) for x in target_object_orientation)}"
+    if current_object_orientation is not None:
+        cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
+    if target_base_orientation is not None:
+        cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
     return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
 
 @mcp.tool()
-def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+def reorient_object(object_name: str, target_orientation: List[float], mode: str = "sim", current_orientation: Optional[List[float]] = None, duration: float = 5.0) -> Dict[str, Any]:
+    """Reorient object to target orientation (standalone, no assembly required).
+
+    Args:
+        object_name: Name of the object to reorient
+        target_orientation: Target object orientation quaternion [x, y, z, w] in world frame (required)
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        current_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
+        duration: Trajectory duration in seconds (default: 5.0)
+
+    Returns:
+        Raw output from the reorient object primitive script
+    """
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --target-orientation {' '.join(str(x) for x in target_orientation)}"
+    if current_orientation is not None:
+        cmd += f" --current-orientation {' '.join(str(x) for x in current_orientation)}"
+    if duration != 5.0:
+        cmd += f" --duration {duration}"
+    
+    return _run_primitive("reorient_object.py", cmd, timeout=90, error_prefix="Reorient object")
+
+@mcp.tool()
+def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim", final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
     """Translate object to target position for assembly.
     
     Args:
         object_name: Name of the object being held
         base_name: Name of the base object
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        final_base_pos: Final base position [x, y, z] in meters (required in real mode unless use_default_base is True)
+        final_base_orientation: Final base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base is True)
+        use_default_base: Use default base position and orientation (for real mode)
     
     Returns:
         Raw output from the translate for assembly primitive script
     """
-    return _run_primitive("translate_for_assembly.py", f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=90, error_prefix="Translate for assembly")
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+    if final_base_pos is not None:
+        cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
+    if final_base_orientation is not None:
+        cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
+    if use_default_base:
+        cmd += " --use-default-base"
+    return _run_primitive("translate_for_assembly.py", cmd, timeout=90, error_prefix="Translate for assembly")
 
 @mcp.tool()
 def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
@@ -565,10 +623,10 @@ def move_down(mode: str = "real") -> Dict[str, Any]:
 def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
     """Control gripper with verification.
     
-    Supports "open", "close", or numeric values 0-110 (representing 0-11cm width).
+    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
     
     Args:
-        command: Gripper command - "open", "close", or numeric value 0-110 (width in mm, representing 0-11cm)
+        command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
     
     Returns:

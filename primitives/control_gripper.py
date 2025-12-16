@@ -3,12 +3,13 @@
 Gripper Control with Verification
 
 Controls gripper and verifies movement using gripper width readings (both sim and real).
-Supports "open", "close", or numeric values 0-110 (representing 0-11cm width).
+Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
 
 Usage:
     python3 control_gripper.py open [--mode sim|real]
     python3 control_gripper.py close [--mode sim|real]
-    python3 control_gripper.py 55 [--mode sim|real]  # 5.5cm width
+    python3 control_gripper.py half-open [--mode sim|real]
+    python3 control_gripper.py 55 [--mode sim|real]  # 55mm width
 """
 
 import rclpy
@@ -39,6 +40,7 @@ class GripperController(Node):
         self.monitoring_lock = threading.Lock()
         self.verification_complete = False
         self.verification_result = None
+        self.final_stabilized_width = None  # Store the final stabilized width
         
         # Publisher for gripper commands
         self.gripper_pub = self.create_publisher(String, '/gripper_command', 10)
@@ -72,6 +74,11 @@ class GripperController(Node):
             self.target_state = "close"
             self.ros_command = "close"
             self.numeric_value = 0
+        elif command.lower() == "half-open":
+            # Half-open: hardcoded to 30mm
+            self.target_state = "numeric"
+            self.numeric_value = int(30.0 * 10)  # Convert 30mm to 300 (0-1100 range)
+            self.ros_command = str(self.numeric_value)
         else:
             # Numeric value 0-110 (convert to 0-1100 for ROS)
             try:
@@ -83,7 +90,7 @@ class GripperController(Node):
                 self.numeric_value = int(value * 10)  # Convert 0-110 to 0-1100
                 self.ros_command = str(self.numeric_value)
             except ValueError:
-                self.get_logger().error(f"Invalid command '{command}'. Use 'open', 'close', or 0-110.")
+                self.get_logger().error(f"Invalid command '{command}'. Use 'open', 'close', 'half-open', or 0-110.")
                 sys.exit(1)
         
         self.get_logger().info(f"Target state: {self.target_state}, ROS command: {self.ros_command}, Mode: {self.mode}")
@@ -189,7 +196,14 @@ class GripperController(Node):
                         # Movement completed and stabilized
                         check_value = baseline_value if baseline_value is not None else initial_value
                         if movement_detected or (check_value is not None and self.has_moved(check_value, current_value, movement_threshold)):
-                            self.get_logger().info(f"✓ Gripper movement completed and stabilized (width: {current_value:.2f})")
+                            # Wait a bit more to ensure we have the true final value
+                            time.sleep(0.5)
+                            # Get one more reading to confirm final value
+                            final_confirmed = self.get_current_width(timeout=0.5)
+                            if final_confirmed is not None:
+                                current_value = final_confirmed
+                            self.final_stabilized_width = current_value
+                            self.get_logger().info(f"✓ Gripper movement completed and stabilized (width: {current_value:.2f}mm)")
                             return True
                 else:
                     no_change_count = 0
@@ -202,15 +216,20 @@ class GripperController(Node):
         self.get_logger().info("Timeout reached, checking final state...")
         time.sleep(1.0)
         
-        # Get final reading
-        final_value = self.get_current_width(timeout=0.5)
+        # Get final reading with extra wait to ensure it's the true final value
+        time.sleep(0.5)
+        final_value = self.get_current_width(timeout=1.0)
         
         # Use baseline_value if initial_value was None
         check_value = baseline_value if baseline_value is not None else initial_value
         
+        # Store final value
+        if final_value is not None:
+            self.final_stabilized_width = final_value
+        
         # If gripper moved from baseline, consider it successful
         if final_value is not None and check_value is not None and self.has_moved(check_value, final_value, movement_threshold):
-            self.get_logger().info(f"✓ Gripper movement detected (baseline: {check_value:.2f}, final: {final_value:.2f})")
+            self.get_logger().info(f"✓ Gripper movement detected (baseline: {check_value:.2f}mm, final: {final_value:.2f}mm)")
             return True
         
         # If no movement detected, return False for retry
@@ -259,12 +278,14 @@ class GripperController(Node):
             # Send command (monitoring is already active)
             self.send_gripper_command()
             
-            # Wait for verification to complete
-            monitoring_thread.join(timeout=20.0)
+            # Wait for verification to complete (increased timeout to ensure completion)
+            monitoring_thread.join(timeout=25.0)
             
             # Check result
             with self.monitoring_lock:
                 if self.verification_complete and self.verification_result:
+                    # Wait a bit more to ensure final value is truly stable
+                    time.sleep(0.3)
                     self.get_logger().info(f"Gripper control successful after {attempt} attempt(s)!")
                     return True
                 elif not self.verification_complete:
@@ -279,7 +300,7 @@ class GripperController(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Control gripper with verification')
-    parser.add_argument('command', type=str, help='Gripper command: "open", "close", or 0-110 (width in cm)')
+    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (30mm), or 0-110 (width in mm)')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
     
@@ -301,10 +322,35 @@ def main(args=None):
     # Control with verification
     success = controller.control_with_verification(initial_value)
     
+    # Wait a bit more to ensure gripper has fully stopped and final value is stable
+    time.sleep(0.5)
+    
     # Get final reading (both modes use width now)
-    final_value = controller.get_current_width(timeout=2.0)
+    # Use stored stabilized width if available, otherwise get current reading
+    if controller.final_stabilized_width is not None:
+        final_value = controller.final_stabilized_width
+        controller.get_logger().info(f"Using stabilized final gripper width: {final_value:.2f}mm")
+    else:
+        # Get a few readings to ensure we have the true final value
+        final_readings = []
+        for _ in range(3):
+            reading = controller.get_current_width(timeout=0.5)
+            if reading is not None:
+                final_readings.append(reading)
+            time.sleep(0.2)
+        
+        if final_readings:
+            # Use the most recent reading, or average if they're close
+            final_value = final_readings[-1]
+            if len(final_readings) >= 2:
+                # Check if readings are stable (within 0.5mm)
+                if abs(final_readings[-1] - final_readings[-2]) <= 0.5:
+                    final_value = final_readings[-1]
+        else:
+            final_value = controller.get_current_width(timeout=2.0)
+    
     if final_value is not None:
-        controller.get_logger().info(f"Final gripper width: {final_value:.2f}")
+        controller.get_logger().info(f"Final gripper width: {final_value:.2f}mm")
     
     # Output gripper range and current width
     controller.get_logger().info(f"Gripper range: {GRIPPER_MIN_WIDTH:.1f} - {GRIPPER_MAX_WIDTH:.1f}mm")
