@@ -27,6 +27,7 @@ from builtin_interfaces.msg import Duration
 import math
 import argparse
 import numpy as np
+import subprocess
 from scipy.spatial.transform import Rotation as R
 
 # Import from local action_libraries file
@@ -1291,12 +1292,64 @@ def main(args=None):
                        help='Distance offset from object/grasp point in meters (default: 0.123m = 12.3cm)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
                        help='Mode: "sim" for simulation (uses /objects_poses_sim with TFMessage), "real" for real robot (uses /objects_poses_real with TFMessage). REQUIRED - no default.')
+    parser.add_argument('--move-to-object', action='store_true',
+                       help='Move to object (default mode - must be specified)')
+    parser.add_argument('--move-to-safe-height', action='store_true',
+                       help='Only move to safe height (after closing gripper)')
     
     # Parse arguments from sys.argv if args is None
     if args is None:
         args = parser.parse_args()
     else:
         args = parser.parse_args(args)
+    
+    # Check that at least one mode flag is specified
+    if not args.move_to_object and not args.move_to_safe_height:
+        parser.error("Must specify either --move-to-object or --move-to-safe-height")
+    
+    # If move-to-safe-height flag is set, only call move_to_safe_height and exit
+    if args.move_to_safe_height:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        print("[INFO] Moving to safe height...")
+        try:
+            cmd_parts = [
+                f"cd {script_dir}",
+                f"timeout 30 /usr/bin/python3 move_to_safe_height.py"
+            ]
+            cmd = "\n".join(cmd_parts)
+            
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                executable='/bin/bash',
+                capture_output=True,
+                text=True,
+                timeout=40
+            )
+            
+            # Log output
+            if result.stdout:
+                print(f"[INFO] Move to safe height output: {result.stdout}")
+            if result.stderr:
+                print(f"[WARN] Move to safe height stderr: {result.stderr}")
+            
+            if result.returncode != 0:
+                print(f"[ERROR] Move to safe height failed with return code: {result.returncode}")
+                return
+            else:
+                print("[INFO] Successfully moved to safe height")
+                return  # Exit after safe height movement
+                
+        except subprocess.TimeoutExpired:
+            print("[ERROR] Move to safe height timed out")
+            return
+        except Exception as e:
+            print(f"[ERROR] Failed to execute move to safe height: {e}")
+            return
+    
+    # Only proceed with object movement if --move-to-object flag is set
+    if not args.move_to_object:
+        parser.error("Must specify --move-to-object to move to an object")
     
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name, 

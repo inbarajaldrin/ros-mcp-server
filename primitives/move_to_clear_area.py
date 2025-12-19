@@ -408,6 +408,10 @@ class MoveToClearArea(Node):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().error("Trajectory goal rejected")
+            try:
+                self.destroy_node()
+            except:
+                pass
             rclpy.shutdown()
             return
 
@@ -421,6 +425,11 @@ class MoveToClearArea(Node):
             self.get_logger().info("Movement completed successfully")
         else:
             self.get_logger().error(f"Trajectory failed with status: {result.status}")
+        # Destroy node before shutdown to ensure clean exit
+        try:
+            self.destroy_node()
+        except:
+            pass
         rclpy.shutdown()
 
 def main(args=None):
@@ -440,7 +449,21 @@ def main(args=None):
     
     rclpy.init()
     node = MoveToClearArea(mode=mode)
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        node.get_logger().error(f"Error during spin: {e}")
+    finally:
+        try:
+            node.destroy_node()
+        except:
+            pass
+        try:
+            rclpy.shutdown()
+        except:
+            pass
 
 if __name__ == '__main__':
     main()

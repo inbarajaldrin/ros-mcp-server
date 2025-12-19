@@ -320,36 +320,36 @@ def read_topic(topic_name: str, timeout: int = 5):
         result["traceback"] = traceback.format_exc()
         return result
 
-@mcp.tool()
-def perform_ik(target_position: List[float], target_rpy: List[float], 
-               duration: float = 5.0) -> Dict[str, Any]:
-    """
-    Perform inverse kinematics and execute smooth trajectory movement using ROS2.
-    
-    Args:
-        target_position: [x, y, z] target position in meters
-        target_rpy: [roll, pitch, yaw] target orientation in degrees
-        duration: Time to complete the movement in seconds (default: 5.0)
-        
-    Returns:
-        Raw output from the perform IK primitive script
-    """
-    timeout_seconds = int(duration) + 10  # Add buffer for communication overhead
-    args = f"--target-position {target_position[0]} {target_position[1]} {target_position[2]} --target-rpy {target_rpy[0]} {target_rpy[1]} {target_rpy[2]} --duration {duration}"
-    return _run_primitive("perform_ik.py", args, timeout=timeout_seconds, error_prefix="Perform IK")
+# @mcp.tool()
+# def perform_ik(target_position: List[float], target_rpy: List[float], 
+#                duration: float = 5.0) -> Dict[str, Any]:
+#     """
+#     Perform inverse kinematics and execute smooth trajectory movement using ROS2.
+#     
+#     Args:
+#         target_position: [x, y, z] target position in meters
+#         target_rpy: [roll, pitch, yaw] target orientation in degrees
+#         duration: Time to complete the movement in seconds (default: 5.0)
+#         
+#     Returns:
+#         Raw output from the perform IK primitive script
+#     """
+#     timeout_seconds = int(duration) + 10  # Add buffer for communication overhead
+#     args = f"--target-position {target_position[0]} {target_position[1]} {target_position[2]} --target-rpy {target_rpy[0]} {target_rpy[1]} {target_rpy[2]} --duration {duration}"
+#     return _run_primitive("perform_ik.py", args, timeout=timeout_seconds, error_prefix="Perform IK")
 
-@mcp.tool()
-def get_ee_pose(joint_angles: List[float] = None) -> Dict[str, Any]:
-    """
-    Get end-effector pose from ROS topic /tcp_pose_broadcaster/pose.
-    
-    Args:
-        joint_angles: This parameter is ignored. The pose is read directly from ROS topic.
-        
-    Returns:
-        Raw output from the get EE pose primitive script
-    """
-    return _run_primitive("get_ee_pose.py", timeout=10, error_prefix="Get EE pose")
+# @mcp.tool()
+# def get_ee_pose(joint_angles: List[float] = None) -> Dict[str, Any]:
+#     """
+#     Get end-effector pose from ROS topic /tcp_pose_broadcaster/pose.
+#     
+#     Args:
+#         joint_angles: This parameter is ignored. The pose is read directly from ROS topic.
+#         
+#     Returns:
+#         Raw output from the get EE pose primitive script
+#     """
+#     return _run_primitive("get_ee_pose.py", timeout=10, error_prefix="Get EE pose")
 
 @mcp.tool()
 def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
@@ -488,25 +488,51 @@ def move_home() -> Dict[str, Any]:
     return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
 
 @mcp.tool()
-def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim") -> Dict[str, Any]:
+def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_object: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
     """Move to grasp position.
-    
-    The grasp_id should be obtained from either:
-    - The captured image space (visual analysis of the image)
-    - The /grasp_points_sim topic (sim mode) or /grasp_points_real topic (real mode) (ROS topics that publish available grasp points)
-    
+    This tool is used to move to the grasp an object. And once the object is grasped, you can move to the safe height.
+    REQUIRED: At least one flag must be set to True.
+
     Args:
         object_name: Name of the object to grasp
         grasp_id: ID of the grasp point to use
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-    
-    Returns:
-        Raw output from the move to grasp primitive script
+        move_to_object: Moves to the specified grasp point
+        move_to_safe_height: After closing gripper move to safe height 
     """
-    return _run_primitive("move_to_grasp.py", f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}", timeout=60, error_prefix="Move to grasp")
+    # Validate that at least one flag is set
+    if not (move_to_object or move_to_safe_height):
+        return {"output": "Error: At least one of move_to_object or move_to_safe_height must be set to True"}
+    
+    cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
+    if move_to_object:
+        cmd += " --move-to-object"
+    if move_to_safe_height:
+        cmd += " --move-to-safe-height"
+    
+    return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
+
+# @mcp.tool()
+# def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
+#     """Reorient object for assembly.
+# 
+#     Args:
+#         object_name: Name of the object to reorient
+#         base_name: Name of the base object
+#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+#         current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
+#         target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
+# 
+#     """
+#     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+#     if current_object_orientation is not None:
+#         cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
+#     if target_base_orientation is not None:
+#         cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
+#     return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
 
 @mcp.tool()
-def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
+def reorient_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
     """Reorient object for assembly.
 
     Args:
@@ -516,8 +542,6 @@ def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", c
         current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
         target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
 
-    Returns:
-        Raw output from the reorient for assembly primitive script
     """
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
@@ -526,73 +550,51 @@ def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", c
         cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
     return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
 
-@mcp.tool()
-def reorient_object(object_name: str, target_orientation: List[float], mode: str = "sim", current_orientation: Optional[List[float]] = None, duration: float = 5.0) -> Dict[str, Any]:
-    """Reorient object to target orientation (standalone, no assembly required).
+# @mcp.tool()
+# def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim", final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
+#     """Translate object to target position for assembly.
+#     
+#     Args:
+#         object_name: Name of the object being held
+#         base_name: Name of the base object
+#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+#         final_base_pos: Final base position [x, y, z] in meters (required in real mode unless use_default_base is True)
+#         final_base_orientation: Final base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base is True)
+#         use_default_base: Use default base position and orientation (for real mode)
+#     
+#     Returns:
+#         Raw output from the translate for assembly primitive script
+#     """
+#     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+#     if final_base_pos is not None:
+#         cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
+#     if final_base_orientation is not None:
+#         cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
+#     if use_default_base:
+#         cmd += " --use-default-base"
+#     return _run_primitive("translate_for_assembly.py", cmd, timeout=90, error_prefix="Translate for assembly")
 
-    Args:
-        object_name: Name of the object to reorient
-        target_orientation: Target object orientation quaternion [x, y, z, w] in world frame (required)
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        current_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
-        duration: Trajectory duration in seconds (default: 5.0)
-
-    Returns:
-        Raw output from the reorient object primitive script
-    """
-    cmd = f"--mode {mode} --object-name \"{object_name}\" --target-orientation {' '.join(str(x) for x in target_orientation)}"
-    if current_orientation is not None:
-        cmd += f" --current-orientation {' '.join(str(x) for x in current_orientation)}"
-    if duration != 5.0:
-        cmd += f" --duration {duration}"
-    
-    return _run_primitive("reorient_object.py", cmd, timeout=90, error_prefix="Reorient object")
-
-@mcp.tool()
-def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim", final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
-    """Translate object to target position for assembly.
-    
-    Args:
-        object_name: Name of the object being held
-        base_name: Name of the base object
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        final_base_pos: Final base position [x, y, z] in meters (required in real mode unless use_default_base is True)
-        final_base_orientation: Final base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base is True)
-        use_default_base: Use default base position and orientation (for real mode)
-    
-    Returns:
-        Raw output from the translate for assembly primitive script
-    """
-    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-    if final_base_pos is not None:
-        cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
-    if final_base_orientation is not None:
-        cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
-    if use_default_base:
-        cmd += " --use-default-base"
-    return _run_primitive("translate_for_assembly.py", cmd, timeout=90, error_prefix="Translate for assembly")
-
-@mcp.tool()
-def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
-    """Perform insert operation with force compliance (sim mode) or force-compliant movement (real mode).
-    
-    Args:
-        mode: Mode to use - "sim" for simulation or "real" for real robot (required)
-        object_name: Name of the object being held (required in sim mode)
-        base_name: Name of the base object (required in sim mode)
-    
-    Returns:
-        Raw output from the perform insert primitive script
-    """
-    # Build command based on mode
-    if mode == "sim":
-        args = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-        timeout = 90
-    else:  # real mode
-        args = f"--mode {mode}"
-        timeout = 300
-    
-    return _run_primitive("perform_insert.py", args, timeout=timeout, error_prefix="Perform insert")
+# @mcp.tool()
+# def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
+#     """Perform insert operation with force compliance (sim mode) or force-compliant movement (real mode).
+#     
+#     Args:
+#         mode: Mode to use - "sim" for simulation or "real" for real robot (required)
+#         object_name: Name of the object being held (required in sim mode)
+#         base_name: Name of the base object (required in sim mode)
+#     
+#     Returns:
+#         Raw output from the perform insert primitive script
+#     """
+#     # Build command based on mode
+#     if mode == "sim":
+#         args = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+#         timeout = 90
+#     else:  # real mode
+#         args = f"--mode {mode}"
+#         timeout = 300
+#     
+#     return _run_primitive("perform_insert.py", args, timeout=timeout, error_prefix="Perform insert")
 
 @mcp.tool()
 def verify_final_assembly_pose(object_name: str, base_name: str) -> Dict[str, Any]:
@@ -607,17 +609,17 @@ def verify_final_assembly_pose(object_name: str, base_name: str) -> Dict[str, An
     """
     return _run_primitive("verify_final_assembly_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify final assembly pose")
 
-@mcp.tool()
-def move_down(mode: str = "real") -> Dict[str, Any]:
-    """Move robot down with force monitoring.
-    
-    Args:
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "real")
-    
-    Returns:
-        Raw output from the move down primitive script
-    """
-    return _run_primitive("move_down.py", f"--mode {mode}", timeout=300, error_prefix="Move down")
+# @mcp.tool()
+# def move_down(mode: str = "real") -> Dict[str, Any]:
+#     """Move robot down with force monitoring.
+#     
+#     Args:
+#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "real")
+#     
+#     Returns:
+#         Raw output from the move down primitive script
+#     """
+#     return _run_primitive("move_down.py", f"--mode {mode}", timeout=300, error_prefix="Move down")
 
 @mcp.tool()
 def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
@@ -628,32 +630,154 @@ def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
     Args:
         command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-    
-    Returns:
-        Raw output from the gripper control primitive script
+
     """
     return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
-@mcp.tool()
-def move_to_safe_height() -> Dict[str, Any]:
-    """Move robot to safe height.
-    
-    Returns:
-        Raw output from the move to safe height primitive script
-    """
-    return _run_primitive("move_to_safe_height.py", timeout=30, error_prefix="Move to safe height")
+# @mcp.tool()
+# def move_to_safe_height() -> Dict[str, Any]:
+#     """Move robot to safe height.
+#     
+#     Returns:
+#         Raw output from the move to safe height primitive script
+#     """
+#     return _run_primitive("move_to_safe_height.py", timeout=30, error_prefix="Move to safe height")
+
+# @mcp.tool()
+# def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
+#     """Move robot to clear area position.
+#     
+#     Args:
+#         mode: Mode to use - "move" to keep current end-effector orientation (default) or "hover" for top-down (face-down) orientation
+#     
+#     Returns:
+#         Raw output from the move to clear area primitive script
+#     """
+#     return _run_primitive("move_to_clear_area.py", f"--{mode}", timeout=45, error_prefix="Move to clear area")
+
+# @mcp.tool()
+# def get_target_ee_pose(object_name: str, base_name: str, mode: str) -> Dict[str, Any]:
+#     """Get target end-effector pose (position and orientation) from assembly configuration.
+#     
+#     Args:
+#         object_name: Name of the object
+#         base_name: Name of the base object
+#         mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose)
+#     
+#     Returns:
+#         Raw output from the get target EE pose primitive script
+#     """
+#     return _run_primitive("get_target_ee_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=10, error_prefix="Get target EE pose")
+
+# @mcp.tool()
+# def get_target_object_pose(object_name: str, base_name: str, mode: str) -> Dict[str, Any]:
+#     """Get target object pose (position and orientation) in world frame from assembly configuration.
+#     
+#     Args:
+#         object_name: Name of the object
+#         base_name: Name of the base object
+#         mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose)
+#     
+#     Returns:
+#         Raw output from the get target object pose primitive script (JSON with target_object_pose)
+#     """
+#     return _run_primitive("get_target_object_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=10, error_prefix="Get target object pose")
 
 @mcp.tool()
-def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
-    """Move robot to clear area position.
+def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
+    """Move to regrasp position.
+    This tool is used to aid in reorienting the current object if the by placing it down on clear space and then moving to safe height so the object can be grasped again.
+    
+    IMPORTANT: Only ONE flag can be set to True at a time. These flags must be called in sequence one by one to complete the move to regrasp sequence.
     
     Args:
-        mode: Mode to use - "move" to keep current end-effector orientation (default) or "hover" for top-down (face-down) orientation
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        move_to_clear_space: This is to move above a clear space maintaining the current orientation of the object.
+        move_down: This is a force compliant move down to place the object on the clear space.
+        move_to_safe_height: This is to move to the safe height position after having opened the gripper. Now you are ready to grasp the object again.
     
     Returns:
-        Raw output from the move to clear area primitive script
+        Raw output from the move to regrasp primitive script
     """
-    return _run_primitive("move_to_clear_area.py", f"--{mode}", timeout=45, error_prefix="Move to clear area")
+    # Count how many flags are set
+    flags_set = sum([move_to_clear_space, move_down, move_to_safe_height])
+    
+    # Validate that exactly one flag is set
+    if flags_set == 0:
+        return {"output": "Error: Exactly one of move_to_clear_space, move_down, or move_to_safe_height must be set to True"}
+    elif flags_set > 1:
+        return {"output": "Error: Only one flag can be set at a time. Set exactly one of move_to_clear_space, move_down, or move_to_safe_height to True"}
+    
+    cmd = f"--mode {mode}"
+    if move_to_clear_space:
+        cmd += " --move-to-clear-space"
+    if move_down:
+        cmd += " --move-down"
+    if move_to_safe_height:
+        cmd += " --move-to-safe-height"
+    
+    return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
+
+@mcp.tool()
+def translate_object(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
+    """Translate object to target position.
+    
+    REQUIRED: Exactly one of move_to_base or move_down must be set to True (they are mutually exclusive).
+    
+    Args:
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        object_name: Name of the object being held (required in sim mode)
+        base_name: Name of the base object (required in sim mode when using move_to_base or move_down; required in real mode when using move_to_base)
+        move_to_base: Moves to the specified base position (exactly one flag must be True)
+        move_down: Moves down to the specified target object position (exactly one flag must be True)
+        final_base_pos: Final base position [x, y, z] in meters (for translate_for_assembly in real mode)
+        final_base_orientation: Final base orientation quaternion [x, y, z, w] (for translate_for_assembly in real mode)
+        use_default_base: Use default base position and orientation (for translate_for_assembly in real mode)
+    """
+    # Validate that exactly one flag is set
+    flags_set = sum([move_to_base, move_down])
+    if flags_set == 0:
+        return {"output": "Error: Exactly one of move_to_base or move_down must be set to True"}
+    elif flags_set > 1:
+        return {"output": "Error: move_to_base and move_down are mutually exclusive. Set exactly one to True"}
+    
+    # Validate sim mode requirements
+    if mode == "sim":
+        if object_name is None:
+            return {"output": "Error: object_name is required in sim mode"}
+        if base_name is None:
+            return {"output": "Error: base_name is required in sim mode when using move_to_base or move_down"}
+    
+    # Validate real mode requirements for move_to_base
+    if mode == "real" and move_to_base:
+        if base_name is None:
+            return {"output": "Error: base_name is required in real mode when using move_to_base"}
+        if not use_default_base and final_base_pos is None:
+            return {"output": "Error: In real mode with move_to_base, either final_base_pos or use_default_base is required"}
+    
+    cmd = f"--mode {mode}"
+    if object_name is not None:
+        cmd += f" --object-name \"{object_name}\""
+    if base_name is not None:
+        cmd += f" --base-name \"{base_name}\""
+    if move_to_base:
+        cmd += " --move-to-base"
+    if move_down:
+        cmd += " --move-down"
+    if final_base_pos is not None:
+        cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
+    if final_base_orientation is not None:
+        cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
+    if use_default_base:
+        cmd += " --use-default-base"
+    
+    # Adjust timeout based on operation
+    if move_down:
+        timeout = 300  # Force compliance can take longer
+    else:
+        timeout = 90
+    
+    return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
 
 if __name__ == "__main__":

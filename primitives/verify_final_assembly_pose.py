@@ -22,11 +22,16 @@ import time
 import sys
 import os
 import glob
+
+# Add project root to path so primitives package can be imported when running directly
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
 # Configuration (auto-discovered)
-ASSEMBLY_DATA_DIR = get_assembly_data_dir()
-ASSEMBLY_JSON_FILE = str(ASSEMBLY_DATA_DIR / "fmb_assembly.json")
+ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
@@ -35,6 +40,51 @@ EE_TOPIC = "/tcp_pose_broadcaster/pose"
 # Tolerance thresholds
 POSITION_TOLERANCE = 0.01  # 1cm tolerance for position
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
+
+
+def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
+    """
+    Find the assembly JSON file that contains the given base name.
+    
+    Args:
+        base_name: Name of the base object to search for
+        data_dir: Directory to search for JSON files
+        logger: Optional logger for debug output
+        
+    Returns:
+        Path to the matching JSON file, or None if not found
+    """
+    if not os.path.exists(data_dir):
+        if logger:
+            logger.error(f"Data directory not found: {data_dir}")
+        return None
+    
+    # Search for all JSON files in the data directory
+    json_files = glob.glob(os.path.join(data_dir, "*.json"))
+    
+    # Try exact match first, then with _scaled70 suffix
+    base_name_variants = [base_name, f"{base_name}_scaled70"]
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+            
+            # Check if any component matches the base name
+            components = config.get('components', [])
+            for component in components:
+                comp_name = component.get('name', '')
+                if comp_name in base_name_variants:
+                    return json_file
+        except (json.JSONDecodeError, IOError) as e:
+            # Skip invalid JSON files
+            if logger:
+                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
+            continue
+    
+    if logger:
+        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
+    return None
 
 
 class FoldSymmetry:
@@ -153,12 +203,18 @@ class FoldSymmetry:
 
 
 class VerifyFinalAssemblyPose(Node):
-    def __init__(self, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
+    def __init__(self, base_name=None, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
         super().__init__('verify_final_assembly_pose')
         
-        # Load assembly configuration
-        self.assembly_config = self.load_assembly_config()
+        # Store base name and find assembly JSON file
+        self.base_name = base_name
+        self.assembly_json_file = None
+        self.assembly_config = {}
         self.symmetry_dir = SYMMETRY_DIR
+        
+        # Load assembly configuration if base_name is provided
+        if base_name is not None:
+            self.assembly_config = self.load_assembly_config(base_name)
         
         # Subscribers for pose data
         self.base_sub = self.create_subscription(TFMessage, base_topic, self.base_callback, 10)
@@ -170,16 +226,41 @@ class VerifyFinalAssemblyPose(Node):
         self.current_ee_pose = None
         
     
-    def load_assembly_config(self):
-        """Load the assembly configuration from JSON file"""
+    def load_assembly_config(self, base_name=None):
+        """
+        Load assembly configuration from JSON file.
+        If base_name is provided, automatically finds the matching JSON file.
+        
+        Args:
+            base_name: Optional base name to search for matching JSON file
+            
+        Returns:
+            Assembly configuration dictionary
+        """
+        # If base_name is provided, find the matching JSON file
+        if base_name is not None:
+            json_file = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file:
+                self.assembly_json_file = json_file
+            else:
+                self.get_logger().error(f"Could not find assembly JSON for base '{base_name}'")
+                return {}
+        
+        # Use found file or fall back to default behavior
+        json_file = self.assembly_json_file
+        if json_file is None:
+            # Fallback: try to find any assembly JSON (for backward compatibility)
+            json_file = find_assembly_json_by_base_name("base", ASSEMBLY_DATA_DIR, self.get_logger())
+            if json_file is None:
+                self.get_logger().error("No assembly JSON file found")
+                return {}
+        
         try:
-            with open(ASSEMBLY_JSON_FILE, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            self.get_logger().error(f"Assembly file not found: {ASSEMBLY_JSON_FILE}")
-            return {}
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f"Error parsing assembly JSON: {e}")
+            with open(json_file, 'r') as f:
+                config = json.load(f)
+                return config
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            self.get_logger().error(f"Error loading assembly config from {json_file}: {e}")
             return {}
     
     def base_callback(self, msg):
@@ -401,7 +482,7 @@ def main(args=None):
     args = parser.parse_args()
     
     rclpy.init()
-    node = VerifyFinalAssemblyPose()
+    node = VerifyFinalAssemblyPose(base_name=args.base_name)
     
     try:
         # Wait for pose data (wait indefinitely until received)
