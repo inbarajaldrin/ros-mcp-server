@@ -54,6 +54,12 @@ else:
 mcp = FastMCP("ros-mcp-server")
 
 
+## ############################################################################################## ##
+##
+##                      ROS TOPIC TOOLS
+##
+## ############################################################################################## ##
+
 @mcp.tool()
 def get_topics():
     topic_info = ws_manager.get_topics()
@@ -87,15 +93,14 @@ class TimeoutError(Exception):
 def timeout_handler(signum, frame):
     raise TimeoutError("Operation timed out")
 
-@mcp.tool(description="Capture camera image from any topic and return it so the agent can see and analyze it. Works with any camera topic including isometric cameras.")
+@mcp.tool(description="Capture camera image from any topic and return it so the agent can see and analyze it.")
 def capture_camera_image(topic_name: str, timeout: int = 10):
     """
     Capture camera image using any camera topic.
-    Works with intel cameras, isometric cameras, and any other image topics.
     Returns a list with status info and the image that the agent can see.
     
     Args:
-        topic_name: The ROS topic to subscribe to (e.g., "/intel_camera_rgb", "/isometric_camera/image_raw")
+        topic_name: The ROS topic to subscribe to
         timeout: Timeout in seconds for image capture
     """
     result_json = {
@@ -320,36 +325,11 @@ def read_topic(topic_name: str, timeout: int = 5):
         result["traceback"] = traceback.format_exc()
         return result
 
-# @mcp.tool()
-# def perform_ik(target_position: List[float], target_rpy: List[float], 
-#                duration: float = 5.0) -> Dict[str, Any]:
-#     """
-#     Perform inverse kinematics and execute smooth trajectory movement using ROS2.
-#     
-#     Args:
-#         target_position: [x, y, z] target position in meters
-#         target_rpy: [roll, pitch, yaw] target orientation in degrees
-#         duration: Time to complete the movement in seconds (default: 5.0)
-#         
-#     Returns:
-#         Raw output from the perform IK primitive script
-#     """
-#     timeout_seconds = int(duration) + 10  # Add buffer for communication overhead
-#     args = f"--target-position {target_position[0]} {target_position[1]} {target_position[2]} --target-rpy {target_rpy[0]} {target_rpy[1]} {target_rpy[2]} --duration {duration}"
-#     return _run_primitive("perform_ik.py", args, timeout=timeout_seconds, error_prefix="Perform IK")
-
-# @mcp.tool()
-# def get_ee_pose(joint_angles: List[float] = None) -> Dict[str, Any]:
-#     """
-#     Get end-effector pose from ROS topic /tcp_pose_broadcaster/pose.
-#     
-#     Args:
-#         joint_angles: This parameter is ignored. The pose is read directly from ROS topic.
-#         
-#     Returns:
-#         Raw output from the get EE pose primitive script
-#     """
-#     return _run_primitive("get_ee_pose.py", timeout=10, error_prefix="Get EE pose")
+## ############################################################################################## ##
+##
+##                      CODE EXECUTION TOOLS
+##
+## ############################################################################################## ##
 
 @mcp.tool()
 def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
@@ -453,8 +433,141 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # Set PYTHONPATH to include project root for imports
+    env = os.environ.copy()
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = script_dir
+    
     cmd_parts = [
         f"cd {script_dir}/primitives",
+        f"timeout {timeout} /usr/bin/python3 -u {script_name} {command_args}".strip()
+    ]
+    
+    cmd = "\n".join(cmd_parts)
+    
+    try:
+        # Use Popen with threading to capture output in real-time
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Combine stderr into stdout
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True,
+            env=env
+        )
+        
+        # Read output in a separate thread to avoid blocking
+        output_lines = []
+        output_lock = threading.Lock()
+        read_complete = threading.Event()
+        
+        def read_output():
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        with output_lock:
+                            output_lines.append(line)
+                    if process.poll() is not None:
+                        break
+                # Read any remaining output
+                remaining = process.stdout.read()
+                if remaining:
+                    with output_lock:
+                        output_lines.append(remaining)
+            except Exception:
+                pass
+            finally:
+                read_complete.set()
+        
+        # Start reading thread
+        read_thread = threading.Thread(target=read_output, daemon=True)
+        read_thread.start()
+        
+        # Wait for process to complete or timeout
+        start_time = time.time()
+        while process.poll() is None:
+            if time.time() - start_time > timeout + 10:
+                # Process timed out, kill it
+                process.kill()
+                try:
+                    process.wait()
+                except:
+                    pass
+                break
+            time.sleep(0.1)
+        
+        # Ensure process is terminated
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait()
+            except:
+                pass
+        
+        # Wait a bit for output thread to finish reading
+        read_complete.wait(timeout=1)
+        
+        # Get return code
+        returncode = process.returncode
+        
+        # Combine all output
+        with output_lock:
+            output = "".join(output_lines)
+        
+        # If process was killed by timeout command (exit code 124), add timeout message
+        if returncode == 124:
+            if output:
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+            else:
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+        
+        # If process was killed by us (returncode -9 or None), it timed out
+        if returncode is None or returncode == -9:
+            if output:
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+            else:
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+        
+        return {"output": output if output else ""}
+        
+    except subprocess.TimeoutExpired as e:
+        # Fallback: try to get any output from the exception
+        output = ""
+        if hasattr(e, 'stdout') and e.stdout:
+            output += e.stdout
+        if hasattr(e, 'stderr') and e.stderr:
+            output += e.stderr
+        if output:
+            return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+        else:
+            return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+    except Exception as e:
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+
+def _run_query(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Query") -> Dict[str, Any]:
+    """Helper function to run query scripts and return raw output.
+    
+    Args:
+        script_name: Name of the query script (e.g., "get_available_objects.py", "get_available_grasp_ids.py")
+        command_args: Optional command-line arguments to pass to the script
+        timeout: Timeout for the subprocess (default: 10 seconds)
+        error_prefix: Prefix for error messages (default: "Query")
+    
+    Returns:
+        Dictionary with output from the query script (stdout + stderr)
+    """
+    import subprocess
+    import os
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    cmd_parts = [
+        f"cd {script_dir}/queries",
         f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
     ]
     
@@ -467,10 +580,10 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
             executable='/bin/bash',
             capture_output=True,
             text=True,
-            timeout=timeout + 10  # Add buffer for subprocess timeout
+            timeout=timeout + 5  # Add buffer for subprocess timeout
         )
         
-        # Return combined stdout and stderr (primitive handles its own output formatting)
+        # Return combined stdout and stderr (query handles its own output formatting)
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
@@ -482,10 +595,92 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
 
+## ############################################################################################## ##
+##
+##                      QUERIES
+##
+## ############################################################################################## ##
+
+@mcp.tool()
+def get_available_objects(mode: str = "sim") -> Dict[str, Any]:
+    """Get list of available object names from ROS topic.
+    
+    Args:
+        mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
+    
+    Returns:
+        JSON output containing list of available object names
+    """
+    return _run_query("get_available_objects.py", f"--mode {mode}", timeout=10, error_prefix="Get available objects")
+
+@mcp.tool()
+def get_available_grasp_ids(mode: str = "sim") -> Dict[str, Any]:
+    """Get available grasp IDs per object from ROS topic.
+    
+    Args:
+        mode: Mode to use - "sim" for simulation (reads from /grasp_points_sim) or "real" for real robot (reads from /grasp_points_real) (default: "sim")
+    
+    Returns:
+        JSON output containing available grasp IDs per object
+    """
+    return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
+
+# @mcp.tool()
+# def get_current_object_pose(object_name: Optional[str] = None, mode: str = "sim") -> Dict[str, Any]:
+#     """Get current object pose(s) from ROS topic.
+#     
+#     Args:
+#         object_name: Optional name of the object to get pose for. If not provided, returns poses for all objects.
+#         mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
+#     
+#     Returns:
+#         JSON output containing the current object pose(s) (position and orientation)
+#     """
+#     if object_name:
+#         cmd = f"--object-name \"{object_name}\" --mode {mode}"
+#     else:
+#         cmd = f"--all --mode {mode}"
+#     return _run_query("get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
+
+## ############################################################################################## ##
+##
+##                      PRIMITIVES
+##
+## ############################################################################################## ##
+
 @mcp.tool()
 def move_home() -> Dict[str, Any]:
     """Move robot to home position."""
     return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
+
+@mcp.tool()
+def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
+    """Control gripper.
+    
+    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
+    
+    Args:
+        command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+
+    """
+    return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
+
+@mcp.tool()
+def scan_workspace(object_name: str) -> Dict[str, Any]:
+    """Scan workspace at fixed height to locate object.
+    
+    This tool scans the workspace by following a predefined path across x,y at a fixed z height.
+    The robot moves along the path and stops as soon as the object is detected.
+    Only works in real mode (not available for simulation).
+    
+    Args:
+        object_name: Name of the object to locate
+    
+    Returns:
+        Raw output from the scan workspace primitive script
+    """
+    return _run_primitive("scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
 @mcp.tool()
 def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_object: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
@@ -512,177 +707,6 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_ob
     
     return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
-# @mcp.tool()
-# def reorient_for_assembly(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
-#     """Reorient object for assembly.
-# 
-#     Args:
-#         object_name: Name of the object to reorient
-#         base_name: Name of the base object
-#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-#         current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
-#         target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
-# 
-#     """
-#     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-#     if current_object_orientation is not None:
-#         cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
-#     if target_base_orientation is not None:
-#         cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
-#     return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
-
-@mcp.tool()
-def reorient_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
-    """Reorient object for assembly.
-
-    Args:
-        object_name: Name of the object to reorient
-        base_name: Name of the base object
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
-        target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode, optional in sim mode)
-
-    """
-    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-    if current_object_orientation is not None:
-        cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
-    if target_base_orientation is not None:
-        cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
-    return _run_primitive("reorient_for_assembly.py", cmd, timeout=90, error_prefix="Reorient for assembly")
-
-# @mcp.tool()
-# def translate_for_assembly(object_name: str, base_name: str, mode: str = "sim", final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
-#     """Translate object to target position for assembly.
-#     
-#     Args:
-#         object_name: Name of the object being held
-#         base_name: Name of the base object
-#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-#         final_base_pos: Final base position [x, y, z] in meters (required in real mode unless use_default_base is True)
-#         final_base_orientation: Final base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base is True)
-#         use_default_base: Use default base position and orientation (for real mode)
-#     
-#     Returns:
-#         Raw output from the translate for assembly primitive script
-#     """
-#     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-#     if final_base_pos is not None:
-#         cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
-#     if final_base_orientation is not None:
-#         cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
-#     if use_default_base:
-#         cmd += " --use-default-base"
-#     return _run_primitive("translate_for_assembly.py", cmd, timeout=90, error_prefix="Translate for assembly")
-
-# @mcp.tool()
-# def perform_insert(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None) -> Dict[str, Any]:
-#     """Perform insert operation with force compliance (sim mode) or force-compliant movement (real mode).
-#     
-#     Args:
-#         mode: Mode to use - "sim" for simulation or "real" for real robot (required)
-#         object_name: Name of the object being held (required in sim mode)
-#         base_name: Name of the base object (required in sim mode)
-#     
-#     Returns:
-#         Raw output from the perform insert primitive script
-#     """
-#     # Build command based on mode
-#     if mode == "sim":
-#         args = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
-#         timeout = 90
-#     else:  # real mode
-#         args = f"--mode {mode}"
-#         timeout = 300
-#     
-#     return _run_primitive("perform_insert.py", args, timeout=timeout, error_prefix="Perform insert")
-
-@mcp.tool()
-def verify_final_assembly_pose(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Verify if object is in correct final assembly pose relative to base.
-    
-    Args:
-        object_name: Name of the object
-        base_name: Name of the base object
-    
-    Returns:
-        Raw output from the verify final assembly pose primitive script
-    """
-    return _run_primitive("verify_final_assembly_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify final assembly pose")
-
-# @mcp.tool()
-# def move_down(mode: str = "real") -> Dict[str, Any]:
-#     """Move robot down with force monitoring.
-#     
-#     Args:
-#         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "real")
-#     
-#     Returns:
-#         Raw output from the move down primitive script
-#     """
-#     return _run_primitive("move_down.py", f"--mode {mode}", timeout=300, error_prefix="Move down")
-
-@mcp.tool()
-def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
-    """Control gripper with verification.
-    
-    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
-    
-    Args:
-        command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-
-    """
-    return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
-
-# @mcp.tool()
-# def move_to_safe_height() -> Dict[str, Any]:
-#     """Move robot to safe height.
-#     
-#     Returns:
-#         Raw output from the move to safe height primitive script
-#     """
-#     return _run_primitive("move_to_safe_height.py", timeout=30, error_prefix="Move to safe height")
-
-# @mcp.tool()
-# def move_to_clear_area(mode: str = "move") -> Dict[str, Any]:
-#     """Move robot to clear area position.
-#     
-#     Args:
-#         mode: Mode to use - "move" to keep current end-effector orientation (default) or "hover" for top-down (face-down) orientation
-#     
-#     Returns:
-#         Raw output from the move to clear area primitive script
-#     """
-#     return _run_primitive("move_to_clear_area.py", f"--{mode}", timeout=45, error_prefix="Move to clear area")
-
-# @mcp.tool()
-# def get_target_ee_pose(object_name: str, base_name: str, mode: str) -> Dict[str, Any]:
-#     """Get target end-effector pose (position and orientation) from assembly configuration.
-#     
-#     Args:
-#         object_name: Name of the object
-#         base_name: Name of the base object
-#         mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose)
-#     
-#     Returns:
-#         Raw output from the get target EE pose primitive script
-#     """
-#     return _run_primitive("get_target_ee_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=10, error_prefix="Get target EE pose")
-
-# @mcp.tool()
-# def get_target_object_pose(object_name: str, base_name: str, mode: str) -> Dict[str, Any]:
-#     """Get target object pose (position and orientation) in world frame from assembly configuration.
-#     
-#     Args:
-#         object_name: Name of the object
-#         base_name: Name of the base object
-#         mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose)
-#     
-#     Returns:
-#         Raw output from the get target object pose primitive script (JSON with target_object_pose)
-#     """
-#     return _run_primitive("get_target_object_pose.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=10, error_prefix="Get target object pose")
-
 @mcp.tool()
 def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
     """Move to regrasp position.
@@ -697,7 +721,7 @@ def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: boo
         move_to_safe_height: This is to move to the safe height position after having opened the gripper. Now you are ready to grasp the object again.
     
     Returns:
-        Raw output from the move to regrasp primitive script
+        Raw output from the move to regrasp primitive script. Notw down the object position and orientation for future use.
     """
     # Count how many flags are set
     flags_set = sum([move_to_clear_space, move_down, move_to_safe_height])
@@ -719,41 +743,29 @@ def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: boo
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
-def translate_object(mode: str, object_name: Optional[str] = None, base_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, final_base_pos: Optional[List[float]] = None, final_base_orientation: Optional[List[float]] = None, use_default_base: bool = False) -> Dict[str, Any]:
+def translate_object(mode: str, base_name: Optional[str] = None, object_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
     """Translate object to target position.
-    
-    REQUIRED: Exactly one of move_to_base or move_down must be set to True (they are mutually exclusive).
+    Moves object to target position relative to base.
+    REQUIRED: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True (they are mutually exclusive).
     
     Args:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        base_name: Name of the base object (required)
         object_name: Name of the object being held (required in sim mode)
-        base_name: Name of the base object (required in sim mode when using move_to_base or move_down; required in real mode when using move_to_base)
-        move_to_base: Moves to the specified base position (exactly one flag must be True)
+        move_to_base: Moves to the specified base position in safe height (exactly one flag must be True)
         move_down: Moves down to the specified target object position (exactly one flag must be True)
-        final_base_pos: Final base position [x, y, z] in meters (for translate_for_assembly in real mode)
-        final_base_orientation: Final base orientation quaternion [x, y, z, w] (for translate_for_assembly in real mode)
-        use_default_base: Use default base position and orientation (for translate_for_assembly in real mode)
+        move_to_safe_height: After closing gripper move to safe height (exactly one flag must be True)
+        use_default_base_position: Use default base position and orientation (for real mode)
     """
     # Validate that exactly one flag is set
-    flags_set = sum([move_to_base, move_down])
+    flags_set = sum([move_to_base, move_down, move_to_safe_height])
     if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_base or move_down must be set to True"}
+        return {"output": "Error: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True"}
     elif flags_set > 1:
-        return {"output": "Error: move_to_base and move_down are mutually exclusive. Set exactly one to True"}
+        return {"output": "Error: move_to_base, move_down, and move_to_safe_height are mutually exclusive. Set exactly one to True"}
     
-    # Validate sim mode requirements
-    if mode == "sim":
-        if object_name is None:
-            return {"output": "Error: object_name is required in sim mode"}
-        if base_name is None:
-            return {"output": "Error: base_name is required in sim mode when using move_to_base or move_down"}
-    
-    # Validate real mode requirements for move_to_base
-    if mode == "real" and move_to_base:
-        if base_name is None:
-            return {"output": "Error: base_name is required in real mode when using move_to_base"}
-        if not use_default_base and final_base_pos is None:
-            return {"output": "Error: In real mode with move_to_base, either final_base_pos or use_default_base is required"}
+    if mode == "sim" and object_name is None:
+        return {"output": "Error: object_name is required in sim mode"}
     
     cmd = f"--mode {mode}"
     if object_name is not None:
@@ -764,21 +776,98 @@ def translate_object(mode: str, object_name: Optional[str] = None, base_name: Op
         cmd += " --move-to-base"
     if move_down:
         cmd += " --move-down"
-    if final_base_pos is not None:
-        cmd += f" --final-base-pos {' '.join(str(x) for x in final_base_pos)}"
-    if final_base_orientation is not None:
-        cmd += f" --final-base-orientation {' '.join(str(x) for x in final_base_orientation)}"
-    if use_default_base:
-        cmd += " --use-default-base"
+    if move_to_safe_height:
+        cmd += " --move-to-safe-height"
+    if use_default_base_position:
+        cmd += " --use-default-base-position"
     
     # Adjust timeout based on operation
+    # For move_down (perform_insert), use a long timeout to let it complete naturally
+    # The alignment_stop_timeout (10s) in perform_insert will handle stopping the alignment phase
+    # 900s (15 min) allows for: search phase + alignment phase (max 10s) + any delays
     if move_down:
-        timeout = 300  # Force compliance can take longer
+        timeout = 300  
+    elif move_to_safe_height:
+        timeout = 40  # Safe height movement is quick
     else:
         timeout = 90
     
     return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
+@mcp.tool()
+def reorient_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
+    """Reorient object for assembly.
+    Reorients object to target base orientation relative to base.
+    Args:
+        object_name: Name of the object to reorient
+        base_name: Name of the base object
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode and always use the orientation of the object you got after moving to grasp the object because the object might not be visible in the camera after moving to grasp the object.)
+        target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base_orientation is True, optional in sim mode)
+        use_default_base_orientation: Use default base orientation [0.0, 0.0, 0.0, 1.0] (for real mode, mutually exclusive with target_base_orientation)
+
+    """
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+    if current_object_orientation is not None:
+        cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
+    if use_default_base_orientation:
+        cmd += " --use-default-base-orientation"
+    elif target_base_orientation is not None:
+        cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
+    return _run_primitive("reorient_object.py", cmd, timeout=90, error_prefix="Reorient for assembly")
+
+## ############################################################################################## ##
+##
+##                      VERIFICATION TOOLS
+##
+## ############################################################################################## ##
+
+
+@mcp.tool()
+def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
+    """Verify if object is within grasp radius from gripper center.
+    
+    This tool checks if an object is successfully grasped by verifying that the object position
+    is within a 6cm radius from the gripper center position in all directions.
+    Only call this tool after moving to safe height.
+    
+    Args:
+        object_name: Name of the object to verify
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+    
+    Returns:
+        Raw output from the verify grasp primitive script
+    """
+    return _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+
+@mcp.tool()
+def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
+    """Verify if object is in correct assembly pose relative to base.
+    
+    Args:
+        object_name: Name of the object
+        base_name: Name of the base object
+    
+    Returns:
+        Raw output from the verify assembly primitive script
+    """
+    return _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+
+@mcp.tool()
+def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
+    """Verify if object is NOT in assembly position relative to base.
+    
+    This tool checks if an object has been successfully disassembled by verifying it is NOT in the 
+    target assembly position. Returns success if the object is away from the assembly position.
+    
+    Args:
+        object_name: Name of the object to verify
+        base_name: Name of the base object
+    
+    Returns:
+        Raw output from the verify disassembly primitive script
+    """
+    return _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
 
 if __name__ == "__main__":
     try:

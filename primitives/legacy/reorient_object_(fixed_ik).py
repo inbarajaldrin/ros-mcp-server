@@ -359,7 +359,14 @@ class ReorientForAssembly(Node):
         self.cardinal_error_threshold_max = 180.0  # Maximum threshold to try
         self.cardinal_error_threshold_increment = 10.0  # Increment threshold by this amount each retry
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
+
+        # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
+        # This matches the offset used in move_to_grasp.py
+        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm (distance from TCP to gripper center)
         
+        # Object to gripper center offset (default from move_to_grasp.py)
+        self.object_to_gripper_center_offset = 0.123  # 0.123m = 12.3cm (gripper center is below object)
+
         self.get_logger().info(f"Using {self.mode.upper()} mode")
     
     def load_assembly_config(self, base_name=None):
@@ -429,6 +436,63 @@ class ReorientForAssembly(Node):
         q = np.array([pose_msg.pose.orientation.x, pose_msg.pose.orientation.y,
                       pose_msg.pose.orientation.z, pose_msg.pose.orientation.w])
         return position, R.from_quat(q).as_matrix()
+    
+    def compute_gripper_center_from_tcp(self, tcp_position, tcp_quaternion):
+        """Compute the gripper center position from TCP position using the same logic as move_to_grasp.
+        
+        The offset vector is defined in the tool frame (gripper frame) and then
+        transformed to world frame using the tool orientation quaternion.
+        
+        Args:
+            tcp_position: TCP position in world frame [x, y, z]
+            tcp_quaternion: TCP/tool orientation quaternion [x, y, z, w] (tool frame to world frame)
+        
+        Returns:
+            gripper_center_position: Position of the gripper center in world frame [x, y, z]
+        """
+        # Offset vector in tool frame (gripper frame): [0, 0, offset_distance]
+        # In tool frame, Z-axis points from TCP to gripper center (downward)
+        offset_vector_tool_frame = np.array([0.0, 0.0, self.tcp_to_gripper_center_offset])
+        
+        # Transform offset vector from tool frame to world frame using quaternion
+        # The quaternion represents the rotation from tool frame to world frame
+        r = R.from_quat(tcp_quaternion)
+        offset_vector_world = r.apply(offset_vector_tool_frame)
+        
+        # Compute gripper center: TCP + offset_vector_world
+        # (going forward from TCP to gripper center along the tool Z-axis)
+        gripper_center_position = np.array(tcp_position) + offset_vector_world
+        
+        return gripper_center_position.tolist()
+    
+    def compute_tcp_from_gripper_center(self, gripper_center_position, quaternion):
+        """Compute TCP position from gripper center position using the gripper orientation
+        
+        The offset is computed along the gripper Z-axis in world frame.
+        The gripper Z-axis is obtained from the quaternion orientation.
+        
+        Args:
+            gripper_center_position: Position of the gripper center (offset point) in world frame [x, y, z]
+            quaternion: Gripper orientation quaternion [x, y, z, w] (gripper frame to world frame)
+                       The quaternion's Z-axis points from TCP to gripper center.
+        
+        Returns:
+            tcp_position: TCP position in world frame [x, y, z]
+        """
+        # Get gripper Z-axis direction in world frame
+        r = R.from_quat(quaternion)
+        gripper_z_axis = r.apply(np.array([0.0, 0.0, 1.0]))  # Gripper Z-axis in world frame
+        gripper_z_axis = gripper_z_axis / np.linalg.norm(gripper_z_axis)  # Normalize
+        
+        # Compute offset vector in world frame
+        # The offset goes from gripper center to TCP, opposite to gripper Z-axis
+        offset_vector_world = -self.tcp_to_gripper_center_offset * gripper_z_axis
+        
+        # Compute TCP position: gripper_center + offset_vector_world
+        # (going from gripper center towards TCP, opposite to gripper Z-axis)
+        tcp_position = np.array(gripper_center_position) + offset_vector_world
+        
+        return tcp_position.tolist()
     
     def get_object_target_orientation(self, object_name):
         """
@@ -1103,14 +1167,33 @@ class ReorientForAssembly(Node):
         if object_error > 30.0:
             self.get_logger().warn(f"High alignment error ({object_error:.1f}°) - result may not be ideal")
         
-        # === Compute IK ===
+        # === Compute IK with gripper offset (same as move_to_grasp) ===
         if self.current_joint_angles is None:
             if self.read_current_joint_angles() is None:
                 self.get_logger().error("Could not read joint angles")
                 return False
         
-        # Try IK with best solution first
-        joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), best_quat.tolist())
+        # Get current TCP position and orientation
+        current_tcp_position = ee_position
+        current_tcp_quat = R.from_matrix(R_EE_current).as_quat()
+        
+        # Compute current gripper center position from current TCP
+        current_gripper_center = self.compute_gripper_center_from_tcp(
+            current_tcp_position.tolist(), current_tcp_quat.tolist()
+        )
+        
+        # Compute new TCP position from gripper center using new orientation
+        # This keeps the gripper center fixed while reorienting
+        new_tcp_position = self.compute_tcp_from_gripper_center(
+            current_gripper_center, best_quat.tolist()
+        )
+        
+        self.get_logger().info(f"Current TCP: ({current_tcp_position[0]:.3f}, {current_tcp_position[1]:.3f}, {current_tcp_position[2]:.3f})")
+        self.get_logger().info(f"Gripper center: ({current_gripper_center[0]:.3f}, {current_gripper_center[1]:.3f}, {current_gripper_center[2]:.3f})")
+        self.get_logger().info(f"New TCP: ({new_tcp_position[0]:.3f}, {new_tcp_position[1]:.3f}, {new_tcp_position[2]:.3f})")
+        
+        # Try IK with best solution first (using new TCP position)
+        joint_angles = self.compute_ik_with_current_seed(new_tcp_position, best_quat.tolist())
         
         # If IK fails and we have alternative candidates, try them
         if joint_angles is None and candidates is not None:
@@ -1130,7 +1213,12 @@ class ReorientForAssembly(Node):
                     card_object_R = R_object_card_exact
                     card_error = card_exact_error
                 
-                joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), card_quat.tolist())
+                # Compute new TCP position from gripper center using alternative orientation
+                alt_tcp_position = self.compute_tcp_from_gripper_center(
+                    current_gripper_center, card_quat.tolist()
+                )
+                
+                joint_angles = self.compute_ik_with_current_seed(alt_tcp_position, card_quat.tolist())
                 
                 if joint_angles is not None:
                     # Update to use this alternative

@@ -191,7 +191,7 @@ class DirectObjectMove(Node):
         # Add timer to control update frequency (same for both modes)
         # Use shorter period for step 2 to get more frequent updates as robot gets closer
         self.timer_period_step1 = 5.0
-        self.timer_period_step2 = 1.0  # More frequent updates for step 2
+        self.timer_period_step2 = 2.0  # More frequent updates for step 2
         self.update_timer = self.create_timer(self.timer_period_step1, self.timer_callback)
         
         # Track last pose update time to ensure we use fresh data
@@ -228,6 +228,11 @@ class DirectObjectMove(Node):
         self.z_smoothing_alpha = 0.3  # Smoothing factor (0.0 = no change, 1.0 = immediate update)
         self.recovery_z_update_count = 0  # Count updates after recovery
         self.recovery_z_smoothing_steps = 5  # Number of steps to smooth Z after recovery
+        
+        # Wait after tracking recovery (for step 2 downward movement)
+        self.waiting_after_recovery = False  # Flag to indicate we're waiting after tracking recovery
+        self.recovery_wait_start_time = None  # Timestamp when recovery wait started
+        self.recovery_wait_duration = 2.0  # Wait duration in seconds after recovery
         
         # Canonical pose retry mechanism - adjust threshold instead of moving robot
         self.canonical_retry_mode = False  # Flag to indicate we're retrying for canonical pose
@@ -476,6 +481,19 @@ class DirectObjectMove(Node):
         if self.trajectory_in_progress:
             self.get_logger().debug("Trajectory already in progress, skipping...")
             return
+        
+        # Check if we're waiting after tracking recovery (step 2 only)
+        if self.waiting_after_recovery and self.recovery_wait_start_time is not None:
+            current_time = self.get_clock().now()
+            elapsed_time = (current_time - self.recovery_wait_start_time).nanoseconds / 1e9  # Convert to seconds
+            if elapsed_time < self.recovery_wait_duration:
+                self.get_logger().debug(f"Waiting after tracking recovery: {elapsed_time:.2f}/{self.recovery_wait_duration:.2f} seconds...")
+                return
+            else:
+                # Wait period completed, clear flag and continue
+                self.waiting_after_recovery = False
+                self.recovery_wait_start_time = None
+                self.get_logger().info(f"Wait period completed. Continuing movement after tracking recovery.")
         
         # Wait for end-effector pose if not received yet
         if not self.ee_pose_received or self.current_ee_pose is None:
@@ -755,7 +773,9 @@ class DirectObjectMove(Node):
         elif self.latest_pose is not None:
             # Use detected object pose
             # Check if we were using stale data in step 2 (using last_known_object_position)
+            was_using_stale_data = False
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
+                was_using_stale_data = True
                 self.get_logger().debug("Fresh object pose data received during step 2! Cancelling current trajectory and recomputing...")
                 # Cancel current trajectory
                 if self.current_goal_handle is not None:
@@ -789,6 +809,12 @@ class DirectObjectMove(Node):
                         self.get_logger().info(f"Initializing Z smoothing with last known Z: {self.smoothed_object_z:.3f}m")
                 else:
                     self.tracking_lost_count = 0
+            
+            # If we're in step 2 (moving down) and pose wasn't available first (tracking lost or stale data), wait 2 seconds after recovery
+            if self.step1_completed and (was_tracking_lost or was_using_stale_data):
+                self.waiting_after_recovery = True
+                self.recovery_wait_start_time = self.get_clock().now()
+                self.get_logger().info(f"Object pose became available again after being unavailable. Waiting {self.recovery_wait_duration} seconds before continuing movement...")
             
             # Extract position directly from latest_pose (no filtering)
             object_position = np.array([
@@ -1312,9 +1338,17 @@ def main(args=None):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         print("[INFO] Moving to safe height...")
         try:
+            # Set PYTHONPATH to include project root for imports
+            env = os.environ.copy()
+            project_root = os.path.dirname(script_dir)
+            if 'PYTHONPATH' in env:
+                env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+            else:
+                env['PYTHONPATH'] = project_root
+            
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 30 /usr/bin/python3 move_to_safe_height.py"
+                f"timeout 30 /usr/bin/python3 legacy/move_to_safe_height.py"
             ]
             cmd = "\n".join(cmd_parts)
             
@@ -1324,7 +1358,8 @@ def main(args=None):
                 executable='/bin/bash',
                 capture_output=True,
                 text=True,
-                timeout=40
+                timeout=40,
+                env=env
             )
             
             # Log output

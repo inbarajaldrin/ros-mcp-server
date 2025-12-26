@@ -79,6 +79,12 @@ class GraspPointsPublisher(Node):
         self.object_poses_sim: Dict[str, dict] = {}
         self.object_poses_real: Dict[str, dict] = {}
         
+        # Track last update time for staleness detection
+        self.last_pose_update_time = None  # For single mode
+        self.last_pose_update_time_sim = None  # For default mode
+        self.last_pose_update_time_real = None  # For default mode
+        self.pose_staleness_threshold = 1.0  # seconds - poses older than this are considered stale
+        
         # QoS profile for subscriptions and publishers
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -205,19 +211,26 @@ class GraspPointsPublisher(Node):
             msg: TFMessage containing object poses
             source_mode: 'sim' or 'real' (only used in default mode)
         """
+        # Get current time for staleness tracking
+        current_time = self.get_clock().now()
+        
         # Determine which pose storage to use
         if self.mode == 'default' or self.mode == 'auto':
             # In default mode, store poses separately for sim and real
             if source_mode == 'sim':
                 target_poses = self.object_poses_sim
+                self.last_pose_update_time_sim = current_time
             elif source_mode == 'real':
                 target_poses = self.object_poses_real
+                self.last_pose_update_time_real = current_time
             else:
                 # Fallback (shouldn't happen)
                 target_poses = self.object_poses
+                self.last_pose_update_time = current_time
         else:
             # Single mode: use main storage
             target_poses = self.object_poses
+            self.last_pose_update_time = current_time
         
         # Clear all existing poses for this source first
         target_poses.clear()
@@ -351,10 +364,32 @@ class GraspPointsPublisher(Node):
         
         return marker_array
     
+    def _are_poses_stale(self, last_update_time):
+        """Check if poses are stale based on last update time"""
+        if last_update_time is None:
+            return True  # Never received poses, consider stale
+        
+        current_time = self.get_clock().now()
+        time_since_update = (current_time - last_update_time).nanoseconds / 1e9  # Convert to seconds
+        
+        return time_since_update > self.pose_staleness_threshold
+    
     def publish_grasp_points(self):
         """Publish grasp points for all objects with known poses"""
         if self.mode == 'default' or self.mode == 'auto':
             # Default mode: publish to both sim and real topics
+            # Check if sim poses are stale
+            if self._are_poses_stale(self.last_pose_update_time_sim):
+                if self.object_poses_sim:
+                    self.get_logger().warn(f"Sim poses are stale (last update: {self.last_pose_update_time_sim}), clearing poses")
+                    self.object_poses_sim.clear()
+            
+            # Check if real poses are stale
+            if self._are_poses_stale(self.last_pose_update_time_real):
+                if self.object_poses_real:
+                    self.get_logger().warn(f"Real poses are stale (last update: {self.last_pose_update_time_real}), clearing poses")
+                    self.object_poses_real.clear()
+            
             marker_array_sim = self._create_grasp_array_from_poses(self.object_poses_sim)
             marker_array_real = self._create_grasp_array_from_poses(self.object_poses_real)
             
@@ -363,6 +398,12 @@ class GraspPointsPublisher(Node):
             self.grasp_pub_real.publish(marker_array_real)
         else:
             # Single mode: publish to single topic
+            # Check if poses are stale
+            if self._are_poses_stale(self.last_pose_update_time):
+                if self.object_poses:
+                    self.get_logger().warn(f"Poses are stale (last update: {self.last_pose_update_time}), clearing poses")
+                    self.object_poses.clear()
+            
             marker_array = self._create_grasp_array_from_poses(self.object_poses)
             # Always publish (even if empty array)
             self.grasp_pub.publish(marker_array)

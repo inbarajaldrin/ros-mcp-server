@@ -5,8 +5,9 @@ Translate Object Primitive - Combines translate_for_assembly and perform_insert
 This primitive combines functionality from translate_for_assembly and perform_insert:
 - --move-to-base: Calls translate_for_assembly to move to safe height
 - --move-down: Calls perform_insert to move down to final position
+- --move-to-safe-height: Moves to safe height (after closing gripper)
 
-Note: --move-to-base and --move-down are mutually exclusive (cannot be used together).
+Note: --move-to-base, --move-down, and --move-to-safe-height are mutually exclusive (cannot be used together).
 
 Usage:
     # Sim mode - safe height only
@@ -15,11 +16,17 @@ Usage:
     # Sim mode - move down only
     python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-down
 
+    # Sim mode - move to safe height only
+    python3 translate_object.py --mode sim --move-to-safe-height
+
     # Real mode - safe height only
     python3 translate_object.py --mode real --base-name base --move-to-base --final-base-pos 0.5 -0.37 0.1882 --final-base-orientation 0.0 0.0 0.0 1.0
 
     # Real mode - move down only with force compliance
     python3 translate_object.py --mode real --move-down --speed 0.01 --gain 2.0
+
+    # Real mode - move to safe height only
+    python3 translate_object.py --mode real --move-to-safe-height
 """
 
 import sys
@@ -50,7 +57,7 @@ def stream_output(pipe, logger, prefix=""):
 
 def run_translate_for_assembly(args, logger):
     """Run translate_for_assembly script"""
-    script_path = os.path.join(os.path.dirname(__file__), 'translate_for_assembly.py')
+    script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'translate_for_assembly.py')
     
     cmd = [sys.executable, script_path,
            '--mode', args.mode,
@@ -63,10 +70,18 @@ def run_translate_for_assembly(args, logger):
             cmd.extend(['--final-base-pos'] + [str(x) for x in args.final_base_pos])
         if args.final_base_orientation:
             cmd.extend(['--final-base-orientation'] + [str(x) for x in args.final_base_orientation])
-        if args.use_default_base:
+        if args.use_default_base_position:
             cmd.append('--use-default-base')
     
     logger.info(f"Translating {args.object_name} relative to {args.base_name}")
+    
+    # Set PYTHONPATH to include project root for imports
+    env = os.environ.copy()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
     
     # Run subprocess and stream output in real-time
     process = subprocess.Popen(
@@ -74,7 +89,8 @@ def run_translate_for_assembly(args, logger):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        env=env
     )
     
     # Stream output in a separate thread
@@ -99,7 +115,7 @@ def run_translate_for_assembly(args, logger):
 
 def run_perform_insert(args, logger):
     """Run perform_insert script"""
-    script_path = os.path.join(os.path.dirname(__file__), 'perform_insert.py')
+    script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'perform_insert.py')
     
     cmd = [sys.executable, script_path, '--mode', args.mode]
     
@@ -126,13 +142,22 @@ def run_perform_insert(args, logger):
     else:
         logger.info("Moving down with force compliance")
     
+    # Set PYTHONPATH to include project root for imports
+    env = os.environ.copy()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+    
     # Run subprocess and stream output in real-time
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        env=env
     )
     
     # Stream output in a separate thread
@@ -167,14 +192,20 @@ Examples:
   # Sim mode - move down only
   python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-down
 
+  # Sim mode - move to safe height only
+  python3 translate_object.py --mode sim --move-to-safe-height
+
   # Real mode - safe height only
   python3 translate_object.py --mode real --base-name base --move-to-base --final-base-pos 0.5 -0.37 0.1882 --final-base-orientation 0.0 0.0 0.0 1.0
 
   # Real mode - safe height only (using defaults)
-  python3 translate_object.py --mode real --base-name base --move-to-base --use-default-base
+  python3 translate_object.py --mode real --base-name base --move-to-base --use-default-base-position
 
   # Real mode - move down only with force compliance
   python3 translate_object.py --mode real --move-down --speed 0.01 --gain 2.0
+
+  # Real mode - move to safe height only
+  python3 translate_object.py --mode real --move-to-safe-height
         """
     )
 
@@ -192,13 +223,16 @@ Examples:
                        help='Call translate_for_assembly to move to safe height')
     parser.add_argument('--move-down', action='store_true',
                        help='Call perform_insert to move down to final position')
+    parser.add_argument('--move-to-safe-height', action='store_true',
+                       help='Move to safe height (after closing gripper)')
 
     # Real mode arguments for translate_for_assembly
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                        help='Final base position [x, y, z] in meters (for translate_for_assembly in real mode)')
     parser.add_argument('--final-base-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
                        help='Final base orientation quaternion [x, y, z, w] (for translate_for_assembly in real mode)')
-    parser.add_argument('--use-default-base', action='store_true',
+    parser.add_argument('--use-default-base-position', action='store_true',
+                       dest='use_default_base_position',
                        help='Use default base position and orientation (for translate_for_assembly in real mode)')
 
     # Real mode force compliance parameters (for perform_insert)
@@ -220,27 +254,32 @@ Examples:
     args = parser.parse_args()
 
     # Validate arguments
-    if not args.move_to_base and not args.move_down:
-        parser.error("Either --move-to-base or --move-down must be specified")
+    flags_set = sum([args.move_to_base, args.move_down, args.move_to_safe_height])
+    if flags_set == 0:
+        parser.error("At least one of --move-to-base, --move-down, or --move-to-safe-height must be specified")
     
-    if args.move_to_base and args.move_down:
-        parser.error("Cannot use both --move-to-base and --move-down")
+    if flags_set > 1:
+        parser.error("Cannot use multiple movement flags together. Use exactly one of --move-to-base, --move-down, or --move-to-safe-height")
 
     # Validate sim mode requirements
     if args.mode == 'sim':
-        if args.object_name is None:
-            parser.error("--object-name is required in sim mode")
-        if args.base_name is None and args.move_to_base:
-            parser.error("--base-name is required when using --move-to-base in sim mode")
-        if args.base_name is None and args.move_down:
-            parser.error("--base-name is required when using --move-down in sim mode")
+        if args.move_to_safe_height:
+            # move_to_safe_height doesn't require object_name or base_name
+            pass
+        else:
+            if args.object_name is None:
+                parser.error("--object-name is required in sim mode")
+            if args.base_name is None and args.move_to_base:
+                parser.error("--base-name is required when using --move-to-base in sim mode")
+            if args.base_name is None and args.move_down:
+                parser.error("--base-name is required when using --move-down in sim mode")
 
     # Validate real mode requirements for translate_for_assembly
     if args.mode == 'real' and args.move_to_base:
         if args.base_name is None:
             parser.error("--base-name is required when using --move-to-base in real mode")
-        if not args.use_default_base and args.final_base_pos is None:
-            parser.error("In real mode with --move-to-base, either --final-base-pos or --use-default-base is required")
+        if not args.use_default_base_position and args.final_base_pos is None:
+            parser.error("In real mode with --move-to-base, either --final-base-pos or --use-default-base-position is required")
 
     # Initialize ROS
     rclpy.init()
@@ -250,6 +289,60 @@ Examples:
     logger.info(f"Using {args.mode.upper()} mode")
 
     try:
+        # Call move_to_safe_height if --move-to-safe-height is specified
+        if args.move_to_safe_height:
+            script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'move_to_safe_height.py')
+            
+            logger.info("Moving to safe height...")
+            
+            # Set PYTHONPATH to include project root for imports
+            env = os.environ.copy()
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if 'PYTHONPATH' in env:
+                env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+            else:
+                env['PYTHONPATH'] = project_root
+            
+            # Run subprocess with timeout
+            process = subprocess.Popen(
+                [sys.executable, script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env
+            )
+            
+            # Stream output in a separate thread
+            output_thread = threading.Thread(
+                target=stream_output,
+                args=(process.stdout, logger),
+                daemon=True
+            )
+            output_thread.start()
+            
+            # Wait for process to complete with timeout
+            try:
+                returncode = process.wait(timeout=40)
+                output_thread.join(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                logger.error("move_to_safe_height timed out")
+                process.kill()
+                node.destroy_node()
+                rclpy.shutdown()
+                sys.exit(1)
+            
+            if returncode != 0:
+                logger.error(f"move_to_safe_height failed with return code {returncode}")
+                node.destroy_node()
+                rclpy.shutdown()
+                sys.exit(1)
+            
+            logger.info("move_to_safe_height completed successfully")
+            node.destroy_node()
+            rclpy.shutdown()
+            sys.exit(0)
+
         # Call translate_for_assembly if --move-to-base is specified
         if args.move_to_base:
             if not run_translate_for_assembly(args, logger):

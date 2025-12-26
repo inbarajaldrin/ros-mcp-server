@@ -16,7 +16,7 @@ import sys
 import os
 
 # Add project root to path so primitives package can be imported when running directly
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
@@ -45,8 +45,6 @@ ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
-# Default base orientation (used if --use-default-base-orientation is set)
-DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
@@ -1229,20 +1227,14 @@ def main(args=None):
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--target-base-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
-                       help='Target base orientation quaternion [x, y, z, w] (required in real mode unless --use-default-base-orientation is used)')
-    parser.add_argument('--use-default-base-orientation', action='store_true',
-                       help=f'Use default base orientation ({DEFAULT_BASE_ORIENTATION}) (for real mode)')
+                       help='Target base orientation quaternion [x, y, z, w] (required in real mode)')
     
     args = parser.parse_args()
     
     # Validate arguments based on mode
     if args.mode == 'real':
-        if args.current_object_orientation is None:
-            parser.error("--current-object-orientation is required in real mode")
-        if not args.use_default_base_orientation and args.target_base_orientation is None:
-            parser.error("In real mode, either --target-base-orientation or --use-default-base-orientation must be provided")
-        if args.use_default_base_orientation and args.target_base_orientation is not None:
-            parser.error("Cannot use both --target-base-orientation and --use-default-base-orientation")
+        if args.current_object_orientation is None or args.target_base_orientation is None:
+            parser.error("--current-object-orientation and --target-base-orientation are required in real mode")
     
     rclpy.init()
     node = ReorientForAssembly(mode=args.mode)
@@ -1261,15 +1253,9 @@ def main(args=None):
         # Default duration is 5.0 seconds
         duration = 5.0
         
-        # Use default base orientation if flag is set
-        target_base_orientation = args.target_base_orientation
-        if args.use_default_base_orientation:
-            target_base_orientation = DEFAULT_BASE_ORIENTATION
-            node.get_logger().info(f"Using default base orientation: {target_base_orientation}")
-        
         success = node.reorient_for_target(
             args.object_name, args.base_name, duration,
-            args.current_object_orientation, target_base_orientation
+            args.current_object_orientation, args.target_base_orientation
         )
         
         if success:

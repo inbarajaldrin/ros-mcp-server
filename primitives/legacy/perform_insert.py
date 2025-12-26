@@ -180,7 +180,7 @@ class PerformInsertController(Node):
         self.just_detected_contact = False  # Flag to trigger trajectory cancellation
         self.current_goal_handle = None  # Current trajectory goal handle (for cancellation)
         self.alignment_start_time = None  # Time when alignment mode started
-        self.alignment_stop_timeout = 20.0  # Stop alignment after this many seconds
+        self.alignment_stop_timeout = 10.0  # Stop alignment after this many seconds
         self.alignment_min_duration = 1.0  # Minimum time in alignment mode before checking for completion
         self.low_force_start_time = None  # Time when X/Y forces first went low (after min duration)
         self.low_force_threshold = deadband  # X/Y force magnitude threshold to consider "low" (use deadband value)
@@ -946,7 +946,7 @@ class PerformInsertController(Node):
                     self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag:.2f}N. Entering alignment mode.")
                     self.get_logger().info("=" * 60)
                     self.alignment_mode = True
-                    self.alignment_start_time = time.time()
+                    # Don't set alignment_start_time here - it will be set when run_alignment_phase() actually starts
                     self.low_force_start_time = None  # Reset low force timer when entering alignment
                     self.smoothed_force_xy = np.array([0.0, 0.0])  # Reset smoothed force when entering alignment
                 else:
@@ -986,7 +986,7 @@ class PerformInsertController(Node):
                                 self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag_confirm:.2f}N. Entering alignment mode.")
                                 self.get_logger().info("=" * 60)
                                 self.alignment_mode = True
-                                self.alignment_start_time = time.time()
+                                # Don't set alignment_start_time here - it will be set when run_alignment_phase() actually starts
                                 self.low_force_start_time = None
                                 self.smoothed_force_xy = np.array([0.0, 0.0])
                                 # Continue to alignment phase
@@ -1075,6 +1075,9 @@ class PerformInsertController(Node):
         self.get_logger().info("=" * 60)
         self.get_logger().info("=" * 60)
         
+        # Start alignment timer when alignment phase actually begins (motion starts)
+        self.alignment_start_time = time.time()
+        
         self.low_force_start_time = None
         self.smoothed_force_xy = np.array([0.0, 0.0])
         
@@ -1096,6 +1099,14 @@ class PerformInsertController(Node):
                 # Check alignment completion
                 if self.alignment_start_time is not None:
                     elapsed = time.time() - self.alignment_start_time
+                    
+                    # Check alignment stop timeout
+                    if elapsed >= self.alignment_stop_timeout:
+                        self.get_logger().info("=" * 60)
+                        self.get_logger().info(f"Alignment timeout reached ({self.alignment_stop_timeout:.1f}s)")
+                        self.get_logger().info("Stopping alignment phase")
+                        self.get_logger().info("=" * 60)
+                        break
                     
                     # Check for low forces after minimum duration
                     if elapsed >= self.alignment_min_duration:

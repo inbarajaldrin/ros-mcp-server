@@ -47,6 +47,14 @@ class MoveToRegrasp(Node):
         """Execute the move to regrasp sequence"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
+        # Set PYTHONPATH to include project root for imports
+        env = os.environ.copy()
+        project_root = os.path.dirname(script_dir)
+        if 'PYTHONPATH' in env:
+            env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+        else:
+            env['PYTHONPATH'] = project_root
+        
         # Handle move_to_safe_height: only move to safe height (hover)
         if self.move_to_safe_height:
             self.get_logger().info("Moving to safe height (hover position)")
@@ -55,7 +63,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 45 /usr/bin/python3 move_to_clear_area.py {move_mode}"
+                    f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
                 
@@ -65,7 +73,8 @@ class MoveToRegrasp(Node):
                     executable='/bin/bash',
                     capture_output=True,
                     text=True,
-                    timeout=55
+                    timeout=55,
+                    env=env
                 )
                 
                 # Log output
@@ -95,7 +104,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 45 /usr/bin/python3 move_to_clear_area.py {move_mode}"
+                    f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
                 
@@ -105,7 +114,8 @@ class MoveToRegrasp(Node):
                     executable='/bin/bash',
                     capture_output=True,
                     text=True,
-                    timeout=55
+                    timeout=55,
+                    env=env
                 )
                 
                 # Log output
@@ -133,7 +143,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 300 /usr/bin/python3 move_down.py --mode {self.mode}"
+                    f"timeout 300 /usr/bin/python3 legacy/move_down.py --mode {self.mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
                 
@@ -143,7 +153,8 @@ class MoveToRegrasp(Node):
                     executable='/bin/bash',
                     capture_output=True,
                     text=True,
-                    timeout=310
+                    timeout=310,
+                    env=env
                 )
                 
                 # Log output
@@ -173,7 +184,7 @@ class MoveToRegrasp(Node):
         try:
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 45 /usr/bin/python3 move_to_clear_area.py {move_mode}"
+                f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
             ]
             cmd = "\n".join(cmd_parts)
             
@@ -183,7 +194,8 @@ class MoveToRegrasp(Node):
                 executable='/bin/bash',
                 capture_output=True,
                 text=True,
-                timeout=55
+                timeout=55,
+                env=env
             )
             
             # Log output
@@ -211,7 +223,7 @@ class MoveToRegrasp(Node):
         try:
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 300 /usr/bin/python3 move_down.py --mode {self.mode}"
+                f"timeout 300 /usr/bin/python3 legacy/move_down.py --mode {self.mode}"
             ]
             cmd = "\n".join(cmd_parts)
             
@@ -221,7 +233,8 @@ class MoveToRegrasp(Node):
                 executable='/bin/bash',
                 capture_output=True,
                 text=True,
-                timeout=310
+                timeout=310,
+                env=env
             )
             
             # Log output

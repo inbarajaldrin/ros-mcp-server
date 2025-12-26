@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Verify Final Assembly Pose - Checks if object is in correct position and orientation relative to base
+Verify Disassembly - Checks if object is NOT in assembly position relative to base (opposite of verify_assembly)
 
 The algorithm:
 1. Get current object pose and base pose
 2. Calculate relative position and orientation of object relative to base
 3. Compare with target position and orientation from JSON
-4. Check if within tolerance
-5. Return success if match, failure if not
+4. Check if NOT within tolerance (opposite of assembly verification)
+5. Return success if NOT in assembly position (disassembled), failure if still in assembly position
 """
 
 import rclpy
@@ -38,7 +38,7 @@ OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Tolerance thresholds
-POSITION_TOLERANCE = 0.01  # 1cm tolerance for position
+POSITION_TOLERANCE = 0.1  # 10cm tolerance for position
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
 
 
@@ -89,17 +89,10 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
 
 class FoldSymmetry:
     """
-    Proper fold symmetry handling (same as in reorient_for_assembly).
+    Proper fold symmetry handling (same as in verify_assembly).
     
     The JSON stores symmetry rotations as quaternions.
     These represent rotations IN THE OBJECT FRAME that result in identical appearance.
-    
-    For fork with 2-fold Y symmetry:
-    - Identity (0°): object as-is
-    - 180° around Y: object flipped, but looks the same
-    
-    To generate equivalent targets:
-    R_equivalent = R_target × R_symmetry  (object-frame rotation)
     """
     
     @staticmethod
@@ -186,25 +179,18 @@ class FoldSymmetry:
         """
         symmetry_rotations = FoldSymmetry.get_symmetry_rotations_as_matrices(fold_data)
         
-        if logger:
-            logger.info(f"  Generating equivalent targets from {len(symmetry_rotations)} symmetry rotations")
-        
         equivalent_targets = []
         for i, R_sym in enumerate(symmetry_rotations):
             # Apply symmetry in object frame: R_equiv = R_target × R_sym
             R_equivalent = R_target_world @ R_sym
             equivalent_targets.append(R_equivalent)
-            
-            if logger:
-                rpy = R.from_matrix(R_equivalent).as_euler('xyz', degrees=True)
-                logger.info(f"    Equivalent target {i}: RPY = [{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}]")
         
         return equivalent_targets
 
 
-class VerifyFinalAssemblyPose(Node):
+class VerifyDisassembly(Node):
     def __init__(self, base_name=None, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
-        super().__init__('verify_final_assembly_pose')
+        super().__init__('verify_disassembly')
         
         # Store base name and find assembly JSON file
         self.base_name = base_name
@@ -331,25 +317,6 @@ class VerifyFinalAssemblyPose(Node):
         """
         Get target orientation for object from assembly configuration (relative to base),
         using the quaternion stored in the JSON.
-        
-        The JSON structure (per component) is:
-        
-        "rotation": {
-            "rpy": {
-                "x": ...,
-                "y": ...,
-                "z": ...
-            },
-            "quaternion": {
-                "x": ...,
-                "y": ...,
-                "z": ...,
-                "w": ...
-            }
-        }
-        
-        We read the quaternion directly to avoid any RPY → quaternion conversions
-        that could trigger gimbal lock.
         """
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
@@ -365,22 +332,22 @@ class VerifyFinalAssemblyPose(Node):
                 ])
         return None
     
-    def verify_assembly_pose(self, object_name, base_name):
+    def verify_disassembly(self, object_name, base_name):
         """
-        Verify if object is in correct position and orientation relative to base
+        Verify if object is NOT in assembly position relative to base (opposite of verify_assembly_pose)
         
         Algorithm:
         1. Get current object pose and base pose
         2. Calculate relative position and orientation of object relative to base
         3. Compare with target position and orientation from JSON
-        4. Check if within tolerance
+        4. Check if NOT within tolerance (opposite of assembly verification)
         
         Args:
             object_name: Name of the object to verify
             base_name: Name of the base object
             
         Returns:
-            True if object is in correct pose, False otherwise
+            True if object is NOT in assembly pose (successfully disassembled), False if still in assembly pose
         """
         # Wait for pose data
         if not self.current_poses:
@@ -427,8 +394,9 @@ class VerifyFinalAssemblyPose(Node):
             self.get_logger().error(f"No target orientation found for {original_object_name} in assembly config")
             return False
         
-        # Calculate position error
-        position_error = np.linalg.norm(object_relative_position - target_position_relative)
+        # Calculate position error (vector and magnitude)
+        position_error_vector = object_relative_position - target_position_relative
+        position_error = np.linalg.norm(position_error_vector)
         
         # === Load fold symmetry and generate equivalent target orientations ===
         fold_data = FoldSymmetry.load_symmetry_data(original_object_name, self.symmetry_dir)
@@ -459,30 +427,37 @@ class VerifyFinalAssemblyPose(Node):
         
         orientation_error_deg = min_orientation_error_deg
         
-        # Check if within tolerance
+        # Check if within tolerance (for assembly position)
         position_ok = position_error <= POSITION_TOLERANCE
         orientation_ok = orientation_error_deg <= ORIENTATION_TOLERANCE_DEG
         
+        # For disassembly: SUCCESS if NOT in assembly position (opposite of assembly verification)
         if position_ok and orientation_ok:
-            self.get_logger().info("Verification successful: Object is in correct assembly pose")
-            return True
-        else:
-            self.get_logger().error("Verification failed: Object is NOT in correct assembly pose")
-            if not position_ok:
-                self.get_logger().error(f"Position error ({position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m)")
-            if not orientation_ok:
-                self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
+            # Object is still in assembly position - disassembly FAILED
+            self.get_logger().error("Disassembly verification failed: Object is still in assembly pose")
+            if position_ok:
+                self.get_logger().error(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) is within tolerance ({POSITION_TOLERANCE}m)")
+            if orientation_ok:
+                self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) is within tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
             return False
+        else:
+            # Object is NOT in assembly position - disassembly SUCCESS
+            self.get_logger().info("Disassembly verification successful: Object is NOT in assembly pose")
+            if not position_ok:
+                self.get_logger().info(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m) - object moved away")
+            if not orientation_ok:
+                self.get_logger().info(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°) - object reoriented")
+            return True
 
 
 def main(args=None):
-    parser = argparse.ArgumentParser(description='Verify Final Assembly Pose - Check if object is in correct position')
+    parser = argparse.ArgumentParser(description='Verify Disassembly - Check if object is NOT in assembly position')
     parser.add_argument('--object-name', type=str, required=True, help='Name of the object to verify')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
     args = parser.parse_args()
     
     rclpy.init()
-    node = VerifyFinalAssemblyPose(base_name=args.base_name)
+    node = VerifyDisassembly(base_name=args.base_name)
     
     try:
         # Wait for pose data (wait indefinitely until received)
@@ -504,16 +479,16 @@ def main(args=None):
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
         
-        # Verify assembly pose
-        success = node.verify_assembly_pose(
+        # Verify disassembly (opposite of assembly verification)
+        success = node.verify_disassembly(
             args.object_name,
             args.base_name
         )
         
         if success:
-            node.get_logger().info("Assembly pose verification: SUCCESS")
+            node.get_logger().info("Disassembly verification: SUCCESS - Object is not in assembly position")
         else:
-            node.get_logger().error("Assembly pose verification: FAILED - Placement failed")
+            node.get_logger().error("Disassembly verification: FAILED - Object is still in assembly position")
         
         # Exit with appropriate code
         node.destroy_node()
