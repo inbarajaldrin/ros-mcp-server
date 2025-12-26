@@ -334,14 +334,14 @@ def read_topic(topic_name: str, timeout: int = 5):
 @mcp.tool()
 def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
     """Execute Python code for calculations and math operations.
-    
+
     This tool allows the agent to execute Python code for performing calculations,
     math operations, data processing, or any other Python computations.
-    
+
     Args:
         code: Python code to execute
         timeout: Maximum execution time in seconds (default: 30)
-        
+
     Returns:
         Dictionary with output from the executed Python code (stdout + stderr) and file information
     """
@@ -350,14 +350,14 @@ def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
     import os
     import sys
     import shutil
-    
+
     try:
         # Create python_executions directory if it doesn't exist
         os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
-        
+
         # Get list of files before execution
         files_before = set(os.listdir(PYTHON_EXECUTIONS_DIR))
-        
+
         # Create a temporary Python file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             # Wrap code with common imports and print result if it's an expression
@@ -372,7 +372,7 @@ import sys
 """
             f.write(code_with_imports)
             temp_file = f.name
-        
+
         # Execute the code in the python_executions directory
         result = subprocess.run(
             [sys.executable, temp_file],
@@ -381,31 +381,31 @@ import sys
             timeout=timeout,
             cwd=PYTHON_EXECUTIONS_DIR
         )
-        
+
         # Clean up
         try:
             os.unlink(temp_file)
         except:
             pass
-        
+
         # Get list of files after execution
         files_after = set(os.listdir(PYTHON_EXECUTIONS_DIR))
         created_files = files_after - files_before
-        
+
         # Return combined stdout and stderr
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
-        
+
         result_dict = {"output": output}
-        
+
         # Files are already in the correct location (PYTHON_EXECUTIONS_DIR uses MCP_CLIENT_OUTPUT_DIR if set)
         if created_files:
             result_dict["files_created"] = list(created_files)
             result_dict["files_location"] = PYTHON_EXECUTIONS_DIR
-        
+
         return result_dict
-        
+
     except subprocess.TimeoutExpired:
         # Clean up the temp file
         try:
@@ -415,6 +415,127 @@ import sys
         return {"output": f"Error: Code execution timed out after {timeout} seconds"}
     except Exception as e:
         return {"output": f"Error: Failed to execute Python code: {str(e)}"}
+
+@mcp.tool()
+def execute_policy_code(code: str, timeout: int = 3600) -> Dict[str, Any]:
+    """Execute Python code with direct access to this server's primitives API.
+
+    Allows executable Python code that calls server primitives with complex control flow
+    (loops, conditionals, result-based branching, etc.).
+
+    Available API: Import with 'from primitives.utils.primitives_api import *'
+    All primitives return dictionaries with results for decision-making.
+
+    Example:
+    ```python
+    from primitives.utils.primitives_api import *
+
+    # Use any available primitives
+    result = some_primitive(param1, param2)
+
+    # Make decisions based on results
+    if result["status"] == "success":
+        another_primitive()
+    ```
+
+    Args:
+        code: Python code (must import from primitives.utils.primitives_api)
+        timeout: Maximum execution time in seconds (default: 3600)
+
+    Returns:
+        Dictionary with output from code execution (stdout + stderr)
+    """
+    import subprocess
+    import tempfile
+    import os
+    import sys
+
+    try:
+        # Create python_executions directory if it doesn't exist
+        os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
+
+        # Get the script directory for PYTHONPATH (need this before building template)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Create a temporary Python file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            # Add standard imports that policies typically need
+            code_with_imports = f"""import sys
+import os
+from typing import Dict, Any, List, Optional
+
+# Add the parent directory to path so we can import primitives_api
+sys.path.insert(0, '{script_dir}')
+
+# Standard imports for policies
+import math
+import numpy as np
+from datetime import datetime, timedelta
+import json
+
+# User's policy code:
+{code}
+"""
+            f.write(code_with_imports)
+            temp_file = f.name
+
+        # Set up environment with PYTHONPATH
+        env = os.environ.copy()
+        if 'PYTHONPATH' in env:
+            env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
+        else:
+            env['PYTHONPATH'] = script_dir
+
+        # Execute the code in the python_executions directory
+        result = subprocess.run(
+            [sys.executable, temp_file],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=PYTHON_EXECUTIONS_DIR,
+            env=env
+        )
+
+        # Clean up
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
+
+        # Return combined stdout and stderr
+        output = result.stdout if result.stdout else ""
+        if result.stderr:
+            output += "\n" + result.stderr
+
+        result_dict = {
+            "output": output,
+            "returncode": result.returncode
+        }
+
+        # Add success indicator
+        if result.returncode == 0:
+            result_dict["status"] = "success"
+        else:
+            result_dict["status"] = "failed"
+            result_dict["message"] = f"Policy execution failed with return code {result.returncode}"
+
+        return result_dict
+
+    except subprocess.TimeoutExpired:
+        # Clean up the temp file
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
+        return {
+            "output": f"Error: Policy execution timed out after {timeout} seconds",
+            "status": "timeout"
+        }
+    except Exception as e:
+        return {
+            "output": f"Error: Failed to execute policy code: {str(e)}",
+            "status": "error"
+        }
 
 def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
     """Helper function to run primitive scripts and return raw output.
@@ -522,18 +643,18 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         # If process was killed by timeout command (exit code 124), add timeout message
         if returncode == 124:
             if output:
-                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
             else:
-                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
         
         # If process was killed by us (returncode -9 or None), it timed out
         if returncode is None or returncode == -9:
             if output:
-                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
             else:
-                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
         
-        return {"output": output if output else ""}
+        return {"output": output if output else "", "returncode": returncode}
         
     except subprocess.TimeoutExpired as e:
         # Fallback: try to get any output from the exception
@@ -543,11 +664,40 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         if hasattr(e, 'stderr') and e.stderr:
             output += e.stderr
         if output:
-            return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds"}
+            return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": None}
         else:
-            return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+            return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": None}
     except Exception as e:
-        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}", "returncode": None}
+
+def _parse_verify_result(primitive_result: Dict[str, Any]) -> str:
+    """Parse verification result from primitive output.
+    
+    Args:
+        primitive_result: Dictionary returned from _run_primitive with "output" and "returncode" keys
+    
+    Returns:
+        "SUCCESS" or "FAILURE" based on return code and output parsing
+    """
+    returncode = primitive_result.get("returncode")
+    output = primitive_result.get("output", "").upper()
+    
+    # Primary method: check return code
+    # 0 = success, non-zero = failure
+    if returncode == 0:
+        return "SUCCESS"
+    elif returncode is not None and returncode != 0:
+        return "FAILURE"
+    
+    # Fallback: parse output for keywords if returncode is ambiguous
+    # Check for explicit success/failure messages
+    if "SUCCESS" in output and "VERIFICATION" in output:
+        return "SUCCESS"
+    elif "FAILED" in output or "FAILURE" in output:
+        return "FAILURE"
+    
+    # Default to FAILURE if we can't determine
+    return "FAILURE"
 
 def _run_query(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Query") -> Dict[str, Any]:
     """Helper function to run query scripts and return raw output.
@@ -836,9 +986,14 @@ def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
     
     Returns:
-        Raw output from the verify grasp primitive script
+        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
-    return _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+    primitive_result = _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+    result = _parse_verify_result(primitive_result)
+    return {
+        "output": primitive_result.get("output", ""),
+        "result": result
+    }
 
 @mcp.tool()
 def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
@@ -849,9 +1004,14 @@ def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
         base_name: Name of the base object
     
     Returns:
-        Raw output from the verify assembly primitive script
+        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
-    return _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+    primitive_result = _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+    result = _parse_verify_result(primitive_result)
+    return {
+        "output": primitive_result.get("output", ""),
+        "result": result
+    }
 
 @mcp.tool()
 def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
@@ -865,9 +1025,14 @@ def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
         base_name: Name of the base object
     
     Returns:
-        Raw output from the verify disassembly primitive script
+        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
-    return _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+    primitive_result = _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+    result = _parse_verify_result(primitive_result)
+    return {
+        "output": primitive_result.get("output", ""),
+        "result": result
+    }
 
 if __name__ == "__main__":
     try:
