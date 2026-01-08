@@ -505,7 +505,7 @@ def read_topic(topic_name: str, timeout: int = 5) -> Dict[str, Any]:
         return result
 
 
-def reorient_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional = None, target_base_orientation: Optional = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
+def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional = None, target_base_orientation: Optional = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
         cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
@@ -513,7 +513,7 @@ def reorient_object(object_name: str, base_name: str, mode: str = "sim", current
         cmd += " --use-default-base-orientation"
     elif target_base_orientation is not None:
         cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
-    return _run_primitive("reorient_object.py", cmd, timeout=90, error_prefix="Reorient for assembly")
+    return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 
 def scan_workspace(object_name: str) -> Dict[str, Any]:

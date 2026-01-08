@@ -205,72 +205,146 @@ class MoveDown(Node):
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees - same as other primitives"""
         import math
-        
+
         # Roll
         sinr_cosp = 2 * (w * x + y * z)
         cosr_cosp = 1 - 2 * (x * x + y * y)
         roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
-        
+
         # Pitch
         sinp = 2 * (w * y - z * x)
         if abs(sinp) >= 1:
             pitch = math.degrees(math.copysign(math.pi / 2, sinp))
         else:
             pitch = math.degrees(math.asin(sinp))
-        
+
         # Yaw
         siny_cosp = 2 * (w * z + x * y)
         cosy_cosp = 1 - 2 * (y * y + z * z)
         yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
-        
+
         return [roll, pitch, yaw]
 
+    def compute_all_joint_positions(self, joint_angles):
+        """
+        Compute the 3D positions of all joints given joint angles.
+        Returns a list of [x, y, z] positions for each joint.
+        """
+        # UR5e DH parameters (from ik_solver.py)
+        dh_params = [
+            (0,  0.1625,  0,     np.pi/2),
+            (0,  0,      -0.425,  0),
+            (0,  0,      -0.3922, 0),
+            (0,  0.1333,  0,     np.pi/2),
+            (0,  0.0997,  0,    -np.pi/2),
+            (0,  0.0996,  0,     0)
+        ]
+
+        def dh_transform(theta, d, a, alpha):
+            ct, st = np.cos(theta), np.sin(theta)
+            ca, sa = np.cos(alpha), np.sin(alpha)
+            return np.array([
+                [ct, -st * ca,  st * sa, a * ct],
+                [st,  ct * ca, -ct * sa, a * st],
+                [0,   sa,       ca,      d],
+                [0,   0,        0,       1]
+            ])
+
+        # Compute cumulative transformations and extract positions
+        joint_positions = []
+        T = np.eye(4)
+
+        # Add base position (always at origin)
+        joint_positions.append(T[:3, 3].copy())
+
+        # Compute position of each joint
+        for i, (theta, d, a, alpha) in enumerate(dh_params):
+            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
+            T = np.dot(T, T_i)
+            joint_positions.append(T[:3, 3].copy())
+
+        return joint_positions
+
+    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+        """
+        Check if any part of the robot (all joints) goes below the table.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed Z position (meters).
+                        Default -0.01 means 1cm below table is still allowed.
+            verbose: If True, log which joint caused collision
+
+        Returns:
+            True if collision detected (any joint below threshold), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        for i, pos in enumerate(joint_positions):
+            if pos[2] < z_threshold:
+                if verbose:
+                    self.get_logger().warn(
+                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
+                        f"(threshold: {z_threshold*1000:.1f}mm)"
+                    )
+                return True  # Collision detected
+
+        return False  # No collision
+
     def read_current_ee_pose(self):
-        """Read current end-effector pose and joint angles using ROS2 subscriber"""
-        # Reset the flags
-        self.ee_pose_received = False
-        self.joint_angles_received = False
-        
-        # Wait for both pose and joint angles to arrive (with timeout)
-        timeout_count = 0
-        max_timeout = 100  # 10 seconds (100 * 0.1s)
-        
-        while rclpy.ok() and (not self.ee_pose_received or not self.joint_angles_received) and timeout_count < max_timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
-            timeout_count += 1
-            
-            if timeout_count % 10 == 0:  # Log every second
-                status = []
-                if not self.ee_pose_received:
-                    status.append("EE pose")
-                if not self.joint_angles_received:
-                    status.append("joint angles")
-                self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
-        
-        if not self.ee_pose_received:
-            self.get_logger().error("Timeout waiting for EE pose message")
-            return None
-        
-        if not self.joint_angles_received:
-            self.get_logger().error("Timeout waiting for joint angles message")
-            return None
-        
-        if self.ee_position is None or self.ee_quat is None:
-            self.get_logger().error("EE pose data is None")
-            return None
-        
-        if self.current_joint_angles is None:
-            self.get_logger().error("Joint angles data is None")
-            return None
-        
-        # Extract position and orientation
-        position = self.ee_position.tolist()
-        orientation = self.ee_quat.tolist()
-        
-        return {
-            'position': position,
-            'orientation': orientation
-        }
+        """Read current end-effector pose and joint angles using ROS2 subscriber with retry"""
+        max_retries = 5
+        timeout_sec = 15.0
+
+        for attempt in range(max_retries):
+            # Reset the flags
+            self.ee_pose_received = False
+            self.joint_angles_received = False
+
+            if attempt > 0:
+                self.get_logger().info(f"Retrying EE pose read (attempt {attempt + 1}/{max_retries})...")
+                # Brief delay before retry
+                time.sleep(0.5)
+
+            # Wait for both pose and joint angles to arrive (with timeout)
+            timeout_count = 0
+            max_timeout = int(timeout_sec / 0.1)  # Convert to count
+
+            while rclpy.ok() and (not self.ee_pose_received or not self.joint_angles_received) and timeout_count < max_timeout:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                timeout_count += 1
+
+                if timeout_count % 10 == 0:  # Log every second
+                    status = []
+                    if not self.ee_pose_received:
+                        status.append("EE pose")
+                    if not self.joint_angles_received:
+                        status.append("joint angles")
+                    self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
+
+            # Check if we got the data
+            if self.ee_pose_received and self.joint_angles_received:
+                if self.ee_position is not None and self.ee_quat is not None and self.current_joint_angles is not None:
+                    # Success!
+                    position = self.ee_position.tolist()
+                    orientation = self.ee_quat.tolist()
+                    return {
+                        'position': position,
+                        'orientation': orientation
+                    }
+
+            # Log what's missing
+            missing = []
+            if not self.ee_pose_received or self.ee_position is None or self.ee_quat is None:
+                missing.append("EE pose")
+            if not self.joint_angles_received or self.current_joint_angles is None:
+                missing.append("joint angles")
+            self.get_logger().warn(f"Timeout waiting for: {', '.join(missing)} (attempt {attempt + 1}/{max_retries})")
+
+        # All retries exhausted
+        self.get_logger().error(f"Failed to read EE pose after {max_retries} attempts")
+        self.get_logger().error("SUGGESTION: Try running the same command again. The issue is often transient and succeeds on retry.")
+        return None
 
     def gripper_force_callback(self, msg: Float64):
         """Callback for gripper force data (sim mode)"""
@@ -574,21 +648,28 @@ class MoveDown(Node):
             for i in range(max_tries):
                 perturbed_position = np.array(target_position).copy()
                 perturbed_position[0] += i * dx
-                
+
                 perturbed_pose = target_pose.copy()
                 perturbed_pose[:3, 3] = perturbed_position
-                
-                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+
+                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
                                 method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
-                
+
                 if result.success:
                     cost = ik_objective_quaternion(result.x, perturbed_pose)
-                    
-                    if cost < 0.01:
+
+                    # Check for table collision (sim mode only)
+                    has_collision = False
+                    if self.mode == 'sim':
+                        has_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+
+                    # Check if this is a good solution (low cost and no collision)
+                    if cost < 0.01 and not has_collision:
                         joint_angles = result.x
                         break
-                    
-                    if cost < best_cost:
+
+                    # Keep track of best solution (only if no collision)
+                    if not has_collision and cost < best_cost:
                         best_cost = cost
                         best_result = result.x
             
@@ -604,31 +685,41 @@ class MoveDown(Node):
                 self.get_logger().warn(f"IK failed at target Z={target_position[2]:.3f}m. Trying higher Z values...")
                 z_increment = 0.05  # Try 5cm increments
                 max_z_attempts = 10  # Try up to 0.5m above target
-                
+
                 for z_attempt in range(1, max_z_attempts + 1):
                     test_z = target_position[2] + z_attempt * z_increment
                     self.get_logger().info(f"Trying IK at Z={test_z:.3f}m (attempt {z_attempt}/{max_z_attempts})")
-                    
+
                     test_position = np.array(target_position).copy()
                     test_position[2] = test_z
                     test_pose = target_pose.copy()
                     test_pose[:3, 3] = test_position
-                    
+
                     # Try IK with current joint angles as seed
-                    result = minimize(ik_objective_quaternion, q_guess, args=(test_pose,), 
+                    result = minimize(ik_objective_quaternion, q_guess, args=(test_pose,),
                                     method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
-                    
+
                     if result.success:
                         cost = ik_objective_quaternion(result.x, test_pose)
-                        if cost < 0.01:
+
+                        # Check for table collision (sim mode only)
+                        has_collision = False
+                        if self.mode == 'sim':
+                            has_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+
+                        # Accept solution if cost is good and no collision
+                        if cost < 0.01 and not has_collision:
                             self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m (cost={cost:.6f})")
                             joint_angles = result.x
                             target_position[2] = test_z  # Update target to reachable Z
                             self.get_logger().info(f"Updated target Z to {test_z:.3f}m (lowest reachable height)")
                             break
-                
+
                 if joint_angles is None:
-                    self.get_logger().error("IK failed: couldn't compute move down position even after trying higher Z values")
+                    if self.mode == 'sim':
+                        self.get_logger().error("IK failed: couldn't compute collision-free move down position even after trying higher Z values")
+                    else:
+                        self.get_logger().error("IK failed: couldn't compute move down position even after trying higher Z values")
                     rclpy.shutdown()
                     return
                 

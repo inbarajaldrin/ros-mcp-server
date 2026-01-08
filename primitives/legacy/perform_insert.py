@@ -29,6 +29,7 @@ if _project_root not in sys.path:
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
@@ -157,6 +158,7 @@ class PerformInsertController(Node):
         # Current state
         self.pos = None             # [x, y, z] in meters
         self.rpy = None             # [r, p, y] in degrees
+        self.quat = None            # [x, y, z, w] quaternion (raw from topic, for sim mode)
         self.joints = None
         self.force = None           # [fx, fy, fz] in N
         
@@ -195,24 +197,87 @@ class PerformInsertController(Node):
             self, FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
-        
-        self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', self._pose_cb, 10)
-        self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
-        
-        # Only subscribe to force sensor in real mode
-        if self.mode == 'real':
-            self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10)
-        else:
-            self.force = np.array([0.0, 0.0, 0.0])  # Dummy force for sim mode
-        
-        # Wait for data
-        while self.pos is None or self.joints is None:
-            rclpy.spin_once(self, timeout_sec=0.1)
-        
-        # In real mode, also wait for force data
-        if self.mode == 'real':
-            while self.force is None:
+
+        # Configure QoS to match the publisher (TRANSIENT_LOCAL durability)
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
+
+        # Store QoS profile for potential resubscription
+        self.pose_qos_profile = qos_profile
+        self.pose_subscription = None
+        self.joint_subscription = None
+        self.force_subscription = None
+
+        # Create initial subscriptions
+        self._create_subscriptions()
+
+        # Wait for data with timeout and retry mechanism
+        max_retries = 5
+        timeout_sec = 15.0
+
+        for attempt in range(max_retries):
+            self.get_logger().info(f"Waiting for initial data (attempt {attempt + 1}/{max_retries})...")
+            start_time = time.time()
+
+            # Wait for data with timeout
+            # In sim mode, also wait for quaternion data (needed for maintaining orientation)
+            while rclpy.ok():
+                elapsed = time.time() - start_time
+
+                # Check if we have all required data
+                if self.mode == 'sim':
+                    have_all_data = (self.pos is not None and
+                                   self.joints is not None and
+                                   self.quat is not None)
+                else:
+                    have_all_data = (self.pos is not None and
+                                   self.joints is not None and
+                                   (self.force is not None or self.mode != 'real'))
+
+                if have_all_data:
+                    self.get_logger().info(f"Received all initial data after {elapsed:.1f}s")
+                    break
+
+                # Check timeout
+                if elapsed > timeout_sec:
+                    self.get_logger().warn(f"Timeout waiting for data after {timeout_sec}s")
+                    missing = []
+                    if self.pos is None:
+                        missing.append("pose")
+                    if self.joints is None:
+                        missing.append("joints")
+                    if self.mode == 'sim' and self.quat is None:
+                        missing.append("quaternion")
+                    if self.mode == 'real' and self.force is None:
+                        missing.append("force")
+                    self.get_logger().warn(f"Missing: {', '.join(missing)}")
+
+                    # Retry: destroy and recreate subscriptions
+                    if attempt < max_retries - 1:
+                        self.get_logger().info("Recreating subscriptions...")
+                        self._destroy_subscriptions()
+                        time.sleep(0.5)  # Brief delay before recreating
+                        self._create_subscriptions()
+                    break
+
                 rclpy.spin_once(self, timeout_sec=0.1)
+
+            # If we got all data, exit retry loop
+            if self.mode == 'sim':
+                if self.pos is not None and self.joints is not None and self.quat is not None:
+                    break
+            else:
+                if self.pos is not None and self.joints is not None:
+                    if self.mode != 'real' or self.force is not None:
+                        break
+        else:
+            # All retries exhausted
+            self.get_logger().error(f"Failed to receive initial data after {max_retries} attempts")
+            self.get_logger().error("SUGGESTION: Try running the same command again. The issue is often transient and succeeds on retry.")
+            raise RuntimeError(f"Failed to receive initial data after {max_retries} attempts. Try running the command again.")
         
         # Capture and store fixed orientation
         if self.rpy is not None:
@@ -273,6 +338,8 @@ class PerformInsertController(Node):
     def _pose_cb(self, msg):
         self.pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         q = [msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w]
+        # Store raw quaternion (used in sim mode to maintain exact orientation)
+        self.quat = np.array(q)
         raw_rpy = np.degrees(R.from_quat(q).as_euler('xyz'))
         # Canonicalize to [0, 180, yaw] format
         self.rpy = self._canonicalize_euler(raw_rpy)
@@ -346,7 +413,106 @@ class PerformInsertController(Node):
         rpy_rad = r.as_euler('xyz')
         rpy_deg = np.degrees(rpy_rad)
         return position, rpy_deg
-    
+
+    def compute_all_joint_positions(self, joint_angles):
+        """
+        Compute the 3D positions of all joints given joint angles.
+        Returns a list of [x, y, z] positions for each joint.
+        """
+        # UR5e DH parameters (from ik_solver.py)
+        dh_params = [
+            (0,  0.1625,  0,     np.pi/2),
+            (0,  0,      -0.425,  0),
+            (0,  0,      -0.3922, 0),
+            (0,  0.1333,  0,     np.pi/2),
+            (0,  0.0997,  0,    -np.pi/2),
+            (0,  0.0996,  0,     0)
+        ]
+
+        def dh_transform(theta, d, a, alpha):
+            ct, st = np.cos(theta), np.sin(theta)
+            ca, sa = np.cos(alpha), np.sin(alpha)
+            return np.array([
+                [ct, -st * ca,  st * sa, a * ct],
+                [st,  ct * ca, -ct * sa, a * st],
+                [0,   sa,       ca,      d],
+                [0,   0,        0,       1]
+            ])
+
+        # Compute cumulative transformations and extract positions
+        joint_positions = []
+        T = np.eye(4)
+
+        # Add base position (always at origin)
+        joint_positions.append(T[:3, 3].copy())
+
+        # Compute position of each joint
+        for i, (theta, d, a, alpha) in enumerate(dh_params):
+            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
+            T = np.dot(T, T_i)
+            joint_positions.append(T[:3, 3].copy())
+
+        return joint_positions
+
+    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+        """
+        Check if any part of the robot (all joints) goes below the table.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed Z position (meters).
+                        Default -0.01 means 1cm below table is still allowed.
+            verbose: If True, log which joint caused collision
+
+        Returns:
+            True if collision detected (any joint below threshold), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        for i, pos in enumerate(joint_positions):
+            if pos[2] < z_threshold:
+                if verbose:
+                    self.get_logger().warn(
+                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
+                        f"(threshold: {z_threshold*1000:.1f}mm)"
+                    )
+                return True  # Collision detected
+
+        return False  # No collision
+
+    def check_self_collision(self, joint_angles, min_distance=0.08, verbose=False):
+        """
+        Check if robot is in self-collision by checking distances between non-adjacent joints.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            min_distance: Minimum allowed distance between non-adjacent joints (meters).
+                         Default 0.08m (80mm) provides conservative collision avoidance.
+            verbose: If True, log which joints are in collision
+
+        Returns:
+            True if self-collision detected, False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # Check distances between all pairs of non-adjacent joints
+        # Skip adjacent joints (i, i+1) as they're always close by design
+        for i in range(len(joint_positions)):
+            for j in range(i + 2, len(joint_positions)):  # Start from i+2 to skip adjacent joints
+                pos_i = joint_positions[i]
+                pos_j = joint_positions[j]
+                distance = np.linalg.norm(pos_i - pos_j)
+
+                if distance < min_distance:
+                    if verbose:
+                        self.get_logger().warn(
+                            f"Self-collision detected: Joint {i} and Joint {j} "
+                            f"are {distance*1000:.1f}mm apart (min: {min_distance*1000:.1f}mm)"
+                        )
+                    return True  # Self-collision detected
+
+        return False  # No self-collision
+
     def read_current_joint_angles(self):
         """Read current joint angles using ROS2 subscriber"""
         timeout_count = 0
@@ -409,17 +575,26 @@ class PerformInsertController(Node):
             
             if result.success:
                 cost = ik_objective_quaternion(result.x, perturbed_pose)
-                
-                # Check if this is a good solution
-                if cost < 0.01:
+
+                # Check for collisions (sim mode only)
+                has_collision = False
+                if self.mode == 'sim':
+                    # Check table collision
+                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                    # Check self-collision
+                    has_self_collision = self.check_self_collision(result.x, min_distance=0.08)
+                    has_collision = has_table_collision or has_self_collision
+
+                # Check if this is a good solution (low cost and no collision)
+                if cost < 0.01 and not has_collision:
                     return result.x
-                
-                # Keep track of best solution
-                if cost < best_cost:
+
+                # Keep track of best solution (only if no collision)
+                if not has_collision and cost < best_cost:
                     best_cost = cost
                     best_result = result.x
-        
-        # If we found any reasonable solution, use it
+
+        # If we found any reasonable solution (without collision), use it
         if best_result is not None and best_cost < 0.1:
             return best_result
         
@@ -466,21 +641,33 @@ class PerformInsertController(Node):
                 
                 if result.success:
                     cost = ik_objective_quaternion(result.x, perturbed_pose)
-                    
-                    # Check if this is a good solution
-                    if cost < 0.01:
+
+                    # Check for collisions (sim mode only)
+                    has_collision = False
+                    if self.mode == 'sim':
+                        # Check table collision
+                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                        # Check self-collision
+                        has_self_collision = self.check_self_collision(result.x, min_distance=0.08)
+                        has_collision = has_table_collision or has_self_collision
+
+                    # Check if this is a good solution (low cost and no collision)
+                    if cost < 0.01 and not has_collision:
                         return result.x
-                    
-                    # Keep track of best solution
-                    if cost < best_cost:
+
+                    # Keep track of best solution (only if no collision)
+                    if not has_collision and cost < best_cost:
                         best_cost = cost
                         best_result = result.x
-        
-        # If we found any reasonable solution with fallback seeds, use it
+
+        # If we found any reasonable solution with fallback seeds (without collision), use it
         if best_result is not None and best_cost < 0.1:
             return best_result
         
-        self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+        if self.mode == 'sim':
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision) even with multiple seeds")
+        else:
+            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None
     
     def execute_trajectory_sim(self, trajectory):
@@ -553,21 +740,20 @@ class PerformInsertController(Node):
         
         # Get current EE pose as PoseStamped-like structure
         # Use actual current EE orientation from topic (maintain current orientation like old code)
-        if self.rpy is None:
-            self.get_logger().error("EE RPY not available from topic")
+        if self.quat is None:
+            self.get_logger().error("EE quaternion not available from topic")
             return False
-        
+
         current_ee_pose_msg = PoseStamped()
         current_ee_pose_msg.pose.position.x = self.pos[0]
         current_ee_pose_msg.pose.position.y = self.pos[1]
         current_ee_pose_msg.pose.position.z = self.pos[2]
-        
-        # Use current EE orientation from topic (self.rpy), not fixed orientation
-        quat = R.from_euler('xyz', self.rpy, degrees=True).as_quat()
-        current_ee_pose_msg.pose.orientation.x = quat[0]
-        current_ee_pose_msg.pose.orientation.y = quat[1]
-        current_ee_pose_msg.pose.orientation.z = quat[2]
-        current_ee_pose_msg.pose.orientation.w = quat[3]
+
+        # Use raw quaternion from topic to maintain exact orientation (not canonicalized RPY)
+        current_ee_pose_msg.pose.orientation.x = self.quat[0]
+        current_ee_pose_msg.pose.orientation.y = self.quat[1]
+        current_ee_pose_msg.pose.orientation.z = self.quat[2]
+        current_ee_pose_msg.pose.orientation.w = self.quat[3]
         
         # Convert poses to matrices
         T_EE_current = self.pose_to_matrix(current_ee_pose_msg.pose)
@@ -643,6 +829,35 @@ class PerformInsertController(Node):
         
         return success
     
+    def _create_subscriptions(self):
+        """Create all subscriptions"""
+        self.pose_subscription = self.create_subscription(
+            PoseStamped, '/tcp_pose_broadcaster/pose', self._pose_cb, self.pose_qos_profile
+        )
+        self.joint_subscription = self.create_subscription(
+            JointState, '/joint_states', self._joint_cb, 10
+        )
+
+        # Only subscribe to force sensor in real mode
+        if self.mode == 'real':
+            self.force_subscription = self.create_subscription(
+                WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10
+            )
+        else:
+            self.force = np.array([0.0, 0.0, 0.0])  # Dummy force for sim mode
+
+    def _destroy_subscriptions(self):
+        """Destroy all subscriptions to allow recreation"""
+        if self.pose_subscription is not None:
+            self.destroy_subscription(self.pose_subscription)
+            self.pose_subscription = None
+        if self.joint_subscription is not None:
+            self.destroy_subscription(self.joint_subscription)
+            self.joint_subscription = None
+        if self.force_subscription is not None:
+            self.destroy_subscription(self.force_subscription)
+            self.force_subscription = None
+
     def _wrench_cb(self, msg):
         self.force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
     
@@ -1309,6 +1524,7 @@ Examples:
         time.sleep(0.5)
         
         # Execute trajectory
+        success = False
         try:
             if args.mode == 'sim':
                 success = node.run()
@@ -1318,6 +1534,7 @@ Examples:
                     node.get_logger().error("Move down failed")
             else:
                 node.run()
+                success = True  # Real mode doesn't return success/failure
         except KeyboardInterrupt:
             # Set running flag to stop the loop
             if hasattr(node, 'running'):
@@ -1339,15 +1556,22 @@ Examples:
             
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        sys.exit(1)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
     finally:
         try:
             rclpy.shutdown()
         except:
             pass
+
+    # Exit with proper code based on success
+    if not success:
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == '__main__':

@@ -338,6 +338,8 @@ def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
     This tool allows the agent to execute Python code for performing calculations,
     math operations, data processing, or any other Python computations.
 
+    File saving: Use relative paths (e.g., "output.txt") instead of absolute paths like "/tmp/output.txt".
+
     Args:
         code: Python code to execute
         timeout: Maximum execution time in seconds (default: 30)
@@ -416,126 +418,126 @@ import sys
     except Exception as e:
         return {"output": f"Error: Failed to execute Python code: {str(e)}"}
 
-@mcp.tool()
-def execute_policy_code(code: str, timeout: int = 3600) -> Dict[str, Any]:
-    """Execute Python code with direct access to this server's primitives API.
-
-    Allows executable Python code that calls server primitives with complex control flow
-    (loops, conditionals, result-based branching, etc.).
-
-    Available API: Import with 'from primitives.utils.primitives_api import *'
-    All primitives return dictionaries with results for decision-making.
-
-    Example:
-    ```python
-    from primitives.utils.primitives_api import *
-
-    # Use any available primitives
-    result = some_primitive(param1, param2)
-
-    # Make decisions based on results
-    if result["status"] == "success":
-        another_primitive()
-    ```
-
-    Args:
-        code: Python code (must import from primitives.utils.primitives_api)
-        timeout: Maximum execution time in seconds (default: 3600)
-
-    Returns:
-        Dictionary with output from code execution (stdout + stderr)
-    """
-    import subprocess
-    import tempfile
-    import os
-    import sys
-
-    try:
-        # Create python_executions directory if it doesn't exist
-        os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
-
-        # Get the script directory for PYTHONPATH (need this before building template)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Create a temporary Python file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            # Add standard imports that policies typically need
-            code_with_imports = f"""import sys
-import os
-from typing import Dict, Any, List, Optional
-
-# Add the parent directory to path so we can import primitives_api
-sys.path.insert(0, '{script_dir}')
-
-# Standard imports for policies
-import math
-import numpy as np
-from datetime import datetime, timedelta
-import json
-
-# User's policy code:
-{code}
-"""
-            f.write(code_with_imports)
-            temp_file = f.name
-
-        # Set up environment with PYTHONPATH
-        env = os.environ.copy()
-        if 'PYTHONPATH' in env:
-            env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
-        else:
-            env['PYTHONPATH'] = script_dir
-
-        # Execute the code in the python_executions directory
-        result = subprocess.run(
-            [sys.executable, temp_file],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=PYTHON_EXECUTIONS_DIR,
-            env=env
-        )
-
-        # Clean up
-        try:
-            os.unlink(temp_file)
-        except:
-            pass
-
-        # Return combined stdout and stderr
-        output = result.stdout if result.stdout else ""
-        if result.stderr:
-            output += "\n" + result.stderr
-
-        result_dict = {
-            "output": output,
-            "returncode": result.returncode
-        }
-
-        # Add success indicator
-        if result.returncode == 0:
-            result_dict["status"] = "success"
-        else:
-            result_dict["status"] = "failed"
-            result_dict["message"] = f"Policy execution failed with return code {result.returncode}"
-
-        return result_dict
-
-    except subprocess.TimeoutExpired:
-        # Clean up the temp file
-        try:
-            os.unlink(temp_file)
-        except:
-            pass
-        return {
-            "output": f"Error: Policy execution timed out after {timeout} seconds",
-            "status": "timeout"
-        }
-    except Exception as e:
-        return {
-            "output": f"Error: Failed to execute policy code: {str(e)}",
-            "status": "error"
-        }
+# @mcp.tool()
+# def execute_policy_code(code: str, timeout: int = 3600) -> Dict[str, Any]:
+#     """Execute Python code with direct access to this server's primitives API.
+#
+#     Allows executable Python code that calls server primitives with complex control flow
+#     (loops, conditionals, result-based branching, etc.).
+#
+#     Available API: Import with 'from primitives.utils.primitives_api import *'
+#     All primitives return dictionaries with results for decision-making.
+#
+#     Example:
+#     ```python
+#     from primitives.utils.primitives_api import *
+#
+#     # Use any available primitives
+#     result = some_primitive(param1, param2)
+#
+#     # Make decisions based on results
+#     if result["status"] == "success":
+#         another_primitive()
+#     ```
+#
+#     Args:
+#         code: Python code (must import from primitives.utils.primitives_api)
+#         timeout: Maximum execution time in seconds (default: 3600)
+#
+#     Returns:
+#         Dictionary with output from code execution (stdout + stderr)
+#     """
+#     import subprocess
+#     import tempfile
+#     import os
+#     import sys
+#
+#     try:
+#         # Create python_executions directory if it doesn't exist
+#         os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
+#
+#         # Get the script directory for PYTHONPATH (need this before building template)
+#         script_dir = os.path.dirname(os.path.abspath(__file__))
+#
+#         # Create a temporary Python file
+#         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+#             # Add standard imports that policies typically need
+#             code_with_imports = f"""import sys
+# import os
+# from typing import Dict, Any, List, Optional
+#
+# # Add the parent directory to path so we can import primitives_api
+# sys.path.insert(0, '{script_dir}')
+#
+# # Standard imports for policies
+# import math
+# import numpy as np
+# from datetime import datetime, timedelta
+# import json
+#
+# # User's policy code:
+# {code}
+# """
+#             f.write(code_with_imports)
+#             temp_file = f.name
+#
+#         # Set up environment with PYTHONPATH
+#         env = os.environ.copy()
+#         if 'PYTHONPATH' in env:
+#             env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
+#         else:
+#             env['PYTHONPATH'] = script_dir
+#
+#         # Execute the code in the python_executions directory
+#         result = subprocess.run(
+#             [sys.executable, temp_file],
+#             capture_output=True,
+#             text=True,
+#             timeout=timeout,
+#             cwd=PYTHON_EXECUTIONS_DIR,
+#             env=env
+#         )
+#
+#         # Clean up
+#         try:
+#             os.unlink(temp_file)
+#         except:
+#             pass
+#
+#         # Return combined stdout and stderr
+#         output = result.stdout if result.stdout else ""
+#         if result.stderr:
+#             output += "\n" + result.stderr
+#
+#         result_dict = {
+#             "output": output,
+#             "returncode": result.returncode
+#         }
+#
+#         # Add success indicator
+#         if result.returncode == 0:
+#             result_dict["status"] = "success"
+#         else:
+#             result_dict["status"] = "failed"
+#             result_dict["message"] = f"Policy execution failed with return code {result.returncode}"
+#
+#         return result_dict
+#
+#     except subprocess.TimeoutExpired:
+#         # Clean up the temp file
+#         try:
+#             os.unlink(temp_file)
+#         except:
+#             pass
+#         return {
+#             "output": f"Error: Policy execution timed out after {timeout} seconds",
+#             "status": "timeout"
+#         }
+#     except Exception as e:
+#         return {
+#             "output": f"Error: Failed to execute policy code: {str(e)}",
+#             "status": "error"
+#         }
 
 def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
     """Helper function to run primitive scripts and return raw output.
@@ -775,22 +777,46 @@ def get_available_grasp_ids(mode: str = "sim") -> Dict[str, Any]:
     """
     return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
 
-# @mcp.tool()
-# def get_current_object_pose(object_name: Optional[str] = None, mode: str = "sim") -> Dict[str, Any]:
-#     """Get current object pose(s) from ROS topic.
-#     
-#     Args:
-#         object_name: Optional name of the object to get pose for. If not provided, returns poses for all objects.
-#         mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
-#     
-#     Returns:
-#         JSON output containing the current object pose(s) (position and orientation)
-#     """
-#     if object_name:
-#         cmd = f"--object-name \"{object_name}\" --mode {mode}"
-#     else:
-#         cmd = f"--all --mode {mode}"
-#     return _run_query("get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
+@mcp.tool()
+def get_target_object_pose(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+    """Get target object pose in world frame from assembly configuration.
+    
+    Calculates the target object pose in world frame by:
+    1. Loading assembly configuration from JSON
+    2. Reading base pose (from ROS topic in sim mode, or using default in real mode)
+    3. Extracting target position and orientation from JSON (relative to base)
+    4. Transforming target pose from base frame to world frame
+    
+    Args:
+        object_name: Name of the object
+        base_name: Name of the base object
+        mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose) (default: "sim")
+    
+    Returns:
+        JSON output containing the target object pose in world frame (position and orientation)
+    """
+    cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
+    return _run_query("get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
+
+@mcp.tool()
+def get_current_object_pose(object_name: Optional[str] = None, mode: str = "sim", all: bool = False) -> Dict[str, Any]:
+    """Get current object pose(s) from ROS topic.
+    
+    Args:
+        object_name: Optional name of the object to get pose for. If not provided and all is False, returns pose for this object. If all is True, this parameter is ignored.
+        mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
+        all: If True, returns poses for all objects. Mutually exclusive with object_name.
+    
+    Returns:
+        JSON output containing the current object pose(s) (position and orientation)
+    """
+    if all:
+        cmd = f"--all --mode {mode}"
+    elif object_name:
+        cmd = f"--object-name \"{object_name}\" --mode {mode}"
+    else:
+        return {"output": "Error: Either object_name or all=True must be provided"}
+    return _run_query("get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
 
 ## ############################################################################################## ##
 ##
@@ -858,54 +884,60 @@ def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_ob
     return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
-def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
+def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_ee_top_down: bool = False) -> Dict[str, Any]:
     """Move to regrasp position.
-    This tool is used to aid in reorienting the current object if the by placing it down on clear space and then moving to safe height so the object can be grasped again.
     
+    Purpose: After rotating an object relative to base, the end effector (EE) holding the object may be in a non-optimal orientation that causes inverse kinematics (IK) failures. But since the object has to be in that specific orientaion in order to perform the assembly,  this tool helps in placing the already-rotated object down and enables regrasping it using a top-down EE orientation.
+    How it works: The object maintains its final orientation, but the EE orientation changes to top-down. This improves IK success rates for subsequent operations while preserving the object's desired orientation.
+
     IMPORTANT: Only ONE flag can be set to True at a time. These flags must be called in sequence one by one to complete the move to regrasp sequence.
     
+    Workflow: After calling move_to_regrasp tool, complete the regrasp sequence by:
+    1. Calling move_to_grasp to grasp the object again
+    2. Calling rotate_object to restore the object's intended orientation (required because placing the object down may cause slight orientation changes)
+        
     Args:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
         move_to_clear_space: This is to move above a clear space maintaining the current orientation of the object.
-        move_down: This is a force compliant move down to place the object on the clear space.
-        move_to_safe_height: This is to move to the safe height position after having opened the gripper. Now you are ready to grasp the object again.
-    
-    Returns:
-        Raw output from the move to regrasp primitive script. Notw down the object position and orientation for future use.
+        move_down: This is a force compliant move down to place the object on the clear space. Note: After moving down and opening the gripper, the object's orientation might have changed slightly by a few degrees. You may need to account for this after grasping the object again.
+        move_ee_top_down: This is to move the end effector to a top-down orientation at safe height after having opened the gripper. Now you are ready to grasp the object again.
     """
     # Count how many flags are set
-    flags_set = sum([move_to_clear_space, move_down, move_to_safe_height])
+    flags_set = sum([move_to_clear_space, move_down, move_ee_top_down])
     
     # Validate that exactly one flag is set
     if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_clear_space, move_down, or move_to_safe_height must be set to True"}
+        return {"output": "Error: Exactly one of move_to_clear_space, move_down, or move_ee_top_down must be set to True"}
     elif flags_set > 1:
-        return {"output": "Error: Only one flag can be set at a time. Set exactly one of move_to_clear_space, move_down, or move_to_safe_height to True"}
+        return {"output": "Error: Only one flag can be set at a time. Set exactly one of move_to_clear_space, move_down, or move_ee_top_down to True"}
     
     cmd = f"--mode {mode}"
     if move_to_clear_space:
         cmd += " --move-to-clear-space"
     if move_down:
         cmd += " --move-down"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
+    if move_ee_top_down:
+        cmd += " --move-ee-top-down"
     
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
 def translate_object(mode: str, base_name: Optional[str] = None, object_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
     """Translate object to target position.
-    Moves object to target position relative to base.
+    Moves object to target position for performing assembly onto the base. This tool maintains the object's current orientation throughout the process.
     REQUIRED: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True (they are mutually exclusive).
     
     Args:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        base_name: Name of the base object (required)
-        object_name: Name of the object being held (required in sim mode)
-        move_to_base: Moves to the specified base position in safe height (exactly one flag must be True)
-        move_down: Moves down to the specified target object position (exactly one flag must be True)
-        move_to_safe_height: After closing gripper move to safe height (exactly one flag must be True)
+        base_name: Name of the base object. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
+        object_name: Name of the object being held. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
+        move_to_base: Translates object above base position maintaining safe height (exactly one flag must be True)
+        move_down: Moves down to the final target object position. Verify if the object is in the right orientation before this final step. (exactly one flag must be True)
+        move_to_safe_height: After moving down and opening gripper, move to safe height (exactly one flag must be True)
         use_default_base_position: Use default base position and orientation (for real mode)
+
+    Returns:
+        Dictionary with "output" (raw output), "returncode" (exit code), and "result" ("SUCCESS" or "FAILURE")
     """
     # Validate that exactly one flag is set
     flags_set = sum([move_to_base, move_down, move_to_safe_height])
@@ -914,8 +946,16 @@ def translate_object(mode: str, base_name: Optional[str] = None, object_name: Op
     elif flags_set > 1:
         return {"output": "Error: move_to_base, move_down, and move_to_safe_height are mutually exclusive. Set exactly one to True"}
     
-    if mode == "sim" and object_name is None:
-        return {"output": "Error: object_name is required in sim mode"}
+    # Validate sim mode requirements
+    if mode == "sim":
+        if move_to_safe_height:
+            # move_to_safe_height doesn't require object_name or base_name
+            pass
+        else:
+            if object_name is None:
+                return {"output": "Error: object_name is required in sim mode"}
+            if base_name is None and (move_to_base or move_down):
+                return {"output": "Error: base_name is required when using move_to_base or move_down in sim mode"}
     
     cmd = f"--mode {mode}"
     if object_name is not None:
@@ -936,20 +976,30 @@ def translate_object(mode: str, base_name: Optional[str] = None, object_name: Op
     # The alignment_stop_timeout (10s) in perform_insert will handle stopping the alignment phase
     # 900s (15 min) allows for: search phase + alignment phase (max 10s) + any delays
     if move_down:
-        timeout = 300  
+        timeout = 300
     elif move_to_safe_height:
         timeout = 40  # Safe height movement is quick
     else:
         timeout = 90
-    
-    return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+
+    primitive_result = _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+
+    # Add result field like verify tools
+    returncode = primitive_result.get("returncode")
+    result = "SUCCESS" if returncode == 0 else "FAILURE"
+
+    return {
+        "output": primitive_result.get("output", ""),
+        "returncode": returncode,
+        "result": result
+    }
 
 @mcp.tool()
-def reorient_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
-    """Reorient object for assembly.
-    Reorients object to target base orientation relative to base.
+def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
+    """Rotate object for assembly.
+    Rotates object from current to target object orientation relative to current base orientation for assembly by controlling the End effector orientation that holds the object.
     Args:
-        object_name: Name of the object to reorient
+        object_name: Name of the object to rotate
         base_name: Name of the base object
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
         current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode and always use the orientation of the object you got after moving to grasp the object because the object might not be visible in the camera after moving to grasp the object.)
@@ -964,7 +1014,7 @@ def reorient_object(object_name: str, base_name: str, mode: str = "sim", current
         cmd += " --use-default-base-orientation"
     elif target_base_orientation is not None:
         cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
-    return _run_primitive("reorient_object.py", cmd, timeout=90, error_prefix="Reorient for assembly")
+    return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 ## ############################################################################################## ##
 ##

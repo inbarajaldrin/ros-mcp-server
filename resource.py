@@ -67,7 +67,7 @@ def validate_assembly_id(assembly_id: str) -> Tuple[bool, str]:
 def get_grasp_log_file(assembly_id: str) -> Path:
     """Get the grasp log file path for a specific assembly"""
     normalized_id = normalize_assembly_id(assembly_id)
-    return RESOURCES_DIR / f"Assembly_{normalized_id}_grasp_log.json"
+    return RESOURCES_DIR / f"Assembly_{normalized_id}_object_grasp_log.json"
 
 def get_assembly_file(assembly_id: str) -> Path:
     """Get the assembly sequence log file path for a specific assembly"""
@@ -109,8 +109,8 @@ def save_grasp_resource(assembly_id: str, data):
     with open(grasp_file, 'w') as f:
         json.dump(data, f, indent=2)
 
-def load_assembly_resource(assembly_id: str):
-    """Load assembly resource from JSON file for a specific assembly. Returns dict with 'assembled_into' and 'sequence' keys."""
+def load_assembly_sequence_resource(assembly_id: str):
+    """Load assembly sequence resource from JSON file for a specific assembly. Returns dict with 'assembled_into' and 'sequence' keys."""
     assembly_file = get_assembly_file(assembly_id)
     if not assembly_file.exists():
         return {"assembled_into": "", "sequence": []}
@@ -139,8 +139,8 @@ def load_assembly_resource(assembly_id: str):
         # Any other error - return empty structure
         return {"assembled_into": "", "sequence": []}
 
-def save_assembly_resource(assembly_id: str, data):
-    """Save assembly resource to JSON file for a specific assembly"""
+def save_assembly_sequence_resource(assembly_id: str, data):
+    """Save assembly sequence resource to JSON file for a specific assembly"""
     assembly_file = get_assembly_file(assembly_id)
     with open(assembly_file, 'w') as f:
         json.dump(data, f, indent=2)
@@ -241,14 +241,14 @@ def get_object_grasp_configs_by_result(assembly_id: str, object_name: str, resul
 
 @mcp.resource("Assembly{assembly_id}/sequence")
 def get_assembly_sequence(assembly_id: str) -> str:
-    """Get sequence for a specific Assembly ID. Returns dict with 'assembled_into' (string) and 'sequence' (list). Each item in sequence has sequence_id (fixed), object_name (fixed), and tools_trials (list of trials with trial_id, grasp_id, gripper_state, tools ordered sequence, and result)."""
-    data = load_assembly_resource(assembly_id)
+    """Get sequence for a specific Assembly ID. Returns dict with 'assembled_into' (string) and 'sequence' (list). Each item in sequence has sequence_id (fixed), object_name (fixed), and tools_trials (list of trials with trial_id, grasp_id, tools ordered sequence, and result)."""
+    data = load_assembly_sequence_resource(assembly_id)
     return json.dumps(data, indent=2)
 
 @mcp.resource("Assembly{assembly_id}/sequence/{object_name}/tools_trials")
 def get_assembly_object_tools_trials(assembly_id: str, object_name: str) -> str:
-    """Get tools_trials for a specific object in an assembly sequence. Each trial has trial_id, grasp_id, gripper_state, tools (ordered sequence), and result."""
-    data = load_assembly_resource(assembly_id)
+    """Get tools_trials for a specific object in an assembly sequence. Each trial has trial_id, grasp_id, tools (ordered sequence), and result."""
+    data = load_assembly_sequence_resource(assembly_id)
     sequence = data.get("sequence", [])
     
     for item in sequence:
@@ -259,8 +259,8 @@ def get_assembly_object_tools_trials(assembly_id: str, object_name: str) -> str:
 
 @mcp.resource("Assembly{assembly_id}/sequence/{object_name}/tools_trials/{trial_id}")
 def get_assembly_object_trial(assembly_id: str, object_name: str, trial_id: str) -> str:
-    """Get a specific trial for an object in an assembly sequence. Returns trial_id, grasp_id, gripper_state, tools (ordered sequence), and result."""
-    data = load_assembly_resource(assembly_id)
+    """Get a specific trial for an object in an assembly sequence. Returns trial_id, grasp_id, tools (ordered sequence), and result."""
+    data = load_assembly_sequence_resource(assembly_id)
     sequence = data.get("sequence", [])
     trial_id_int = int(trial_id)
     
@@ -276,8 +276,8 @@ def get_assembly_object_trial(assembly_id: str, object_name: str, trial_id: str)
 
 @mcp.resource("Assembly{assembly_id}/sequence/{object_name}/tools_trials/{trial_id}/result")
 def get_assembly_object_trial_result(assembly_id: str, object_name: str, trial_id: str) -> str:
-    """Get all configurations (trial_id, grasp_id, gripper_state, tools, and result) for a specific trial_id of an object_name in an assembly. Returns all attempts (both SUCCESS and FAILURE) with their configurations. IMPORTANT: The gripper must be set to the specified gripper_state BEFORE moving to grasp to access the grasp_id."""
-    data = load_assembly_resource(assembly_id)
+    """Get all configurations (trial_id, grasp_id, tools, and result) for a specific trial_id of an object_name in an assembly. Returns all attempts (both SUCCESS and FAILURE) with their configurations."""
+    data = load_assembly_sequence_resource(assembly_id)
     sequence = data.get("sequence", [])
     trial_id_int = int(trial_id)
     
@@ -294,7 +294,7 @@ def get_assembly_object_trial_result(assembly_id: str, object_name: str, trial_i
 @mcp.resource("Assembly{assembly_id}/sequence/{object_name}/tools_trials/result/{result}")
 def get_assembly_object_trials_by_result(assembly_id: str, object_name: str, result: str) -> str:
     """Get all tools_trials filtered by result (SUCCESS or FAILURE) for an object in an assembly sequence. Returns all trials matching the specified result."""
-    data = load_assembly_resource(assembly_id)
+    data = load_assembly_sequence_resource(assembly_id)
     sequence = data.get("sequence", [])
     result_upper = result.upper()
     
@@ -352,10 +352,10 @@ def get_disassembly_object_grasp_configs_by_result(assembly_id: str, object_name
     
     return json.dumps([], indent=2)
 
-# ========== TOOLS FOR GRASP RESOURCE (Assembly{id}/object_name/grasp_configs) ==========
+# ========== TOOLS FOR OBJECT GRASP RESOURCE (Assembly{id}/object_name/grasp_configs) ==========
 
 @mcp.tool()
-def read_grasp_resource(assembly_id: str, object_name: str) -> str:
+def read_object_grasp_resource(assembly_id: str, object_name: str) -> str:
     """
     Read the grasp configurations for an object in a specific assembly (grasp_configs with grasp_id, gripper_state, and result)
     
@@ -395,7 +395,7 @@ def read_grasp_resource(assembly_id: str, object_name: str) -> str:
         }, indent=2)
 
 @mcp.tool()
-def write_grasp_resource(assembly_id: str, object_name: str, grasp_configs: Optional[List[Dict[str, Any]]] = None) -> str:
+def write_object_grasp_resource(assembly_id: str, object_name: str, grasp_configs: Optional[List[Dict[str, Any]]] = None) -> str:
     """
     Write or update grasp configurations for an object in a specific assembly (grasp_configs list with grasp_id, gripper_state, and result)
     
@@ -483,7 +483,7 @@ def write_grasp_resource(assembly_id: str, object_name: str, grasp_configs: Opti
     return json.dumps({"success": True}, indent=2)
 
 @mcp.tool()
-def clear_grasp_resource(assembly_id: str, object_name: str) -> str:
+def clear_object_grasp_resource(assembly_id: str, object_name: str) -> str:
     """
     Clear/delete a grasp resource for an object in a specific assembly
     
@@ -506,47 +506,46 @@ def clear_grasp_resource(assembly_id: str, object_name: str) -> str:
     return json.dumps({"success": True}, indent=2)
 
 @mcp.tool()
-def list_grasp_resource(assembly_id: str) -> str:
+def list_object_grasp_resource() -> str:
     """
-    List all objects in the grasp resource for a specific assembly
-    
-    Args:
-        assembly_id: The ID of the assembly (must be a numeric string, e.g., "3")
+    List all assemblies in the grasp resource
     
     Returns:
-        JSON string containing object names for the assembly
+        JSON string containing all assembly IDs that have grasp logs
     
     Note: When using grasp configurations from this resource, remember that the gripper must be set to the specified gripper_state BEFORE moving to grasp to access the grasp_id.
     """
-    # Validate that assembly_id is numeric
-    is_valid, error_message = validate_assembly_id(assembly_id)
-    if not is_valid:
-        return json.dumps({
-            "error": error_message
-        }, indent=2)
+    # Find all Assembly_{id}_object_grasp_log.json files
+    grasp_files = list(RESOURCES_DIR.glob("Assembly_*_object_grasp_log.json"))
+    assembly_ids = []
     
-    data = load_grasp_resource(assembly_id)
+    for file in grasp_files:
+        # Extract assembly ID from filename like "Assembly_1_object_grasp_log.json"
+        name = file.stem  # "Assembly_1_object_grasp_log"
+        if name.startswith("Assembly_") and name.endswith("_object_grasp_log"):
+            # Remove "Assembly_" prefix and "_object_grasp_log" suffix
+            assembly_id = name.replace("Assembly_", "").replace("_object_grasp_log", "")
+            assembly_ids.append(assembly_id)
     
     return json.dumps({
-        "assembly_id": assembly_id,
-        "object_names": list(data.keys()),
-        "count": len(data)
+        "assembly_ids": assembly_ids,
+        "count": len(assembly_ids)
     }, indent=2)
 
-# ========== TOOLS FOR ASSEMBLY RESOURCE (Assembly{id}/sequence/object_name/grasp_id) ==========
+# ========== TOOLS FOR ASSEMBLY SEQUENCE RESOURCE (Assembly{id}/sequence/object_name/grasp_id) ==========
 
 @mcp.tool()
-def read_assembly_resource(assembly_id: str) -> str:
+def read_assembly_sequence_resource(assembly_id: str) -> str:
     """
-    Read the complete resource for an assembly (dict with assembled_into and sequence)
+    Read the complete assembly sequence resource for an assembly (dict with assembled_into and sequence)
     
     Args:
         assembly_id: The ID of the assembly
     
     Returns:
-        JSON string containing dict with 'assembled_into' (string) and 'sequence' (list). Each item in sequence has sequence_id (fixed), object_name (fixed), and tools_trials (list of trials with trial_id, grasp_id, gripper_state, tools ordered sequence, and result)
+        JSON string containing dict with 'assembled_into' (string) and 'sequence' (list). Each item in sequence has sequence_id (fixed), object_name (fixed), and tools_trials (list of trials with trial_id, grasp_id, tools ordered sequence, and result)
     """
-    data = load_assembly_resource(assembly_id)
+    data = load_assembly_sequence_resource(assembly_id)
     
     if not data.get("sequence"):
         return json.dumps({
@@ -563,9 +562,9 @@ def read_assembly_resource(assembly_id: str) -> str:
     }, indent=2)
 
 @mcp.tool()
-def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int, assembled_into: str, tools_trials: Optional[List[Dict[str, Any]]] = None) -> str:
+def write_assembly_sequence_resource(assembly_id: str, object_name: str, sequence_id: int, assembled_into: str, tools_trials: Optional[List[Dict[str, Any]]] = None) -> str:
     """
-    Write or update an assembly resource for a specific object. assembled_into is stored at the top level (once for the entire assembly). sequence_id and object_name are fixed and cannot be changed after creation.
+    Write or update an assembly sequence resource for a specific object. assembled_into is stored at the top level (once for the entire assembly). sequence_id and object_name are fixed and cannot be changed after creation.
     
     Args:
         assembly_id: The ID of the assembly
@@ -575,17 +574,18 @@ def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int
         tools_trials: Optional list of trial objects, each with:
                       - trial_id: integer (required)
                       - grasp_id: integer (required)
-                      - gripper_state: "open" or "half-open" (required)
                       - tools: ordered list of strings (required) - sequence of tool names executed in order
                                 NOTE: Add flags also if called under one tool (e.g., ["tool_name", "tool_name --flag1", "tool_name --flag2"])
+                                NOTE: Gripper state is included in the tools sequence (e.g., "control_gripper --command open")
                       - result: "SUCCESS" or "FAILURE" (required)
-                      Format: [{"trial_id": 1, "grasp_id": 1, "gripper_state": "open", "tools": ["tool_name_1", "tool_name_2"], "result": "SUCCESS"}, ...]
+                      - comment: string (optional) - optional comment/note about the trial
+                      Format: [{"trial_id": 1, "grasp_id": 1, "tools": ["tool_name_1", "tool_name_2"], "result": "SUCCESS", "comment": "optional note"}, ...]
     
     Returns:
         JSON string with confirmation or error message
     """
     try:
-        data = load_assembly_resource(assembly_id)
+        data = load_assembly_sequence_resource(assembly_id)
     except json.JSONDecodeError as e:
         return json.dumps({"success": False, "error": f"Error loading resource file: {str(e)}"}, indent=2)
     except Exception as e:
@@ -651,7 +651,7 @@ def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int
             return json.dumps({"success": False, "error": f"Trial at index {j} must be a dictionary, got: {type(trial).__name__}"}, indent=2)
         
         # Check for required fields in trial
-        trial_required_fields = {"trial_id", "grasp_id", "gripper_state", "tools", "result"}
+        trial_required_fields = {"trial_id", "grasp_id", "tools", "result"}
         trial_missing_fields = trial_required_fields - set(trial.keys())
         if trial_missing_fields:
             return json.dumps({"success": False, "error": f"Trial at index {j} missing required fields: {list(trial_missing_fields)}"}, indent=2)
@@ -668,11 +668,6 @@ def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int
         except (ValueError, TypeError):
             return json.dumps({"success": False, "error": f"grasp_id must be an integer, got: {trial.get('grasp_id')}"}, indent=2)
         
-        # Validate gripper_state
-        gripper_state = trial.get("gripper_state")
-        if gripper_state not in ["open", "half-open"]:
-            return json.dumps({"success": False, "error": f"Invalid gripper_state: {gripper_state}. Must be 'open' or 'half-open'"}, indent=2)
-        
         # Validate tools is an ordered list (sequence)
         tools = trial.get("tools")
         if not isinstance(tools, list):
@@ -688,19 +683,28 @@ def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int
         if result not in ["SUCCESS", "FAILURE"]:
             return json.dumps({"success": False, "error": f"Invalid result: {trial.get('result')}. Must be 'SUCCESS' or 'FAILURE'"}, indent=2)
         
+        # Validate comment (optional)
+        comment = trial.get("comment")
+        if comment is not None and not isinstance(comment, str):
+            return json.dumps({"success": False, "error": f"comment must be a string, got: {type(comment).__name__}"}, indent=2)
+        
         # Reject any extra fields in trial
-        trial_allowed_fields = {"trial_id", "grasp_id", "gripper_state", "tools", "result"}
+        trial_allowed_fields = {"trial_id", "grasp_id", "tools", "result", "comment"}
         trial_extra_fields = set(trial.keys()) - trial_allowed_fields
         if trial_extra_fields:
-            return json.dumps({"success": False, "error": f"Invalid fields found in trial {j}: {list(trial_extra_fields)}. Only 'trial_id', 'grasp_id', 'gripper_state', 'tools', and 'result' are allowed."}, indent=2)
+            return json.dumps({"success": False, "error": f"Invalid fields found in trial {j}: {list(trial_extra_fields)}. Only 'trial_id', 'grasp_id', 'tools', 'result', and 'comment' are allowed."}, indent=2)
         
-        validated_trials.append({
+        # Build trial dict (include comment only if provided)
+        trial_dict = {
             "trial_id": trial_id,
             "grasp_id": grasp_id,
-            "gripper_state": gripper_state,
             "tools": tools,
             "result": result
-        })
+        }
+        if comment is not None:
+            trial_dict["comment"] = comment
+        
+        validated_trials.append(trial_dict)
     
     # Update or create the object entry
     if object_found:
@@ -714,14 +718,14 @@ def write_assembly_resource(assembly_id: str, object_name: str, sequence_id: int
     
     # Update the sequence in data
     data["sequence"] = sequence
-    save_assembly_resource(assembly_id, data)
+    save_assembly_sequence_resource(assembly_id, data)
     
     return json.dumps({"success": True}, indent=2)
 
 @mcp.tool()
-def clear_assembly_resource(assembly_id: str) -> str:
+def clear_assembly_sequence_resource(assembly_id: str) -> str:
     """
-    Clear/delete an assembly resource
+    Clear/delete an assembly sequence resource
     
     Args:
         assembly_id: The ID of the assembly to clear
@@ -742,9 +746,9 @@ def clear_assembly_resource(assembly_id: str) -> str:
         return json.dumps({"success": False, "error": str(e)}, indent=2)
 
 @mcp.tool()
-def list_assembly_resource() -> str:
+def list_assembly_sequence_resource() -> str:
     """
-    List all assemblies in the assembly resource
+    List all assemblies in the assembly sequence resource
     
     Returns:
         JSON string containing all assembly IDs
@@ -907,31 +911,30 @@ def clear_disassembly_grasp_resource(assembly_id: str, object_name: str) -> str:
     return json.dumps({"success": True}, indent=2)
 
 @mcp.tool()
-def list_disassembly_grasp_resource(assembly_id: str) -> str:
+def list_disassembly_grasp_resource() -> str:
     """
-    List all objects in the disassembly grasp resource for a specific assembly
-    
-    Args:
-        assembly_id: The ID of the assembly (must be a numeric string, e.g., "3")
+    List all assemblies in the disassembly grasp resource
     
     Returns:
-        JSON string containing object names for the assembly
+        JSON string containing all assembly IDs that have disassembly grasp logs
     
     Note: Disassembly grasp configurations only store grasp_id and result (no gripper_state).
     """
-    # Validate that assembly_id is numeric
-    is_valid, error_message = validate_assembly_id(assembly_id)
-    if not is_valid:
-        return json.dumps({
-            "error": error_message
-        }, indent=2)
+    # Find all Disassembly_{id}_grasp_log.json files
+    disassembly_files = list(RESOURCES_DIR.glob("Disassembly_*_grasp_log.json"))
+    assembly_ids = []
     
-    data = load_disassembly_grasp_resource(assembly_id)
+    for file in disassembly_files:
+        # Extract assembly ID from filename like "Disassembly_1_grasp_log.json"
+        name = file.stem  # "Disassembly_1_grasp_log"
+        if name.startswith("Disassembly_") and name.endswith("_grasp_log"):
+            # Remove "Disassembly_" prefix and "_grasp_log" suffix
+            assembly_id = name.replace("Disassembly_", "").replace("_grasp_log", "")
+            assembly_ids.append(assembly_id)
     
     return json.dumps({
-        "assembly_id": assembly_id,
-        "object_names": list(data.keys()),
-        "count": len(data)
+        "assembly_ids": assembly_ids,
+        "count": len(assembly_ids)
     }, indent=2)
 
 # ========== TOOLS FOR FINAL SEQUENCE (Assembly{id}_final_sequence.json) ==========

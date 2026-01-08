@@ -915,9 +915,13 @@ class ReorientForAssembly(Node):
         # Target in base-relative frame (same as R_target_relative)
         R_object_target_base_relative = R_target_relative
         
-        # Log initial object orientation
+        # Log target object orientation from JSON, then initial object and EE orientations
+        target_obj_rpy = R.from_matrix(R_object_target_world).as_euler('xyz', degrees=True)
         initial_obj_rpy = R.from_matrix(R_object_current).as_euler('xyz', degrees=True)
+        initial_ee_rpy = R.from_matrix(R_EE_current).as_euler('xyz', degrees=True)
+        self.get_logger().info(f"Target object orientation from JSON (RPY, degrees): [{target_obj_rpy[0]:.1f}, {target_obj_rpy[1]:.1f}, {target_obj_rpy[2]:.1f}]")
         self.get_logger().info(f"Initial object orientation (RPY, degrees): [{initial_obj_rpy[0]:.1f}, {initial_obj_rpy[1]:.1f}, {initial_obj_rpy[2]:.1f}]")
+        self.get_logger().info(f"Initial EE orientation (RPY, degrees): [{initial_ee_rpy[0]:.1f}, {initial_ee_rpy[1]:.1f}, {initial_ee_rpy[2]:.1f}]")
         
         # === Try cardinal-to-cardinal optimization first (in base-relative frame) ===
         (optimization_success, best_quat_base_relative, resulting_object_R_base_relative, 
@@ -1146,6 +1150,10 @@ class ReorientForAssembly(Node):
         if joint_angles is None:
             self.get_logger().error("IK failed for all attempted cardinals")
             return False
+        
+        # Log final EE orientation (before execution)
+        final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
+        self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
         
         # === Execute ===
         trajectory = {"traj1": [{

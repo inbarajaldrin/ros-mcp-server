@@ -21,6 +21,7 @@ if _project_root not in sys.path:
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import JointState
@@ -126,8 +127,15 @@ class TranslateForAssembly(Node):
             # Real mode: no topic subscriptions
             self.base_sub = None
             self.object_sub = None
-        
-        self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, 10)
+
+        # Configure QoS to match the publisher (TRANSIENT_LOCAL durability)
+        ee_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
+
+        self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, ee_qos_profile)
         
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
