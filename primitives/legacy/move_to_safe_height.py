@@ -277,7 +277,7 @@ class MoveToSafeHeight(Node):
                 joint_angles = best_result
 
             if joint_angles is None:
-                self.error_message = "IK failed: couldn't compute safe height position"
+                self.error_message = "IK solver failed: no valid solution to perform safe height move"
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return

@@ -908,7 +908,7 @@ class PerformInsertController(Node):
         )
         
         if final_computed_joint_angles is None:
-            self.error_message = "IK failed: couldn't compute insert position"
+            self.error_message = "IK solver failed: no valid solution to perform insert"
             self.get_logger().error(self.error_message)
             return False
         
@@ -1186,7 +1186,7 @@ class PerformInsertController(Node):
                 break
         
         if len(joint_trajectory) == 0:
-            self.error_message = "IK failed: couldn't compute insert trajectory"
+            self.error_message = "IK solver failed: no valid solution to perform insert trajectory"
             self.get_logger().error(self.error_message)
             return False
         

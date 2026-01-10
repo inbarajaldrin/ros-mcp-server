@@ -219,7 +219,7 @@ class MoveToClearArea(Node):
             joint_angles = compute_ik(tcp_position, [0, 180, 0])
             
             if joint_angles is None:
-                self.error_message = "IK failed: couldn't compute clear space position"
+                self.error_message = "IK solver failed: no valid solution to perform clear space move"
                 self.get_logger().error(self.error_message)
                 self.operation_success = False
                 self.operation_complete = True
@@ -378,7 +378,7 @@ class MoveToClearArea(Node):
                     joint_angles = best_result
                 
                 if joint_angles is None:
-                    self.error_message = "IK failed: couldn't compute clear space position"
+                    self.error_message = "IK solver failed: no valid solution to perform clear space move"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True

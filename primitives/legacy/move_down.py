@@ -887,9 +887,9 @@ class MoveDown(Node):
 
                 if joint_angles is None:
                     if self.mode == 'sim':
-                        self.error_message = "IK failed: couldn't compute collision-free move down position"
+                        self.error_message = "IK solver failed: no valid solution to perform collision-free move down"
                     else:
-                        self.error_message = "IK failed: couldn't compute move down position"
+                        self.error_message = "IK solver failed: no valid solution to perform move down"
                     self.get_logger().error(self.error_message)
                     rclpy.shutdown()
                     return

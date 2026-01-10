@@ -612,7 +612,7 @@ class TranslateForAssembly(Node):
         )
 
         if hover_computed_joint_angles is None:
-            self.error_message = "IK failed: couldn't compute hover position"
+            self.error_message = "IK solver failed: no valid solution to perform hover"
             self.get_logger().error(self.error_message)
             return False
 
@@ -776,7 +776,7 @@ class TranslateForAssembly(Node):
         )
 
         if hover_computed_joint_angles is None:
-            self.error_message = "IK failed: couldn't compute hover position"
+            self.error_message = "IK solver failed: no valid solution to perform hover"
             self.get_logger().error(self.error_message)
             return False
         
