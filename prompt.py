@@ -102,7 +102,7 @@ Read the tool descriptions properly and understand the underlying logic of the t
 Use available tools to perform assembly. 
 
 Half-open gripper after securing the object into the base as to not disturb the previously placed parts.
-If it was a SUCCESS, record the tools and arguments executed in sequence, save scene state and move on to the next object.
+If it was a SUCCESS, Make sure the previously placed object wasnt disturbed and record the tools and arguments executed in sequence, save scene state and move on to the next object.
 If it was a FAILURE, restore scene state and record the tools and arguments executed in sequence that didnt work and retry a different seqeuence you havent tried before.
 DO NOT orchestrate the tools to perform a composed policy. 
 
@@ -110,7 +110,11 @@ DO NOT orchestrate the tools to perform a composed policy.
 
 > To verify if an assembly was successful: run verify assembly once you think you've ran all tools required to move the object into the fixed base.
 1.SUCCESS: verify assembly returns success.
-2.FAILURE: If the objects need to be regrasped from a different orientation then the assembly might fail.
+2.FAILURE: If the sequence of tool calls is not the right one then the assembly might fail.
+
+**Troubleshooting**
+If your having trouble, try reading the object pose before and after tool calls and compare against the target pose of the object and reason on what the tool does to the object and the end effector orientation.
+Read the tool description properly to not miss any details on how to use the tool.
 
 **Output**
 Use `write_assembly_sequence_resource(assembly_id, object_name, sequence_id, assembled_into, tools_trials)` to log each trial.

@@ -20,6 +20,7 @@ import time
 import sys
 import json
 import threading
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 # Gripper range: 0.0 - 110.0mm
 GRIPPER_MIN_WIDTH = 0.0
@@ -101,7 +102,35 @@ class GripperController(Node):
         self.current_width = msg.data
         self.width_received = True
     
-    def get_current_width(self, timeout=2.0):
+    def check_topic_available(self, topic_name, timeout=3.0):
+        """Check if topic exists and has publishers"""
+        start_time = time.time()
+        while rclpy.ok() and (time.time() - start_time) < timeout:
+            try:
+                # Get topic names and types
+                topic_names_and_types = self.get_topic_names_and_types()
+                topic_exists = any(topic[0] == topic_name for topic in topic_names_and_types)
+                
+                if topic_exists:
+                    # Check if there are publishers
+                    publishers_info = self.get_publishers_info_by_topic(topic_name)
+                    if len(publishers_info) > 0:
+                        self.get_logger().info(f"Topic {topic_name} exists with {len(publishers_info)} publisher(s)")
+                        return True
+                    else:
+                        self.get_logger().warn(f"Topic {topic_name} exists but has no publishers yet")
+                else:
+                    self.get_logger().debug(f"Topic {topic_name} not found yet")
+                
+                # Spin to allow discovery
+                rclpy.spin_once(self, timeout_sec=0.2)
+            except Exception as e:
+                self.get_logger().debug(f"Error checking topic: {e}")
+                rclpy.spin_once(self, timeout_sec=0.2)
+        
+        return False
+    
+    def get_current_width(self, timeout=5.0):
         """Get current gripper width reading"""
         self.width_received = False
         start_time = time.time()
@@ -331,13 +360,35 @@ def main(args=None):
         # Wait a moment for subscriptions to establish
         time.sleep(0.5)
 
-        # Check if topic exists and is publishing (fail early if missing)
+        # Check if topic exists and has publishers
         topic_name = '/gripper_width' if known_args.mode == 'real' else '/gripper_width_sim'
         controller.get_logger().info(f"Checking if topic {topic_name} is available...")
-        initial_value = controller.get_current_width(timeout=2.0)
+        
+        # First check if topic exists and has publishers
+        if not controller.check_topic_available(topic_name, timeout=3.0):
+            error_msg = f"Topic {topic_name} not found or has no publishers. Cannot proceed with gripper control."
+            controller.get_logger().error(error_msg)
+            error = error_msg
+            success = False
+            # Build result and exit immediately
+            result = {
+                "result": "failure",
+                "command": known_args.command,
+                "mode": known_args.mode,
+                "initial_width_mm": None,
+                "final_width_mm": None,
+                "change_mm": None,
+                "error": error
+            }
+            output_result(result)
+            sys.exit(1)
+        
+        # Topic exists and has publishers, now wait for a message (with longer timeout)
+        controller.get_logger().info(f"Topic {topic_name} is available, waiting for first message...")
+        initial_value = controller.get_current_width(timeout=5.0)
         
         if initial_value is None:
-            error_msg = f"Topic {topic_name} not found or not publishing. Cannot proceed with gripper control."
+            error_msg = f"Topic {topic_name} exists but no message received within 5 seconds. The publisher may be publishing too slowly or there may be a QoS mismatch."
             controller.get_logger().error(error_msg)
             error = error_msg
             success = False

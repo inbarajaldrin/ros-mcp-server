@@ -933,13 +933,13 @@ def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: boo
     IMPORTANT: Only ONE flag can be set to True at a time. These flags must be called in sequence one by one to complete the move to regrasp sequence.
     
     Workflow: After calling move_to_regrasp tool, complete the regrasp sequence by:
-    1. Calling move_to_grasp to grasp the object again
+    1. Calling move_to_grasp to grasp the object again using the same id as before.
     2. Calling rotate_object to restore the object's intended orientation (required because placing the object down may cause slight orientation changes)
         
     Args:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
         move_to_clear_space: This is to move above a clear space maintaining the current orientation of the object.
-        move_down: This is a force compliant move down to place the object on the clear space. Note: After moving down and opening the gripper, the object's orientation might have changed slightly by a few degrees. You may need to account for this after grasping the object again.
+        move_down: This is a force compliant move down to place the object on the clear space. Note: After moving down and opening the gripper, the object's orientation might have changed slightly by a few degrees. Rotate the object to account for this after grasping the object again.
         move_ee_top_down: This is to move the end effector to a top-down orientation at safe height after having opened the gripper. Now you are ready to grasp the object again.
     """
     # Count how many flags are set
@@ -972,7 +972,7 @@ def translate_object(mode: str, base_name: Optional[str] = None, object_name: Op
         base_name: Name of the base object. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
         object_name: Name of the object being held. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
         move_to_base: Translates object above base position maintaining safe height (exactly one flag must be True)
-        move_down: Moves down to the final target object position. Verify if the object is in the right orientation before this final step. (exactly one flag must be True)
+        move_down: Moves down to the final target object position. VERIFY if the object is in the target object orientation before this final step. (exactly one flag must be True)
         move_to_safe_height: After moving down and opening gripper, move to safe height (exactly one flag must be True)
         use_default_base_position: Use default base position and orientation (for real mode)
 
@@ -1090,7 +1090,14 @@ def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
         base_name: Name of the base object
 
     Returns:
-        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
+        Dictionary containing:
+        - "result": "success" or "failure" for the verified object
+        - "object_name": Name of the verified object
+        - "base_name": Name of the base object
+        - "position_error_m": Position error metrics (x, y, z)
+        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
+        - "within_tolerance": Boolean indicating if within tolerance
+        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled
     """
     primitive_result = _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
 

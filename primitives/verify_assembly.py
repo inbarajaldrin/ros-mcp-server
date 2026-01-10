@@ -497,6 +497,59 @@ class VerifyAssembly(Node):
             if not orientation_ok:
                 self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
             return False, error_data
+    
+    def get_unassembled_objects(self, base_name, exclude_object_name):
+        """
+        Check all other objects in the same assembly and return list of objects that are NOT assembled.
+        
+        Args:
+            base_name: Name of the base object
+            exclude_object_name: Name of the object to exclude from checking (the one being verified)
+            
+        Returns:
+            List of object names that are not assembled (excluding the one being verified)
+        """
+        unassembled = []
+        
+        # Get all components from assembly config
+        components = self.assembly_config.get('components', [])
+        
+        # Normalize exclude_object_name (remove _scaled70 if present for comparison)
+        exclude_name_base = exclude_object_name.replace('_scaled70', '')
+        
+        for component in components:
+            comp_name = component.get('name', '')
+            comp_name_base = comp_name.replace('_scaled70', '')
+            
+            # Skip the object being verified
+            if comp_name_base == exclude_name_base:
+                continue
+            
+            # Skip the base itself
+            if comp_name_base == base_name.replace('_scaled70', ''):
+                continue
+            
+            # Check if this component is assembled
+            # Try both with and without _scaled70 suffix
+            object_to_check = comp_name
+            if object_to_check not in self.current_poses:
+                object_to_check = comp_name_base
+                if object_to_check not in self.current_poses:
+                    # Object not found in poses, consider it unassembled
+                    unassembled.append(comp_name_base)
+                    continue
+            
+            # Verify if this object is assembled
+            try:
+                is_assembled, _ = self.verify_assembly_pose(comp_name_base, base_name)
+                if not is_assembled:
+                    unassembled.append(comp_name_base)
+            except Exception as e:
+                # If verification fails, consider it unassembled
+                self.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
+                unassembled.append(comp_name_base)
+        
+        return unassembled
 
 
 def main(args=None):
@@ -511,6 +564,7 @@ def main(args=None):
     success = False
     error_data = {}
     error_msg = None
+    unassembled_objects = []
 
     try:
         # Wait for pose data (wait indefinitely until received)
@@ -532,7 +586,7 @@ def main(args=None):
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
 
-        # Verify assembly pose
+        # Verify assembly pose for the specified object
         success, error_data = node.verify_assembly_pose(
             args.object_name,
             args.base_name
@@ -542,6 +596,17 @@ def main(args=None):
             node.get_logger().info("Assembly pose verification: SUCCESS")
         else:
             node.get_logger().error("Assembly pose verification: FAILED - Placement failed")
+        
+        # Check other objects in the same assembly
+        try:
+            unassembled_objects = node.get_unassembled_objects(args.base_name, args.object_name)
+            if unassembled_objects:
+                node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+            else:
+                node.get_logger().info("All other objects in assembly are assembled")
+        except Exception as e:
+            node.get_logger().warn(f"Could not check other objects: {e}")
+            unassembled_objects = []
 
     except KeyboardInterrupt:
         node.get_logger().info("Interrupted by user")
@@ -561,9 +626,12 @@ def main(args=None):
             "base_name": args.base_name,
         }
 
-        # Add error data if available
+        # Add error data if available (contains metrics for the verified object)
         if error_data:
             result.update(error_data)
+
+        # Add unassembled objects list
+        result["unassembled_objects"] = unassembled_objects
 
         # Add error message if present
         if error_msg:

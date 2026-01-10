@@ -601,29 +601,51 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Step 1: Move to hover position only (no step 2 in sim mode)
+        # Step 1: Move to hover position using Cartesian waypoints to maintain orientation
 
-        # Compute IK for hover position
-        hover_computed_joint_angles = self.compute_ik_with_current_seed(
-            hover_position.tolist(),
-            ee_target_quat.tolist(),
-            max_tries=5,
-            dx=0.001
-        )
+        # Create Cartesian path with multiple waypoints to maintain orientation throughout
+        num_waypoints = 10  # Number of intermediate waypoints
+        total_duration = duration  # Total movement duration in seconds
 
-        if hover_computed_joint_angles is None:
-            self.error_message = "IK solver failed: no valid solution to perform hover"
-            self.get_logger().error(self.error_message)
-            return False
+        trajectory_points = []
+        current_ee_position = ee_current_position
+        target_position = hover_position
 
-        # Create hover trajectory
-        hover_trajectory = [{
-            "positions": [float(x) for x in hover_computed_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(duration))
-        }]
+        self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
 
-        success = self.execute_trajectory({"traj1": hover_trajectory})
+        for i in range(1, num_waypoints + 1):
+            # Linear interpolation in Cartesian space
+            alpha = i / num_waypoints
+            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+
+            # Compute IK for this waypoint (maintaining same orientation)
+            # Note: compute_ik_with_current_seed uses self.current_joint_angles as seed
+            waypoint_joint_angles = self.compute_ik_with_current_seed(
+                waypoint_position.tolist(),
+                ee_target_quat.tolist(),
+                max_tries=3,  # Fewer attempts for intermediate waypoints
+                dx=0.001
+            )
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK solver failed at waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            # Update current_joint_angles for next waypoint's IK seed
+            self.current_joint_angles = waypoint_joint_angles.copy()
+
+            # Create trajectory point for this waypoint
+            time_from_start = (i / num_waypoints) * total_duration
+            trajectory_points.append({
+                "positions": [float(x) for x in waypoint_joint_angles],
+                "velocities": [0.0] * 6,
+                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
+            })
+
+        self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
+
+        success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
             # error_message already set by execute_trajectory
             return False
@@ -765,68 +787,90 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Step 1: Move to hover position only (no step 2 in real mode)
+        # Step 1: Move to hover position using Cartesian waypoints to maintain orientation
 
-        # Compute IK for hover position using current joint angles as seed
-        hover_computed_joint_angles = self.compute_ik_with_current_seed(
-            hover_position.tolist(),
-            ee_target_quat.tolist(),
-            max_tries=5,
-            dx=0.001
-        )
+        # Create Cartesian path with multiple waypoints to maintain orientation throughout
+        num_waypoints = 10  # Number of intermediate waypoints
+        total_duration = duration  # Total movement duration in seconds
 
-        if hover_computed_joint_angles is None:
-            self.error_message = "IK solver failed: no valid solution to perform hover"
-            self.get_logger().error(self.error_message)
-            return False
-        
-        # Create trajectory
-        hover_trajectory = [{
-            "positions": [float(x) for x in hover_computed_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(duration))
-        }]
-        
-        success = self.execute_trajectory({"traj1": hover_trajectory})
+        trajectory_points = []
+        current_ee_position = ee_current_position
+        target_position = hover_position
+
+        self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
+
+        for i in range(1, num_waypoints + 1):
+            # Linear interpolation in Cartesian space
+            alpha = i / num_waypoints
+            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+
+            # Compute IK for this waypoint (maintaining same orientation)
+            # Note: compute_ik_with_current_seed uses self.current_joint_angles as seed
+            waypoint_joint_angles = self.compute_ik_with_current_seed(
+                waypoint_position.tolist(),
+                ee_target_quat.tolist(),
+                max_tries=3,  # Fewer attempts for intermediate waypoints
+                dx=0.001
+            )
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK solver failed at waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            # Update current_joint_angles for next waypoint's IK seed
+            self.current_joint_angles = waypoint_joint_angles.copy()
+
+            # Create trajectory point for this waypoint
+            time_from_start = (i / num_waypoints) * total_duration
+            trajectory_points.append({
+                "positions": [float(x) for x in waypoint_joint_angles],
+                "velocities": [0.0] * 6,
+                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
+            })
+
+        self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
+
+        success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
             self.get_logger().error("Failed to reach hover position")
             return False
-        
+
         return success
-    
+
     def execute_trajectory(self, trajectory):
-        """Execute trajectory and wait for completion"""
+        """Execute trajectory with multiple waypoints and wait for completion"""
         try:
             if 'traj1' not in trajectory or not trajectory['traj1']:
                 return False
-            
-            point = trajectory['traj1'][0]
-            positions = point['positions']
-            duration = point['time_from_start'].sec
-            
+
+            points = trajectory['traj1']
+
             traj_msg = JointTrajectory()
             traj_msg.joint_names = self.joint_names
-            
-            traj_point = JointTrajectoryPoint()
-            traj_point.positions = positions
-            traj_point.velocities = [0.0] * 6
-            traj_point.time_from_start = Duration(sec=duration)
-            traj_msg.points.append(traj_point)
-            
+
+            # Add all trajectory points
+            for point in points:
+                traj_point = JointTrajectoryPoint()
+                traj_point.positions = point['positions']
+                traj_point.velocities = point.get('velocities', [0.0] * 6)
+                traj_point.time_from_start = point['time_from_start']
+                traj_msg.points.append(traj_point)
+
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
             goal.goal_time_tolerance = Duration(sec=1)
-            
+
             future = self.action_client.send_goal_async(goal)
             rclpy.spin_until_future_complete(self, future)
             goal_handle = future.result()
-            
+
             if not goal_handle.accepted:
                 self.error_message = "External control program stopped or robot in protective stop"
                 self.get_logger().error(self.error_message)
                 return False
 
-            self.get_logger().info("Trajectory sent and accepted")
+            self.get_logger().info(f"Trajectory with {len(points)} waypoints sent and accepted")
             result_future = goal_handle.get_result_async()
             rclpy.spin_until_future_complete(self, result_future)
             result = result_future.result()

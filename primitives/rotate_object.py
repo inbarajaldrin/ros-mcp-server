@@ -378,6 +378,10 @@ class ReorientForAssembly(Node):
         self.initial_object_orientation_rpy_deg = None
         self.final_object_orientation_quat = None
         self.final_object_orientation_rpy_deg = None
+        self.initial_ee_orientation_quat = None
+        self.initial_ee_orientation_rpy_deg = None
+        self.final_ee_orientation_quat = None
+        self.final_ee_orientation_rpy_deg = None
         self.target_orientation_quat = None
         self.target_orientation_rpy_deg = None
         self.alignment_error_deg = None
@@ -451,7 +455,16 @@ class ReorientForAssembly(Node):
         q = np.array([pose_msg.pose.orientation.x, pose_msg.pose.orientation.y,
                       pose_msg.pose.orientation.z, pose_msg.pose.orientation.w])
         return position, R.from_quat(q).as_matrix()
-    
+
+    def canonicalize_euler(self, orientation):
+        """Canonicalize Euler angles to avoid gimbal lock representation issues.
+        When roll is close to ±180° and pitch is close to 0°, normalize to (0, 180, yaw)."""
+        roll, pitch, yaw = orientation
+        if abs(pitch) < 1 and abs(abs(roll) - 180) < 1:
+            return np.array([0.0, 180.0, (yaw % 360) - 180])
+        else:
+            return orientation
+
     def get_object_target_orientation(self, object_name):
         """
         Get target orientation for object from assembly configuration (relative to base),
@@ -889,7 +902,13 @@ class ReorientForAssembly(Node):
             self.get_logger().error(self.error_message)
             return False
         ee_position, R_EE_current = self.get_pose_from_msg(self.current_ee_pose)
-        
+
+        # Store initial EE orientation for JSON output
+        initial_ee_quat = R.from_matrix(R_EE_current).as_quat()
+        self.initial_ee_orientation_quat = initial_ee_quat
+        initial_ee_rpy = R.from_quat(initial_ee_quat).as_euler('xyz', degrees=True)
+        self.initial_ee_orientation_rpy_deg = self.canonicalize_euler(initial_ee_rpy)
+
         # === Get current object orientation ===
         if current_object_orientation is not None:
             R_object_current = self.get_rotation_from_quat(current_object_orientation)
@@ -1205,7 +1224,7 @@ class ReorientForAssembly(Node):
         
         success = self.execute_trajectory(trajectory)
 
-        # Store final object orientation and alignment error for JSON output
+        # Store final orientations and alignment error for JSON output
         if success:
             final_obj_quat = R.from_matrix(resulting_object_R).as_quat()
             self.final_object_orientation_quat = final_obj_quat
@@ -1213,6 +1232,11 @@ class ReorientForAssembly(Node):
             self.alignment_error_deg = object_error
             final_obj_rpy = self.final_object_orientation_rpy_deg
             self.get_logger().info(f"Final object orientation (RPY, degrees): [{final_obj_rpy[0]:.1f}, {final_obj_rpy[1]:.1f}, {final_obj_rpy[2]:.1f}]")
+
+            # Store final EE orientation (from best_quat which was used for IK)
+            self.final_ee_orientation_quat = best_quat
+            final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
+            self.final_ee_orientation_rpy_deg = self.canonicalize_euler(final_ee_rpy)
 
         return success
     
@@ -1309,6 +1333,32 @@ class ReorientForAssembly(Node):
                     "roll": round(float(self.final_object_orientation_rpy_deg[0]), 4),
                     "pitch": round(float(self.final_object_orientation_rpy_deg[1]), 4),
                     "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
+                }
+            if self.initial_ee_orientation_quat is not None:
+                result["initial_end_effector_orientation"] = {
+                    "x": round(float(self.initial_ee_orientation_quat[0]), 6),
+                    "y": round(float(self.initial_ee_orientation_quat[1]), 6),
+                    "z": round(float(self.initial_ee_orientation_quat[2]), 6),
+                    "w": round(float(self.initial_ee_orientation_quat[3]), 6)
+                }
+            if self.initial_ee_orientation_rpy_deg is not None:
+                result["initial_end_effector_orientation_rpy_deg"] = {
+                    "roll": round(float(self.initial_ee_orientation_rpy_deg[0]), 4),
+                    "pitch": round(float(self.initial_ee_orientation_rpy_deg[1]), 4),
+                    "yaw": round(float(self.initial_ee_orientation_rpy_deg[2]), 4)
+                }
+            if self.final_ee_orientation_quat is not None:
+                result["final_end_effector_orientation"] = {
+                    "x": round(float(self.final_ee_orientation_quat[0]), 6),
+                    "y": round(float(self.final_ee_orientation_quat[1]), 6),
+                    "z": round(float(self.final_ee_orientation_quat[2]), 6),
+                    "w": round(float(self.final_ee_orientation_quat[3]), 6)
+                }
+            if self.final_ee_orientation_rpy_deg is not None:
+                result["final_end_effector_orientation_rpy_deg"] = {
+                    "roll": round(float(self.final_ee_orientation_rpy_deg[0]), 4),
+                    "pitch": round(float(self.final_ee_orientation_rpy_deg[1]), 4),
+                    "yaw": round(float(self.final_ee_orientation_rpy_deg[2]), 4)
                 }
         else:
             # Add error message on failure
