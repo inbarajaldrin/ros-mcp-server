@@ -642,20 +642,40 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         with output_lock:
             output = "".join(output_lines)
         
+        # Check if output contains JSON markers (parse even on timeout)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result = json.loads(json_str)
+                return result
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to old format handling
+                pass
+
         # If process was killed by timeout command (exit code 124), add timeout message
         if returncode == 124:
             if output:
                 return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
             else:
                 return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
-        
+
         # If process was killed by us (returncode -9 or None), it timed out
         if returncode is None or returncode == -9:
             if output:
                 return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
             else:
                 return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
-        
+
+        # Old format (backward compatible)
         return {"output": output if output else "", "returncode": returncode}
         
     except subprocess.TimeoutExpired as e:
@@ -734,14 +754,34 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
             text=True,
             timeout=timeout + 5  # Add buffer for subprocess timeout
         )
-        
-        # Return combined stdout and stderr (query handles its own output formatting)
+
+        # Return combined stdout and stderr
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
-        
+
+        # Check if output contains JSON markers (parse JSON if present)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result_json = json.loads(json_str)
+                return result_json
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to returning raw output
+                pass
+
+        # Fallback: return raw output if no JSON markers or parsing failed
         return {"output": output}
-        
+
     except subprocess.TimeoutExpired:
         return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
     except Exception as e:
@@ -831,10 +871,10 @@ def move_home() -> Dict[str, Any]:
 
 @mcp.tool()
 def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
-    """Control gripper.
-    
-    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
-    
+    """Control gripper
+
+    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (range of width in mm).
+
     Args:
         command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
@@ -982,17 +1022,7 @@ def translate_object(mode: str, base_name: Optional[str] = None, object_name: Op
     else:
         timeout = 90
 
-    primitive_result = _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
-
-    # Add result field like verify tools
-    returncode = primitive_result.get("returncode")
-    result = "SUCCESS" if returncode == 0 else "FAILURE"
-
-    return {
-        "output": primitive_result.get("output", ""),
-        "returncode": returncode,
-        "result": result
-    }
+    return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
 @mcp.tool()
 def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
@@ -1039,6 +1069,12 @@ def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
         Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
     primitive_result = _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+
+    # If primitive returned structured JSON (has "result" field), return it directly
+    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
+        return primitive_result
+
+    # Old format: parse and add result field
     result = _parse_verify_result(primitive_result)
     return {
         "output": primitive_result.get("output", ""),
@@ -1048,15 +1084,21 @@ def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
 @mcp.tool()
 def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
     """Verify if object is in correct assembly pose relative to base.
-    
+
     Args:
         object_name: Name of the object
         base_name: Name of the base object
-    
+
     Returns:
         Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
     primitive_result = _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+
+    # If primitive returned structured JSON (has "result" field), return it directly
+    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
+        return primitive_result
+
+    # Old format: parse and add result field
     result = _parse_verify_result(primitive_result)
     return {
         "output": primitive_result.get("output", ""),
@@ -1078,6 +1120,12 @@ def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
         Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
     """
     primitive_result = _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+
+    # If primitive returned structured JSON (has "result" field), return it directly
+    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
+        return primitive_result
+
+    # Old format: parse and add result field
     result = _parse_verify_result(primitive_result)
     return {
         "output": primitive_result.get("output", ""),

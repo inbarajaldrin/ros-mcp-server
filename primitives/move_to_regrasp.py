@@ -15,6 +15,7 @@ import os
 import subprocess
 import argparse
 import time
+import json
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +24,19 @@ if _project_root not in sys.path:
 
 import rclpy
 from rclpy.node import Node
+
+
+def extract_json_from_output(output_text):
+    """Extract JSON result from subprocess output"""
+    if "__RESULT_JSON__" in output_text and "__END_RESULT_JSON__" in output_text:
+        start = output_text.find("__RESULT_JSON__") + len("__RESULT_JSON__")
+        end = output_text.find("__END_RESULT_JSON__")
+        json_str = output_text[start:end].strip()
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 class MoveToRegrasp(Node):
@@ -34,6 +48,8 @@ class MoveToRegrasp(Node):
         self.move_ee_top_down = move_ee_top_down
         self.sequence_complete = False
         self.sequence_success = False
+        self.error_message = None  # Track error for JSON output
+        self.movement_type = None  # Track which operation for JSON output
         self.get_logger().info(f"Using {self.mode.upper()} mode")
         if self.move_ee_top_down:
             self.get_logger().info("Starting move to regrasp sequence: move EE to top-down orientation at safe height (hover)")
@@ -44,7 +60,7 @@ class MoveToRegrasp(Node):
         else:
             # This should not happen if validation is correct, but keep for safety
             self.get_logger().info("Starting move to regrasp sequence: move to clear area -> move down")
-    
+
     def execute_sequence(self):
         """Execute the move to regrasp sequence"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -59,16 +75,17 @@ class MoveToRegrasp(Node):
         
         # Handle move_ee_top_down: only move to safe height (hover) with top-down EE orientation
         if self.move_ee_top_down:
+            self.movement_type = "move_ee_top_down"
             self.get_logger().info("Moving EE to top-down orientation at safe height (hover position)")
             move_mode = "--hover"
-            
+
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
                     f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
-                
+
                 result = subprocess.run(
                     cmd,
                     shell=True,
@@ -78,38 +95,58 @@ class MoveToRegrasp(Node):
                     timeout=55,
                     env=env
                 )
-                
+
                 # Log output
                 if result.stdout:
-                    self.get_logger().info(f"Move to clear area output: {result.stdout}")
+                    self.get_logger().debug(f"Move to clear area output: {result.stdout}")
                 if result.stderr:
-                    self.get_logger().warn(f"Move to clear area stderr: {result.stderr}")
+                    self.get_logger().debug(f"Move to clear area stderr: {result.stderr}")
+
+                # Extract JSON from subprocess output for detailed error messages
+                subprocess_json = extract_json_from_output(result.stdout)
                 
                 if result.returncode != 0:
-                    self.get_logger().error(f"Move to clear area failed with return code: {result.returncode}")
+                    # Use detailed error from subprocess JSON if available
+                    if subprocess_json and subprocess_json.get("result") == "failure":
+                        self.error_message = subprocess_json.get("error", f"Move to clear area failed with return code {result.returncode}")
+                    else:
+                        self.error_message = f"Move to clear area failed with return code {result.returncode}"
+                    self.get_logger().error(self.error_message)
+                    self.sequence_success = False
+                elif subprocess_json and subprocess_json.get("result") == "failure":
+                    # Return code is 0 but JSON indicates failure
+                    self.error_message = subprocess_json.get("error", "Move to clear area operation failed")
+                    self.get_logger().error(self.error_message)
+                    self.sequence_success = False
                 else:
                     self.get_logger().info("Move to regrasp sequence completed successfully (EE top-down at safe height only)")
-                    
+                    self.sequence_success = True
+
             except subprocess.TimeoutExpired:
-                self.get_logger().error("Move to clear area timed out")
+                self.error_message = "Subprocess timeout waiting for move to clear area (45s)"
+                self.get_logger().error(self.error_message)
+                self.sequence_success = False
             except Exception as e:
-                self.get_logger().error(f"Failed to execute move to clear area: {e}")
+                self.error_message = f"Failed to execute move to clear area: {e}"
+                self.get_logger().error(self.error_message)
+                self.sequence_success = False
             finally:
                 self.sequence_complete = True
             return
         
         # Handle move_to_clear_space: only move to clear area (no move down)
         if self.move_to_clear_space:
+            self.movement_type = "move_to_clear_space"
             self.get_logger().info("Moving to clear area")
             move_mode = "--move"
-            
+
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
                     f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
-                
+
                 result = subprocess.run(
                     cmd,
                     shell=True,
@@ -119,25 +156,40 @@ class MoveToRegrasp(Node):
                     timeout=55,
                     env=env
                 )
-                
+
                 # Log output
                 if result.stdout:
-                    self.get_logger().info(f"Move to clear area output: {result.stdout}")
+                    self.get_logger().debug(f"Move to clear area output: {result.stdout}")
                 if result.stderr:
-                    self.get_logger().warn(f"Move to clear area stderr: {result.stderr}")
+                    self.get_logger().debug(f"Move to clear area stderr: {result.stderr}")
+
+                # Extract JSON from subprocess output for detailed error messages
+                subprocess_json = extract_json_from_output(result.stdout)
                 
                 if result.returncode != 0:
-                    self.get_logger().error(f"Move to clear area failed with return code: {result.returncode}")
+                    # Use detailed error from subprocess JSON if available
+                    if subprocess_json and subprocess_json.get("result") == "failure":
+                        self.error_message = subprocess_json.get("error", f"Move to clear area failed with return code {result.returncode}")
+                    else:
+                        self.error_message = f"Move to clear area failed with return code {result.returncode}"
+                    self.get_logger().error(self.error_message)
+                    self.sequence_success = False
+                elif subprocess_json and subprocess_json.get("result") == "failure":
+                    # Return code is 0 but JSON indicates failure
+                    self.error_message = subprocess_json.get("error", "Move to clear area operation failed")
+                    self.get_logger().error(self.error_message)
                     self.sequence_success = False
                 else:
                     self.get_logger().info("Move to regrasp sequence completed successfully (clear area only)")
                     self.sequence_success = True
-                    
+
             except subprocess.TimeoutExpired:
-                self.get_logger().error("Move to clear area timed out")
+                self.error_message = "Subprocess timeout waiting for move to clear area (45s)"
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
             except Exception as e:
-                self.get_logger().error(f"Failed to execute move to clear area: {e}")
+                self.error_message = f"Failed to execute move to clear area: {e}"
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
             finally:
                 self.sequence_complete = True
@@ -145,6 +197,7 @@ class MoveToRegrasp(Node):
         
         # Handle move_down: only move down (skip clear area)
         if self.move_down:
+            self.movement_type = "move_down"
             self.get_logger().info("Calling move down")
             try:
                 cmd_parts = [
@@ -152,7 +205,7 @@ class MoveToRegrasp(Node):
                     f"timeout 300 /usr/bin/python3 legacy/move_down.py --mode {self.mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
-                
+
                 result = subprocess.run(
                     cmd,
                     shell=True,
@@ -162,25 +215,37 @@ class MoveToRegrasp(Node):
                     timeout=310,
                     env=env
                 )
-                
+
                 # Log output
                 if result.stdout:
-                    self.get_logger().info(f"Move down output: {result.stdout}")
+                    self.get_logger().debug(f"Move down output: {result.stdout}")
                 if result.stderr:
-                    self.get_logger().warn(f"Move down stderr: {result.stderr}")
+                    self.get_logger().debug(f"Move down stderr: {result.stderr}")
+
+                # move_down.py always returns 0, so check for JSON error markers
+                subprocess_json = extract_json_from_output(result.stdout)
                 
-                if result.returncode != 0:
-                    self.get_logger().error(f"Move down failed with return code: {result.returncode}")
+                if subprocess_json and subprocess_json.get("result") == "failure":
+                    # Use detailed error from subprocess if available
+                    self.error_message = subprocess_json.get("error", "Move down operation failed")
+                    self.get_logger().error(f"Move down failed: {self.error_message}")
+                    self.sequence_success = False
+                elif "__RESULT_JSON__" in result.stdout and "failure" in result.stdout:
+                    # Fallback: JSON found but couldn't parse, or failure detected
+                    self.error_message = "Move down operation failed"
+                    self.get_logger().error(self.error_message)
                     self.sequence_success = False
                 else:
                     self.get_logger().info("Move to regrasp sequence completed successfully")
                     self.sequence_success = True
-                    
+
             except subprocess.TimeoutExpired:
-                self.get_logger().error("Move down timed out")
+                self.error_message = "Subprocess timeout waiting for move down (300s)"
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
             except Exception as e:
-                self.get_logger().error(f"Failed to execute move down: {e}")
+                self.error_message = f"Failed to execute move down: {e}"
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
             finally:
                 self.sequence_complete = True
@@ -214,8 +279,23 @@ class MoveToRegrasp(Node):
             if result.stderr:
                 self.get_logger().warn(f"Move to clear area stderr: {result.stderr}")
             
+            # Extract JSON from subprocess output for detailed error messages
+            subprocess_json = extract_json_from_output(result.stdout)
+            
             if result.returncode != 0:
-                self.get_logger().error(f"Move to clear area failed with return code: {result.returncode}")
+                # Use detailed error from subprocess JSON if available
+                if subprocess_json and subprocess_json.get("result") == "failure":
+                    self.error_message = subprocess_json.get("error", f"Move to clear area failed with return code {result.returncode}")
+                else:
+                    self.error_message = f"Move to clear area failed with return code {result.returncode}"
+                self.get_logger().error(self.error_message)
+                self.sequence_success = False
+                self.sequence_complete = True
+                return
+            elif subprocess_json and subprocess_json.get("result") == "failure":
+                # Return code is 0 but JSON indicates failure
+                self.error_message = subprocess_json.get("error", "Move to clear area operation failed")
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
                 self.sequence_complete = True
                 return
@@ -256,8 +336,22 @@ class MoveToRegrasp(Node):
             if result.stderr:
                 self.get_logger().warn(f"Move down stderr: {result.stderr}")
             
-            if result.returncode != 0:
-                self.get_logger().error(f"Move down failed with return code: {result.returncode}")
+            # move_down.py always returns 0, so check for JSON error markers
+            subprocess_json = extract_json_from_output(result.stdout)
+            
+            if subprocess_json and subprocess_json.get("result") == "failure":
+                # Use detailed error from subprocess if available
+                self.error_message = subprocess_json.get("error", "Move down operation failed")
+                self.get_logger().error(f"Move down failed: {self.error_message}")
+                self.sequence_success = False
+            elif "__RESULT_JSON__" in result.stdout and "failure" in result.stdout:
+                # Fallback: JSON found but couldn't parse, or failure detected
+                self.error_message = "Move down operation failed"
+                self.get_logger().error(self.error_message)
+                self.sequence_success = False
+            elif result.returncode != 0:
+                self.error_message = f"Move down failed with return code: {result.returncode}"
+                self.get_logger().error(self.error_message)
                 self.sequence_success = False
             else:
                 self.get_logger().info("Move to regrasp sequence completed successfully")
@@ -271,6 +365,36 @@ class MoveToRegrasp(Node):
             self.sequence_success = False
         finally:
             self.sequence_complete = True
+
+    def output_result_json(self, movement_type=None):
+        """Output result in JSON format for MCP server"""
+        if movement_type is None:
+            movement_type = self.movement_type or "move_to_regrasp"
+
+        if self.error_message:
+            # Failure format
+            result = {
+                "result": "failure",
+                "mode": self.mode,
+                "movement_type": movement_type,
+                "error": self.error_message
+            }
+        else:
+            # Success format - minimal output (no position/orientation)
+            result = {
+                "result": "success",
+                "mode": self.mode,
+                "movement_type": movement_type
+            }
+
+        output_result(result)
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
 
 
 def main(args=None):
@@ -310,11 +434,12 @@ def main(args=None):
         node.sequence_success = False
     finally:
         try:
+            node.output_result_json()
             node.destroy_node()
             rclpy.shutdown()
         except (RuntimeError, AttributeError):
             pass  # Context already shut down or node already destroyed
-    
+
     # Exit with appropriate code
     sys.exit(0 if node.sequence_success else 1)
 

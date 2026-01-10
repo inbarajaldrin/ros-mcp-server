@@ -48,7 +48,12 @@ class MoveToSafeHeight(Node):
         # Current joint angles storage
         self.current_joint_angles = None
         self.joint_angles_received = False
-        
+
+        # Error tracking for JSON output
+        self.error_message = None
+        self.current_position = None
+        self.current_orientation = None
+
         # Subscriber for EE pose data
         # Use VOLATILE durability (default for most publishers) to avoid QoS incompatibility warnings
         qos_profile = QoSProfile(
@@ -153,19 +158,23 @@ class MoveToSafeHeight(Node):
                 self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
         
         if not self.ee_pose_received:
-            self.get_logger().error("Timeout waiting for EE pose message")
+            self.error_message = "Timeout waiting for EE pose message"
+            self.get_logger().error(self.error_message)
             return None
-        
+
         if not self.joint_angles_received:
-            self.get_logger().error("Timeout waiting for joint angles message")
+            self.error_message = "Timeout waiting for joint angles message"
+            self.get_logger().error(self.error_message)
             return None
-        
+
         if self.ee_position is None or self.ee_quat is None:
-            self.get_logger().error("EE pose data is None")
+            self.error_message = "EE pose data is None"
+            self.get_logger().error(self.error_message)
             return None
-        
+
         if self.current_joint_angles is None:
-            self.get_logger().error("Joint angles data is None")
+            self.error_message = "Joint angles data is None"
+            self.get_logger().error(self.error_message)
             return None
         
         # Extract position and orientation
@@ -180,9 +189,10 @@ class MoveToSafeHeight(Node):
     def move_to_safe_height(self):
         """Move to safe height while maintaining current position and orientation"""
         pose_data = self.read_current_ee_pose()
-        
+
         if pose_data is None:
-            self.get_logger().error("Could not read current end-effector pose")
+            self.error_message = "Could not read current end-effector pose"
+            self.get_logger().error(self.error_message)
             rclpy.shutdown()
             return
             
@@ -222,7 +232,8 @@ class MoveToSafeHeight(Node):
             # Primary seed: use current joint angles from joint state subscription
             # This is the best seed since we're only moving up (small Z change)
             if self.current_joint_angles is None:
-                self.get_logger().error("Current joint angles not available! Cannot compute IK.")
+                self.error_message = "Current joint angles not available! Cannot compute IK."
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
             
@@ -264,9 +275,10 @@ class MoveToSafeHeight(Node):
             # If we found any reasonable solution, use it
             if joint_angles is None and best_result is not None and best_cost < 0.1:
                 joint_angles = best_result
-            
+
             if joint_angles is None:
-                self.get_logger().error("IK failed: couldn't compute safe height position")
+                self.error_message = "IK failed: couldn't compute safe height position"
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
             
@@ -289,15 +301,17 @@ class MoveToSafeHeight(Node):
             self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
-            
+
         except Exception as e:
-            self.get_logger().error(f"Failed to compute IK: {e}")
+            self.error_message = f"Failed to compute IK: {e}"
+            self.get_logger().error(self.error_message)
             rclpy.shutdown()
 
     def goal_response(self, future):
         """Handle goal response"""
         goal_handle = future.result()
         if not goal_handle.accepted:
+            self.error_message = "External control program stopped or robot in protective stop"
             self.get_logger().error("Trajectory goal rejected")
             rclpy.shutdown()
             return
@@ -311,13 +325,51 @@ class MoveToSafeHeight(Node):
         if result.status == 4:  # SUCCEEDED
             self.get_logger().info("Movement completed successfully")
         else:
-            self.get_logger().error(f"Trajectory failed with status: {result.status}")
+            self.error_message = f"Trajectory failed with status code {result.status}"
+            self.get_logger().error(self.error_message)
         rclpy.shutdown()
+
+    def output_result_json(self, movement_type="move_to_safe_height"):
+        """Output result in JSON format for MCP server"""
+        if self.error_message:
+            # Failure format
+            result = {
+                "result": "failure",
+                "mode": "sim",
+                "movement_type": movement_type,
+                "error": self.error_message
+            }
+        else:
+            # Success format - minimal output (no position/orientation)
+            result = {
+                "result": "success",
+                "mode": "sim",
+                "movement_type": movement_type
+            }
+
+        output_result(result)
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = MoveToSafeHeight()
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    finally:
+        try:
+            node.output_result_json(movement_type="move_to_safe_height")
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception as e:
+            pass
+
 
 if __name__ == '__main__':
     main()

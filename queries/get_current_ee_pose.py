@@ -5,6 +5,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+import json
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
 
 class EEPoseReader:
     def __init__(self):

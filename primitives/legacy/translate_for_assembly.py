@@ -47,6 +47,13 @@ OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 HOVER_HEIGHT = 0.25  # Height to hover above base before descending
 
+
+def output_result(result):
+    """Output JSON result with markers for MCP server parsing"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 # Default base position and orientation (used if not provided via command line)
 DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
@@ -108,7 +115,14 @@ class TranslateForAssembly(Node):
             raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
         
         self.mode = mode  # 'sim' or 'real'
-        
+
+        # Error tracking for JSON output
+        self.error_message = None
+
+        # Store object and base names (set during translate call)
+        self.object_name = None
+        self.base_name = None
+
         # Load assembly configuration (will be loaded when base_name is available)
         self.assembly_config = {}
         self.assembly_json_file = None
@@ -497,33 +511,42 @@ class TranslateForAssembly(Node):
         Sim mode: Calculate and execute EE translation to hover position (step 1 only).
         Uses topics to get base and object poses.
         """
+        # Store names for JSON output
+        self.object_name = object_name
+        self.base_name = base_name
+
         # Load assembly config based on base_name if not already loaded for this base
         if self.loaded_base_name != base_name:
             self.assembly_config = self.load_assembly_config(base_name=base_name)
             if not self.assembly_config:
-                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                self.error_message = f"Failed to load assembly config for base '{base_name}'"
+                self.get_logger().error(self.error_message)
                 return False
-        
+
         # Wait for pose data
         if not self.current_poses or self.current_ee_pose is None:
-            self.get_logger().error("No pose data available")
+            self.error_message = "No pose data available"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Get current EE pose
         if self.current_ee_pose is None:
-            self.get_logger().error("End-effector pose not available")
+            self.error_message = "End-effector pose not available"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Check if object exists
         obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
         if obj_key not in self.current_poses:
-            self.get_logger().error(f"Object {object_name} not found")
+            self.error_message = f"Object {object_name} not found"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Check if base exists
         base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
         if base_key not in self.current_poses:
-            self.get_logger().error(f"Base {base_name} not found")
+            self.error_message = f"Base {base_name} not found"
+            self.get_logger().error(self.error_message)
             return False
         
         # Convert poses to matrices
@@ -541,7 +564,8 @@ class TranslateForAssembly(Node):
         # Get target object position from JSON (relative to base)
         target_position_relative = self.get_object_target_position(object_name)
         if target_position_relative is None:
-            self.get_logger().error(f"No target position found for {object_name} in JSON")
+            self.error_message = f"No target position found for {object_name} in JSON"
+            self.get_logger().error(self.error_message)
             return False
         
         # Transform target position from base frame to world frame
@@ -573,11 +597,12 @@ class TranslateForAssembly(Node):
         if self.current_joint_angles is None:
             joint_angles = self.read_current_joint_angles()
             if joint_angles is None:
-                self.get_logger().error("Could not read current joint angles")
+                self.error_message = "Could not read current joint angles"
+                self.get_logger().error(self.error_message)
                 return False
-        
+
         # Step 1: Move to hover position only (no step 2 in sim mode)
-        
+
         # Compute IK for hover position
         hover_computed_joint_angles = self.compute_ik_with_current_seed(
             hover_position.tolist(),
@@ -585,32 +610,33 @@ class TranslateForAssembly(Node):
             max_tries=5,
             dx=0.001
         )
-        
+
         if hover_computed_joint_angles is None:
-            self.get_logger().error("Failed to compute IK for hover position")
+            self.error_message = "IK failed: couldn't compute hover position"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Create hover trajectory
         hover_trajectory = [{
             "positions": [float(x) for x in hover_computed_joint_angles],
             "velocities": [0.0] * 6,
             "time_from_start": Duration(sec=int(duration))
         }]
-        
+
         success = self.execute_trajectory({"traj1": hover_trajectory})
         if not success:
-            self.get_logger().error("Failed to reach hover position")
+            # error_message already set by execute_trajectory
             return False
-        
+
         return success
     
-    def translate_for_target_real(self, object_name, base_name, duration=20.0, 
+    def translate_for_target_real(self, object_name, base_name, duration=20.0,
                             final_base_pos=None, final_base_orientation=None,
                             use_default_base=False):
         """
         Real mode: Calculate and execute EE translation to hover position (step 1 only).
         Uses provided base position/orientation (no topics).
-        
+
         Args:
             object_name: Name of the object being held
             base_name: Name of the base object (e.g., 'base')
@@ -619,27 +645,34 @@ class TranslateForAssembly(Node):
             final_base_orientation: [x, y, z, w] final base orientation quaternion (required in real mode)
             use_default_base: Use default base position/orientation if True
         """
+        # Store names for JSON output
+        self.object_name = object_name
+        self.base_name = base_name
+
         # Load assembly config based on base_name if not already loaded for this base
         if self.loaded_base_name != base_name:
             self.assembly_config = self.load_assembly_config(base_name=base_name)
             if not self.assembly_config:
-                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                self.error_message = f"Failed to load assembly config for base '{base_name}'"
+                self.get_logger().error(self.error_message)
                 return None
-        
+
         # Get current EE pose (always needed from topic)
         if self.current_ee_pose is None:
-            self.get_logger().error("End-effector pose not available")
+            self.error_message = "End-effector pose not available"
+            self.get_logger().error(self.error_message)
             return None
-        
+
         # Note: We don't need current object position - we calculate EE position directly from target object position
-        
+
         # Use default base position and orientation only if explicitly requested
         if final_base_pos is None:
             if use_default_base:
                 final_base_pos = DEFAULT_BASE_POSITION
                 self.get_logger().info(f"Using default base position: {final_base_pos}")
             else:
-                self.get_logger().error("Base position not provided. Use --final-base-pos or --use-default-base flag")
+                self.error_message = "Base position not provided. Use --final-base-pos or --use-default-base flag"
+                self.get_logger().error(self.error_message)
                 return None
         
         if final_base_orientation is None:
@@ -674,7 +707,8 @@ class TranslateForAssembly(Node):
         # Get target object position from JSON (relative to base)
         target_position_relative = self.get_object_target_position(object_name)
         if target_position_relative is None:
-            self.get_logger().error(f"No target position found for {object_name} in JSON")
+            self.error_message = f"No target position found for {object_name} in JSON"
+            self.get_logger().error(self.error_message)
             return None
         
         # Get target object orientation from JSON (relative to base)
@@ -727,11 +761,12 @@ class TranslateForAssembly(Node):
         if self.current_joint_angles is None:
             joint_angles = self.read_current_joint_angles()
             if joint_angles is None:
-                self.get_logger().error("Could not read current joint angles")
+                self.error_message = "Could not read current joint angles"
+                self.get_logger().error(self.error_message)
                 return False
-        
+
         # Step 1: Move to hover position only (no step 2 in real mode)
-        
+
         # Compute IK for hover position using current joint angles as seed
         hover_computed_joint_angles = self.compute_ik_with_current_seed(
             hover_position.tolist(),
@@ -739,9 +774,10 @@ class TranslateForAssembly(Node):
             max_tries=5,
             dx=0.001
         )
-        
+
         if hover_computed_joint_angles is None:
-            self.get_logger().error("Failed to compute IK for hover position")
+            self.error_message = "IK failed: couldn't compute hover position"
+            self.get_logger().error(self.error_message)
             return False
         
         # Create trajectory
@@ -786,22 +822,25 @@ class TranslateForAssembly(Node):
             goal_handle = future.result()
             
             if not goal_handle.accepted:
-                self.get_logger().error("Trajectory goal rejected")
+                self.error_message = "External control program stopped or robot in protective stop"
+                self.get_logger().error(self.error_message)
                 return False
-            
+
             self.get_logger().info("Trajectory sent and accepted")
             result_future = goal_handle.get_result_async()
             rclpy.spin_until_future_complete(self, result_future)
             result = result_future.result()
-            
+
             if result.status == 4:  # SUCCEEDED
                 self.get_logger().info("Movement completed successfully")
                 return True
             else:
-                self.get_logger().error(f"Trajectory failed with status: {result.status}")
+                self.error_message = f"Trajectory failed with status code {result.status}"
+                self.get_logger().error(self.error_message)
                 return False
         except Exception as e:
-            self.get_logger().error(f"Trajectory execution error: {e}")
+            self.error_message = f"Trajectory execution error: {e}"
+            self.get_logger().error(self.error_message)
             return False
 
 
@@ -828,25 +867,29 @@ def main(args=None):
             parser.error("In real mode, either --final-base-pos or --use-default-base is required")
     
     rclpy.init()
-    node = TranslateForAssembly(mode=args.mode)
-    
-    node.action_client.wait_for_server()
-    
+
+    node = None
+    success = False
+    error = None
+
     try:
+        node = TranslateForAssembly(mode=args.mode)
+        node.action_client.wait_for_server()
+
         # Always need EE pose from topic
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
             time.sleep(0.1)
-        
+
         # In sim mode, wait for object and base poses from topics
         if args.mode == 'sim':
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
                 time.sleep(0.1)
-        
+
         # Default duration
         duration = 5.0
-        
+
         # Execute translation (step 1 only: hover position)
         if args.mode == 'sim':
             success = node.translate_for_target_sim(
@@ -863,27 +906,48 @@ def main(args=None):
                 final_base_orientation=args.final_base_orientation,
                 use_default_base=args.use_default_base
             )
-        
+
         if success:
             node.get_logger().info("Translation successful!")
         else:
             node.get_logger().error("Translation failed")
-        
-        # Exit with appropriate code
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0 if success else 1)
-            
+            error = node.error_message
+
     except KeyboardInterrupt:
-        node.get_logger().info("Interrupted by user")
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        error = "Interrupted by user"
     except Exception as e:
-        node.get_logger().error(f"Error: {e}")
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        error = str(e)
+    finally:
+        # Build and output JSON result
+        if success:
+            result = {
+                "result": "success",
+                "mode": args.mode,
+                "object_name": args.object_name,
+                "base_name": args.base_name
+            }
+        else:
+            result = {
+                "result": "failure",
+                "mode": args.mode,
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+                "error": error or (node.error_message if node else "Unknown error")
+            }
+
+        output_result(result)
+
+        try:
+            if node:
+                node.destroy_node()
+        except:
+            pass
+        try:
+            rclpy.shutdown()
+        except:
+            pass
+
+    sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':

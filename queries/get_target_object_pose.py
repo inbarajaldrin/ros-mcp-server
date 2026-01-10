@@ -31,6 +31,13 @@ import time
 
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
 
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 GRASP_DATA_DIR = get_aruco_data_dir() / "grasp"
@@ -358,19 +365,25 @@ def main(args=None):
     R_target_abs = R_base @ R_target_relative
     target_object_orientation_abs = R.from_matrix(R_target_abs).as_quat()
 
+    # Convert quaternion to RPY (roll, pitch, yaw) in degrees
+    rpy = R.from_quat(target_object_orientation_abs).as_euler('xyz', degrees=True)
+
     # Output only target object pose as JSON
     result = {
         "target_object_pose": {
             "position": {
-                "x": float(target_object_position_abs[0]),
-                "y": float(target_object_position_abs[1]),
-                "z": float(target_object_position_abs[2])
+                "x": round(float(target_object_position_abs[0]), 4),
+                "y": round(float(target_object_position_abs[1]), 4),
+                "z": round(float(target_object_position_abs[2]), 4)
             },
             "orientation": {
-                "x": float(target_object_orientation_abs[0]),
-                "y": float(target_object_orientation_abs[1]),
-                "z": float(target_object_orientation_abs[2]),
-                "w": float(target_object_orientation_abs[3])
+                "x": round(float(target_object_orientation_abs[0]), 6),
+                "y": round(float(target_object_orientation_abs[1]), 6),
+                "z": round(float(target_object_orientation_abs[2]), 6),
+                "w": round(float(target_object_orientation_abs[3]), 6),
+                "roll": round(float(rpy[0]), 4),
+                "pitch": round(float(rpy[1]), 4),
+                "yaw": round(float(rpy[2]), 4)
             }
         }
     }
@@ -406,7 +419,7 @@ def main(args=None):
     #     }
     # }
 
-    print(json.dumps(result, indent=2))
+    output_result(result)
     sys.exit(0)
 
 

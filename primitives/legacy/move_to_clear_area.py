@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,31 +29,32 @@ class MoveToClearArea(Node):
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
         ]
-        
+
         # Action client for trajectory control
         self.action_client = ActionClient(
-            self, 
-            FollowJointTrajectory, 
+            self,
+            FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
-        
+
         # Target position for clear space (gripper center position, not TCP)
         self.target_gripper_center_position = [-0.320, -0.5, 0.25]  # [x, y, z] - gripper center position
         # TCP to gripper center offset (24cm along gripper Z-axis, from TCP to gripper center)
         self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm
-        
+
         # EE pose data storage
         self.ee_pose_received = False
         self.ee_position = None
         self.ee_quat = None
-        
+
         # Current joint angles storage
         self.current_joint_angles = None
         self.joint_angles_received = False
-        
+
         # Success/failure tracking
         self.operation_success = False
         self.operation_complete = False
+        self.error_message = None  # Track error for JSON output
         
         # Subscriber for EE pose data
         # Use VOLATILE durability (default for most publishers) to avoid QoS incompatibility warnings
@@ -178,7 +180,8 @@ class MoveToClearArea(Node):
         pose_data = self.read_current_ee_pose()
         
         if pose_data is None:
-            self.get_logger().error("Could not read current end-effector pose")
+            self.error_message = "Could not read current end-effector pose"
+            self.get_logger().error(self.error_message)
             self.operation_success = False
             self.operation_complete = True
             rclpy.shutdown()
@@ -216,7 +219,8 @@ class MoveToClearArea(Node):
             joint_angles = compute_ik(tcp_position, [0, 180, 0])
             
             if joint_angles is None:
-                self.get_logger().error("IK failed: couldn't compute clear space position")
+                self.error_message = "IK failed: couldn't compute clear space position"
+                self.get_logger().error(self.error_message)
                 self.operation_success = False
                 self.operation_complete = True
                 rclpy.shutdown()
@@ -273,7 +277,8 @@ class MoveToClearArea(Node):
                 
                 # Primary seed: use current joint angles from joint state subscription
                 if self.current_joint_angles is None:
-                    self.get_logger().error("Current joint angles not available! Cannot compute IK.")
+                    self.error_message = "Current joint angles not available! Cannot compute IK."
+                    self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
                     rclpy.shutdown()
@@ -373,7 +378,8 @@ class MoveToClearArea(Node):
                     joint_angles = best_result
                 
                 if joint_angles is None:
-                    self.get_logger().error("IK failed: couldn't compute clear space position")
+                    self.error_message = "IK failed: couldn't compute clear space position"
+                    self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
                     rclpy.shutdown()
@@ -437,7 +443,8 @@ class MoveToClearArea(Node):
                         waypoint_joint_angles = best_result_wp
 
                     if waypoint_joint_angles is None:
-                        self.get_logger().error(f"IK failed at waypoint {i}/{num_waypoints}")
+                        self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
+                        self.get_logger().error(self.error_message)
                         self.operation_success = False
                         self.operation_complete = True
                         rclpy.shutdown()
@@ -467,7 +474,8 @@ class MoveToClearArea(Node):
                 self._send_goal_future.add_done_callback(self.goal_response)
                 
             except Exception as e:
-                self.get_logger().error(f"Failed to compute IK: {e}")
+                self.error_message = f"Failed to compute IK: {e}"
+                self.get_logger().error(self.error_message)
                 self.operation_success = False
                 self.operation_complete = True
                 rclpy.shutdown()
@@ -476,7 +484,8 @@ class MoveToClearArea(Node):
         """Handle goal response"""
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Trajectory goal rejected")
+            self.error_message = "External control program stopped or robot in protective stop"
+            self.get_logger().error(self.error_message)
             self.operation_success = False
             self.operation_complete = True
             try:
@@ -496,7 +505,8 @@ class MoveToClearArea(Node):
             self.get_logger().info("Movement completed successfully")
             self.operation_success = True
         else:
-            self.get_logger().error(f"Trajectory failed with status: {result.status}")
+            self.error_message = f"Trajectory failed with status: {result.status}"
+            self.get_logger().error(self.error_message)
             self.operation_success = False
         self.operation_complete = True
         # Destroy node before shutdown to ensure clean exit
@@ -505,6 +515,34 @@ class MoveToClearArea(Node):
         except:
             pass
         rclpy.shutdown()
+
+    def output_result_json(self, movement_type="move_to_clear_area"):
+        """Output result in JSON format for MCP server"""
+        if self.error_message:
+            # Failure format
+            result = {
+                "result": "failure",
+                "mode": self.mode,
+                "movement_type": movement_type,
+                "error": self.error_message
+            }
+        else:
+            # Success format - minimal output (no position/orientation)
+            result = {
+                "result": "success",
+                "mode": self.mode,
+                "movement_type": movement_type
+            }
+
+        output_result(result)
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Move to clear space position')
@@ -536,6 +574,7 @@ def main(args=None):
         node.operation_complete = True
     finally:
         try:
+            node.output_result_json()
             node.destroy_node()
         except:
             pass
@@ -543,7 +582,7 @@ def main(args=None):
             rclpy.shutdown()
         except:
             pass
-    
+
     # Exit with appropriate code
     sys.exit(0 if node.operation_success else 1)
 

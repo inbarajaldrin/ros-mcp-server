@@ -27,6 +27,13 @@ from tf2_msgs.msg import TFMessage
 import time
 
 
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
 class ObjectsReader(Node):
     """ROS2 node to read available object names from topic"""
     def __init__(self, topic_name):
@@ -98,7 +105,7 @@ def main(args=None):
         "available_objects": available_objects
     }
 
-    print(json.dumps(result, indent=2))
+    output_result(result)
     sys.exit(0)
 
 

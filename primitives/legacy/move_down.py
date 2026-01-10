@@ -100,7 +100,8 @@ class MoveDown(Node):
             self.movement_start_time = None
             self.force_check_grace_period = 0.5  # Wait 0.5 seconds after movement starts
         self.force_threshold_reached = False
-        
+        self.error_message = None  # Track error for JSON output
+
         # Current goal handle for cancellation
         self._current_goal_handle = None
         
@@ -349,12 +350,12 @@ class MoveDown(Node):
     def gripper_force_callback(self, msg: Float64):
         """Callback for gripper force data (sim mode)"""
         self.current_gripper_force = msg.data
-        
-        # Check if force threshold is exceeded
+
+        # Check if force threshold is exceeded (contact detected - this is SUCCESS)
         if self.current_gripper_force > GRIPPER_FORCE_THRESHOLD and not self.force_threshold_reached:
-            self.get_logger().warn(f"Gripper force threshold reached! Force: {self.current_gripper_force:.2f} (threshold: {GRIPPER_FORCE_THRESHOLD})")
+            self.get_logger().info(f"Contact detected: Gripper force {self.current_gripper_force:.2f} exceeded threshold {GRIPPER_FORCE_THRESHOLD}")
             self.force_threshold_reached = True
-            self.emergency_stop()
+            self.contact_detected_stop()
     
     def force_callback(self, msg: WrenchStamped):
         """Callback for force/torque sensor data - monitors all axes (real mode)
@@ -427,9 +428,9 @@ class MoveDown(Node):
         if self.mode == 'sim':
             # Sim mode: check gripper force
             if self.current_gripper_force > GRIPPER_FORCE_THRESHOLD:
-                self.get_logger().error(f"EMERGENCY STOP: Gripper force threshold exceeded during movement! Force: {self.current_gripper_force:.2f}")
+                self.get_logger().info(f"Contact detected: Gripper force {self.current_gripper_force:.2f} exceeded threshold {GRIPPER_FORCE_THRESHOLD}")
                 self.force_threshold_reached = True
-                self.emergency_stop()
+                self.contact_detected_stop()
             else:
                 # Debug: log force values during movement
                 self.get_logger().debug(f"Force monitoring: Gripper force = {self.current_gripper_force:.2f} (threshold: {GRIPPER_FORCE_THRESHOLD})")
@@ -456,15 +457,15 @@ class MoveDown(Node):
             
             # Check Z force with directional threshold (negative = upward resistance)
             if f_z <= Z_FORCE_THRESHOLD:
-                self.get_logger().error(
-                    f"EMERGENCY STOP: Z force threshold exceeded! "
+                self.get_logger().info(
+                    f"Contact detected: Z force threshold reached. "
                     f"Z force (after baseline): {f_z:.2f}N (threshold: {Z_FORCE_THRESHOLD}N, "
                     f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)"
                 )
                 self.force_threshold_reached = True
-                self.emergency_stop()
-                return  # Exit immediately after emergency stop
-            
+                self.contact_detected_stop()
+                return  # Exit immediately after contact detected
+
             # Check other axes (Fx, Fy, Tx, Ty, Tz) with magnitude thresholds
             axes = [
                 (abs(f_x), "Fx", f_x, self.current_force_x, self.baseline_force_x),
@@ -473,35 +474,78 @@ class MoveDown(Node):
                 (abs(t_y), "Ty", t_y, self.current_torque_y, self.baseline_torque_y),
                 (abs(t_z), "Tz", t_z, self.current_torque_z, self.baseline_torque_z),
             ]
-            
+
             # Check each axis
             for magnitude, axis_name, force_value, current_value, baseline_value in axes:
                 if magnitude > FORCE_THRESHOLD:
-                    self.get_logger().error(
-                        f"EMERGENCY STOP: {axis_name} force/torque exceeded threshold! "
+                    self.get_logger().info(
+                        f"Contact detected: {axis_name} force/torque threshold reached. "
                         f"{axis_name} (after baseline): {force_value:.2f}N (magnitude: {magnitude:.2f}N, "
                         f"current: {current_value:.2f}N, baseline: {baseline_value:.2f}N, "
                         f"threshold: {FORCE_THRESHOLD}N)"
                     )
                     self.force_threshold_reached = True
-                    self.emergency_stop()
-                    return  # Exit immediately after emergency stop
+                    self.contact_detected_stop()
+                    return  # Exit immediately after contact detected
 
-    def emergency_stop(self):
-        """Emergency stop - cancel current trajectory and stop immediately, then exit"""
+    def contact_detected_stop(self):
+        """Graceful stop when contact is detected - this is SUCCESS, not failure.
+
+        Contact detection is the goal of move_down, so reaching force threshold
+        during trajectory execution is a successful outcome.
+        """
         self.moving = False
-        self.get_logger().error("EMERGENCY STOP: Force threshold exceeded. Exiting...")
-        
+        self.get_logger().info("Contact detected: Force threshold reached during movement. Stopping trajectory.")
+
         # Stop force monitoring
         self.stop_force_monitoring()
-        
+
+        # Cancel the current goal if it exists
+        if self._current_goal_handle is not None:
+            try:
+                self._current_goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warn(f"Could not cancel trajectory (may already be stopped): {e}")
+
+        # Update current Z position from actual EE pose
+        if self.ee_position is not None:
+            self.current_z_position = self.ee_position[2]
+
+        # Graceful shutdown - use a timer to shutdown after brief delay to allow logging
+        def delayed_shutdown():
+            try:
+                rclpy.shutdown()
+            except:
+                pass
+            # Force exit if rclpy.shutdown() doesn't work
+            os._exit(0)
+
+        # Start shutdown in a separate thread after 100ms to allow log messages to flush
+        shutdown_timer = threading.Timer(0.1, delayed_shutdown)
+        shutdown_timer.daemon = True
+        shutdown_timer.start()
+
+    def emergency_stop(self):
+        """Emergency stop for actual failures (not contact detection).
+
+        Note: Force threshold during move_down is SUCCESS (contact detected),
+        so this method should only be used for actual error conditions.
+        """
+        self.moving = False
+        if not self.error_message:
+            self.error_message = "EMERGENCY STOP: Unexpected error"
+        self.get_logger().error(f"EMERGENCY STOP: {self.error_message}")
+
+        # Stop force monitoring
+        self.stop_force_monitoring()
+
         # Cancel the current goal if it exists
         if self._current_goal_handle is not None:
             try:
                 self._current_goal_handle.cancel_goal_async()
             except Exception as e:
                 self.get_logger().error(f"Failed to cancel trajectory: {e}")
-        
+
         # Force immediate exit - use a timer to shutdown after brief delay to allow logging
         def delayed_shutdown():
             try:
@@ -510,7 +554,7 @@ class MoveDown(Node):
                 pass
             # Force exit if rclpy.shutdown() doesn't work
             os._exit(0)
-        
+
         # Start shutdown in a separate thread after 100ms to allow log messages to flush
         shutdown_timer = threading.Timer(0.1, delayed_shutdown)
         shutdown_timer.daemon = True
@@ -566,19 +610,21 @@ class MoveDown(Node):
             pose_data = self.read_current_ee_pose()
             
             if pose_data is None:
-                self.get_logger().error("Could not read current end-effector pose")
+                self.error_message = "Could not read current end-effector pose"
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
-                
+
             current_pos = pose_data['position']
             current_quat = pose_data['orientation']
             self.current_z_position = current_pos[2]
         else:
             # Use stored position and read fresh pose for orientation
             pose_data = self.read_current_ee_pose()
-            
+
             if pose_data is None:
-                self.get_logger().error("Could not read current end-effector pose")
+                self.error_message = "Could not read current end-effector pose"
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
                 
@@ -619,7 +665,8 @@ class MoveDown(Node):
         
         # Check workspace limit (safety check)
         if target_position[2] < MIN_WORKSPACE_Z:
-            self.get_logger().error(f"Target Z position ({target_position[2]:.3f}m) is below workspace limit ({MIN_WORKSPACE_Z}m). Cannot proceed.")
+            self.error_message = f"Target Z position ({target_position[2]:.3f}m) is below workspace limit ({MIN_WORKSPACE_Z}m). Cannot proceed."
+            self.get_logger().error(self.error_message)
             rclpy.shutdown()
             return
 
@@ -633,7 +680,8 @@ class MoveDown(Node):
             target_pose[:3, :3] = target_rot_matrix
             
             if self.current_joint_angles is None:
-                self.get_logger().error("Current joint angles not available! Cannot compute IK.")
+                self.error_message = "Current joint angles not available! Cannot compute IK."
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
             
@@ -717,9 +765,10 @@ class MoveDown(Node):
 
                 if joint_angles is None:
                     if self.mode == 'sim':
-                        self.get_logger().error("IK failed: couldn't compute collision-free move down position even after trying higher Z values")
+                        self.error_message = "IK failed: couldn't compute collision-free move down position"
                     else:
-                        self.get_logger().error("IK failed: couldn't compute move down position even after trying higher Z values")
+                        self.error_message = "IK failed: couldn't compute move down position"
+                    self.get_logger().error(self.error_message)
                     rclpy.shutdown()
                     return
                 
@@ -752,14 +801,16 @@ class MoveDown(Node):
             self._send_goal_future.add_done_callback(self.goal_response)
             
         except Exception as e:
-            self.get_logger().error(f"Failed to compute IK: {e}")
+            self.error_message = f"Failed to compute IK: {e}"
+            self.get_logger().error(self.error_message)
             rclpy.shutdown()
 
     def goal_response(self, future):
         """Handle goal response"""
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Trajectory goal rejected")
+            self.error_message = "External control program stopped or robot in protective stop"
+            self.get_logger().error(self.error_message)
             self.stop_force_monitoring()
             self.moving = False
             rclpy.shutdown()
@@ -789,7 +840,8 @@ class MoveDown(Node):
             elif result.status == 4:  # ABORTED
                 pass  # Continue to check force threshold
             else:
-                self.get_logger().error(f"Trajectory failed with status: {result.status}")
+                self.error_message = f"Trajectory failed with status: {result.status}"
+                self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
             
@@ -822,6 +874,34 @@ class MoveDown(Node):
             self.stop_force_monitoring()
             self.moving = False
 
+    def output_result_json(self, movement_type="move_down"):
+        """Output result in JSON format for MCP server"""
+        if self.error_message:
+            # Failure format
+            result = {
+                "result": "failure",
+                "mode": self.mode,
+                "movement_type": movement_type,
+                "error": self.error_message
+            }
+        else:
+            # Success format - minimal output (no position/orientation)
+            result = {
+                "result": "success",
+                "mode": self.mode,
+                "movement_type": movement_type
+            }
+
+        output_result(result)
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
 def main(args=None):
     parser = argparse.ArgumentParser(description='Move Down Primitive with force monitoring on all axes')
     parser.add_argument('--height', type=float, default=None,
@@ -844,6 +924,7 @@ def main(args=None):
         node.get_logger().error(f"Error in move down: {e}")
     finally:
         try:
+            node.output_result_json()
             rclpy.shutdown()
         except RuntimeError:
             pass  # Context already shut down

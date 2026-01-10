@@ -34,6 +34,7 @@ import os
 import subprocess
 import argparse
 import threading
+import json
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,26 +45,47 @@ import rclpy
 from rclpy.node import Node
 
 
-def stream_output(pipe, logger, prefix=""):
-    """Stream subprocess output line by line"""
+def output_result(result):
+    """Output JSON result with markers for MCP server parsing"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
+def extract_json_from_output(output_text):
+    """Extract JSON result from subprocess output"""
+    if "__RESULT_JSON__" in output_text and "__END_RESULT_JSON__" in output_text:
+        start = output_text.find("__RESULT_JSON__") + len("__RESULT_JSON__")
+        end = output_text.find("__END_RESULT_JSON__")
+        json_str = output_text[start:end].strip()
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def stream_output(pipe, logger, output_lines, prefix=""):
+    """Stream subprocess output line by line and capture to output_lines"""
     for line in iter(pipe.readline, ''):
         if line:
             # Remove trailing newline and log
             line = line.rstrip()
             if line:
+                output_lines.append(line)
                 logger.info(f"{prefix}{line}")
     pipe.close()
 
 
 def run_translate_for_assembly(args, logger):
-    """Run translate_for_assembly script"""
+    """Run translate_for_assembly script and return (success, output_text)"""
     script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'translate_for_assembly.py')
-    
+
     cmd = [sys.executable, script_path,
            '--mode', args.mode,
            '--object-name', args.object_name,
            '--base-name', args.base_name]
-    
+
     # Add real mode arguments if provided
     if args.mode == 'real':
         if args.final_base_pos:
@@ -72,9 +94,9 @@ def run_translate_for_assembly(args, logger):
             cmd.extend(['--final-base-orientation'] + [str(x) for x in args.final_base_orientation])
         if args.use_default_base_position:
             cmd.append('--use-default-base')
-    
+
     logger.info(f"Translating {args.object_name} relative to {args.base_name}")
-    
+
     # Set PYTHONPATH to include project root for imports
     env = os.environ.copy()
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,7 +104,10 @@ def run_translate_for_assembly(args, logger):
         env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
     else:
         env['PYTHONPATH'] = project_root
-    
+
+    # Capture output lines
+    output_lines = []
+
     # Run subprocess and stream output in real-time
     process = subprocess.Popen(
         cmd,
@@ -92,40 +117,42 @@ def run_translate_for_assembly(args, logger):
         bufsize=1,
         env=env
     )
-    
+
     # Stream output in a separate thread
     output_thread = threading.Thread(
         target=stream_output,
-        args=(process.stdout, logger),
+        args=(process.stdout, logger, output_lines),
         daemon=True
     )
     output_thread.start()
-    
+
     # Wait for process to complete
     returncode = process.wait()
     output_thread.join(timeout=1.0)
-    
+
+    output_text = '\n'.join(output_lines)
+
     if returncode != 0:
         logger.error(f"translate_for_assembly failed with return code {returncode}")
-        return False
-    
+        return False, output_text
+
     logger.info("translate_for_assembly completed successfully")
-    return True
+    return True, output_text
 
 
 def run_perform_insert(args, logger):
-    """Run perform_insert script"""
+    """Run perform_insert script and return (success, output_text)"""
     script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'perform_insert.py')
-    
+
     cmd = [sys.executable, script_path, '--mode', args.mode]
-    
+
     # Add sim mode arguments if provided
     if args.mode == 'sim':
         if args.object_name:
             cmd.extend(['--object-name', args.object_name])
         if args.base_name:
             cmd.extend(['--base-name', args.base_name])
-    
+
     # Add real mode force compliance parameters
     if args.mode == 'real':
         cmd.extend(['--speed', str(args.speed)])
@@ -136,12 +163,12 @@ def run_perform_insert(args, logger):
             cmd.append('--reverse')
         cmd.extend(['--z-threshold', str(args.z_threshold)])
         cmd.extend(['--xy-threshold', str(args.xy_threshold)])
-    
+
     if args.mode == 'sim':
         logger.info(f"Moving down {args.object_name} to {args.base_name}")
     else:
         logger.info("Moving down with force compliance")
-    
+
     # Set PYTHONPATH to include project root for imports
     env = os.environ.copy()
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -149,7 +176,10 @@ def run_perform_insert(args, logger):
         env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
     else:
         env['PYTHONPATH'] = project_root
-    
+
+    # Capture output lines
+    output_lines = []
+
     # Run subprocess and stream output in real-time
     process = subprocess.Popen(
         cmd,
@@ -159,25 +189,27 @@ def run_perform_insert(args, logger):
         bufsize=1,
         env=env
     )
-    
+
     # Stream output in a separate thread
     output_thread = threading.Thread(
         target=stream_output,
-        args=(process.stdout, logger),
+        args=(process.stdout, logger, output_lines),
         daemon=True
     )
     output_thread.start()
-    
+
     # Wait for process to complete
     returncode = process.wait()
     output_thread.join(timeout=1.0)
-    
+
+    output_text = '\n'.join(output_lines)
+
     if returncode != 0:
         logger.error(f"perform_insert failed with return code {returncode}")
-        return False
-    
+        return False, output_text
+
     logger.info("perform_insert completed successfully")
-    return True
+    return True, output_text
 
 
 def main():
@@ -292,9 +324,9 @@ Examples:
         # Call move_to_safe_height if --move-to-safe-height is specified
         if args.move_to_safe_height:
             script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'move_to_safe_height.py')
-            
+
             logger.info("Moving to safe height...")
-            
+
             # Set PYTHONPATH to include project root for imports
             env = os.environ.copy()
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -302,7 +334,10 @@ Examples:
                 env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
             else:
                 env['PYTHONPATH'] = project_root
-            
+
+            # Capture output lines
+            output_lines = []
+
             # Run subprocess with timeout
             process = subprocess.Popen(
                 [sys.executable, script_path],
@@ -312,15 +347,15 @@ Examples:
                 bufsize=1,
                 env=env
             )
-            
+
             # Stream output in a separate thread
             output_thread = threading.Thread(
                 target=stream_output,
-                args=(process.stdout, logger),
+                args=(process.stdout, logger, output_lines),
                 daemon=True
             )
             output_thread.start()
-            
+
             # Wait for process to complete with timeout
             try:
                 returncode = process.wait(timeout=40)
@@ -328,41 +363,133 @@ Examples:
             except subprocess.TimeoutExpired:
                 logger.error("move_to_safe_height timed out")
                 process.kill()
+                output_result({
+                    "result": "failure",
+                    "mode": args.mode,
+                    "movement_type": "move_to_safe_height",
+                    "error": "move_to_safe_height timed out"
+                })
                 node.destroy_node()
                 rclpy.shutdown()
                 sys.exit(1)
-            
+
+            output_text = '\n'.join(output_lines)
+            subprocess_json = extract_json_from_output(output_text)
+
             if returncode != 0:
                 logger.error(f"move_to_safe_height failed with return code {returncode}")
+                # Use subprocess error if available, otherwise generic error
+                if subprocess_json:
+                    subprocess_json["movement_type"] = "move_to_safe_height"
+                    output_result(subprocess_json)
+                else:
+                    output_result({
+                        "result": "failure",
+                        "mode": args.mode,
+                        "movement_type": "move_to_safe_height",
+                        "error": f"move_to_safe_height failed with return code {returncode}"
+                    })
                 node.destroy_node()
                 rclpy.shutdown()
                 sys.exit(1)
-            
+
             logger.info("move_to_safe_height completed successfully")
+            # Add movement_type to subprocess JSON or create success JSON
+            if subprocess_json:
+                subprocess_json["movement_type"] = "move_to_safe_height"
+                output_result(subprocess_json)
+            else:
+                output_result({
+                    "result": "success",
+                    "mode": args.mode,
+                    "movement_type": "move_to_safe_height"
+                })
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(0)
 
         # Call translate_for_assembly if --move-to-base is specified
         if args.move_to_base:
-            if not run_translate_for_assembly(args, logger):
+            success, output_text = run_translate_for_assembly(args, logger)
+            subprocess_json = extract_json_from_output(output_text)
+
+            if not success:
                 logger.error("translate_for_assembly failed, aborting")
+                # Use subprocess error if available, otherwise generic error
+                if subprocess_json:
+                    subprocess_json["movement_type"] = "move_to_base"
+                    output_result(subprocess_json)
+                else:
+                    output_result({
+                        "result": "failure",
+                        "mode": args.mode,
+                        "movement_type": "move_to_base",
+                        "object_name": args.object_name,
+                        "base_name": args.base_name,
+                        "error": "translate_for_assembly failed"
+                    })
                 node.destroy_node()
                 rclpy.shutdown()
                 sys.exit(1)
+
             logger.info("Operation completed successfully!")
+            # Add movement_type to subprocess JSON or create success JSON
+            if subprocess_json:
+                subprocess_json["movement_type"] = "move_to_base"
+                output_result(subprocess_json)
+            else:
+                output_result({
+                    "result": "success",
+                    "mode": args.mode,
+                    "movement_type": "move_to_base",
+                    "object_name": args.object_name,
+                    "base_name": args.base_name
+                })
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(0)
 
         # Call perform_insert if --move-down is specified
         if args.move_down:
-            if not run_perform_insert(args, logger):
+            success, output_text = run_perform_insert(args, logger)
+            subprocess_json = extract_json_from_output(output_text)
+
+            if not success:
                 logger.error("perform_insert failed, aborting")
+                # Use subprocess error if available, otherwise generic error
+                if subprocess_json:
+                    subprocess_json["movement_type"] = "move_down"
+                    output_result(subprocess_json)
+                else:
+                    result = {
+                        "result": "failure",
+                        "mode": args.mode,
+                        "movement_type": "move_down",
+                        "error": "perform_insert failed"
+                    }
+                    if args.mode == 'sim':
+                        result["object_name"] = args.object_name
+                        result["base_name"] = args.base_name
+                    output_result(result)
                 node.destroy_node()
                 rclpy.shutdown()
                 sys.exit(1)
+
             logger.info("Operation completed successfully!")
+            # Add movement_type to subprocess JSON or create success JSON
+            if subprocess_json:
+                subprocess_json["movement_type"] = "move_down"
+                output_result(subprocess_json)
+            else:
+                result = {
+                    "result": "success",
+                    "mode": args.mode,
+                    "movement_type": "move_down"
+                }
+                if args.mode == 'sim':
+                    result["object_name"] = args.object_name
+                    result["base_name"] = args.base_name
+                output_result(result)
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(0)

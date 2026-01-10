@@ -28,6 +28,7 @@ import math
 import argparse
 import numpy as np
 import subprocess
+import json
 from scipy.spatial.transform import Rotation as R
 
 # Import from local action_libraries file
@@ -41,6 +42,14 @@ from primitives.utils.data_path_finder import get_symmetry_dir
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 
 class DirectObjectMove(Node):
     def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, movement_duration=5.0, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
@@ -136,7 +145,10 @@ class DirectObjectMove(Node):
         
         # Track final object pose for logging before exit
         self.final_object_pose = None  # Store final object pose (PoseStamped) before exit
-        
+        self.final_position = None  # [x, y, z]
+        self.final_orientation_quat = None  # [x, y, z, w]
+        self.final_orientation_rpy_deg = None  # [roll, pitch, yaw] in degrees
+
         # Store current end-effector pose
         self.current_ee_pose = None
         self.ee_pose_received = False
@@ -200,6 +212,7 @@ class DirectObjectMove(Node):
         self.latest_pose = None
         self.movement_completed = False  # Flag to track if movement has been completed
         self.should_exit = False  # Flag to control exit
+        self.error_message = None  # Specific error message for failure modes
         self.trajectory_in_progress = False  # Flag to track if trajectory is executing
         
         # Visual servoing variables (for real mode continuous tracking)
@@ -411,15 +424,17 @@ class DirectObjectMove(Node):
             self.latest_pose = pose_stamped
             # Track final object pose for logging
             self.final_object_pose = pose_stamped
+            self._update_final_pose_data(pose_stamped)
         else:
             # Object not found in this message
             self.latest_pose = None
-    
+
     def pose_callback(self, msg):
         """Store latest pose message (fallback for PoseStamped)"""
         self.latest_pose = msg
         # Track final object pose for logging
         self.final_object_pose = msg
+        self._update_final_pose_data(msg)
     
     def grasp_points_callback(self, msg):
         """Handle MarkerArray message and find target grasp point"""
@@ -525,7 +540,8 @@ class DirectObjectMove(Node):
         )
         
         if not has_explicit_mode:
-            self.get_logger().error("No explicit mode specified. Must provide one of: target_xyz/xyzw, grasp_id, or object detection. Exiting.")
+            self.error_message = "No explicit mode specified. Must provide one of: target_xyz/xyzw, grasp_id, or object detection."
+            self.get_logger().error(self.error_message + " Exiting.")
             self.should_exit = True
             return
         
@@ -617,7 +633,12 @@ class DirectObjectMove(Node):
         elif self.grasp_id is not None:
             # Grasp point mode: must have selected_grasp_point, exit if not available
             if self.selected_grasp_point is None:
-                self.get_logger().error(f"Grasp point {self.grasp_id} not found. Cannot proceed in grasp point mode. Exiting.")
+                # Differentiate between topic not publishing vs grasp point not in data
+                if self.latest_grasp_points is None:
+                    self.error_message = f"No data from grasp topic {self.grasp_points_topic}"
+                else:
+                    self.error_message = f"Grasp point {self.grasp_id} not found"
+                self.get_logger().error(self.error_message + " Cannot proceed in grasp point mode. Exiting.")
                 self.should_exit = True
                 return
             
@@ -695,7 +716,8 @@ class DirectObjectMove(Node):
             
             if not grasp_point_has_orientation:
                 # Grasp point orientation is required - exit if not available
-                self.get_logger().error(f"Grasp point {self.grasp_id} does not have valid orientation. Cannot proceed. Exiting.")
+                self.error_message = f"Grasp point {self.grasp_id} does not have valid orientation."
+                self.get_logger().error(self.error_message + " Cannot proceed. Exiting.")
                 self.should_exit = True
                 return
             
@@ -1005,7 +1027,8 @@ class DirectObjectMove(Node):
                         
                         self.get_logger().warn(f"Using last known position (miss {self.tracking_lost_count}/{self.max_tracking_lost})")
                     else:
-                        self.get_logger().error("No target position provided, no object detected, and no last known position. Cannot proceed. Exiting.")
+                        self.error_message = "No target position provided, no object detected, and no last known position."
+                        self.get_logger().error(self.error_message + " Cannot proceed. Exiting.")
                         self.should_exit = True
                         return
             else:
@@ -1021,7 +1044,8 @@ class DirectObjectMove(Node):
         
         # Verify that we have a valid target position and orientation (safety check)
         if 'object_position' not in locals() or 'target_quaternion' not in locals():
-            self.get_logger().error("Failed to determine target position or orientation. Cannot proceed. Exiting.")
+            self.error_message = "Failed to determine target position or orientation. Cannot proceed."
+            self.get_logger().error(self.error_message + " Exiting.")
             self.should_exit = True
             return
         
@@ -1138,7 +1162,8 @@ class DirectObjectMove(Node):
             self._send_goal_future.add_done_callback(self.goal_response)
             
         except Exception as e:
-            self.get_logger().error(f"Trajectory execution error: {e}")
+            self.error_message = f"Trajectory execution error: {e}"
+            self.get_logger().error(self.error_message)
             self.trajectory_in_progress = False  # Clear flag on error
             self.movement_completed = True
             self.should_exit = True
@@ -1147,6 +1172,7 @@ class DirectObjectMove(Node):
         """Handle goal response"""
         goal_handle = future.result()
         if not goal_handle.accepted:
+            self.error_message = "External control program stopped or robot in protective stop"
             self.get_logger().error("Trajectory goal rejected")
             # Set exit flags if goal is rejected
             self.trajectory_in_progress = False
@@ -1242,12 +1268,83 @@ class DirectObjectMove(Node):
             detected_quat = detected_quat / np.linalg.norm(detected_quat)
             return detected_quat, False, float('inf')
     
+    def _update_final_pose_data(self, pose_stamped):
+        """Update final pose position, quaternion, and RPY when final_object_pose is set"""
+        if pose_stamped is not None:
+            pose = pose_stamped.pose
+            # Store position
+            self.final_position = [
+                float(pose.position.x),
+                float(pose.position.y),
+                float(pose.position.z)
+            ]
+            # Store quaternion
+            self.final_orientation_quat = [
+                float(pose.orientation.x),
+                float(pose.orientation.y),
+                float(pose.orientation.z),
+                float(pose.orientation.w)
+            ]
+            # Calculate and store RPY (in degrees)
+            quat = np.array([
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w
+            ])
+            rpy_rad = R.from_quat(quat).as_euler('xyz')
+            self.final_orientation_rpy_deg = [
+                float(np.degrees(rpy_rad[0])),
+                float(np.degrees(rpy_rad[1])),
+                float(np.degrees(rpy_rad[2]))
+            ]
+
     def _print_final_object_pose(self):
         """Print the final object pose recorded before exit"""
         if self.final_object_pose is not None:
             # Print object detection pose (regardless of mode)
             pose = self.final_object_pose
             self.get_logger().info(f"Final object pose: position=({pose.pose.position.x:.6f}, {pose.pose.position.y:.6f}, {pose.pose.position.z:.6f}), quaternion=({pose.pose.orientation.x:.6f}, {pose.pose.orientation.y:.6f}, {pose.pose.orientation.z:.6f}, {pose.pose.orientation.w:.6f})")
+
+    def output_result_json(self, movement_type="move_to_object"):
+        """Output movement result as JSON"""
+        if self.movement_completed and self.final_position is not None and self.final_orientation_quat is not None:
+            # Success
+            result = {
+                "result": "success",
+                "object_name": self.object_name,
+                "grasp_id": self.grasp_id,
+                "mode": self.mode,
+                "movement_type": movement_type,
+                "current_object_position": {
+                    "x": round(self.final_position[0], 4),
+                    "y": round(self.final_position[1], 4),
+                    "z": round(self.final_position[2], 4)
+                },
+                "current_object_orientation": {
+                    "x": round(self.final_orientation_quat[0], 6),
+                    "y": round(self.final_orientation_quat[1], 6),
+                    "z": round(self.final_orientation_quat[2], 6),
+                    "w": round(self.final_orientation_quat[3], 6)
+                },
+                "current_object_orientation_rpy_deg": {
+                    "roll": round(self.final_orientation_rpy_deg[0], 4),
+                    "pitch": round(self.final_orientation_rpy_deg[1], 4),
+                    "yaw": round(self.final_orientation_rpy_deg[2], 4)
+                }
+            }
+        else:
+            # Failure
+            result = {
+                "result": "failure",
+                "object_name": self.object_name,
+                "grasp_id": self.grasp_id,
+                "mode": self.mode,
+                "movement_type": movement_type,
+                "error": self.error_message if self.error_message else "Movement did not complete successfully"
+            }
+
+        output_result(result)
     
     def goal_result(self, future):
         """Handle goal result (used for both sim and real modes)"""
@@ -1283,7 +1380,8 @@ class DirectObjectMove(Node):
                 # Don't exit - let timer callback trigger step 2 with latest pose
                 return
         else:
-            self.get_logger().error(f"Trajectory failed with status: {result.status}")
+            self.error_message = f"Trajectory failed with status code {result.status}"
+            self.get_logger().error(self.error_message)
         
         # Print final object pose before exiting
         self._print_final_object_pose()
@@ -1312,8 +1410,8 @@ def main(args=None):
                        help='Optional target orientation [x, y, z, w] quaternion')
     parser.add_argument('--grasp-points-topic', type=str, default="/grasp_points",
                        help='Topic name for grasp points subscription')
-    parser.add_argument('--grasp-id', type=int, default=None,
-                       help='Specific grasp point ID to use (if provided, will use grasp point instead of object center)')
+    parser.add_argument('--grasp-id', type=int, required=True,
+                       help='Specific grasp point ID to use (required - will use grasp point instead of object center)')
     parser.add_argument('--offset', type=float, default=None,
                        help='Distance offset from object/grasp point in meters (default: 0.123m = 12.3cm)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
@@ -1402,6 +1500,8 @@ def main(args=None):
         node.get_logger().error(f"Direct movement error: {e}")
     finally:
         try:
+            # Output result as JSON
+            node.output_result_json(movement_type="move_to_object")
             node.destroy_node()
             rclpy.shutdown()
         except Exception as e:

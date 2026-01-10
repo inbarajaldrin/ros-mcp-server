@@ -25,7 +25,15 @@ import argparse
 import rclpy
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
+from scipy.spatial.transform import Rotation as R
 import time
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
 
 
 class ObjectPoseReader(Node):
@@ -148,17 +156,22 @@ def main(args=None):
                 "object_poses": {}
             }
             for object_name, pose_data in all_poses.items():
+                # Convert quaternion to RPY (roll, pitch, yaw) in degrees
+                rpy = R.from_quat(pose_data['orientation']).as_euler('xyz', degrees=True)
                 result["object_poses"][object_name] = {
                     "position": {
-                        "x": float(pose_data['position'][0]),
-                        "y": float(pose_data['position'][1]),
-                        "z": float(pose_data['position'][2])
+                        "x": round(float(pose_data['position'][0]), 4),
+                        "y": round(float(pose_data['position'][1]), 4),
+                        "z": round(float(pose_data['position'][2]), 4)
                     },
                     "orientation": {
-                        "x": float(pose_data['orientation'][0]),
-                        "y": float(pose_data['orientation'][1]),
-                        "z": float(pose_data['orientation'][2]),
-                        "w": float(pose_data['orientation'][3])
+                        "x": round(float(pose_data['orientation'][0]), 6),
+                        "y": round(float(pose_data['orientation'][1]), 6),
+                        "z": round(float(pose_data['orientation'][2]), 6),
+                        "w": round(float(pose_data['orientation'][3]), 6),
+                        "roll": round(float(rpy[0]), 4),
+                        "pitch": round(float(rpy[1]), 4),
+                        "yaw": round(float(rpy[2]), 4)
                     }
                 }
         else:
@@ -170,19 +183,25 @@ def main(args=None):
                 print(f"Error: Could not read object pose for '{args.object_name}' from ROS topic {topic_name}.")
                 sys.exit(1)
             
+            # Convert quaternion to RPY (roll, pitch, yaw) in degrees
+            rpy = R.from_quat(object_quaternion).as_euler('xyz', degrees=True)
+
             # Output single object pose as JSON
             result = {
                 "object_pose": {
                     "position": {
-                        "x": float(object_position[0]),
-                        "y": float(object_position[1]),
-                        "z": float(object_position[2])
+                        "x": round(float(object_position[0]), 4),
+                        "y": round(float(object_position[1]), 4),
+                        "z": round(float(object_position[2]), 4)
                     },
                     "orientation": {
-                        "x": float(object_quaternion[0]),
-                        "y": float(object_quaternion[1]),
-                        "z": float(object_quaternion[2]),
-                        "w": float(object_quaternion[3])
+                        "x": round(float(object_quaternion[0]), 6),
+                        "y": round(float(object_quaternion[1]), 6),
+                        "z": round(float(object_quaternion[2]), 6),
+                        "w": round(float(object_quaternion[3]), 6),
+                        "roll": round(float(rpy[0]), 4),
+                        "pitch": round(float(rpy[1]), 4),
+                        "yaw": round(float(rpy[2]), 4)
                     }
                 }
             }
@@ -190,7 +209,7 @@ def main(args=None):
         print(f"Error: Could not read object pose from ROS topic ({e}).")
         sys.exit(1)
 
-    print(json.dumps(result))
+    output_result(result)
     sys.exit(0)
 
 

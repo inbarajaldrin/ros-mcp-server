@@ -21,6 +21,14 @@ import argparse
 import time
 import sys
 import os
+import json
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -209,22 +217,26 @@ def main(args=None):
                        help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
     parser.add_argument('--radius', type=float, default=DEFAULT_RADIUS,
                        help=f'Radius tolerance in meters (default: {DEFAULT_RADIUS}m = {DEFAULT_RADIUS*1000:.0f}mm)')
-    
-    args = parser.parse_args()
-    
-    rclpy.init()
-    node = VerifyGrasp(object_name=args.object_name, mode=args.mode, radius=args.radius)
-    
+
+    parsed_args = parser.parse_args()
+
+    success = False
+    error = None
+    node = None
+
     try:
+        rclpy.init()
+        node = VerifyGrasp(object_name=parsed_args.object_name, mode=parsed_args.mode, radius=parsed_args.radius)
+
         # Wait for pose data (wait indefinitely until received)
-        node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and end-effector")
+        node.get_logger().info(f"Waiting for pose data for object: {parsed_args.object_name} and end-effector")
         start_time = time.time()
         last_log_time = start_time
-        
+
         while not (node.object_pose_received and node.ee_pose_received):
             rclpy.spin_once(node, timeout_sec=0.1)
             time.sleep(0.1)
-            
+
             # Log every 5 seconds to show we're still waiting
             current_time = time.time()
             if current_time - last_log_time >= 5.0:
@@ -236,30 +248,42 @@ def main(args=None):
                     missing.append("end-effector")
                 node.get_logger().info(f"Still waiting for pose data ({', '.join(missing)})... ({elapsed:.1f}s elapsed)")
                 last_log_time = current_time
-        
+
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data (waited {elapsed:.1f}s)")
-        
+
         # Verify grasp (already logs the result)
         success, distance, object_pos, gripper_center_pos = node.verify_grasp()
-        
-        # Exit with appropriate code
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0 if success else 1)
-            
+
+        if not success:
+            if distance is None:
+                error = f"Object '{parsed_args.object_name}' not found"
+            else:
+                error = "Object is outside grasp radius"
+
     except KeyboardInterrupt:
-        node.get_logger().info("Interrupted by user")
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        error = "Interrupted by user"
     except Exception as e:
-        node.get_logger().error(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        error = str(e)
+    finally:
+        try:
+            if node is not None:
+                node.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+    # Build and output result
+    result = {
+        "result": "success" if success else "failure",
+        "object_name": parsed_args.object_name,
+        "mode": parsed_args.mode
+    }
+    if not success and error:
+        result["error"] = error
+
+    output_result(result)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':

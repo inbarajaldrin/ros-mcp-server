@@ -53,6 +53,13 @@ from primitives.utils.data_path_finder import get_assembly_data_dir
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 
 
+def output_result(result):
+    """Output JSON result with markers for MCP server parsing"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
     """
     Find the assembly JSON file that contains the given base name.
@@ -118,7 +125,10 @@ class PerformInsertController(Node):
             raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
         
         self.mode = mode  # 'sim' or 'real'
-        
+
+        # Error tracking for JSON output
+        self.error_message = None
+
         # For sim mode, we need object and base names
         if self.mode == 'sim':
             if object_name is None or base_name is None:
@@ -698,17 +708,19 @@ class PerformInsertController(Node):
             goal_handle = future.result()
             
             if not goal_handle.accepted:
-                self.get_logger().error("Trajectory goal rejected")
+                self.error_message = "External control program stopped or robot in protective stop"
+                self.get_logger().error(self.error_message)
                 return False
-            
+
             result_future = goal_handle.get_result_async()
             rclpy.spin_until_future_complete(self, result_future)
             result = result_future.result()
-            
+
             if result.status == 4:  # SUCCEEDED
                 return True
             else:
-                self.get_logger().error(f"Trajectory failed with status: {result.status}")
+                self.error_message = f"Trajectory failed with status code {result.status}"
+                self.get_logger().error(self.error_message)
                 return False
         except Exception as e:
             self.get_logger().error(f"Trajectory execution error: {e}")
@@ -729,13 +741,15 @@ class PerformInsertController(Node):
         # Check if object exists
         obj_key = self.object_name if self.object_name in self.current_poses else f"{self.object_name}_scaled70"
         if obj_key not in self.current_poses:
-            self.get_logger().error(f"Object {self.object_name} not found")
+            self.error_message = f"Object {self.object_name} not found"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Check if base exists
         base_key = self.base_name if self.base_name in self.current_poses else f"{self.base_name}_scaled70"
         if base_key not in self.current_poses:
-            self.get_logger().error(f"Base {self.base_name} not found")
+            self.error_message = f"Base {self.base_name} not found"
+            self.get_logger().error(self.error_message)
             return False
         
         # Get current EE pose as PoseStamped-like structure
@@ -770,7 +784,8 @@ class PerformInsertController(Node):
         # Get target object position from JSON (relative to base)
         target_position_relative = self.get_object_target_position(self.object_name)
         if target_position_relative is None:
-            self.get_logger().error(f"No target position found for {self.object_name} in JSON")
+            self.error_message = f"No target position found for {self.object_name} in JSON"
+            self.get_logger().error(self.error_message)
             return False
         
         # Transform target position from base frame to world frame
@@ -808,7 +823,8 @@ class PerformInsertController(Node):
         )
         
         if final_computed_joint_angles is None:
-            self.get_logger().error("Failed to compute IK for final position")
+            self.error_message = "IK failed: couldn't compute insert position"
+            self.get_logger().error(self.error_message)
             return False
         
         # Create final trajectory
@@ -1009,7 +1025,8 @@ class PerformInsertController(Node):
     def run_real(self):
         
         if not self.traj_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().error("Trajectory server not available!")
+            self.error_message = "UR robot driver isn't running"
+            self.get_logger().error(self.error_message)
             return
         
         # First, run the search phase with precomputed waypoints
@@ -1084,7 +1101,8 @@ class PerformInsertController(Node):
                 break
         
         if len(joint_trajectory) == 0:
-            self.get_logger().error("Failed to compute any waypoints! Aborting.")
+            self.error_message = "IK failed: couldn't compute insert trajectory"
+            self.get_logger().error(self.error_message)
             return False
         
         
@@ -1121,9 +1139,10 @@ class PerformInsertController(Node):
         
         goal_handle = future.result()
         if not goal_handle or not goal_handle.accepted:
-            self.get_logger().error("Trajectory goal rejected!")
+            self.error_message = "External control program stopped or robot in protective stop"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         self.current_goal_handle = goal_handle
         self.get_logger().info("Trajectory accepted. Monitoring force during execution...")
         
@@ -1500,7 +1519,11 @@ Examples:
             parser.error("In sim mode, --object-name and --base-name are required")
     
     rclpy.init()
-    
+
+    node = None
+    success = False
+    error = None
+
     try:
         if args.mode == 'sim':
             node = PerformInsertController(
@@ -1519,12 +1542,11 @@ Examples:
                 z_threshold=args.z_threshold,
                 xy_force_threshold=args.xy_threshold
             )
-        
+
         # Give system time to stabilize
         time.sleep(0.5)
-        
+
         # Execute trajectory
-        success = False
         try:
             if args.mode == 'sim':
                 success = node.run()
@@ -1532,46 +1554,70 @@ Examples:
                     node.get_logger().info("Move down completed successfully!")
                 else:
                     node.get_logger().error("Move down failed")
+                    error = node.error_message
             else:
                 node.run()
-                success = True  # Real mode doesn't return success/failure
+                # Real mode: check if error occurred
+                if node.error_message:
+                    success = False
+                    error = node.error_message
+                else:
+                    success = True
         except KeyboardInterrupt:
             # Set running flag to stop the loop
             if hasattr(node, 'running'):
                 node.running = False
-            node.get_logger().info("=" * 60)
             node.get_logger().info("TRAJECTORY INTERRUPTED BY USER")
-            node.get_logger().info("=" * 60)
-            if node.pos is not None:
-                node.get_logger().info(f"Final position: X={node.pos[0]*1000:.2f}, Y={node.pos[1]*1000:.2f}, Z={node.pos[2]*1000:.2f} mm")
-            if node.force is not None:
-                f = node.force - node.baseline
-                f_xy = node.get_force_xy()
-                f_xy_mag = np.linalg.norm(f_xy)
-                f_z = node.get_force_z()
-                node.get_logger().info(f"Final X/Y force magnitude: {f_xy_mag:.2f} N")
-                node.get_logger().info(f"Final Z force: {f_z:.2f} N")
-                if node.contact_detected:
-                    node.get_logger().info("Contact was detected during execution (alignment mode activated)")
-            
+            error = "Interrupted by user"
+
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        sys.exit(1)
+        error = "Interrupted by user"
     except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        error = str(e)
     finally:
+        # Build and output JSON result
+        if args.mode == 'sim':
+            if success:
+                result = {
+                    "result": "success",
+                    "mode": "sim",
+                    "object_name": args.object_name,
+                    "base_name": args.base_name
+                }
+            else:
+                result = {
+                    "result": "failure",
+                    "mode": "sim",
+                    "object_name": args.object_name,
+                    "base_name": args.base_name,
+                    "error": error or (node.error_message if node else "Unknown error")
+                }
+        else:  # real mode
+            if success:
+                result = {
+                    "result": "success",
+                    "mode": "real"
+                }
+            else:
+                result = {
+                    "result": "failure",
+                    "mode": "real",
+                    "error": error or (node.error_message if node else "Unknown error")
+                }
+
+        output_result(result)
+
+        try:
+            if node:
+                node.destroy_node()
+        except:
+            pass
         try:
             rclpy.shutdown()
         except:
             pass
 
-    # Exit with proper code based on success
-    if not success:
-        sys.exit(1)
-    sys.exit(0)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':

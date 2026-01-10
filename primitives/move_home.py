@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,6 +17,13 @@ import time
 from primitives.utils.action_libraries import home
 from threading import Timer
 
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
 ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
 JOINT_NAMES = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
 HOME_MOVEMENT_DURATION = 5.0
@@ -29,11 +37,15 @@ class HomeRunner(Node):
         self.goal_accepted = False
         self.goal_rejected = False
         self.acceptance_timer = None
-        
+        self.success = False
+        self.error = None
+
         if self.client.wait_for_server(timeout_sec=10.0):
             self.send_home_trajectory()
         else:
+            self.error = "UR robot driver isn't running"
             self.get_logger().error("Action server not available. Exiting.")
+            self.shutdown()
     
     def shutdown(self):
         if not self.shutdown_called:
@@ -42,10 +54,6 @@ class HomeRunner(Node):
 
     def send_home_trajectory(self):
         points = home()
-        if not points:
-            self.get_logger().error("IK failed: couldn't compute home position.")
-            self.shutdown()
-            return
 
         for pt in points:
             pt["time_from_start"] = Duration(sec=int(HOME_MOVEMENT_DURATION))
@@ -69,7 +77,7 @@ class HomeRunner(Node):
         # Don't retry if goal was explicitly rejected
         if self.goal_rejected:
             return
-        
+
         if not self.goal_accepted:
             self.retry_count += 1
             if self.retry_count <= 5:
@@ -77,6 +85,7 @@ class HomeRunner(Node):
                 time.sleep(0.5)
                 self.send_home_trajectory()
             else:
+                self.error = "Goal not accepted after max retries"
                 self.get_logger().error("Goal not accepted after max retries. Exiting.")
                 self.shutdown()
 
@@ -85,33 +94,65 @@ class HomeRunner(Node):
         if self.acceptance_timer:
             self.acceptance_timer.cancel()
             self.acceptance_timer = None
-        
+
         if not goal_handle.accepted:
             self.goal_rejected = True
+            self.error = "External control program stopped or robot in protective stop"
             self.get_logger().error("Trajectory goal rejected")
             self.shutdown()
             return
-        
+
         self.goal_accepted = True
         self.retry_count = 0
         self.get_logger().info("Trajectory sent and accepted")
         goal_handle.get_result_async().add_done_callback(self.goal_result)
 
     def goal_result(self, future):
+        self.success = True
         self.get_logger().info("Movement completed successfully")
         self.shutdown()
 
 def main(args=None):
     rclpy.init(args=args)
     node = HomeRunner()
+    success = False
+    error = None
+
     try:
-        rclpy.spin(node)
+        # Only spin if not already shutdown (e.g., if wait_for_server failed)
+        if not node.shutdown_called:
+            rclpy.spin(node)
+        success = node.success
+        error = node.error
     except KeyboardInterrupt:
         node.get_logger().info("Home movement interrupted by user")
+        error = "Interrupted by user"
+    except Exception as e:
+        error = str(e)
     finally:
-        node.destroy_node()
+        # Get result before cleanup
+        if not success and not error:
+            error = node.error
+        success = node.success
+
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
         if not node.shutdown_called:
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    # Build and output result
+    result = {"result": "success" if success else "failure"}
+    if not success and error:
+        result["error"] = error
+
+    output_result(result)
+    sys.exit(0 if success else 1)
+
 
 if __name__ == '__main__':
     main()

@@ -335,40 +335,43 @@ class VerifyDisassembly(Node):
     def verify_disassembly(self, object_name, base_name):
         """
         Verify if object is NOT in assembly position relative to base (opposite of verify_assembly_pose)
-        
+
         Algorithm:
         1. Get current object pose and base pose
         2. Calculate relative position and orientation of object relative to base
         3. Compare with target position and orientation from JSON
         4. Check if NOT within tolerance (opposite of assembly verification)
-        
+
         Args:
             object_name: Name of the object to verify
             base_name: Name of the base object
-            
+
         Returns:
-            True if object is NOT in assembly pose (successfully disassembled), False if still in assembly pose
+            Tuple: (success: bool, error_data: dict) where success = NOT in assembly position
         """
         # Wait for pose data
         if not self.current_poses:
-            self.get_logger().error("No pose data available")
-            return False
-        
+            error_msg = "no pose data available"
+            self.get_logger().error(error_msg)
+            return False, {"error": error_msg}
+
         # Check if object exists
         original_object_name = object_name
         if object_name not in self.current_poses:
             object_name = f"{object_name}_scaled70"
             if object_name not in self.current_poses:
+                error_msg = f"{original_object_name} not found in JSON"
                 self.get_logger().error(f"Object {original_object_name} not found in poses")
-                return False
-        
+                return False, {"error": error_msg}
+
         # Check if base exists
         original_base_name = base_name
         if base_name not in self.current_poses:
             base_name = f"{base_name}_scaled70"
             if base_name not in self.current_poses:
+                error_msg = f"{original_base_name} not found in JSON"
                 self.get_logger().error(f"Base {original_base_name} not found in poses")
-                return False
+                return False, {"error": error_msg}
         
         # Convert poses to matrices
         T_object_current = self.transform_to_matrix(self.current_poses[object_name].transform)
@@ -381,18 +384,21 @@ class VerifyDisassembly(Node):
         object_relative_position = T_object_relative[:3, 3]
         object_relative_rotation = R.from_matrix(T_object_relative[:3, :3])
         object_relative_rpy_rad = object_relative_rotation.as_euler('xyz')
-        
+        object_relative_rpy_deg = np.degrees(object_relative_rpy_rad)
+
         # Get target position and orientation from JSON (relative to base)
         target_position_relative = self.get_object_target_position(original_object_name)
         target_orientation_relative = self.get_object_target_orientation(original_object_name)
-        
+
         if target_position_relative is None:
+            error_msg = f"target position not found"
             self.get_logger().error(f"No target position found for {original_object_name} in assembly config")
-            return False
-        
+            return False, {"error": error_msg}
+
         if target_orientation_relative is None:
+            error_msg = f"target orientation not found"
             self.get_logger().error(f"No target orientation found for {original_object_name} in assembly config")
-            return False
+            return False, {"error": error_msg}
         
         # Calculate position error (vector and magnitude)
         position_error_vector = object_relative_position - target_position_relative
@@ -406,40 +412,63 @@ class VerifyDisassembly(Node):
         # Get target orientation as rotation matrix (from quaternion)
         target_quat = target_orientation_relative  # Already a quaternion [x, y, z, w]
         R_target_relative = R.from_quat(target_quat).as_matrix()
-        
+        target_rpy_rad = R.from_quat(target_quat).as_euler('xyz')
+        target_rpy_deg = np.degrees(target_rpy_rad)
+
         # Generate all equivalent target orientations using fold symmetry
         equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
             R_target_relative, fold_data, logger=self.get_logger() if fold_data else None
         )
-        
+
         # Check if current orientation matches ANY equivalent target
         min_orientation_error_deg = float('inf')
         best_match_idx = -1
-        
+        best_match_error_rpy_deg = None
+
         for i, R_equiv_target in enumerate(equivalent_targets):
             R_equiv_rotation = R.from_matrix(R_equiv_target)
             orientation_error_rad = (object_relative_rotation.inv() * R_equiv_rotation).magnitude()
             orientation_error_deg = np.degrees(orientation_error_rad)
-            
+
             if orientation_error_deg < min_orientation_error_deg:
                 min_orientation_error_deg = orientation_error_deg
                 best_match_idx = i
-        
+                # Get the RPY error for the best match
+                equiv_rpy_rad = R_equiv_rotation.as_euler('xyz')
+                equiv_rpy_deg = np.degrees(equiv_rpy_rad)
+                best_match_error_rpy_deg = object_relative_rpy_deg - equiv_rpy_deg
+
         orientation_error_deg = min_orientation_error_deg
-        
+        orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else object_relative_rpy_deg - target_rpy_deg
+
         # Check if within tolerance (for assembly position)
-        position_ok = position_error <= POSITION_TOLERANCE
-        orientation_ok = orientation_error_deg <= ORIENTATION_TOLERANCE_DEG
-        
+        position_ok = bool(position_error <= POSITION_TOLERANCE)
+        orientation_ok = bool(orientation_error_deg <= ORIENTATION_TOLERANCE_DEG)
+        within_tolerance = position_ok and orientation_ok
+
+        # Prepare error data for JSON output
+        error_data = {
+            "position_error_m": {
+                "x": round(float(position_error_vector[0]), 2),
+                "y": round(float(position_error_vector[1]), 2),
+                "z": round(float(position_error_vector[2]), 2)
+            },
+            "orientation_error_deg": {
+                "roll": round(float(orientation_error_rpy_deg[0]), 2),
+                "pitch": round(float(orientation_error_rpy_deg[1]), 2),
+                "yaw": round(float(orientation_error_rpy_deg[2]), 2)
+            }
+        }
+
         # For disassembly: SUCCESS if NOT in assembly position (opposite of assembly verification)
-        if position_ok and orientation_ok:
+        if within_tolerance:
             # Object is still in assembly position - disassembly FAILED
             self.get_logger().error("Disassembly verification failed: Object is still in assembly pose")
             if position_ok:
                 self.get_logger().error(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) is within tolerance ({POSITION_TOLERANCE}m)")
             if orientation_ok:
                 self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) is within tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
-            return False
+            return False, error_data
         else:
             # Object is NOT in assembly position - disassembly SUCCESS
             self.get_logger().info("Disassembly verification successful: Object is NOT in assembly pose")
@@ -447,7 +476,7 @@ class VerifyDisassembly(Node):
                 self.get_logger().info(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m) - object moved away")
             if not orientation_ok:
                 self.get_logger().info(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°) - object reoriented")
-            return True
+            return True, error_data
 
 
 def main(args=None):
@@ -455,56 +484,78 @@ def main(args=None):
     parser.add_argument('--object-name', type=str, required=True, help='Name of the object to verify')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
     args = parser.parse_args()
-    
+
     rclpy.init()
     node = VerifyDisassembly(base_name=args.base_name)
-    
+
+    success = False
+    error_data = {}
+    error_msg = None
+
     try:
         # Wait for pose data (wait indefinitely until received)
         node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
         start_time = time.time()
         last_log_time = start_time
-        
+
         while not node.current_poses:
             rclpy.spin_once(node, timeout_sec=0.1)
             time.sleep(0.1)
-            
+
             # Log every 5 seconds to show we're still waiting
             current_time = time.time()
             if current_time - last_log_time >= 5.0:
                 elapsed = current_time - start_time
                 node.get_logger().info(f"Still waiting for pose data... ({elapsed:.1f}s elapsed)")
                 last_log_time = current_time
-        
+
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
-        
+
         # Verify disassembly (opposite of assembly verification)
-        success = node.verify_disassembly(
+        success, error_data = node.verify_disassembly(
             args.object_name,
             args.base_name
         )
-        
+
         if success:
             node.get_logger().info("Disassembly verification: SUCCESS - Object is not in assembly position")
         else:
             node.get_logger().error("Disassembly verification: FAILED - Object is still in assembly position")
-        
-        # Exit with appropriate code
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0 if success else 1)
-            
+
     except KeyboardInterrupt:
         node.get_logger().info("Interrupted by user")
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        error_msg = "Interrupted by user"
     except Exception as e:
         node.get_logger().error(f"Error: {e}")
+        error_msg = str(e)
+    finally:
+        # Cleanup ROS
         node.destroy_node()
         rclpy.shutdown()
-        sys.exit(1)
+
+        # Build result dictionary
+        result = {
+            "result": "success" if success else "failure",
+            "object_name": args.object_name,
+            "base_name": args.base_name,
+        }
+
+        # Add error data if available
+        if error_data:
+            result.update(error_data)
+
+        # Add error message if present
+        if error_msg:
+            result["error"] = error_msg
+
+        # Output JSON markers
+        print("__RESULT_JSON__")
+        print(json.dumps(result))
+        print("__END_RESULT_JSON__")
+
+        # Exit with appropriate code
+        sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':

@@ -40,6 +40,14 @@ import glob
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
@@ -361,7 +369,19 @@ class ReorientForAssembly(Node):
         self.cardinal_error_threshold_max = 180.0  # Maximum threshold to try
         self.cardinal_error_threshold_increment = 10.0  # Increment threshold by this amount each retry
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
-        
+
+        # JSON output tracking
+        self.error_message = None
+        self.object_name = None
+        self.base_name = None
+        self.initial_object_orientation_quat = None
+        self.initial_object_orientation_rpy_deg = None
+        self.final_object_orientation_quat = None
+        self.final_object_orientation_rpy_deg = None
+        self.target_orientation_quat = None
+        self.target_orientation_rpy_deg = None
+        self.alignment_error_deg = None
+
         self.get_logger().info(f"Using {self.mode.upper()} mode")
     
     def load_assembly_config(self, base_name=None):
@@ -848,19 +868,25 @@ class ReorientForAssembly(Node):
     def reorient_for_target(self, object_name, base_name, duration=5.0,
                             current_object_orientation=None, target_base_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
-        
+
+        # Store for JSON output
+        self.object_name = object_name
+        self.base_name = base_name
+
         # Load assembly config based on base_name if not already loaded for this base
         if self.loaded_base_name != base_name:
             self.assembly_config = self.load_assembly_config(base_name=base_name)
             if not self.assembly_config:
-                self.get_logger().error(f"Failed to load assembly config for base '{base_name}'")
+                self.error_message = f"Failed to load assembly config for base '{base_name}'"
+                self.get_logger().error(self.error_message)
                 return False
-        
+
         self.get_logger().info(f"Reorienting {object_name} relative to {base_name}")
-        
+
         # === Get current EE pose ===
         if self.current_ee_pose is None:
-            self.get_logger().error("EE pose not available")
+            self.error_message = "EE pose data is None"
+            self.get_logger().error(self.error_message)
             return False
         ee_position, R_EE_current = self.get_pose_from_msg(self.current_ee_pose)
         
@@ -870,26 +896,34 @@ class ReorientForAssembly(Node):
         else:
             obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
             if obj_key not in self.current_poses:
-                self.get_logger().error(f"Object {object_name} not found")
+                self.error_message = f"Object {object_name} not found"
+                self.get_logger().error(self.error_message)
                 return False
             R_object_current = self.get_rotation_from_transform(self.current_poses[obj_key].transform)
-        
+
+        # Store initial object orientation for JSON output
+        initial_quat = R.from_matrix(R_object_current).as_quat()
+        self.initial_object_orientation_quat = initial_quat
+        self.initial_object_orientation_rpy_deg = R.from_quat(initial_quat).as_euler('xyz', degrees=True)
+
         # === Get base orientation ===
         if target_base_orientation is not None:
             R_base = self.get_rotation_from_quat(target_base_orientation)
         else:
             base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
             if base_key not in self.current_poses:
-                self.get_logger().error(f"Base {base_name} not found")
+                self.error_message = f"Base {base_name} not found"
+                self.get_logger().error(self.error_message)
                 return False
             R_base = self.get_rotation_from_transform(self.current_poses[base_key].transform)
-        
+
         # === Get target orientation from JSON (relative to base, quaternion) ===
         target_quat = self.get_object_target_orientation(object_name)
         if target_quat is None:
             target_quat = self.get_object_target_orientation(f"{object_name}_scaled70")
         if target_quat is None:
-            self.get_logger().error(f"No target orientation for {object_name}")
+            self.error_message = f"No target orientation for {object_name} in assembly config"
+            self.get_logger().error(self.error_message)
             return False
         
         # === Load fold symmetry ===
@@ -905,7 +939,12 @@ class ReorientForAssembly(Node):
         # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.
         R_target_relative = R.from_quat(target_quat).as_matrix()
         R_object_target_world = R_base @ R_target_relative
-        
+
+        # Store target orientation for JSON output
+        target_quat_world = R.from_matrix(R_object_target_world).as_quat()
+        self.target_orientation_quat = target_quat_world
+        self.target_orientation_rpy_deg = R.from_quat(target_quat_world).as_euler('xyz', degrees=True)
+
         # === Transform to base-relative frame for cardinal calculation ===
         # Cardinal calculation should be done assuming base is at identity [0,0,0,1]
         # Transform current object and EE to base-relative frame
@@ -1112,7 +1151,8 @@ class ReorientForAssembly(Node):
         # === Compute IK ===
         if self.current_joint_angles is None:
             if self.read_current_joint_angles() is None:
-                self.get_logger().error("Could not read joint angles")
+                self.error_message = "Joint angles data is None"
+                self.get_logger().error(self.error_message)
                 return False
         
         # Try IK with best solution first
@@ -1148,9 +1188,10 @@ class ReorientForAssembly(Node):
                     break
         
         if joint_angles is None:
-            self.get_logger().error("IK failed for all attempted cardinals")
+            self.error_message = "IK failed: couldn't find valid orientation for reorientation"
+            self.get_logger().error(self.error_message)
             return False
-        
+
         # Log final EE orientation (before execution)
         final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
         self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
@@ -1163,65 +1204,118 @@ class ReorientForAssembly(Node):
         }]}
         
         success = self.execute_trajectory(trajectory)
-        
-        # Log final object orientation
+
+        # Store final object orientation and alignment error for JSON output
         if success:
-            final_obj_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
+            final_obj_quat = R.from_matrix(resulting_object_R).as_quat()
+            self.final_object_orientation_quat = final_obj_quat
+            self.final_object_orientation_rpy_deg = R.from_quat(final_obj_quat).as_euler('xyz', degrees=True)
+            self.alignment_error_deg = object_error
+            final_obj_rpy = self.final_object_orientation_rpy_deg
             self.get_logger().info(f"Final object orientation (RPY, degrees): [{final_obj_rpy[0]:.1f}, {final_obj_rpy[1]:.1f}, {final_obj_rpy[2]:.1f}]")
-        
+
         return success
     
     def execute_trajectory(self, trajectory):
         try:
             point = trajectory['traj1'][0]
-            
+
             traj_msg = JointTrajectory()
             traj_msg.joint_names = self.joint_names
-            
+
             traj_point = JointTrajectoryPoint()
             traj_point.positions = point['positions']
             traj_point.velocities = [0.0] * 6
             traj_point.time_from_start = point['time_from_start']
             traj_msg.points.append(traj_point)
-            
+
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
             goal.goal_time_tolerance = Duration(sec=1)
-            
+
             self.trajectory_completed = False
             self.trajectory_success = False
-            
+
             self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response_callback)
-            
+
             while rclpy.ok() and not self.trajectory_completed:
                 rclpy.spin_once(self, timeout_sec=0.1)
-            
+
             if self.trajectory_success:
                 self.get_logger().info("Movement completed successfully")
-            else:
-                self.get_logger().error("Trajectory failed")
-            
+            # Error message is set in goal_result_callback or goal_response_callback
+
             return self.trajectory_success
         except Exception as e:
-            self.get_logger().error(f"Trajectory error: {e}")
+            self.error_message = f"Trajectory execution error: {e}"
+            self.get_logger().error(self.error_message)
             return False
-    
+
     def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Trajectory goal rejected")
+            self.error_message = "External control program stopped or robot in protective stop"
+            self.get_logger().error(self.error_message)
             self.trajectory_completed = True
             self.trajectory_success = False
             return
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result_callback)
-    
+
     def goal_result_callback(self, future):
         result = future.result()
         self.trajectory_success = (result.status == 4)
+        if not self.trajectory_success:
+            self.error_message = f"Trajectory failed with status code {result.status}"
+            self.get_logger().error(self.error_message)
         self.trajectory_completed = True
+
+    def output_result_json(self, success):
+        """Output JSON result with success/failure and orientation data"""
+        result = {
+            "result": "success" if success else "failure",
+            "object_name": self.object_name,
+            "base_name": self.base_name,
+            "mode": self.mode,
+            "movement_type": "rotate_object"
+        }
+
+        if success:
+            # Add orientation data on success
+            if self.initial_object_orientation_quat is not None:
+                result["initial_object_orientation"] = {
+                    "x": round(float(self.initial_object_orientation_quat[0]), 6),
+                    "y": round(float(self.initial_object_orientation_quat[1]), 6),
+                    "z": round(float(self.initial_object_orientation_quat[2]), 6),
+                    "w": round(float(self.initial_object_orientation_quat[3]), 6)
+                }
+            if self.initial_object_orientation_rpy_deg is not None:
+                result["initial_object_orientation_rpy_deg"] = {
+                    "roll": round(float(self.initial_object_orientation_rpy_deg[0]), 4),
+                    "pitch": round(float(self.initial_object_orientation_rpy_deg[1]), 4),
+                    "yaw": round(float(self.initial_object_orientation_rpy_deg[2]), 4)
+                }
+            if self.final_object_orientation_quat is not None:
+                result["final_object_orientation"] = {
+                    "x": round(float(self.final_object_orientation_quat[0]), 6),
+                    "y": round(float(self.final_object_orientation_quat[1]), 6),
+                    "z": round(float(self.final_object_orientation_quat[2]), 6),
+                    "w": round(float(self.final_object_orientation_quat[3]), 6)
+                }
+            if self.final_object_orientation_rpy_deg is not None:
+                result["final_object_orientation_rpy_deg"] = {
+                    "roll": round(float(self.final_object_orientation_rpy_deg[0]), 4),
+                    "pitch": round(float(self.final_object_orientation_rpy_deg[1]), 4),
+                    "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
+                }
+        else:
+            # Add error message on failure
+            if self.error_message:
+                result["error"] = self.error_message
+
+        output_result(result)
 
 
 def main(args=None):
@@ -1255,45 +1349,50 @@ def main(args=None):
     rclpy.init()
     node = ReorientForAssembly(mode=args.mode)
     node.action_client.wait_for_server()
-    
+
+    success = False
     try:
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
-        
+
         # In sim mode, wait for poses from topic if not provided
         # In real mode, orientations should be provided via arguments
         if args.mode == 'sim' and (args.current_object_orientation is None or args.target_base_orientation is None):
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
-        
+
         # Default duration is 5.0 seconds
         duration = 5.0
-        
+
         # Use default base orientation if flag is set
         target_base_orientation = args.target_base_orientation
         if args.use_default_base_orientation:
             target_base_orientation = DEFAULT_BASE_ORIENTATION
             node.get_logger().info(f"Using default base orientation: {target_base_orientation}")
-        
+
         success = node.reorient_for_target(
             args.object_name, args.base_name, duration,
             args.current_object_orientation, target_base_orientation
         )
-        
+
         if success:
             node.get_logger().info("Movement completed successfully")
         else:
             node.get_logger().error("Reorientation failed")
-        
-        time.sleep(0.5)
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0 if success else 1)
-        
+
     except KeyboardInterrupt:
-        node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(1)
+        node.error_message = "Operation interrupted by user"
+    except Exception as e:
+        node.error_message = f"Unexpected error: {e}"
+    finally:
+        try:
+            node.output_result_json(success)
+            time.sleep(0.5)
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
+        sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':

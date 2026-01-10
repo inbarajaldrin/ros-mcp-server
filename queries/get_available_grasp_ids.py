@@ -28,6 +28,13 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import time
 
 
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
+
+
 class GraspIdsReader(Node):
     """ROS2 node to read available grasp IDs from topic"""
     def __init__(self, topic_name):
@@ -116,7 +123,7 @@ def main(args=None):
         "available_grasp_ids": available_grasp_ids
     }
 
-    print(json.dumps(result))
+    output_result(result)
     sys.exit(0)
 
 

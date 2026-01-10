@@ -18,6 +18,7 @@ from std_msgs.msg import String, Float64, Float32
 import argparse
 import time
 import sys
+import json
 import threading
 
 # Gripper range: 0.0 - 110.0mm
@@ -30,12 +31,12 @@ RETRY_DELAY = 0.5  # Seconds to wait between retries
 class GripperController(Node):
     def __init__(self, command, mode='sim'):
         super().__init__('gripper_controller')
-        
+
         self.command = command
         self.mode = mode
         self.current_width = None
         self.width_received = False
-        
+
         # Threading synchronization
         self.monitoring_lock = threading.Lock()
         self.verification_complete = False
@@ -265,12 +266,12 @@ class GripperController(Node):
             if attempt > 1:
                 self.get_logger().info(f"Retry attempt {attempt}/{MAX_RETRIES}")
                 time.sleep(RETRY_DELAY)
-            
+
             # Reset verification state
             with self.monitoring_lock:
                 self.verification_complete = False
                 self.verification_result = None
-            
+
             # Start monitoring thread before sending command (parallel execution)
             monitoring_thread = threading.Thread(
                 target=self.verify_gripper_state_threaded,
@@ -279,7 +280,7 @@ class GripperController(Node):
             )
             monitoring_thread.start()
             time.sleep(0.01)  # Small delay to ensure thread starts
-            
+
             # Send command (monitoring is already active)
             self.send_gripper_command()
 
@@ -291,12 +292,19 @@ class GripperController(Node):
                 if self.verification_complete and self.verification_result:
                     self.get_logger().info(f"Gripper control successful after {attempt} attempt(s)!")
                     return True
-            
+
             if attempt < MAX_RETRIES:
                 self.get_logger().warn(f"Verification failed, retrying... (attempt {attempt}/{MAX_RETRIES})")
-        
+
         self.get_logger().error(f"Gripper control failed after {MAX_RETRIES} attempts")
         return False
+
+
+def output_result(result):
+    """Output JSON result with markers"""
+    print("__RESULT_JSON__")
+    print(json.dumps(result))
+    print("__END_RESULT_JSON__")
 
 
 def main(args=None):
@@ -304,41 +312,99 @@ def main(args=None):
     parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (30mm), or 0-110 (width in mm)')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
-    
+
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
-    
-    rclpy.init(args=args)
-    
-    controller = GripperController(known_args.command, known_args.mode)
-    
-    # Wait a moment for subscriptions to establish
-    time.sleep(0.5)
-    
-    # Get initial reading (both modes use width now)
-    initial_value = controller.get_current_width(timeout=2.0)
-    if initial_value is not None:
-        controller.get_logger().info(f"Initial gripper width: {initial_value:.2f}")
-    
-    # Control with verification
-    success = controller.control_with_verification(initial_value)
 
-    # Get final reading - use stored stabilized width from monitoring
-    final_value = controller.final_stabilized_width
-    
-    if final_value is not None:
-        controller.get_logger().info(f"Final gripper width: {final_value:.2f}mm")
-    
-    # Output gripper range and current width
-    controller.get_logger().info(f"Gripper range: {GRIPPER_MIN_WIDTH:.1f} - {GRIPPER_MAX_WIDTH:.1f}mm")
-    if initial_value is not None and final_value is not None:
-        controller.get_logger().info(f"Gripper width: {initial_value:.2f}mm → {final_value:.2f}mm (change: {final_value - initial_value:+.2f}mm)")
-    elif final_value is not None:
-        controller.get_logger().info(f"Current gripper width: {final_value:.2f}mm")
-    
-    controller.destroy_node()
-    rclpy.shutdown()
-    
+    # Initialize variables for result
+    success = False
+    initial_value = None
+    final_value = None
+    error = None
+    controller = None
+
+    try:
+        rclpy.init(args=args)
+
+        controller = GripperController(known_args.command, known_args.mode)
+
+        # Wait a moment for subscriptions to establish
+        time.sleep(0.5)
+
+        # Check if topic exists and is publishing (fail early if missing)
+        topic_name = '/gripper_width' if known_args.mode == 'real' else '/gripper_width_sim'
+        controller.get_logger().info(f"Checking if topic {topic_name} is available...")
+        initial_value = controller.get_current_width(timeout=2.0)
+        
+        if initial_value is None:
+            error_msg = f"Topic {topic_name} not found or not publishing. Cannot proceed with gripper control."
+            controller.get_logger().error(error_msg)
+            error = error_msg
+            success = False
+            # Build result and exit immediately
+            result = {
+                "result": "failure",
+                "command": known_args.command,
+                "mode": known_args.mode,
+                "initial_width_mm": None,
+                "final_width_mm": None,
+                "change_mm": None,
+                "error": error
+            }
+            output_result(result)
+            sys.exit(1)
+        
+        controller.get_logger().info(f"Initial gripper width: {initial_value:.2f}")
+
+        # Control with verification
+        success = controller.control_with_verification(initial_value)
+
+        if not success:
+            error = "Gripper verification failed after retries"
+
+        # Get final reading - use stored stabilized width from monitoring
+        # If None (e.g., already at target), use initial value as final
+        final_value = controller.final_stabilized_width if controller.final_stabilized_width is not None else initial_value
+
+        if final_value is not None:
+            controller.get_logger().info(f"Final gripper width: {final_value:.2f}mm")
+
+        # Output gripper range and current width
+        controller.get_logger().info(f"Gripper range: {GRIPPER_MIN_WIDTH:.1f} - {GRIPPER_MAX_WIDTH:.1f}mm")
+        if initial_value is not None and final_value is not None:
+            controller.get_logger().info(f"Gripper width: {initial_value:.2f}mm → {final_value:.2f}mm (change: {final_value - initial_value:+.2f}mm)")
+        elif final_value is not None:
+            controller.get_logger().info(f"Current gripper width: {final_value:.2f}mm")
+
+    except Exception as e:
+        success = False
+        error = str(e)
+    finally:
+        # Clean up ROS
+        try:
+            if controller is not None:
+                controller.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass  # Ignore cleanup errors
+
+    # Build structured result
+    result = {
+        "result": "success" if success else "failure",
+        "command": known_args.command,
+        "mode": known_args.mode,
+        "initial_width_mm": round(initial_value, 2) if initial_value is not None else None,
+        "final_width_mm": round(final_value, 2) if final_value is not None else None,
+        "change_mm": round(final_value - initial_value, 2) if (initial_value is not None and final_value is not None) else None
+    }
+
+    # Add error if failed
+    if not success and error:
+        result["error"] = error
+
+    # Output JSON markers
+    output_result(result)
+
     sys.exit(0 if success else 1)
 
 
