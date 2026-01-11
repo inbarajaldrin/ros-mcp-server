@@ -8,6 +8,7 @@ from msgs.geometry_msgs import Twist, PoseStamped
 from msgs.sensor_msgs import Image as RosImage, JointState
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 
 #camera
 import time
@@ -50,8 +51,41 @@ else:
     SCREENSHOTS_DIR = "screenshots"
     PYTHON_EXECUTIONS_DIR = "python_executions"
 
-# Initialize MCP 
-mcp = FastMCP("ros-mcp-server")
+# Grasp points publisher process (started automatically on client connect)
+grasp_publisher_process = None
+
+@asynccontextmanager
+async def lifespan(app):
+    """Lifespan context manager - starts grasp points publisher on client connect."""
+    global grasp_publisher_process
+
+    # Start grasp points publisher on server startup (client connect)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    grasp_publisher_path = os.path.join(script_dir, "primitives/utils/grasp_points_publisher.py")
+
+    try:
+        grasp_publisher_process = subprocess.Popen(
+            ["/usr/bin/python3", grasp_publisher_path, "--mode", "default"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print(f"Started grasp points publisher (PID: {grasp_publisher_process.pid})", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Could not start grasp points publisher: {e}", file=sys.stderr)
+
+    yield {}  # Server runs here
+
+    # Cleanup on server shutdown (client disconnect)
+    if grasp_publisher_process:
+        try:
+            grasp_publisher_process.terminate()
+            grasp_publisher_process.wait(timeout=5)
+            print("Stopped grasp points publisher", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Error stopping grasp points publisher: {e}", file=sys.stderr)
+
+# Initialize MCP with lifespan to auto-start grasp points publisher
+mcp = FastMCP("ros-mcp-server", lifespan=lifespan)
 
 
 ## ############################################################################################## ##
