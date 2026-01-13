@@ -26,7 +26,8 @@ Verify if the object is actually grabbed by moving to safe height and using veri
 Once you've found information about a grasp id for an object save it to grasp logs. Save both SUCCESS and FAILURE.
 If it was a FAILURE, restore scene state.
 Perform the tasks using individual tools to figure out a working sequence of tool calls. 
-Once you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
+Only after you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
+DO NOT orchestrate the tools to perform a composed policy until you have figured out a working sequence for one object wth a grasp id.
 
 **Verification**
 
@@ -65,7 +66,8 @@ Half open the gripper before moving to grasp any object, accounting for limited 
 If it was a SUCCESS, save scene state and log the grasp id using which you were able to dissassemble that object. Move on to the next object.
 If it was a FAILURE, restore scene state and try a different grasp id of the same object.
 Perform the tasks using individual tools to figure out a working sequence of tool calls for one object.
-Once you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
+Only after you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
+DO NOT orchestrate the tools to perform a composed policy until you have figured out a working sequence for one object wth a grasp id.
 
 **Verification**
 

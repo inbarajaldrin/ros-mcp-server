@@ -6,8 +6,9 @@ This primitive combines functionality from translate_for_assembly and perform_in
 - --move-to-base: Calls translate_for_assembly to move to safe height
 - --move-down: Calls perform_insert to move down to final position
 - --move-to-safe-height: Moves to safe height (after closing gripper)
+- --move-away-from-base: Calls move_to_clear_area to move object away from base to a clear area
 
-Note: --move-to-base, --move-down, and --move-to-safe-height are mutually exclusive (cannot be used together).
+Note: --move-to-base, --move-down, --move-to-safe-height, and --move-away-from-base are mutually exclusive (cannot be used together).
 
 Usage:
     # Sim mode - safe height only
@@ -27,6 +28,9 @@ Usage:
 
     # Real mode - move to safe height only
     python3 translate_object.py --mode real --move-to-safe-height
+
+    # Move away from base (to clear area)
+    python3 translate_object.py --mode real --move-away-from-base
 """
 
 import sys
@@ -212,6 +216,60 @@ def run_perform_insert(args, logger):
     return True, output_text
 
 
+def run_move_to_clear_area(logger):
+    """Run move_to_clear_area script and return (success, output_text)"""
+    script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'move_to_clear_area.py')
+
+    cmd = [sys.executable, script_path]
+
+    # Default to 'move' mode (keeps current EE orientation)
+    cmd.append('--move')
+
+    logger.info("Moving object away from base to clear area")
+
+    # Set PYTHONPATH to include project root for imports
+    env = os.environ.copy()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+
+    # Capture output lines
+    output_lines = []
+
+    # Run subprocess and stream output in real-time
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env
+    )
+
+    # Stream output in a separate thread
+    output_thread = threading.Thread(
+        target=stream_output,
+        args=(process.stdout, logger, output_lines),
+        daemon=True
+    )
+    output_thread.start()
+
+    # Wait for process to complete
+    returncode = process.wait()
+    output_thread.join(timeout=1.0)
+
+    output_text = '\n'.join(output_lines)
+
+    if returncode != 0:
+        logger.error(f"move_to_clear_area failed with return code {returncode}")
+        return False, output_text
+
+    logger.info("move_to_clear_area completed successfully")
+    return True, output_text
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Translate Object - Combines translate_for_assembly and perform_insert',
@@ -238,6 +296,9 @@ Examples:
 
   # Real mode - move to safe height only
   python3 translate_object.py --mode real --move-to-safe-height
+
+  # Move away from base (to clear area)
+  python3 translate_object.py --mode real --move-away-from-base
         """
     )
 
@@ -257,6 +318,8 @@ Examples:
                        help='Call perform_insert to move down to final position')
     parser.add_argument('--move-to-safe-height', action='store_true',
                        help='Move to safe height (after closing gripper)')
+    parser.add_argument('--move-away-from-base', action='store_true',
+                       help='Move object away from base to a clear area (uses move_to_clear_area)')
 
     # Real mode arguments for translate_for_assembly
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
@@ -286,17 +349,17 @@ Examples:
     args = parser.parse_args()
 
     # Validate arguments
-    flags_set = sum([args.move_to_base, args.move_down, args.move_to_safe_height])
+    flags_set = sum([args.move_to_base, args.move_down, args.move_to_safe_height, args.move_away_from_base])
     if flags_set == 0:
-        parser.error("At least one of --move-to-base, --move-down, or --move-to-safe-height must be specified")
-    
+        parser.error("At least one of --move-to-base, --move-down, --move-to-safe-height, or --move-away-from-base must be specified")
+
     if flags_set > 1:
-        parser.error("Cannot use multiple movement flags together. Use exactly one of --move-to-base, --move-down, or --move-to-safe-height")
+        parser.error("Cannot use multiple movement flags together. Use exactly one of --move-to-base, --move-down, --move-to-safe-height, or --move-away-from-base")
 
     # Validate sim mode requirements
     if args.mode == 'sim':
-        if args.move_to_safe_height:
-            # move_to_safe_height doesn't require object_name or base_name
+        if args.move_to_safe_height or args.move_away_from_base:
+            # move_to_safe_height and move_away_from_base don't require object_name or base_name
             pass
         else:
             if args.object_name is None:
@@ -490,6 +553,43 @@ Examples:
                     result["object_name"] = args.object_name
                     result["base_name"] = args.base_name
                 output_result(result)
+            node.destroy_node()
+            rclpy.shutdown()
+            sys.exit(0)
+
+        # Call move_to_clear_area if --move-away-from-base is specified
+        if args.move_away_from_base:
+            success, output_text = run_move_to_clear_area(logger)
+            subprocess_json = extract_json_from_output(output_text)
+
+            if not success:
+                logger.error("move_to_clear_area failed, aborting")
+                # Use subprocess error if available, otherwise generic error
+                if subprocess_json:
+                    subprocess_json["movement_type"] = "move_away_from_base"
+                    output_result(subprocess_json)
+                else:
+                    output_result({
+                        "result": "failure",
+                        "mode": args.mode,
+                        "movement_type": "move_away_from_base",
+                        "error": "move_to_clear_area failed"
+                    })
+                node.destroy_node()
+                rclpy.shutdown()
+                sys.exit(1)
+
+            logger.info("Operation completed successfully!")
+            # Add movement_type to subprocess JSON or create success JSON
+            if subprocess_json:
+                subprocess_json["movement_type"] = "move_away_from_base"
+                output_result(subprocess_json)
+            else:
+                output_result({
+                    "result": "success",
+                    "mode": args.mode,
+                    "movement_type": "move_away_from_base"
+                })
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(0)

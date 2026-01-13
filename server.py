@@ -996,41 +996,42 @@ def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: boo
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
-def translate_object(mode: str, base_name: Optional[str] = None, object_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
+def translate_object(mode: str, base_name: Optional[str] = None, object_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, move_away_from_base: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
     """Translate object to target position.
     Moves object to target position for performing assembly onto the base. This tool maintains the object's current orientation throughout the process.
-    REQUIRED: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True (they are mutually exclusive).
-    
+    REQUIRED: Exactly one of move_to_base, move_down, move_to_safe_height, or move_away_from_base must be set to True (they are mutually exclusive).
+
     Args:
         mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        base_name: Name of the base object. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
-        object_name: Name of the object being held. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height.
+        base_name: Name of the base object. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height and move_away_from_base.
+        object_name: Name of the object being held. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height and move_away_from_base.
         move_to_base: Translates object above base position maintaining safe height (exactly one flag must be True)
         move_down: Moves down to the final target object position. VERIFY if the object is in the target object orientation before this final step. (exactly one flag must be True)
         move_to_safe_height: After moving down and opening gripper, move to safe height (exactly one flag must be True)
+        move_away_from_base: Translates object away from the base. Call this only after closing gripper to secure the object using the end effector at safeheight. Open gripper after moving to clear area to release the object. (exactly one flag must be True)
         use_default_base_position: Use default base position and orientation (for real mode)
 
     Returns:
         Dictionary with "output" (raw output), "returncode" (exit code), and "result" ("SUCCESS" or "FAILURE")
     """
     # Validate that exactly one flag is set
-    flags_set = sum([move_to_base, move_down, move_to_safe_height])
+    flags_set = sum([move_to_base, move_down, move_to_safe_height, move_away_from_base])
     if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True"}
+        return {"output": "Error: Exactly one of move_to_base, move_down, move_to_safe_height, or move_away_from_base must be set to True"}
     elif flags_set > 1:
-        return {"output": "Error: move_to_base, move_down, and move_to_safe_height are mutually exclusive. Set exactly one to True"}
-    
+        return {"output": "Error: move_to_base, move_down, move_to_safe_height, and move_away_from_base are mutually exclusive. Set exactly one to True"}
+
     # Validate sim mode requirements
     if mode == "sim":
-        if move_to_safe_height:
-            # move_to_safe_height doesn't require object_name or base_name
+        if move_to_safe_height or move_away_from_base:
+            # move_to_safe_height and move_away_from_base don't require object_name or base_name
             pass
         else:
             if object_name is None:
                 return {"output": "Error: object_name is required in sim mode"}
             if base_name is None and (move_to_base or move_down):
                 return {"output": "Error: base_name is required when using move_to_base or move_down in sim mode"}
-    
+
     cmd = f"--mode {mode}"
     if object_name is not None:
         cmd += f" --object-name \"{object_name}\""
@@ -1042,17 +1043,19 @@ def translate_object(mode: str, base_name: Optional[str] = None, object_name: Op
         cmd += " --move-down"
     if move_to_safe_height:
         cmd += " --move-to-safe-height"
+    if move_away_from_base:
+        cmd += " --move-away-from-base"
     if use_default_base_position:
         cmd += " --use-default-base-position"
-    
+
     # Adjust timeout based on operation
     # For move_down (perform_insert), use a long timeout to let it complete naturally
     # The alignment_stop_timeout (10s) in perform_insert will handle stopping the alignment phase
     # 900s (15 min) allows for: search phase + alignment phase (max 10s) + any delays
     if move_down:
         timeout = 300
-    elif move_to_safe_height:
-        timeout = 40  # Safe height movement is quick
+    elif move_to_safe_height or move_away_from_base:
+        timeout = 60  # Safe height and clear area movements are relatively quick
     else:
         timeout = 90
 
