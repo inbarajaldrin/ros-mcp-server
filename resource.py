@@ -1,10 +1,21 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.session import ServerSession
+from pydantic import BaseModel, Field
 import json
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 mcp = FastMCP("FMB Assembly Steps and Grasp IDs Management")
+
+# ========== ELICITATION SCHEMA ==========
+
+class ClearLogsConfirmation(BaseModel):
+    """Schema for confirming log deletion."""
+    confirm_delete: bool = Field(
+        default=False,
+        description="Delete ALL listed log files? This cannot be undone."
+    )
 
 # Output directories - use MCP_CLIENT_OUTPUT_DIR if set, otherwise use relative paths
 # Directories are created lazily when needed by tools
@@ -937,8 +948,97 @@ def list_disassembly_grasp_resource() -> str:
         "count": len(assembly_ids)
     }, indent=2)
 
-# ========== TOOLS FOR FINAL SEQUENCE (Assembly{id}_final_sequence.json) ==========
-# NOTE: Final sequence tools have been removed per user request
+# ========== ELICITATION TOOL FOR LOG MANAGEMENT ==========
+
+@mcp.tool()
+async def clear_resource_logs(ctx: Context[ServerSession, None]) -> str:
+    """
+    Clear/delete resource log files with user confirmation via elicitation.
+
+    Shows the user a list of existing log files and asks for confirmation before deleting.
+
+    Returns:
+        JSON string with deletion result
+    """
+    # Get all log files
+    log_patterns = [
+        "Assembly_*_object_grasp_log.json",
+        "Assembly_*_sequence_log.json",
+        "Assembly_*_final_sequence.json",
+        "Disassembly_*_grasp_log.json"
+    ]
+
+    all_files = []
+    for pattern in log_patterns:
+        files = list(RESOURCES_DIR.glob(pattern))
+        all_files.extend([f.name for f in files])
+
+    all_files.sort()
+
+    if not all_files:
+        return json.dumps({
+            "status": "info",
+            "message": "No log files found in resources directory",
+            "resources_dir": str(RESOURCES_DIR)
+        }, indent=2)
+
+    # Build file list message
+    file_list = "\n".join(f"  - {f}" for f in all_files)
+
+    try:
+        # Use elicitation to ask for confirmation
+        result = await ctx.elicit(
+            message=f"Found {len(all_files)} log file(s):\n{file_list}\n\nWould you like to delete them all?",
+            schema=ClearLogsConfirmation
+        )
+
+        if result.action == "accept" and result.data:
+            if not result.data.confirm_delete:
+                return json.dumps({
+                    "status": "cancelled",
+                    "message": "Deletion cancelled by user"
+                }, indent=2)
+
+            # Delete all files
+            deleted_files = []
+            errors = []
+            for filename in all_files:
+                file_path = RESOURCES_DIR / filename
+                try:
+                    file_path.unlink()
+                    deleted_files.append(filename)
+                except Exception as e:
+                    errors.append(f"{filename}: {str(e)}")
+
+            return json.dumps({
+                "status": "success" if not errors else "partial",
+                "deleted_files": deleted_files,
+                "errors": errors if errors else None,
+                "message": f"Deleted {len(deleted_files)} file(s)"
+            }, indent=2)
+
+        else:
+            return json.dumps({
+                "status": "cancelled",
+                "message": "Elicitation declined or cancelled",
+                "files_found": all_files
+            }, indent=2)
+
+    except Exception as e:
+        error_msg = str(e)
+        if "Method not found" in error_msg:
+            return json.dumps({
+                "status": "error",
+                "message": "Elicitation not supported by this client",
+                "files_found": all_files,
+                "hint": "Use clear_object_grasp_resource, clear_assembly_sequence_resource, or clear_disassembly_grasp_resource tools directly"
+            }, indent=2)
+        return json.dumps({
+            "status": "error",
+            "message": f"Elicitation failed: {error_msg}",
+            "files_found": all_files
+        }, indent=2)
+
 
 if __name__ == "__main__":
     mcp.run()

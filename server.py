@@ -1,5 +1,7 @@
-from mcp.server.fastmcp import FastMCP, Image
-from typing import List, Any, Optional, Union
+from mcp.server.fastmcp import FastMCP, Image, Context
+from mcp.server.session import ServerSession
+from pydantic import BaseModel, Field
+from typing import List, Any, Optional, Union, Literal
 from pathlib import Path
 import json
 import base64
@@ -1175,6 +1177,116 @@ def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
         "output": primitive_result.get("output", ""),
         "result": result
     }
+
+## ############################################################################################## ##
+##
+##                      ELICITATION TOOL
+##
+## ############################################################################################## ##
+
+# Elicitation allows MCP servers to pause execution and request structured input from the user.
+# This is useful for:
+# 1. Confirming potentially dangerous operations before executing
+# 2. Collecting additional parameters that weren't provided initially
+# 3. Offering choices when multiple valid options exist
+# 4. Human-in-the-loop workflows where user decisions are needed mid-execution
+#
+# Define schemas using Pydantic models - these define what fields the user will be asked to fill
+# Note: MCP elicitation supports primitive types: str, int, float, bool, or list[str]
+# For enum-style selection, use json_schema_extra={"enum": [...]} on str fields
+
+# class GripperConfirmation(BaseModel):
+#     """Schema for confirming gripper operation."""
+#     confirm: bool = Field(
+#         default=True,
+#         description="Confirm you want to proceed with this gripper operation?"
+#     )
+#     action: str = Field(
+#         default="open",
+#         description="Select gripper action",
+#         json_schema_extra={"enum": ["open", "close", "half-open", "cancel"]}
+#     )
+#     width_mm: int = Field(
+#         default=50,
+#         description="Gripper width in mm (0-110), only used for custom width"
+#     )
+
+# @mcp.tool()
+# async def demo_elicitation_gripper(ctx: Context[ServerSession, None]) -> Dict[str, Any]:
+#     """
+#     DEMO: Demonstrates MCP elicitation by asking user to confirm gripper operation.
+#
+#     This tool shows how elicitation works:
+#     1. Server pauses and sends a schema to the client
+#     2. Client presents a form/dialog to the user
+#     3. User fills in the form and submits
+#     4. Server receives the structured response and continues
+#
+#     NOTE: Elicitation requires client support. Claude Desktop/Claude Code may not
+#     support elicitation yet (will return "Method not found" error).
+#     """
+#     try:
+#         # Request user input using elicitation
+#         # The schema defines what fields the user will see
+#         result = await ctx.elicit(
+#             message="Please confirm the gripper operation you want to perform:",
+#             schema=GripperConfirmation
+#         )
+#
+#         # Handle the response
+#         # result.action can be: "accept", "decline", or "cancel"
+#         if result.action == "accept" and result.data:
+#             data = result.data
+#             if not data.confirm:
+#                 return {
+#                     "status": "cancelled",
+#                     "message": "User declined to proceed with gripper operation"
+#                 }
+#
+#             # Literal type ensures action is valid - no runtime validation needed
+#             if data.action == "cancel":
+#                 return {
+#                     "status": "cancelled",
+#                     "message": "User selected cancel"
+#                 }
+#
+#             # In a real implementation, you would execute the gripper command here
+#             # For demo purposes, we just return what would happen
+#             return {
+#                 "status": "success",
+#                 "message": f"Would execute gripper action: {data.action}",
+#                 "parameters": {
+#                     "action": data.action,
+#                     "width_mm": data.width_mm
+#                 },
+#                 "note": "This is a demo - no actual gripper movement occurred"
+#             }
+#
+#         elif result.action == "decline":
+#             return {
+#                 "status": "declined",
+#                 "message": "User declined the elicitation request"
+#             }
+#
+#         else:  # cancelled
+#             return {
+#                 "status": "cancelled",
+#                 "message": "Elicitation was cancelled"
+#             }
+#
+#     except Exception as e:
+#         error_msg = str(e)
+#         if "Method not found" in error_msg:
+#             return {
+#                 "status": "error",
+#                 "message": "Elicitation not supported by this client",
+#                 "details": "Claude Desktop and Claude Code don't currently support MCP elicitation. Try using an MCP client that supports elicitation (like the MCP Inspector or custom clients).",
+#                 "error": error_msg
+#             }
+#         return {
+#             "status": "error",
+#             "message": f"Elicitation failed: {error_msg}"
+#         }
 
 if __name__ == "__main__":
     try:
