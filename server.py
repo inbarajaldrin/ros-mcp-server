@@ -622,214 +622,144 @@ def get_ee_pose(joint_angles: List[float] = None,
             "message": f"Unexpected error in forward kinematics computation: {str(e)}"
         }
 
-@mcp.tool()
-def control_gripper(command: str) -> Dict[str, Any]:
+def _run_primitive(script_name: str, args: str = "", timeout: int = 60, error_prefix: str = "Primitive execution") -> Dict[str, Any]:
     """
-    Control gripper with flexible input commands using ROS2.
+    Helper function to run primitive scripts from the primitives directory.
+    Parses JSON output if present (scripts that output __RESULT_JSON__ markers).
     
     Args:
-        command: Gripper control command. Can be:
-                - String commands: "open", "close"
-                - Numeric values: "0" to "1100" (representing 0cm to 11cm gripper width)
-                
-    Value meanings:
-        - "open" or "1100" = Fully open (11cm width)
-        - "close" or "0" = Fully closed (0cm width)  
-        - Any value "0"-"1100" = Proportional opening (e.g., "550" = 5.5cm width)
-    
-    Examples:
-        control_gripper("open")          # Fully open gripper
-        control_gripper("close")         # Fully close gripper
-        control_gripper("550")           # Half open (5.5cm width)
-        control_gripper("1100")          # Fully open (same as "open")
-        control_gripper("0")             # Fully closed (same as "close")
-    """
-    try:
-        import subprocess
-        
-        # Convert command to appropriate ROS2 message
-        if isinstance(command, str):
-            if command.lower() == "open":
-                ros_command = "open"
-                numeric_value = 1100
-                width_cm = 11.0
-            elif command.lower() == "close":
-                ros_command = "close" 
-                numeric_value = 0
-                width_cm = 0.0
-            elif command.isdigit() or (command.replace('.', '').isdigit()):
-                # It's a numeric string
-                try:
-                    numeric_value = float(command)
-                    if not (0 <= numeric_value <= 1100):
-                        return {
-                            "status": "error",
-                            "message": f"Numeric value {numeric_value} out of range. Use 0-1100."
-                        }
-                    
-                    # Convert to ROS command string and width
-                    ros_command = str(int(numeric_value))
-                    width_cm = numeric_value / 100.0  # Convert to cm (1100 -> 11cm)
-                    
-                except (ValueError, TypeError):
-                    return {
-                        "status": "error",
-                        "message": f"Invalid numeric command '{command}'. Use number 0-1100."
-                    }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Invalid string command '{command}'. Use 'open', 'close', or numeric value 0-1100."
-                }
-        else:
-            # Direct numeric input
-            try:
-                numeric_value = float(command)
-                if not (0 <= numeric_value <= 1100):
-                    return {
-                        "status": "error",
-                        "message": f"Numeric value {numeric_value} out of range. Use 0-1100."
-                    }
-                
-                ros_command = str(int(numeric_value))
-                width_cm = numeric_value / 100.0
-                
-            except (ValueError, TypeError):
-                return {
-                    "status": "error",
-                    "message": f"Invalid command '{command}'. Use 'open', 'close', or number 0-1100."
-                }
-        
-        # Execute ROS2 command using the same pattern as your other tools
-        cmd = f"source /opt/ros/humble/setup.bash && ros2 topic pub --once /gripper_command std_msgs/String \"{{data: '{ros_command}'}}\""
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                executable='/bin/bash',
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if result.returncode == 0:
-                return {
-                    "status": "success",
-                    "message": f"Gripper command sent successfully",
-                    "command_sent": ros_command,
-                    "numeric_value": numeric_value,
-                    "width_cm": width_cm,
-                    "ros_output": result.stdout.strip() if result.stdout else None
-                }
-            else:
-                return {
-                    "status": "error", 
-                    "message": f"ROS2 command failed: {result.stderr.strip()}",
-                    "command_attempted": ros_command
-                }
-                
-        except subprocess.TimeoutExpired:
-            return {
-                "status": "error",
-                "message": "ROS2 command timed out (5 seconds)"
-            }
-        except FileNotFoundError:
-            return {
-                "status": "error", 
-                "message": "ros2 command not found. Make sure ROS2 is properly installed and sourced."
-            }
-            
-    except Exception as e:
-        import traceback
-        return {
-            "status": "error",
-            "message": f"Unexpected error in gripper control: {str(e)}",
-            "traceback": traceback.format_exc()
-        }
-
-@mcp.tool()
-def verify_grasp(timeout: int = 5) -> Dict[str, Any]:
-    """
-    Get gripper width information including fully open, fully closed, and current width.
-    
-    Args:
-        timeout: Maximum time to wait for gripper reading (default: 5 seconds)
+        script_name: Name of the script file (e.g., "control_gripper.py")
+        args: Command line arguments to pass to the script
+        timeout: Maximum execution time in seconds
+        error_prefix: Prefix for error messages
         
     Returns:
-        Dictionary with gripper width information:
-        - fully_open_width: Gripper width when fully open (110.0)
-        - fully_closed_width: Gripper width when fully closed (9.0)
-        - current_width: Current gripper width
-        - status: "success" or "error"
+        Dictionary with execution results, including parsed JSON if available
     """
     try:
         import subprocess
+        import os
         import re
         
-        # Gripper width constants
-        FULLY_OPEN_WIDTH = 110.0
-        FULLY_CLOSED_WIDTH = 9.0
+        # Path to primitives directory
+        primitives_dir = "/home/aaugus11/Documents/ros-mcp-server/primitives"
+        script_path = os.path.join(primitives_dir, script_name)
         
-        # Run the verify_grasp.py script
-        script_path = "/home/aaugus11/Documents/ros-mcp-server/primitives/verify_grasp.py"
-        cmd = f"source /opt/ros/humble/setup.bash && source ~/Desktop/ros2_ws/install/setup.bash && python {script_path} {timeout}"
+        # Check if script exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "message": f"{error_prefix}: Script not found: {script_path}"
+            }
         
+        # Build command with ROS2 environment sourcing
+        cmd = f"""
+source /opt/ros/humble/setup.bash
+source ~/Desktop/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=0
+cd {primitives_dir}
+/usr/bin/python3 {script_name} {args}
+"""
+        
+        # Run with bash shell to source environment
         result = subprocess.run(
             cmd,
             shell=True,
             executable='/bin/bash',
             capture_output=True,
             text=True,
-            timeout=timeout + 5
+            timeout=timeout
         )
         
+        # Try to parse JSON output if present (for scripts like control_gripper.py)
+        json_result = None
+        if result.stdout:
+            # Look for JSON markers: __RESULT_JSON__ ... __END_RESULT_JSON__
+            json_match = re.search(r'__RESULT_JSON__\s*\n(.*?)\n__END_RESULT_JSON__', result.stdout, re.DOTALL)
+            if json_match:
+                try:
+                    json_result = json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+        
+        # Build response
         if result.returncode == 0:
-            # Parse the output to extract current width
-            output = result.stdout.strip()
-            current_width = None
-            
-            # Look for the current width line
-            for line in output.split('\n'):
-                if 'Gripper current width:' in line:
-                    try:
-                        current_width = float(line.split(':')[1].strip())
-                        break
-                    except (ValueError, IndexError):
-                        pass
-            
-            if current_width is not None:
-                return {
-                    "status": "success",
-                    "fully_open_width": FULLY_OPEN_WIDTH,
-                    "fully_closed_width": FULLY_CLOSED_WIDTH,
-                    "current_width": current_width,
-                    "raw_output": output
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Could not parse current width from output: {output}",
-                    "raw_output": output
-                }
-        else:
-            return {
-                "status": "error",
-                "message": f"Script failed with return code {result.returncode}",
-                "stderr": result.stderr.strip() if result.stderr else None,
-                "stdout": result.stdout.strip() if result.stdout else None
+            response = {
+                "status": "success",
+                "message": f"{error_prefix} completed successfully",
+                "script_path": script_path
             }
+            
+            # Add parsed JSON result if available
+            if json_result:
+                response.update(json_result)
+                # Map script's result format to our status format
+                if "result" in json_result:
+                    if json_result["result"] == "success":
+                        response["status"] = "success"
+                    elif json_result["result"] == "failure":
+                        response["status"] = "error"
+                        response["message"] = json_result.get("error", f"{error_prefix} failed")
+            else:
+                # No JSON output, include stdout/stderr
+                if result.stdout:
+                    response["output"] = result.stdout.strip()
+                if result.stderr:
+                    response["stderr"] = result.stderr.strip()
+            
+            return response
+        else:
+            # Script failed
+            error_msg = f"{error_prefix} failed"
+            if json_result and "error" in json_result:
+                error_msg = json_result["error"]
+            elif result.stderr:
+                error_msg = result.stderr.strip()
+            
+            response = {
+                "status": "error",
+                "message": error_msg,
+                "script_path": script_path,
+                "return_code": result.returncode
+            }
+            
+            # Include parsed JSON if available
+            if json_result:
+                response.update(json_result)
+            else:
+                if result.stdout:
+                    response["output"] = result.stdout.strip()
+                if result.stderr:
+                    response["stderr"] = result.stderr.strip()
+            
+            return response
             
     except subprocess.TimeoutExpired:
         return {
             "status": "error",
-            "message": f"Script timed out after {timeout + 5} seconds"
+            "message": f"{error_prefix} timed out after {timeout} seconds",
+            "script_name": script_name
         }
     except Exception as e:
         return {
             "status": "error",
-            "message": f"Unexpected error: {str(e)}"
+            "message": f"{error_prefix} error: {str(e)}",
+            "script_name": script_name,
+            "traceback": traceback.format_exc()
         }
+
+@mcp.tool()
+def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
+    """Control gripper
+
+    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (range of width in mm).
+
+    Args:
+        command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
+        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
+
+    """
+    return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 def _get_all_mcp_tools():
     """
@@ -2349,28 +2279,44 @@ def update_yolo_prompts(color_map: dict):
                        "YOLO_WRONG_LABEL": "actual_object_name",
                        "YOLO_WRONG_LABEL": "actual_object_name"
                    }
+                   
+                   ⚠️ CRITICAL FOR COLORED BLOCKS: When mapping colored blocks, you MUST use the pattern:
+                   "{color} object" → "{color} block" (e.g., "red object" → "red block", "blue object" → "blue block")
+                   Do NOT use the wrong YOLO label directly. Extract the color and use "{color} object" as the key.
     
     Returns:
         Dictionary with service call results
         
     Examples:
-        # Looking at annotated image, YOLO detected:
-        # - "cork" (but it's actually a jenga block)
-        # - "matchbox" (but it's actually a red block)  
-        # - "envelope" (but it's actually a blue block)
-        # - "first-aid kit" (but it's actually a white box)
-        
+        # Example 1: Correct format for colored blocks
+        # YOLO detected "lip balm" but it's actually a red block
+        # You MUST use "red object" → "red block" (not "lip balm" → "red block")
         update_yolo_prompts({
-            "cork": "jenga block",           # YOLO said "cork" → Actually "jenga block"
-            "first-aid kit": "white box",    # YOLO said "first-aid kit" → Actually "white box"
-            "envelope": "blue block",        # YOLO said "envelope" → Actually "blue block"
-            "clipboard": "red block"         # YOLO said "clipboard" → Actually "red block"
+            "document": "white box",
+            "red object": "red block",      # ✅ CORRECT: Use "{color} object" pattern
+            "blue object": "blue block"     # ✅ CORRECT: Use "{color} object" pattern
+        })
+        
+        # Example 2: WRONG - Don't use the wrong YOLO label for colored blocks
+        # ❌ WRONG: {"lip balm": "red block", "bookmark": "blue block"}
+        # ✅ CORRECT: {"red object": "red block", "blue object": "blue block"}
+        
+        # Example 3: Mixed mappings (colored blocks vs other objects)
+        update_yolo_prompts({
+            "document": "white box",         # ✅ OK: Not a colored block, use YOLO label
+            "cork": "jenga block",           # ✅ OK: Not a colored block, use YOLO label
+            "red object": "red block",       # ✅ CORRECT: Colored block, use "{color} object"
+            "blue object": "blue block"     # ✅ CORRECT: Colored block, use "{color} object"
         })
         
         # Step-by-step for VLM:
         # 1. Look at ANNOTATED image - read the wrong labels YOLO put on each object
         # 2. Look at ORIGINAL image - identify what each object actually is
-        # 3. Create mapping: color_map[wrong_yolo_label] = actual_object_name
+        # 3. For colored blocks (red block, blue block, green block, etc.):
+        #    - Extract the color from the actual object name
+        #    - Use "{color} object" as the KEY (e.g., "red object", "blue object")
+        #    - Use "{color} block" as the VALUE (e.g., "red block", "blue block")
+        # 4. For non-colored objects, use the YOLO wrong label directly
     """
     try:
         import subprocess
@@ -2515,17 +2461,44 @@ def move_to_safe_height(safe_height: float = 0.481) -> Dict[str, Any]:
         cleaned_output = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', cleaned_output)  # Remove other escape sequences
         cleaned_output = re.sub(r'[^\x20-\x7E\n\r]', '', cleaned_output)  # Keep only printable ASCII and newlines
         
-        # Find the YAML content between the --- markers
-        yaml_start = cleaned_output.find('---')
-        yaml_end = cleaned_output.rfind('---')
-        
-        if yaml_start != -1 and yaml_end != -1 and yaml_end > yaml_start:
-            yaml_content = cleaned_output[yaml_start:yaml_end].strip()
-        else:
-            yaml_content = cleaned_output.strip()
-        
-        # Parse the YAML output
-        data = yaml.safe_load(yaml_content)
+        # Parse the YAML output - handle multiple documents by taking the last one
+        data = None
+        try:
+            # Try loading all YAML documents and take the last one (the actual message)
+            documents = list(yaml.safe_load_all(cleaned_output))
+            if documents:
+                # Find the last document that has pose data
+                for doc in reversed(documents):
+                    if doc and isinstance(doc, dict) and 'pose' in doc:
+                        data = doc
+                        break
+                # If no document with pose found, use the last document
+                if data is None:
+                    data = documents[-1]
+        except yaml.YAMLError as e:
+            # If safe_load_all fails, try to extract YAML content manually
+            # Find the last YAML document between --- markers
+            yaml_parts = cleaned_output.split('---')
+            if len(yaml_parts) > 1:
+                # Take the last part that looks like YAML
+                for part in reversed(yaml_parts):
+                    part = part.strip()
+                    if part and ('pose:' in part or 'position:' in part):
+                        try:
+                            data = yaml.safe_load(part)
+                            if data and 'pose' in data:
+                                break
+                        except yaml.YAMLError:
+                            continue
+            # Final fallback: try safe_load on entire output
+            if data is None:
+                try:
+                    data = yaml.safe_load(cleaned_output)
+                except yaml.YAMLError:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to parse YAML output: {str(e)}. Output preview: {cleaned_output[:200]}"
+                    }
         
         if 'pose' not in data:
             return {
