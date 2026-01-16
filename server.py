@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP, Image, Context
 from mcp.server.session import ServerSession
 from pydantic import BaseModel, Field
-from typing import List, Any, Optional, Union, Literal
+from typing import List, Any, Optional, Union, Literal, Dict
 from pathlib import Path
 import json
 import base64
@@ -32,6 +32,12 @@ from scipy.spatial.transform import Rotation as R
 import traceback
 import re
 
+# Type aliases for consistent parameter types
+Mode = Literal["sim", "real"]
+GripperCommand = Literal["open", "close", "half-open"]
+MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
+MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
+TranslateAction = Literal["move_to_base", "move_down", "move_to_safe_height", "move_away_from_base"]
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -830,44 +836,44 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ## ############################################################################################## ##
 
 @mcp.tool()
-def get_available_objects(mode: str = "sim") -> Dict[str, Any]:
+def get_available_objects(mode: Mode = "sim") -> Dict[str, Any]:
     """Get list of available object names from ROS topic.
-    
+
     Args:
-        mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
-    
+        mode: Robot mode
+
     Returns:
         JSON output containing list of available object names
     """
     return _run_query("get_available_objects.py", f"--mode {mode}", timeout=10, error_prefix="Get available objects")
 
 @mcp.tool()
-def get_available_grasp_ids(mode: str = "sim") -> Dict[str, Any]:
+def get_available_grasp_ids(mode: Mode = "sim") -> Dict[str, Any]:
     """Get available grasp IDs per object from ROS topic.
-    
+
     Args:
-        mode: Mode to use - "sim" for simulation (reads from /grasp_points_sim) or "real" for real robot (reads from /grasp_points_real) (default: "sim")
-    
+        mode: Robot mode
+
     Returns:
         JSON output containing available grasp IDs per object
     """
     return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
 
 @mcp.tool()
-def get_target_object_pose(object_name: str, base_name: str, mode: str = "sim") -> Dict[str, Any]:
+def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
     """Get target object pose in world frame from assembly configuration.
-    
+
     Calculates the target object pose in world frame by:
     1. Loading assembly configuration from JSON
     2. Reading base pose (from ROS topic in sim mode, or using default in real mode)
     3. Extracting target position and orientation from JSON (relative to base)
     4. Transforming target pose from base frame to world frame
-    
+
     Args:
         object_name: Name of the object
         base_name: Name of the base object
-        mode: Mode to use - "sim" for simulation (reads base pose from topic) or "real" for real robot (uses default base pose) (default: "sim")
-    
+        mode: Robot mode
+
     Returns:
         JSON output containing the target object pose in world frame (position and orientation)
     """
@@ -875,14 +881,14 @@ def get_target_object_pose(object_name: str, base_name: str, mode: str = "sim") 
     return _run_query("get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
 
 @mcp.tool()
-def get_current_object_pose(object_name: Optional[str] = None, mode: str = "sim", all: bool = False) -> Dict[str, Any]:
+def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim", all: bool = False) -> Dict[str, Any]:
     """Get current object pose(s) from ROS topic.
-    
+
     Args:
-        object_name: Optional name of the object to get pose for. If not provided and all is False, returns pose for this object. If all is True, this parameter is ignored.
-        mode: Mode to use - "sim" for simulation (reads from /objects_poses_sim) or "real" for real robot (reads from /objects_poses_real) (default: "sim")
-        all: If True, returns poses for all objects. Mutually exclusive with object_name.
-    
+        object_name: Name of the object to get pose for (ignored if all=True)
+        mode: Robot mode
+        all: If True, returns poses for all objects
+
     Returns:
         JSON output containing the current object pose(s) (position and orientation)
     """
@@ -906,15 +912,12 @@ def move_home() -> Dict[str, Any]:
     return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
 
 @mcp.tool()
-def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
-    """Control gripper
-
-    Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (range of width in mm).
+def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[str, Any]:
+    """Control gripper.
 
     Args:
-        command: Gripper command - "open", "close", "half-open" (30mm), or numeric value 0-110 (width in mm)
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-
+        command: Gripper action or numeric width 0-110 mm
+        mode: Robot mode
     """
     return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
@@ -935,146 +938,92 @@ def scan_workspace(object_name: str) -> Dict[str, Any]:
     return _run_primitive("scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
 @mcp.tool()
-def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_object: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
+def move_to_grasp(object_name: str, grasp_id: int, action: MoveToGraspAction, mode: Mode = "sim") -> Dict[str, Any]:
     """Move to grasp position.
-    This tool is used to move to the grasp an object. And once the object is grasped, you can move to the safe height.
-    REQUIRED: At least one flag must be set to True.
 
     Args:
         object_name: Name of the object to grasp
         grasp_id: ID of the grasp point to use
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        move_to_object: Moves to the specified grasp point
-        move_to_safe_height: After closing gripper move to safe height 
+        action: move_to_object or move_to_safe_height (call separately for each step)
+        mode: Robot mode
     """
-    # Validate that at least one flag is set
-    if not (move_to_object or move_to_safe_height):
-        return {"output": "Error: At least one of move_to_object or move_to_safe_height must be set to True"}
-    
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
-    if move_to_object:
-        cmd += " --move-to-object"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
-    
+    cmd += f" --{action.replace('_', '-')}"
     return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
-def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_ee_top_down: bool = False) -> Dict[str, Any]:
+def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str, Any]:
     """Move to regrasp position.
-    
-    Purpose: After rotating an object relative to base, the end effector (EE) holding the object may be in a non-optimal orientation that causes inverse kinematics (IK) failures. But since the object has to be in that specific orientaion in order to perform the assembly,  this tool helps in placing the already-rotated object down and enables regrasping it using a top-down EE orientation.
-    How it works: The object maintains its final orientation, but the EE orientation changes to top-down. This improves IK success rates for subsequent operations while preserving the object's desired orientation.
 
-    IMPORTANT: Only ONE flag can be set to True at a time. These flags must be called in sequence one by one to complete the move to regrasp sequence.
-    
-    Workflow: After calling move_to_regrasp tool, complete the regrasp sequence by:
-    1. Calling move_to_grasp to grasp the object again using the same id as before.
-    2. Calling rotate_object to restore the object's intended orientation (required because placing the object down may cause slight orientation changes)
-        
+    Purpose: After rotating an object, the EE may be in a non-optimal orientation causing IK failures.
+    This tool places the rotated object down and enables regrasping with a top-down EE orientation.
+
+    Workflow: Call actions in sequence, then:
+    1. Call move_to_grasp to grasp the object again
+    2. Call rotate_object to restore the object's orientation
+
     Args:
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        move_to_clear_space: This is to move above a clear space maintaining the current orientation of the object.
-        move_down: This is a force compliant move down to place the object on the clear space. Note: After moving down and opening the gripper, the object's orientation might have changed slightly by a few degrees. Rotate the object to account for this after grasping the object again.
-        move_ee_top_down: This is to move the end effector to a top-down orientation at safe height after having opened the gripper. Now you are ready to grasp the object again.
+        action: Which step to perform (move_to_clear_space, move_down, or move_ee_top_down)
+        mode: Robot mode
     """
-    # Count how many flags are set
-    flags_set = sum([move_to_clear_space, move_down, move_ee_top_down])
-    
-    # Validate that exactly one flag is set
-    if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_clear_space, move_down, or move_ee_top_down must be set to True"}
-    elif flags_set > 1:
-        return {"output": "Error: Only one flag can be set at a time. Set exactly one of move_to_clear_space, move_down, or move_ee_top_down to True"}
-    
-    cmd = f"--mode {mode}"
-    if move_to_clear_space:
-        cmd += " --move-to-clear-space"
-    if move_down:
-        cmd += " --move-down"
-    if move_ee_top_down:
-        cmd += " --move-ee-top-down"
-    
+    cmd = f"--mode {mode} --{action.replace('_', '-')}"
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
-def translate_object(mode: str, base_name: Optional[str] = None, object_name: Optional[str] = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, move_away_from_base: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
+def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Optional[str] = None, object_name: Optional[str] = None, use_default_base_position: bool = False) -> Dict[str, Any]:
     """Translate object to target position.
-    Moves object to target position for performing assembly onto the base. This tool maintains the object's current orientation throughout the process.
-    REQUIRED: Exactly one of move_to_base, move_down, move_to_safe_height, or move_away_from_base must be set to True (they are mutually exclusive).
+
+    Moves object to target position for assembly. Maintains object's current orientation.
 
     Args:
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        base_name: Name of the base object. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height and move_away_from_base.
-        object_name: Name of the object being held. REQUIRED in sim mode when using move_to_base or move_down. Optional for move_to_safe_height and move_away_from_base.
-        move_to_base: Translates object above base position maintaining safe height (exactly one flag must be True)
-        move_down: Moves down to the final target object position. VERIFY if the object is in the target object orientation before this final step. (exactly one flag must be True)
-        move_to_safe_height: After moving down and opening gripper, move to safe height (exactly one flag must be True)
-        move_away_from_base: Translates object away from the base. Call this only after closing gripper to secure the object using the end effector at safeheight. Open gripper after moving to clear area to release the object. (exactly one flag must be True)
-        use_default_base_position: Use default base position and orientation (for real mode)
+        action: Which step to perform
+        mode: Robot mode
+        base_name: Required for move_to_base/move_down in sim mode
+        object_name: Required for move_to_base/move_down in sim mode
+        use_default_base_position: Use default base position (for real mode)
 
     Returns:
-        Dictionary with "output" (raw output), "returncode" (exit code), and "result" ("SUCCESS" or "FAILURE")
+        Dictionary with output and result
     """
-    # Validate that exactly one flag is set
-    flags_set = sum([move_to_base, move_down, move_to_safe_height, move_away_from_base])
-    if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_base, move_down, move_to_safe_height, or move_away_from_base must be set to True"}
-    elif flags_set > 1:
-        return {"output": "Error: move_to_base, move_down, move_to_safe_height, and move_away_from_base are mutually exclusive. Set exactly one to True"}
-
-    # Validate sim mode requirements
-    if mode == "sim":
-        if move_to_safe_height or move_away_from_base:
-            # move_to_safe_height and move_away_from_base don't require object_name or base_name
-            pass
-        else:
-            if object_name is None:
-                return {"output": "Error: object_name is required in sim mode"}
-            if base_name is None and (move_to_base or move_down):
-                return {"output": "Error: base_name is required when using move_to_base or move_down in sim mode"}
+    # Validate sim mode requirements for certain actions
+    if mode == "sim" and action in ["move_to_base", "move_down"]:
+        if object_name is None:
+            return {"output": "Error: object_name is required in sim mode for this action"}
+        if base_name is None:
+            return {"output": "Error: base_name is required in sim mode for this action"}
 
     cmd = f"--mode {mode}"
     if object_name is not None:
         cmd += f" --object-name \"{object_name}\""
     if base_name is not None:
         cmd += f" --base-name \"{base_name}\""
-    if move_to_base:
-        cmd += " --move-to-base"
-    if move_down:
-        cmd += " --move-down"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
-    if move_away_from_base:
-        cmd += " --move-away-from-base"
+    cmd += f" --{action.replace('_', '-')}"
     if use_default_base_position:
         cmd += " --use-default-base-position"
 
-    # Adjust timeout based on operation
-    # For move_down (perform_insert), use a long timeout to let it complete naturally
-    # The alignment_stop_timeout (10s) in perform_insert will handle stopping the alignment phase
-    # 900s (15 min) allows for: search phase + alignment phase (max 10s) + any delays
-    if move_down:
+    # Adjust timeout based on action
+    if action == "move_down":
         timeout = 300
-    elif move_to_safe_height or move_away_from_base:
-        timeout = 60  # Safe height and clear area movements are relatively quick
+    elif action in ["move_to_safe_height", "move_away_from_base"]:
+        timeout = 60
     else:
         timeout = 90
 
     return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
 @mcp.tool()
-def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
+def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
     """Rotate object for assembly.
-    Rotates object from current to target object orientation relative to current base orientation for assembly by controlling the End effector orientation that holds the object.
+
+    Rotates object from current to target orientation relative to base orientation.
+
     Args:
         object_name: Name of the object to rotate
         base_name: Name of the base object
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode and always use the orientation of the object you got after moving to grasp the object because the object might not be visible in the camera after moving to grasp the object.)
-        target_base_orientation: Target base orientation quaternion [x, y, z, w] (required in real mode unless use_default_base_orientation is True, optional in sim mode)
-        use_default_base_orientation: Use default base orientation [0.0, 0.0, 0.0, 1.0] (for real mode, mutually exclusive with target_base_orientation)
-
+        mode: Robot mode
+        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode)
+        target_base_orientation: Target base orientation quaternion [x, y, z, w] (optional in sim mode)
+        use_default_base_orientation: Use default base orientation [0, 0, 0, 1] (for real mode)
     """
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
@@ -1093,19 +1042,18 @@ def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_o
 
 
 @mcp.tool()
-def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
+def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
     """Verify if object is within grasp radius from gripper center.
-    
-    This tool checks if an object is successfully grasped by verifying that the object position
-    is within a 6cm radius from the gripper center position in all directions.
+
+    Checks if object position is within 6cm radius from gripper center.
     Only call this tool after moving to safe height.
-    
+
     Args:
         object_name: Name of the object to verify
-        mode: Mode to use - "sim" for simulation or "real" for real robot (default: "sim")
-    
+        mode: Robot mode
+
     Returns:
-        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
+        Dictionary with result (success or failure)
     """
     primitive_result = _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
 
