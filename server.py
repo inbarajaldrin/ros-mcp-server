@@ -135,170 +135,170 @@ class TimeoutError(Exception):
 def timeout_handler(signum, frame):
     raise TimeoutError("Operation timed out")
 
-@mcp.tool(description="Capture camera image from any topic and return it so the agent can see and analyze it.")
-def capture_camera_image(topic_name: str, timeout: int = 10):
-    """
-    Capture camera image using any camera topic.
-    Returns a list with status info and the image that the agent can see.
-    
-    Args:
-        topic_name: The ROS topic to subscribe to
-        timeout: Timeout in seconds for image capture
-    """
-    result_json = {
-        "timestamp": datetime.now().isoformat(),
-        "topic": topic_name,
-        "status": "attempting"
-    }
-    
-    try:
-        # Set up timeout
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout)
-        
-        # First, unsubscribe from the topic to clear any buffered/stale messages
-        # This ensures we get a fresh image on the next subscription
-        try:
-            unsubscribe_msg = {
-                "op": "unsubscribe",
-                "topic": topic_name
-            }
-            ws_manager.send(unsubscribe_msg)
-            # Small delay to ensure unsubscribe is processed
-            time.sleep(0.1)
-            
-            # Flush any pending messages from the WebSocket buffer
-            # This ensures we don't get stale messages from previous subscriptions
-            ws_manager.flush_pending_messages(timeout=0.1)
-        except Exception as e:
-            # If unsubscribe fails, continue anyway - might not be subscribed
-            pass
-        
-        # Create dynamic image subscriber for the specified topic
-        image_subscriber = RosImage(ws_manager, topic=topic_name)
-        
-        # Subscribe and get image data with timeout
-        msg = image_subscriber.subscribe(timeout=timeout)
-        
-        # Cancel timeout
-        signal.alarm(0)
-        
-        # Unsubscribe after getting the image to prevent message buffering
-        try:
-            unsubscribe_msg = {
-                "op": "unsubscribe",
-                "topic": topic_name
-            }
-            ws_manager.send(unsubscribe_msg)
-        except Exception as e:
-            # If unsubscribe fails, continue anyway
-            pass
-        
-        result_json["status"] = "success"
-        
-        if msg is not None and 'data' in msg:
-            image_data = msg['data']
-            
-            # Convert the image data to numpy array (RGB format)
-            # Handle different data types and formats
-            if isinstance(image_data, np.ndarray):
-                # Ensure proper format for RGB conversion
-                if len(image_data.shape) == 3:
-                    if image_data.shape[2] == 3:
-                        # Already RGB or BGR - assume RGB
-                        arr_rgb = image_data.astype(np.uint8)
-                    elif image_data.shape[2] == 4:
-                        # RGBA to RGB
-                        arr_rgb = image_data[:, :, :3].astype(np.uint8)
-                    else:
-                        raise Exception(f"Unsupported number of channels: {image_data.shape[2]}")
-                elif len(image_data.shape) == 2:
-                    # Grayscale - convert to RGB
-                    gray = image_data.astype(np.uint8)
-                    arr_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-                else:
-                    raise Exception(f"Unsupported image shape: {image_data.shape}")
-            else:
-                raise Exception(f"Unexpected data type: {type(image_data)}. Expected numpy array.")
-            
-            # Use the working conversion function
-            mcp_image = _np_to_mcp_image(arr_rgb)
-            
-            # Save backup screenshot with topic-specific naming
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Clean topic name for filename
-            topic_clean = topic_name.replace("/", "_").replace(":", "_")
-            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-            filename = os.path.join(SCREENSHOTS_DIR, f"{timestamp}_{topic_clean}.jpg")
-            bgr_image = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(filename, bgr_image)
-            
-            result_json["message"] = f"Image captured from {topic_name}"
-            result_json["saved_to"] = filename
-            
-            # Add metadata from the message if available
-            if 'metadata' in msg:
-                result_json["image_metadata"] = msg['metadata']
-            
-            # Return in robot_MCP pattern: [json, image]
-            return [result_json, mcp_image]
-            
-        else:
-            # No live data, try to use latest screenshot
-            result_json["status"] = "fallback"
-            result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
-            
-            try:
-                if os.path.exists(SCREENSHOTS_DIR):
-                    files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-                    if files:
-                        latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-                        with open(latest_file, 'rb') as f:
-                            raw_data = f.read()
-                        mcp_image = Image(data=raw_data, format="jpeg")
-                        result_json["used_screenshot"] = files[-1]
-                        return [result_json, mcp_image]
-            except Exception as e:
-                result_json["screenshot_error"] = str(e)
-            
-            raise Exception(f"No image data received from {topic_name} and no screenshots available")
-            
-    except TimeoutError:
-        signal.alarm(0)  # Cancel alarm
-        error_result = {
-            "timestamp": datetime.now().isoformat(),
-            "topic": topic_name,
-            "status": "timeout",
-            "error": f"Image capture timed out after {timeout} seconds"
-        }
-        
-        # Try fallback to screenshot
-        try:
-            if os.path.exists(SCREENSHOTS_DIR):
-                files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-                if files:
-                    latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-                    with open(latest_file, 'rb') as f:
-                        raw_data = f.read()
-                    mcp_image = Image(data=raw_data, format="jpeg")
-                    error_result["status"] = "timeout_fallback"
-                    error_result["message"] = "Timed out, using latest screenshot"
-                    error_result["used_screenshot"] = files[-1]
-                    return [error_result, mcp_image]
-        except:
-            pass
-            
-        return [error_result]
-        
-    except Exception as e:
-        signal.alarm(0)  # Cancel alarm
-        error_result = {
-            "timestamp": datetime.now().isoformat(),
-            "topic": topic_name,
-            "status": "error",
-            "error": str(e)
-        }
-        return [error_result]
+# @mcp.tool(description="Capture camera image from any topic and return it so the agent can see and analyze it.")
+# def capture_camera_image(topic_name: str, timeout: int = 10):
+#     """
+#     Capture camera image using any camera topic.
+#     Returns a list with status info and the image that the agent can see.
+#
+#     Args:
+#         topic_name: The ROS topic to subscribe to
+#         timeout: Timeout in seconds for image capture
+#     """
+#     result_json = {
+#         "timestamp": datetime.now().isoformat(),
+#         "topic": topic_name,
+#         "status": "attempting"
+#     }
+#
+#     try:
+#         # Set up timeout
+#         signal.signal(signal.SIGALRM, timeout_handler)
+#         signal.alarm(timeout)
+#
+#         # First, unsubscribe from the topic to clear any buffered/stale messages
+#         # This ensures we get a fresh image on the next subscription
+#         try:
+#             unsubscribe_msg = {
+#                 "op": "unsubscribe",
+#                 "topic": topic_name
+#             }
+#             ws_manager.send(unsubscribe_msg)
+#             # Small delay to ensure unsubscribe is processed
+#             time.sleep(0.1)
+#
+#             # Flush any pending messages from the WebSocket buffer
+#             # This ensures we don't get stale messages from previous subscriptions
+#             ws_manager.flush_pending_messages(timeout=0.1)
+#         except Exception as e:
+#             # If unsubscribe fails, continue anyway - might not be subscribed
+#             pass
+#
+#         # Create dynamic image subscriber for the specified topic
+#         image_subscriber = RosImage(ws_manager, topic=topic_name)
+#
+#         # Subscribe and get image data with timeout
+#         msg = image_subscriber.subscribe(timeout=timeout)
+#
+#         # Cancel timeout
+#         signal.alarm(0)
+#
+#         # Unsubscribe after getting the image to prevent message buffering
+#         try:
+#             unsubscribe_msg = {
+#                 "op": "unsubscribe",
+#                 "topic": topic_name
+#             }
+#             ws_manager.send(unsubscribe_msg)
+#         except Exception as e:
+#             # If unsubscribe fails, continue anyway
+#             pass
+#
+#         result_json["status"] = "success"
+#
+#         if msg is not None and 'data' in msg:
+#             image_data = msg['data']
+#
+#             # Convert the image data to numpy array (RGB format)
+#             # Handle different data types and formats
+#             if isinstance(image_data, np.ndarray):
+#                 # Ensure proper format for RGB conversion
+#                 if len(image_data.shape) == 3:
+#                     if image_data.shape[2] == 3:
+#                         # Already RGB or BGR - assume RGB
+#                         arr_rgb = image_data.astype(np.uint8)
+#                     elif image_data.shape[2] == 4:
+#                         # RGBA to RGB
+#                         arr_rgb = image_data[:, :, :3].astype(np.uint8)
+#                     else:
+#                         raise Exception(f"Unsupported number of channels: {image_data.shape[2]}")
+#                 elif len(image_data.shape) == 2:
+#                     # Grayscale - convert to RGB
+#                     gray = image_data.astype(np.uint8)
+#                     arr_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+#                 else:
+#                     raise Exception(f"Unsupported image shape: {image_data.shape}")
+#             else:
+#                 raise Exception(f"Unexpected data type: {type(image_data)}. Expected numpy array.")
+#
+#             # Use the working conversion function
+#             mcp_image = _np_to_mcp_image(arr_rgb)
+#
+#             # Save backup screenshot with topic-specific naming
+#             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#             # Clean topic name for filename
+#             topic_clean = topic_name.replace("/", "_").replace(":", "_")
+#             os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+#             filename = os.path.join(SCREENSHOTS_DIR, f"{timestamp}_{topic_clean}.jpg")
+#             bgr_image = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
+#             cv2.imwrite(filename, bgr_image)
+#
+#             result_json["message"] = f"Image captured from {topic_name}"
+#             result_json["saved_to"] = filename
+#
+#             # Add metadata from the message if available
+#             if 'metadata' in msg:
+#                 result_json["image_metadata"] = msg['metadata']
+#
+#             # Return in robot_MCP pattern: [json, image]
+#             return [result_json, mcp_image]
+#
+#         else:
+#             # No live data, try to use latest screenshot
+#             result_json["status"] = "fallback"
+#             result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
+#
+#             try:
+#                 if os.path.exists(SCREENSHOTS_DIR):
+#                     files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
+#                     if files:
+#                         latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
+#                         with open(latest_file, 'rb') as f:
+#                             raw_data = f.read()
+#                         mcp_image = Image(data=raw_data, format="jpeg")
+#                         result_json["used_screenshot"] = files[-1]
+#                         return [result_json, mcp_image]
+#             except Exception as e:
+#                 result_json["screenshot_error"] = str(e)
+#
+#             raise Exception(f"No image data received from {topic_name} and no screenshots available")
+#
+#     except TimeoutError:
+#         signal.alarm(0)  # Cancel alarm
+#         error_result = {
+#             "timestamp": datetime.now().isoformat(),
+#             "topic": topic_name,
+#             "status": "timeout",
+#             "error": f"Image capture timed out after {timeout} seconds"
+#         }
+#
+#         # Try fallback to screenshot
+#         try:
+#             if os.path.exists(SCREENSHOTS_DIR):
+#                 files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
+#                 if files:
+#                     latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
+#                     with open(latest_file, 'rb') as f:
+#                         raw_data = f.read()
+#                     mcp_image = Image(data=raw_data, format="jpeg")
+#                     error_result["status"] = "timeout_fallback"
+#                     error_result["message"] = "Timed out, using latest screenshot"
+#                     error_result["used_screenshot"] = files[-1]
+#                     return [error_result, mcp_image]
+#         except:
+#             pass
+#
+#         return [error_result]
+#
+#     except Exception as e:
+#         signal.alarm(0)  # Cancel alarm
+#         error_result = {
+#             "timestamp": datetime.now().isoformat(),
+#             "topic": topic_name,
+#             "status": "error",
+#             "error": str(e)
+#         }
+#         return [error_result]
 
 @mcp.tool()
 def read_topic(topic_name: str, timeout: int = 5):
