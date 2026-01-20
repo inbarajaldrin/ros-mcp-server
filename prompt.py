@@ -3,132 +3,106 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("Prompts")
 
 @mcp.prompt()
-def phase_1_identify_accessible_grasp_ids() -> str:
+def phase_1_disassembly_sequence_discovery() -> str:
     """
-    Returns a prompt for identifying accessible grasp ids in a simulation environment.
-    """
-    return f"""**Initialize:**
-
-You are working in a sim environment
-Identify available objects and their grasp ids.
-Save scene state
-
-**Task**
-
-Your task is to find which grasp ids are accessible per object and if we need to perform half open before moving to grasp.
-
-**Execution**
-
-Use the tools to find the right control gripper mode for each grasp id of each object.
-Gripper is in open mode by default. But for some objects in the scene, the gripper needs to be half open before accessing that specific grasp id.
-And some grasp ids are not accesible at all.
-Verify if the object is actually grabbed by moving to safe height and using verify_grasp.
-Once you've found information about a grasp id for an object save it to grasp logs. Save both SUCCESS and FAILURE.
-If it was a FAILURE, restore scene state.
-Perform the tasks using individual tools to figure out a working sequence of tool calls. 
-Only after you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
-DO NOT orchestrate the tools to perform a composed policy until you have figured out a working sequence for one object wth a grasp id.
-
-**Verification**
-
-> To verify if a grasp was successful:
-> After moving to safe height, use `verify_grasp` to check if the object is within 6cm radius from the gripper center:
-> - **SUCCESS**: verify_grasp returns success (object is within grasp radius)
-> - **FAILURE**: verify_grasp returns failure (object is outside grasp radius) - the object was not successfully grasped
-
-**Output**
-Use `write_object_grasp_resource(assembly_id, object_name, grasp_configs)` to log each attempt.
-Each config should have: {{"grasp_id": <int>, "gripper_state": "open"|"half-open", "result": "SUCCESS"|"FAILURE"}}
-Resource endpoint: Assembly{{assembly_id}}/object_name/{{object_name}}/grasp_configs/result/{{result}}"""
-
-@mcp.prompt()
-def phase_2_identify_grasp_id_per_object() -> str:
-    """
-    Returns a prompt for performing disassembly and identifying grasp id per object in a simulation environment.
+    Returns a prompt for Phase 1: Disassembly sequence discovery in a simulation environment.
     """
     return """**Initialize:**
 
-You are working in a sim environment
+You are working in a sim environment.
 Find the objects available in the scene. Save scene.
-Read object grasp log resource to identify accessible grasp ids out of the available ones.
+Identify available objects and their grasp ids.
 You will be provided the fully assembled assembly in the scene.
 
 **Task**
 
-Your goal is to dissassemble the assembly there by figuring out which of the grasp ids out of the accessible grasp ids let you perform the dissassembly. 
-You can refer the instruction manual to figure out the sequence in which you need to dissassemble them. 
+Your goal is to disassemble the assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly.
+You can refer to the instruction manual to figure out the sequence in which you need to disassemble them.
 The information you collect in this run will be used later to perform assembly.
 
 **Execution**
 
-Use existing tools to perform disassembly one object at a time. 
-Half open the gripper before moving to grasp any object, accounting for limited space when accessing the objects in the assembly.
-If it was a SUCCESS, save scene state and log the grasp id using which you were able to dissassemble that object. Move on to the next object.
-If it was a FAILURE, restore scene state and try a different grasp id of the same object.
+Use existing tools to perform disassembly one object at a time.
+Gripper is in open mode by default. Half open the gripper before moving to grasp any object, accounting for limited space when accessing the objects in the assembly.
+If the object was successfully disassembled, log the tool call sequence that worked and then save scene state and log the grasp id and gripper state using which you were able to disassemble that object. Move on to the next object.
+If it was a FAILURE, restore scene state and try a different grasp id or gripper state of the same object.
 Perform the tasks using individual tools to figure out a working sequence of tool calls for one object.
-Only after you have figured out a working seqeunce, you can orchestrate the tools to perform a composed policy.
-DO NOT orchestrate the tools to perform a composed policy until you have figured out a working sequence for one object wth a grasp id.
+Only after you have figured out a working sequence for successfully disassembling one object, you can orchestrate the tools to perform a composed policy.
 
 **Verification**
 
-> To verify if a disassembly was successful: run verify dissasembly once you think you've ran all tools required to move the object out of the assembly.
-> 1.**SUCCESS**: verify dissassembly returns success.
-> 2.**FAILURE**: If the grasp ids are out of reach then verify dissassembly will fail. 
+> To verify if a disassembly was successful: run verify disassembly once you think you've ran all tools required to move the object out of the assembly.
+> 1. **SUCCESS**: verify disassembly returns success.
+> 2. **FAILURE**: If the grasp ids are out of reach then verify disassembly will fail.s
 
 **Output**
-Use `write_disassembly_grasp_resource(assembly_id, object_name, grasp_configs)` to log each attempt.
-Each config should have: {{"grasp_id": <int>, "result": "SUCCESS"|"FAILURE"}} (no gripper_state)
-Resource endpoint: Disassembly{{assembly_id}}/object_name/{{object_name}}/grasp_configs/result/{{result}}"""
+
+Use `write_disassembly_tool_sequence(tool_sequence)` to log the tool call sequences needed to disassemble an object.
+tool_sequence: List of tool call strings in order (e.g., ["move_to_object", "move_down", "control_gripper --command close", ...])
+
+Use `write_disassembly_results(assembly_id, base_name, object_name, disassembly_order, trial)` to log each attempt.
+Each trial should have: {"trial_id": <int>, "grasp_id": <int>, "gripper_state": "open"|"half-open", "result": "success"|"failure"}"""
 
 @mcp.prompt()
-def phase_3_identify_assembly_sequence() -> str:
+def phase_2_assembly_sequence_discovery() -> str:
     """
-    Returns a prompt for performing assembly using grasp ids from disassembly log in a simulation environment.
+    Returns a prompt for Phase 2: Assembly sequence discovery with hypothesis formation in a simulation environment.
     """
     return """**Initialize:**
 
-You are working in a sim environment
+You are working in a sim environment.
 Find the objects available in the scene. Save scene.
-Read the disassembly log (generated by disassembling a fully assembled object) to identify the grasp ids that were successfully used per object during disassembly.
-Use only the grasp id from the disassembly grasp log to perform assembly. DO NOT try a different id.
-Identify the gripper state requried to access these ids per object from the grasp log.
+Read the disassembly results (generated by disassembling a fully assembled object) to identify the grasp ids that were successfully used per object during disassembly.
+Use only the grasp id from the disassembly results to perform assembly. DO NOT try a different id.
 
 **Task**
 
-You goal is to perform assembly of the objects scattered in the scene onto the base object based on the dissassembly data collected earlier. 
-The same tool sequence might not work for all objects. 
+Your goal is to perform assembly of the objects scattered in the scene onto the base object based on the disassembly data collected earlier.
+The same tool sequence might not work for all objects.
 
 **Execution**
 
 Read the tool descriptions properly and understand the underlying logic of the tools.
-Use available tools to perform assembly. 
+Use available tools to perform assembly.
 
 Half-open gripper after securing the object into the base as to not disturb the previously placed parts.
-If it was a SUCCESS, Make sure the previously placed object wasnt disturbed and record the tools and arguments executed in sequence, save scene state and move on to the next object.
-If it was a FAILURE, restore scene state and record the tools and arguments executed in sequence that didnt work and retry a different seqeuence you havent tried before.
-DO NOT orchestrate the tools to perform a composed policy. 
+If it was a SUCCESS, make sure the previously placed object wasn't disturbed and record the tools and arguments executed in sequence, save scene state and move on to the next object.
+If it was a FAILURE, restore scene state and record the tools and arguments executed in sequence that didn't work and retry a different sequence you haven't tried before.
+DO NOT orchestrate the tools to perform a composed policy.
 
 **Verification**
 
 > To verify if an assembly was successful: run verify assembly once you think you've ran all tools required to move the object into the fixed base.
-1.SUCCESS: verify assembly returns success.
-2.FAILURE: If the sequence of tool calls is not the right one then the assembly might fail.
+> 1. **SUCCESS**: verify assembly returns success.
+> 2. **FAILURE**: If the sequence of tool calls is not the right one then the assembly might fail.
 
 **Troubleshooting**
-If your having trouble, try reading the object pose before and after tool calls and compare against the target pose of the object and reason on what the tool does to the object and the end effector orientation.
+
+If you're having trouble, try reading the object pose before and after tool calls and compare against the target pose of the object and reason on what the tool does to the object and the end effector orientation.
 Read the tool description properly to not miss any details on how to use the tool.
 
+**Knowledge Formation**
+
+After completing assembly, analyze manipulation data to identify behavioral patterns.
+Form explicit hypotheses about patterns observed during the task.
+If there is an existing hypothesis, validate the sequence and if it works for a new assembly, promote the hypothesis to a rule.
+If you don't see any new patterns, continue without this step.
+
 **Output**
-Use `write_assembly_sequence_resource(assembly_id, object_name, sequence_id, assembled_into, tools_trials)` to log each trial.
-Each trial should have: {{"trial_id": <int>, "grasp_id": <int>, "tools": [<ordered list of tool names with flags>], "result": "SUCCESS"|"FAILURE", "comment": "<optional string>"}}
-Note: Gripper state is included in the tools sequence (e.g., "control_gripper --command open" or "control_gripper --command half-open")
+
+Use `write_assembly_results(assembly_id, base_name, object_name, assembly_order, trial)` to log each trial.
+Each trial should have: {"trial_id": <int>, "grasp_id": <int>, "tool_sequence": [<ordered list of tool names with flags>], "result": "success"|"failure", "comment": "<optional string>"}
+Note: Gripper state is included in the tool_sequence (e.g., "control_gripper --command open" or "control_gripper --command half-open")
 Note: Include flags in tool names if used (e.g., "translate_object --move-to-base", "move_to_grasp --move-to-object")
 Note: The "comment" field is optional and can be used to add notes about the trial
-The assembled_into parameter specifies what object/base all objects are being assembled into (e.g., "base", "part_a", etc.). This is stored once at the top level of the assembly log and should be the same for all objects in the assembly.
-Resource endpoint: Assembly{{assembly_id}}/sequence/{{object_name}}/tools_trials/result/{{result}}"""
+The assembly_order parameter specifies the fixed sequence position (assembly order).
+
+Use `write_knowledge(obs_id, observation, status, assembly_id)` to log knowledge base observations.
+status: "hypothesis" (unverified pattern from first assembly) or "rule" (validated across assemblies)
+Hypotheses can be promoted to rules upon validation in subsequent assemblies."""
 
 @mcp.prompt()
-def phase_4_perform_assembly_sequence(mode: str = "real") -> str:
+def phase_3_perform_assembly_sequence(mode: str = "real") -> str:
     """
     Returns a prompt for performing assembly based on assembly log data.
     
@@ -141,7 +115,7 @@ def phase_4_perform_assembly_sequence(mode: str = "real") -> str:
     return f"""**Initialize:**
 
 You are working in a {environment}.
-Read the assembly log to identify the objects you are dealing with.
+Read the assembly sequence log to identify the tool call sequences for each object to perform assembly.
 
 **Task**
 
