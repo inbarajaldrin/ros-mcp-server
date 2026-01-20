@@ -244,12 +244,51 @@ def timeout_handler(signum, frame):
 #             return [result_json, mcp_image]
 #
 #         else:
-#             # No live data - throw an error indicating topic isn't available
-#             raise Exception(f"Topic '{topic_name}' is not available or did not return image data")
+#             # No live data, try to use latest screenshot
+#             result_json["status"] = "fallback"
+#             result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
+#
+#             try:
+#                 if os.path.exists(SCREENSHOTS_DIR):
+#                     files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
+#                     if files:
+#                         latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
+#                         with open(latest_file, 'rb') as f:
+#                             raw_data = f.read()
+#                         mcp_image = Image(data=raw_data, format="jpeg")
+#                         result_json["used_screenshot"] = files[-1]
+#                         return [result_json, mcp_image]
+#             except Exception as e:
+#                 result_json["screenshot_error"] = str(e)
+#
+#             raise Exception(f"No image data received from {topic_name} and no screenshots available")
 #
 #     except TimeoutError:
 #         signal.alarm(0)  # Cancel alarm
-#         raise Exception(f"Topic '{topic_name}' timed out after {timeout} seconds - topic may not be available or publishing")
+#         error_result = {
+#             "timestamp": datetime.now().isoformat(),
+#             "topic": topic_name,
+#             "status": "timeout",
+#             "error": f"Image capture timed out after {timeout} seconds"
+#         }
+#
+#         # Try fallback to screenshot
+#         try:
+#             if os.path.exists(SCREENSHOTS_DIR):
+#                 files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
+#                 if files:
+#                     latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
+#                     with open(latest_file, 'rb') as f:
+#                         raw_data = f.read()
+#                     mcp_image = Image(data=raw_data, format="jpeg")
+#                     error_result["status"] = "timeout_fallback"
+#                     error_result["message"] = "Timed out, using latest screenshot"
+#                     error_result["used_screenshot"] = files[-1]
+#                     return [error_result, mcp_image]
+#         except:
+#             pass
+#
+#         return [error_result]
 #
 #     except Exception as e:
 #         signal.alarm(0)  # Cancel alarm
