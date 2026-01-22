@@ -40,7 +40,7 @@ def output_result(result):
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
-GRASP_DATA_DIR = get_aruco_data_dir() / "grasp"
+GRASP_DATA_DIR = get_aruco_data_dir() / "grasp_points"
 BASE_TOPIC = "/objects_poses_sim"
 
 # Default base position and orientation (used in real mode)
@@ -191,7 +191,7 @@ def load_grasp_points_data(object_name, grasp_data_dir=GRASP_DATA_DIR):
     ]
 
     for variant in object_name_variants:
-        grasp_file = grasp_data_dir / f"{variant}_grasp_points_all_markers.json"
+        grasp_file = grasp_data_dir / f"{variant}_grasp_points.json"
         if grasp_file.exists():
             try:
                 with open(grasp_file, 'r') as f:

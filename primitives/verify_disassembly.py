@@ -38,7 +38,7 @@ OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Tolerance thresholds
-POSITION_TOLERANCE = 0.1  # 10cm tolerance for position
+POSITION_TOLERANCE = 0.07  # 7cm tolerance for position
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
 
 
@@ -442,9 +442,9 @@ class VerifyDisassembly(Node):
         orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else object_relative_rpy_deg - target_rpy_deg
 
         # Check if within tolerance (for assembly position)
+        # Only position matters for disassembly verification - orientation is informational only
         position_ok = bool(position_error <= POSITION_TOLERANCE)
-        orientation_ok = bool(orientation_error_deg <= ORIENTATION_TOLERANCE_DEG)
-        within_tolerance = position_ok and orientation_ok
+        within_tolerance = position_ok  # Disassembly success depends only on position
 
         # Prepare error data for JSON output
         error_data = {
@@ -460,22 +460,16 @@ class VerifyDisassembly(Node):
             }
         }
 
-        # For disassembly: SUCCESS if NOT in assembly position (opposite of assembly verification)
+        # For disassembly: SUCCESS if NOT in assembly position (based on position only)
         if within_tolerance:
             # Object is still in assembly position - disassembly FAILED
             self.get_logger().error("Disassembly verification failed: Object is still in assembly pose")
-            if position_ok:
-                self.get_logger().error(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) is within tolerance ({POSITION_TOLERANCE}m)")
-            if orientation_ok:
-                self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) is within tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
+            self.get_logger().error(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) is within tolerance ({POSITION_TOLERANCE}m)")
             return False, error_data
         else:
             # Object is NOT in assembly position - disassembly SUCCESS
             self.get_logger().info("Disassembly verification successful: Object is NOT in assembly pose")
-            if not position_ok:
-                self.get_logger().info(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m) - object moved away")
-            if not orientation_ok:
-                self.get_logger().info(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°) - object reoriented")
+            self.get_logger().info(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m) - object moved away")
             return True, error_data
 
 

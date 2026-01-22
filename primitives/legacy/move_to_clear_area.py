@@ -38,7 +38,7 @@ class MoveToClearArea(Node):
         )
 
         # Target position for clear space (gripper center position, not TCP)
-        self.target_gripper_center_position = [-0.320, -0.5, 0.25]  # [x, y, z] - gripper center position
+        self.target_gripper_center_position = [-0.320, -0.5, 0.30]  # [x, y, z] - gripper center position (matches safe_height)
         # TCP to gripper center offset (24cm along gripper Z-axis, from TCP to gripper center)
         self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm
 
@@ -416,27 +416,85 @@ class MoveToClearArea(Node):
                     else:
                         q_seed = trajectory_points[-1].positions  # Use previous waypoint
 
-                    # Try IK with position perturbations (fewer attempts for waypoints)
-                    for j in range(3):  # Reduced attempts for intermediate waypoints
-                        perturbed_position_wp = np.array(waypoint_position).copy()
-                        perturbed_position_wp[0] += j * 0.001
+                    # Try IK with position perturbations (robust strategy matching translate_for_assembly)
+                    max_wp_tries = 10  # Increased from 3 to 10
+                    dx_wp = 0.001
+                    solution_found_wp = False
 
-                        perturbed_pose_wp = waypoint_pose.copy()
-                        perturbed_pose_wp[:3, 3] = perturbed_position_wp
+                    # Strategy 1: Position perturbations with current seed (both positive and negative, X and Y)
+                    for j in range(max_wp_tries):
+                        if solution_found_wp:
+                            break
 
-                        result_wp = minimize(ik_objective_quaternion, q_seed, args=(perturbed_pose_wp,),
-                                           method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
+                        # Try both positive and negative perturbations
+                        perturbations = [(j * dx_wp, 0), (-j * dx_wp, 0)] if j > 0 else [(0, 0)]
 
-                        if result_wp.success:
-                            cost_wp = ik_objective_quaternion(result_wp.x, perturbed_pose_wp)
+                        # Add Y perturbations after half the attempts
+                        if j > max_wp_tries // 2:
+                            perturbations.extend([(0, j * dx_wp), (0, -j * dx_wp)])
+                            perturbations.extend([(j * dx_wp * 0.5, j * dx_wp * 0.5), (-j * dx_wp * 0.5, -j * dx_wp * 0.5)])
 
-                            if cost_wp < 0.01:
-                                waypoint_joint_angles = result_wp.x
+                        for dx_pert, dy_pert in perturbations:
+                            if solution_found_wp:
                                 break
 
-                            if cost_wp < best_cost_wp:
-                                best_cost_wp = cost_wp
-                                best_result_wp = result_wp.x
+                            perturbed_position_wp = np.array(waypoint_position).copy()
+                            perturbed_position_wp[0] += dx_pert
+                            perturbed_position_wp[1] += dy_pert
+
+                            perturbed_pose_wp = waypoint_pose.copy()
+                            perturbed_pose_wp[:3, 3] = perturbed_position_wp
+
+                            result_wp = minimize(ik_objective_quaternion, q_seed, args=(perturbed_pose_wp,),
+                                               method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
+
+                            if result_wp.success:
+                                cost_wp = ik_objective_quaternion(result_wp.x, perturbed_pose_wp)
+
+                                if cost_wp < 0.01:
+                                    waypoint_joint_angles = result_wp.x
+                                    solution_found_wp = True
+                                    break
+
+                                if cost_wp < best_cost_wp:
+                                    best_cost_wp = cost_wp
+                                    best_result_wp = result_wp.x
+
+                    # Strategy 2: Try with perturbed joint angle seeds if first strategy failed
+                    if not solution_found_wp and waypoint_joint_angles is None:
+                        seed_perturbations_wp = [
+                            [0.1, 0, 0, 0, 0, 0],
+                            [-0.1, 0, 0, 0, 0, 0],
+                            [0, 0.1, 0, 0, 0, 0],
+                            [0, -0.1, 0, 0, 0, 0],
+                            [0, 0, 0.1, 0, 0, 0],
+                            [0, 0, -0.1, 0, 0, 0],
+                            [0.05, 0.05, 0.05, 0, 0, 0],
+                            [-0.05, -0.05, -0.05, 0, 0, 0]
+                        ]
+
+                        for seed_pert in seed_perturbations_wp:
+                            if solution_found_wp:
+                                break
+
+                            q_perturbed_wp = np.array(q_seed).copy()
+                            q_perturbed_wp += np.array(seed_pert)
+
+                            # Try with original position and perturbed seed
+                            result_wp = minimize(ik_objective_quaternion, q_perturbed_wp, args=(waypoint_pose,),
+                                               method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
+
+                            if result_wp.success:
+                                cost_wp = ik_objective_quaternion(result_wp.x, waypoint_pose)
+
+                                if cost_wp < 0.01:
+                                    waypoint_joint_angles = result_wp.x
+                                    solution_found_wp = True
+                                    break
+
+                                if cost_wp < best_cost_wp:
+                                    best_cost_wp = cost_wp
+                                    best_result_wp = result_wp.x
 
                     # Use best solution if no perfect solution found
                     if waypoint_joint_angles is None and best_result_wp is not None and best_cost_wp < 0.1:

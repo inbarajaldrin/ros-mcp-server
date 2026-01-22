@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
 
 mcp = FastMCP("FMB Assembly and Disassembly Resources")
 
@@ -75,35 +76,51 @@ def get_assembly_results_file(assembly_id: str) -> Path:
 
 
 def get_disassembly_tool_sequence_file() -> Path:
-    """Get the global disassembly tool sequence file path (no assembly_id needed)"""
+    """Get the global disassembly tool sequence file path (reusable across all assemblies)"""
     return RESOURCES_DIR / "disassembly_tool_sequence.json"
 
 def load_disassembly_tool_sequence():
-    """Load disassembly tool sequence from global JSON file.
+    """Load global disassembly tool sequence from JSON file.
 
-    Returns list of tool call strings:
-    ["move_to_object", "move_down", "control_gripper --command close", ...]
+    Returns dict with:
+    {
+        "tool_sequence": ["move_to_grasp --move-to-object", "control_gripper --command close", ...],
+        "comment": "optional comment string" (if present),
+        "timestamp": "2024-01-15T10:30:45.123456" (if present)
+    }
     """
     tool_seq_file = get_disassembly_tool_sequence_file()
     if not tool_seq_file.exists():
-        return []
+        return {"tool_sequence": []}
 
     try:
         with open(tool_seq_file, 'r') as f:
             content = f.read().strip()
             if not content:
-                return []
+                return {"tool_sequence": []}
             data = json.loads(content)
-            if isinstance(data, list):
+            
+            # Expected format: dict with tool_sequence
+            if isinstance(data, dict) and "tool_sequence" in data:
                 return data
-            return []
+            
+            # Invalid format - return empty
+            return {"tool_sequence": []}
     except json.JSONDecodeError:
-        return []
+        return {"tool_sequence": []}
     except Exception:
-        return []
+        return {"tool_sequence": []}
 
 def save_disassembly_tool_sequence(data):
-    """Save disassembly tool sequence to global JSON file"""
+    """Save global disassembly tool sequence to JSON file.
+    
+    data should be a dict with:
+    {
+        "tool_sequence": ["move_to_grasp --move-to-object", "control_gripper --command close", ...],
+        "comment": "optional comment" (optional),
+        "timestamp": "2024-01-15T10:30:45.123456" (optional)
+    }
+    """
     tool_seq_file = get_disassembly_tool_sequence_file()
     with open(tool_seq_file, 'w') as f:
         json.dump(data, f, indent=2)
@@ -485,25 +502,25 @@ def list_assembly_results() -> str:
 @mcp.tool()
 def read_disassembly_tool_sequence() -> str:
     """
-    Read the global disassembly tool sequence (list of tool calls).
+    Read the global disassembly tool sequence (reusable across all assemblies).
 
     Returns:
-        JSON string containing the tool_sequence list:
-        ["move_to_object", "move_down", "control_gripper --command close", ...]
+        JSON string with the tool sequence and comment
     """
-    tool_sequence = load_disassembly_tool_sequence()
-    return json.dumps({
-        "tool_sequence": tool_sequence
-    }, indent=2)
+    data = load_disassembly_tool_sequence()
+    return json.dumps(data, indent=2)
 
 @mcp.tool()
-def write_disassembly_tool_sequence(tool_sequence: List[str]) -> str:
+def write_disassembly_tool_sequence(tool_sequence: List[str], comment: Optional[str] = None) -> str:
     """
-    Write the global disassembly tool sequence (ordered list of tool calls).
+    Write the global disassembly tool sequence (reusable across all assemblies).
+    Only writes if the tool sequence doesn't exist or if it has changed.
+    Do not write any assembly-specific information - this sequence should be general and reusable across all assemblies.
 
     Args:
         tool_sequence: List of tool call strings in order.
-                       Example: ["move_to_object", "move_down", "control_gripper --command close", ...]
+                       Example: ["move_to_grasp --move-to-object", "control_gripper --command close", ...]
+        comment: Optional comment string to store with the tool sequence.
 
     Returns:
         JSON string with confirmation or error message
@@ -524,8 +541,36 @@ def write_disassembly_tool_sequence(tool_sequence: List[str]) -> str:
         if not isinstance(tool, str):
             return json.dumps({"success": False, "error": f"tool_sequence[{i}] must be a string, got: {type(tool).__name__}"}, indent=2)
 
-    save_disassembly_tool_sequence(tool_sequence)
-    return json.dumps({"success": True}, indent=2)
+    # Validate comment if provided
+    if comment is not None and not isinstance(comment, str):
+        return json.dumps({"success": False, "error": f"comment must be a string, got: {type(comment).__name__}"}, indent=2)
+
+    # Check if tool sequence already exists
+    existing_data = load_disassembly_tool_sequence()
+    existing_sequence = existing_data.get("tool_sequence", [])
+    existing_comment = existing_data.get("comment", "").strip() if existing_data.get("comment") else None
+    
+    # Normalize comment for comparison
+    new_comment = comment.strip() if comment and comment.strip() else None
+    
+    # Check if tool sequence and comment are the same
+    if existing_sequence == tool_sequence and existing_comment == new_comment:
+        return json.dumps({
+            "success": True,
+            "message": "Tool sequence already exists with the same content, no update needed"
+        }, indent=2)
+
+    # Create data structure with tool_sequence and optional comment/timestamp
+    data = {
+        "tool_sequence": tool_sequence,
+        "timestamp": datetime.now().astimezone().isoformat()
+    }
+    if new_comment:
+        data["comment"] = new_comment
+    
+    # Write only if different
+    save_disassembly_tool_sequence(data)
+    return json.dumps({"success": True, "message": "Tool sequence written"}, indent=2)
 
 @mcp.tool()
 def clear_disassembly_tool_sequence() -> str:
@@ -561,10 +606,10 @@ def read_disassembly_results(assembly_id: str, result: Optional[str] = None) -> 
         JSON string containing:
         - assembly_id
         - base_name
-        - disassembly_order: list of {assembly_order, object_name, trials or filtered trial}
+        - disassembly_order: list of {disassembly_order, object_name, trials or filtered trial}
 
         When result filter is applied, returns first matching trial per object with:
-        {assembly_order, object_name, grasp_id, gripper_state}
+        {disassembly_order, object_name, grasp_id, gripper_state}
     """
     data = load_disassembly_results(assembly_id)
 
@@ -584,7 +629,7 @@ def read_disassembly_results(assembly_id: str, result: Optional[str] = None) -> 
         if matching_trials:
             # Return first matching trial for this object
             filtered_order.append({
-                "assembly_order": item.get("assembly_order"),
+                "disassembly_order": item.get("disassembly_order"),
                 "object_name": item.get("object_name"),
                 "grasp_id": matching_trials[0].get("grasp_id"),
                 "gripper_state": matching_trials[0].get("gripper_state")
@@ -609,7 +654,7 @@ def write_disassembly_results(assembly_id: str, base_name: str, object_name: str
         trial: Trial data with:
             - trial_id: integer (required)
             - grasp_id: integer (required)
-            - gripper_state: "open" or "half-open" (required)
+            - gripper_state: "open" or "half-open" (required) (which gripper state was used to access the object)
             - result: "success" or "failure" (required)
 
     Returns:
@@ -771,7 +816,14 @@ def list_disassembly_results() -> str:
 @mcp.tool()
 def write_knowledge(obs_id: str, observation: str, status: str, assembly_id: str) -> str:
     """
-    Write a knowledge observation (hypothesis or rule).
+    Write a knowledge observation (hypothesis or rule). Do not write one assembly specific rules. Only write general rules that can be applied to all assemblies.
+
+    Rules:
+    - First time writing an observation: must be "hypothesis" (cannot be "rule")
+    - Promoting to "rule": can only be done when testing the hypothesis on a different assembly
+      (i.e., obs_id exists as "hypothesis" and assembly_id is different)
+    - Revoking a "rule": can be demoted back to "hypothesis" when testing on a different assembly
+      if it no longer holds (allows rules to be invalidated if they fail on new assemblies)
 
     Args:
         obs_id: Unique identifier for the observation
@@ -805,19 +857,85 @@ def write_knowledge(obs_id: str, observation: str, status: str, assembly_id: str
         return json.dumps({"success": False, "error": f"Error loading knowledge: {str(e)}"}, indent=2)
 
     observations = data.get("observations", [])
+    assembly_id = assembly_id.strip()
 
     # Check if obs_id already exists
-    for obs in observations:
+    existing_obs = None
+    existing_index = -1
+    for i, obs in enumerate(observations):
         if obs.get("obs_id") == obs_id:
-            return json.dumps({"success": False, "error": f"obs_id '{obs_id}' already exists"}, indent=2)
+            existing_obs = obs
+            existing_index = i
+            break
 
-    # Add new observation
-    observations.append({
-        "obs_id": obs_id.strip(),
-        "observation": observation.strip(),
-        "status": status_lower,
-        "assembly_id": assembly_id.strip()
-    })
+    if existing_obs is None:
+        # New observation: can only be "hypothesis" on first write
+        if status_lower == "rule":
+            return json.dumps({
+                "success": False,
+                "error": "Cannot create a new observation as 'rule'. First observation must be 'hypothesis'. Only after testing on a different assembly can it be promoted to 'rule'."
+            }, indent=2)
+        
+        # Add new observation as hypothesis
+        observations.append({
+            "obs_id": obs_id.strip(),
+            "observation": observation.strip(),
+            "status": "hypothesis",
+            "assembly_id": assembly_id
+        })
+    else:
+        # Existing observation: can promote/demote based on testing on different assemblies
+        existing_status = existing_obs.get("status", "").lower()
+        existing_assembly_id = existing_obs.get("assembly_id", "").strip()
+        
+        # If testing on the same assembly, only allow updates if staying as hypothesis
+        if assembly_id == existing_assembly_id:
+            if existing_status == "rule":
+                return json.dumps({
+                    "success": False,
+                    "error": f"Cannot modify a 'rule' when testing on the same assembly ({assembly_id}). Must test on a different assembly to validate or revoke the rule."
+                }, indent=2)
+            # Can update hypothesis on same assembly
+            observations[existing_index] = {
+                "obs_id": obs_id.strip(),
+                "observation": observation.strip(),
+                "status": "hypothesis",
+                "assembly_id": assembly_id
+            }
+        else:
+            # Testing on a different assembly - can promote, demote, or update
+            if existing_status == "hypothesis" and status_lower == "rule":
+                # Promote hypothesis to rule (validated on different assembly)
+                observations[existing_index] = {
+                    "obs_id": obs_id.strip(),
+                    "observation": observation.strip(),
+                    "status": "rule",
+                    "assembly_id": assembly_id
+                }
+            elif existing_status == "rule" and status_lower == "hypothesis":
+                # Revoke/demote rule back to hypothesis (failed on new assembly)
+                observations[existing_index] = {
+                    "obs_id": obs_id.strip(),
+                    "observation": observation.strip(),
+                    "status": "hypothesis",
+                    "assembly_id": assembly_id
+                }
+            elif existing_status == "rule" and status_lower == "rule":
+                # Keep as rule (still holds on new assembly) - update assembly_id and observation
+                observations[existing_index] = {
+                    "obs_id": obs_id.strip(),
+                    "observation": observation.strip(),
+                    "status": "rule",
+                    "assembly_id": assembly_id
+                }
+            elif existing_status == "hypothesis" and status_lower == "hypothesis":
+                # Update hypothesis (still not validated) - update assembly_id and observation
+                observations[existing_index] = {
+                    "obs_id": obs_id.strip(),
+                    "observation": observation.strip(),
+                    "status": "hypothesis",
+                    "assembly_id": assembly_id
+                }
 
     data["observations"] = observations
     save_knowledge(data)

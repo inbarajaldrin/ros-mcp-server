@@ -13,6 +13,29 @@ Usage:
     python3 grasp_points_publisher.py [--mode sim|real|default]
 """
 
+# =============================================================================
+# GRASP DIRECTION CONFIGURATION
+# =============================================================================
+# Set these flags to True/False to enable/disable grasp points by approach direction.
+# Each grasp point in the JSON has grasp_validity.x_axis and grasp_validity.y_axis
+# indicating which directions are valid for grasping.
+#
+# X-AXIS GRASPS: Uses the object pose orientation as-is. The gripper aligns with
+#                the object's detected yaw angle.
+#
+# Y-AXIS GRASPS: NOT YET SUPPORTED. To enable Y-axis grasps, move_to_grasp.py needs
+#                to be modified to accept a parameter (e.g., --rotate-ee-90) that
+#                rotates the end-effector orientation by +90 degrees relative to
+#                the object pose. This allows the gripper to approach from the
+#                perpendicular direction.
+#
+# Example for fork_orange:
+#   X-axis valid: IDs 1, 3, 4, 6
+#   Y-axis valid: IDs 2, 5
+# =============================================================================
+ENABLE_X_AXIS_GRASPS = True   # Publish grasp points valid for X-axis approach
+ENABLE_Y_AXIS_GRASPS = False  # Publish grasp points valid for Y-axis approach (requires move_to_grasp modification)
+
 import sys
 from pathlib import Path
 
@@ -64,7 +87,7 @@ class GraspPointsPublisher(Node):
         if data_dir is None:
             # Auto-discover aruco-grasp-annotator data directory
             aruco_data_dir = get_aruco_data_dir()
-            self.data_dir = aruco_data_dir / "grasp"
+            self.data_dir = aruco_data_dir / "grasp_points"
         else:
             self.data_dir = Path(data_dir)
         
@@ -174,6 +197,17 @@ class GraspPointsPublisher(Node):
         self.get_logger().info(f"Data directory: {self.data_dir}")
         self.get_logger().info(f"Loaded grasp data for {len(self.grasp_data)} objects")
         self.get_logger().info(f"Using standard ROS2 visualization_msgs/MarkerArray")
+
+        # Log grasp direction filtering configuration
+        directions_enabled = []
+        if ENABLE_X_AXIS_GRASPS:
+            directions_enabled.append("X-axis")
+        if ENABLE_Y_AXIS_GRASPS:
+            directions_enabled.append("Y-axis")
+        if directions_enabled:
+            self.get_logger().info(f"Grasp direction filter: {', '.join(directions_enabled)} enabled")
+        else:
+            self.get_logger().warn("WARNING: No grasp directions enabled! No grasp points will be published.")
     
     def load_grasp_data(self):
         """Load all grasp points JSON files from data directory"""
@@ -182,7 +216,7 @@ class GraspPointsPublisher(Node):
             return
         
         # Find all grasp points JSON files
-        pattern = "*_grasp_points_all_markers.json"
+        pattern = "*_grasp_points.json"
         for grasp_file in self.data_dir.glob(pattern):
             try:
                 with open(grasp_file, 'r') as f:
@@ -314,6 +348,21 @@ class GraspPointsPublisher(Node):
             
             # Transform and add each grasp point
             for gp_local in grasp_points_local:
+                # Filter by grasp direction validity
+                grasp_validity = gp_local.get('grasp_validity', {})
+                x_axis_valid = len(grasp_validity.get('x_axis', [])) > 0
+                y_axis_valid = len(grasp_validity.get('y_axis', [])) > 0
+
+                # Check if this grasp point should be published based on configuration
+                should_publish = False
+                if ENABLE_X_AXIS_GRASPS and x_axis_valid:
+                    should_publish = True
+                if ENABLE_Y_AXIS_GRASPS and y_axis_valid:
+                    should_publish = True
+
+                if not should_publish:
+                    continue  # Skip this grasp point
+
                 try:
                     pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose)
                     
@@ -421,7 +470,7 @@ def main(args=None):
     parser.add_argument('--mode', type=str, default='default', choices=['sim', 'real', 'default', 'auto'],
                        help='Mode: "sim" for simulation only, "real" for real robot only, "default"/"auto" to automatically publish to both based on topic availability. Default: default')
     parser.add_argument('--data-dir', type=str, default=None,
-                       help='Directory containing grasp points JSON files (default: data/grasp relative to project root)')
+                       help='Directory containing grasp points JSON files (default: data/grasp_points relative to project root)')
     
     if args is None:
         args = parser.parse_args()

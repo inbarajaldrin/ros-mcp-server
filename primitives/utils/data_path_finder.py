@@ -23,8 +23,8 @@ def find_aruco_data_dir() -> Optional[Path]:
     for path in documents_dir.rglob(target_name):
         if path.is_dir():
             data_dir = path / "data"
-            # Verify it has the expected structure (grasp subdirectory)
-            if data_dir.exists() and (data_dir / "grasp").exists():
+            # Verify it has the expected structure (grasp_points subdirectory)
+            if data_dir.exists() and (data_dir / "grasp_points").exists():
                 return data_dir
     
     return None

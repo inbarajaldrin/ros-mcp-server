@@ -860,6 +860,21 @@ def get_available_grasp_ids(mode: Mode = "sim") -> Dict[str, Any]:
     return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
 
 @mcp.tool()
+def get_current_grasp_points_pose(mode: Mode = "sim") -> Dict[str, Any]:
+    """Get current grasp point positions from ROS topic.
+
+    Reads grasp point positions from the grasp points topic.
+
+    Args:
+        mode: Robot mode
+
+    Returns:
+        JSON output containing grasp point poses (id and position) per object,
+        sorted by z value (highest first)
+    """
+    return _run_query("get_current_grasp_points_pose.py", f"--mode {mode}", timeout=10, error_prefix="Get current grasp points pose")
+
+@mcp.tool()
 def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
     """Get target object pose in world frame from assembly configuration.
 
@@ -933,7 +948,11 @@ def scan_workspace(object_name: str) -> Dict[str, Any]:
         object_name: Name of the object to locate
     
     Returns:
-        Raw output from the scan workspace primitive script
+        Dictionary containing:
+        - "result": "success" or "failure"
+        - "mode": "real"
+        - "object_name": Name of the object that was scanned for
+        - "error": Error message (only present if result is "failure")
     """
     return _run_primitive("scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
@@ -941,11 +960,28 @@ def scan_workspace(object_name: str) -> Dict[str, Any]:
 def move_to_grasp(object_name: str, grasp_id: int, action: MoveToGraspAction, mode: Mode = "sim") -> Dict[str, Any]:
     """Move to grasp position.
 
+    Workflow:
+    1. Call move_to_object to move to the grasp point (make sure the gripper is open before this call)
+    2. Call control_gripper to grasp the object
+    3. Call move_to_safe_height to move to the safe height (z=0.3m)
+
     Args:
         object_name: Name of the object to grasp
         grasp_id: ID of the grasp point to use
-        action: move_to_object or move_to_safe_height (call separately for each step)
+        action: Which step to perform (move_to_object or move_to_safe_height)
         mode: Robot mode
+
+    Returns:
+        Dictionary containing:
+        - "result": "success" or "failure"
+        - "object_name": Name of the object
+        - "grasp_id": ID of the grasp point used
+        - "mode": Robot mode ("sim" or "real")
+        - "movement_type": The action that was performed (move_to_object or move_to_safe_height)
+        - "current_object_position": Object position after movement (x, y, z) - only on success
+        - "current_object_orientation": Object orientation quaternion (x, y, z, w) - only on success
+        - "current_object_orientation_rpy_deg": Object orientation in degrees (roll, pitch, yaw) - only on success
+        - "error": Error message (only present if result is "failure")
     """
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     cmd += f" --{action.replace('_', '-')}"
@@ -958,13 +994,25 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
     Purpose: After rotating an object, the EE may be in a non-optimal orientation causing IK failures.
     This tool places the rotated object down and enables regrasping with a top-down EE orientation.
 
-    Workflow: Call actions in sequence, then:
-    1. Call move_to_grasp to grasp the object again
-    2. Call rotate_object to restore the object's orientation
+    Workflow: 
+    1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
+    2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
+    3. Call move_down to place the object on the table
+    4. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
+    5. Call move_to_grasp to grasp the object again
+    6. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
+    7. Continue with what you were doing
 
     Args:
         action: Which step to perform (move_to_clear_space, move_down, or move_ee_top_down)
         mode: Robot mode
+
+    Returns:
+        Dictionary containing:
+        - "result": "success" or "failure"
+        - "mode": Robot mode ("sim" or "real")
+        - "movement_type": The action that was performed (move_to_clear_space, move_down, or move_ee_top_down)
+        - "error": Error message (only present if result is "failure")
     """
     cmd = f"--mode {mode} --{action.replace('_', '-')}"
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
@@ -973,17 +1021,34 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
 def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Optional[str] = None, object_name: Optional[str] = None, use_default_base_position: bool = False) -> Dict[str, Any]:
     """Translate object to target position.
 
-    Moves object to target position for assembly. Maintains object's current orientation.
+    Call this tool only if the object is already grasped.
+    Moves object to target position for assembly. Maintains object's current orientation. 
+
+    Workflow for assembly:
+    1. Call move_to_base to move to the base
+    2. Call move_down to move down to the final position (Make sure the object orientation is correct before this call)
+    3. Call control_gripper to release the object
+    4. Call move_to_safe_height to move to the safe height (z=0.3m)
+
+    Workflow for disassembly:
+    1. Call move_away_from_base once you are holding the object and in safe height to move the object away from the base
+    2. Call control_gripper to release the object
 
     Args:
-        action: Which step to perform
+        action: Which step to perform (move_to_base, move_down, move_to_safe_height, or move_away_from_base)
         mode: Robot mode
         base_name: Required for move_to_base/move_down in sim mode
         object_name: Required for move_to_base/move_down in sim mode
         use_default_base_position: Use default base position (for real mode)
 
     Returns:
-        Dictionary with output and result
+        Dictionary containing:
+        - "result": "success" or "failure"
+        - "mode": Robot mode ("sim" or "real")
+        - "movement_type": The action that was performed (move_to_base, move_down, move_to_safe_height, or move_away_from_base)
+        - "object_name": Name of the object (present in sim mode for certain actions)
+        - "base_name": Name of the base (present in sim mode for certain actions)
+        - "error": Error message (only present if result is "failure")
     """
     # Validate sim mode requirements for certain actions
     if mode == "sim" and action in ["move_to_base", "move_down"]:
@@ -1015,6 +1080,7 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
 def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
     """Rotate object for assembly.
 
+    Call this tool only if the object is already grasped.
     Rotates object from current to target orientation relative to base orientation.
 
     Args:
@@ -1024,6 +1090,23 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
         current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode)
         target_base_orientation: Target base orientation quaternion [x, y, z, w] (optional in sim mode)
         use_default_base_orientation: Use default base orientation [0, 0, 0, 1] (for real mode)
+
+    Returns:
+        Dictionary containing:
+        - "result": "success" or "failure"
+        - "object_name": Name of the object
+        - "base_name": Name of the base object
+        - "mode": Robot mode ("sim" or "real")
+        - "movement_type": "rotate_object"
+        - "initial_object_orientation": Initial object orientation quaternion (x, y, z, w) - only on success
+        - "initial_object_orientation_rpy_deg": Initial object orientation in degrees (roll, pitch, yaw) - only on success
+        - "final_object_orientation": Final object orientation quaternion (x, y, z, w) - only on success
+        - "final_object_orientation_rpy_deg": Final object orientation in degrees (roll, pitch, yaw) - only on success
+        - "initial_end_effector_orientation": Initial end-effector orientation quaternion (x, y, z, w) - only on success
+        - "initial_end_effector_orientation_rpy_deg": Initial end-effector orientation in degrees (roll, pitch, yaw) - only on success
+        - "final_end_effector_orientation": Final end-effector orientation quaternion (x, y, z, w) - only on success
+        - "final_end_effector_orientation_rpy_deg": Final end-effector orientation in degrees (roll, pitch, yaw) - only on success
+        - "error": Error message (only present if result is "failure")
     """
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
@@ -1111,7 +1194,12 @@ def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
         base_name: Name of the base object
     
     Returns:
-        Dictionary with "output" (raw output from script) and "result" ("SUCCESS" or "FAILURE")
+        Dictionary containing:
+        - "result": "success" or "failure" for the verified object
+        - "object_name": Name of the verified object
+        - "base_name": Name of the base object
+        - "position_error_m": Position error metrics (x, y, z)
+        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
     """
     primitive_result = _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
 
