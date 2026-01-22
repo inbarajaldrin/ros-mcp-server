@@ -346,46 +346,16 @@ class TranslateForAssembly(Node):
         # self.get_logger().info(f"Successfully read joint angles: {self.current_joint_angles}")
         return self.current_joint_angles.copy()
     
-    def is_valid_configuration(self, joint_angles):
-        """
-        Validate that joint angles are in an acceptable "elbow up" configuration.
-        Rejects configurations that are technically valid but undesirable.
-
-        Args:
-            joint_angles: Array of 6 joint angles in radians
-
-        Returns:
-            True if configuration is acceptable, False otherwise
-        """
-        # Joint indices: 0=shoulder_pan, 1=shoulder_lift, 2=elbow, 3=wrist_1, 4=wrist_2, 5=wrist_3
-        shoulder_lift = joint_angles[1]
-        wrist_3 = joint_angles[5]
-
-        # Reject if shoulder_lift is too negative (arm too extended backward)
-        # Normal working range is about -80° to -120° (-1.4 to -2.1 rad)
-        # Reject if < -140° (-2.44 rad)
-        if shoulder_lift < -2.44:
-            self.get_logger().warn(f"Rejecting IK solution: shoulder_lift={np.degrees(shoulder_lift):.1f}° is too extended")
-            return False
-
-        # Reject if wrist_3 is at or very near joint limits (±180°)
-        # This causes singularity issues
-        if abs(wrist_3) > 3.0:  # > ~172°
-            self.get_logger().warn(f"Rejecting IK solution: wrist_3={np.degrees(wrist_3):.1f}° is near joint limit")
-            return False
-
-        return True
-
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
         Compute IK using current joint angles as seed (similar to move_down.py)
-
+        
         Args:
             target_position: [x, y, z] target position
             target_quat: [x, y, z, w] target orientation quaternion
             max_tries: Number of position perturbations to try
             dx: Position perturbation step size
-
+            
         Returns:
             Joint angles if successful, None otherwise
         """
@@ -407,50 +377,58 @@ class TranslateForAssembly(Node):
         # self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
         
         # Try IK with current joint angles and position perturbations
-        # Only use current seed if it's already in a valid configuration
-        valid_current_seed = self.is_valid_configuration(q_guess)
-
-        if valid_current_seed:
-            solution_found = False
-            best_result = None
-            best_cost = float('inf')
-
-            for i in range(max_tries):
-                if solution_found:
-                    break
-
-                # Try small x-shift each iteration (helps with workspace boundaries)
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
-
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-
-                joint_bounds = [(-np.pi, np.pi)] * 6
-
-                # Use quaternion-based objective
-                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
-                                method='L-BFGS-B', bounds=joint_bounds)
-
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
-
-                    # Check if this is a good solution AND valid configuration
-                    if cost < 0.01 and self.is_valid_configuration(result.x):
-                        return result.x
-
-                    # Keep track of best valid solution
-                    if cost < best_cost and self.is_valid_configuration(result.x):
-                        best_cost = cost
-                        best_result = result.x
-
-            # If we found any reasonable valid solution, use it
-            if best_result is not None and best_cost < 0.1:
-                return best_result
-        else:
-            self.get_logger().warn("Current joint angles are in invalid configuration, skipping to fallback seeds")
-
-        # Fallback: Try multiple predefined seeds (always in valid elbow-up configurations)
+        solution_found = False
+        best_result = None
+        best_cost = float('inf')
+        
+        for i in range(max_tries):
+            if solution_found:
+                break
+                
+            # Try small x-shift each iteration (helps with workspace boundaries)
+            perturbed_position = np.array(target_position).copy()
+            perturbed_position[0] += i * dx
+            
+            perturbed_pose = target_pose.copy()
+            perturbed_pose[:3, 3] = perturbed_position
+            
+            joint_bounds = [(-np.pi, np.pi)] * 6
+            
+            # Use quaternion-based objective
+            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+                            method='L-BFGS-B', bounds=joint_bounds)
+            
+            if result.success:
+                cost = ik_objective_quaternion(result.x, perturbed_pose)
+                
+                # Check if this is a good solution
+                if cost < 0.01:
+                    # self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
+                    
+                    # Verify orientation accuracy
+                    # T_result = forward_kinematics(dh_params, result.x)
+                    # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                    # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                    
+                    return result.x
+                
+                # Keep track of best solution
+                if cost < best_cost:
+                    best_cost = cost
+                    best_result = result.x
+        
+        # If we found any reasonable solution, use it
+        if best_result is not None and best_cost < 0.1:
+            # self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
+            
+            # Verify orientation accuracy
+            # T_result = forward_kinematics(dh_params, best_result)
+            # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+            # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+            
+            return best_result
+        
+        # Fallback: Try multiple predefined seeds if current seed failed
         # self.get_logger().warn("IK failed with current joint angles as seed. Trying multiple predefined seeds...")
         
         # Convert target quaternion to RPY for seed generation
@@ -497,22 +475,35 @@ class TranslateForAssembly(Node):
                 
                 if result.success:
                     cost = ik_objective_quaternion(result.x, perturbed_pose)
-
-                    # Check if this is a good solution AND valid configuration
-                    if cost < 0.01 and self.is_valid_configuration(result.x):
-                        self.get_logger().info(f"IK succeeded with fallback seed {seed_idx+1}/{len(seed_configs)}")
+                    
+                    # Check if this is a good solution
+                    if cost < 0.01:
+                        # self.get_logger().info(f"IK succeeded with fallback seed {seed_idx+1}/{len(seed_configs)} (perturbation {i}), cost={cost:.6f}")
+                        
+                        # Verify orientation accuracy
+                        # T_result = forward_kinematics(dh_params, result.x)
+                        # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+                        # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+                        
                         return result.x
-
-                    # Keep track of best valid solution
-                    if cost < best_cost and self.is_valid_configuration(result.x):
+                    
+                    # Keep track of best solution
+                    if cost < best_cost:
                         best_cost = cost
                         best_result = result.x
-
-        # If we found any reasonable valid solution with fallback seeds, use it
+        
+        # If we found any reasonable solution with fallback seeds, use it
         if best_result is not None and best_cost < 0.1:
+            # self.get_logger().info(f"Using best fallback IK solution with cost={best_cost:.6f}")
+            
+            # Verify orientation accuracy
+            # T_result = forward_kinematics(dh_params, best_result)
+            # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
+            # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+            
             return best_result
-
-        self.get_logger().error("IK failed: couldn't find valid configuration even with multiple seeds")
+        
+        self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None
     
     def translate_for_target_sim(self, object_name, base_name, duration=20.0):
@@ -888,7 +879,11 @@ class TranslateForAssembly(Node):
                 self.get_logger().info("Movement completed successfully")
                 return True
             else:
-                self.error_message = f"Trajectory failed with status code {result.status}"
+                result_msg = result.result
+                if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                    self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
+                else:
+                    self.error_message = f"Trajectory failed with status code {result.status}"
                 self.get_logger().error(self.error_message)
                 return False
         except Exception as e:

@@ -110,7 +110,7 @@ class HomeRunner(Node):
     def goal_result(self, future):
         result = future.result()
         result_msg = result.result
-        
+
         # Check if trajectory execution was successful
         if result_msg.error_code == FollowJointTrajectory.Result.SUCCESSFUL:
             self.success = True
@@ -125,14 +125,22 @@ class HomeRunner(Node):
                 FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED: "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this.",
                 FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED: "Goal tolerance violated: did not reach target position",
             }
-            
+
             # Get error message or use default
-            error_msg = error_messages.get(result_msg.error_code, f"Trajectory execution failed with error code: {result_msg.error_code}")
+            error_msg = error_messages.get(result_msg.error_code, None)
+
+            # If no specific error code match, check for status 6 (ABORTED) which often indicates velocity limits
+            if error_msg is None:
+                if result.status == 6:  # ABORTED
+                    error_msg = "Trajectory ABORTED: likely velocity/acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Click 'Continue' in URSim/URcap to clear the error, then retry."
+                else:
+                    error_msg = f"Trajectory execution failed with error code: {result_msg.error_code}"
+
             self.error = error_msg
-            
+
             # Log detailed error information for debugging
             self.get_logger().error(f"{self.error} (error_code: {result_msg.error_code}, status: {result.status})")
-        
+
         self.shutdown()
 
 def main(args=None):
