@@ -608,6 +608,39 @@ class PerformInsertController(Node):
 
         return False  # No collision
 
+    def check_ee_below_base(self, joint_angles, z_threshold=0.1625, verbose=False):
+        """
+        Check if the end effector goes below the robot base height.
+
+        The UR5e base is at Z=0, and the shoulder (joint 1) is at Z=162.5mm.
+        We don't want the EE to go below this height as it could collide with
+        the robot's own base or mounting structure.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed Z position for EE (meters).
+                        Default 0.1625m (162.5mm) = robot base height.
+            verbose: If True, log details
+
+        Returns:
+            True if EE is below threshold (violation), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # EE position is the last joint position
+        ee_pos = joint_positions[-1]
+        ee_z = ee_pos[2]
+
+        if ee_z < z_threshold:
+            if verbose:
+                self.get_logger().warn(
+                    f"EE below robot base: EE Z={ee_z*1000:.1f}mm "
+                    f"(threshold: {z_threshold*1000:.1f}mm)"
+                )
+            return True  # Violation detected
+
+        return False  # No violation
+
     def read_current_joint_angles(self):
         """Read current joint angles using ROS2 subscriber"""
         timeout_count = 0
@@ -678,7 +711,9 @@ class PerformInsertController(Node):
                     has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                     # Check self-collision
                     has_self_collision = self.check_self_collision(result.x)
-                    has_collision = has_table_collision or has_self_collision
+                    # Check EE below robot base
+                    has_ee_below_base = self.check_ee_below_base(result.x)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
 
                 # Check if this is a good solution (low cost and no collision)
                 if cost < 0.01 and not has_collision:
@@ -692,7 +727,7 @@ class PerformInsertController(Node):
         # If we found any reasonable solution (without collision), use it
         if best_result is not None and best_cost < 0.1:
             return best_result
-        
+
         # Fallback: Try multiple predefined seeds if current seed failed
         # Convert target quaternion to RPY for seed generation
         target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
@@ -744,7 +779,9 @@ class PerformInsertController(Node):
                         has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                         # Check self-collision
                         has_self_collision = self.check_self_collision(result.x)
-                        has_collision = has_table_collision or has_self_collision
+                        # Check EE below robot base
+                        has_ee_below_base = self.check_ee_below_base(result.x)
+                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
 
                     # Check if this is a good solution (low cost and no collision)
                     if cost < 0.01 and not has_collision:
@@ -758,9 +795,9 @@ class PerformInsertController(Node):
         # If we found any reasonable solution with fallback seeds (without collision), use it
         if best_result is not None and best_cost < 0.1:
             return best_result
-        
+
         if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision) even with multiple seeds")
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
         else:
             self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None

@@ -345,7 +345,217 @@ class TranslateForAssembly(Node):
         
         # self.get_logger().info(f"Successfully read joint angles: {self.current_joint_angles}")
         return self.current_joint_angles.copy()
-    
+
+    def compute_all_joint_positions(self, joint_angles):
+        """
+        Compute the 3D positions of all joints given joint angles.
+        Returns a list of [x, y, z] positions for each joint.
+        """
+        # UR5e DH parameters (from ik_solver.py)
+        dh_params_local = [
+            (0,  0.1625,  0,     np.pi/2),
+            (0,  0,      -0.425,  0),
+            (0,  0,      -0.3922, 0),
+            (0,  0.1333,  0,     np.pi/2),
+            (0,  0.0997,  0,    -np.pi/2),
+            (0,  0.0996,  0,     0)
+        ]
+
+        def dh_transform(theta, d, a, alpha):
+            ct, st = np.cos(theta), np.sin(theta)
+            ca, sa = np.cos(alpha), np.sin(alpha)
+            return np.array([
+                [ct, -st * ca,  st * sa, a * ct],
+                [st,  ct * ca, -ct * sa, a * st],
+                [0,   sa,       ca,      d],
+                [0,   0,        0,       1]
+            ])
+
+        # Compute cumulative transformations and extract positions
+        joint_positions = []
+        T = np.eye(4)
+
+        # Add base position (always at origin)
+        joint_positions.append(T[:3, 3].copy())
+
+        # Compute position of each joint
+        for i, (theta, d, a, alpha) in enumerate(dh_params_local):
+            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
+            T = np.dot(T, T_i)
+            joint_positions.append(T[:3, 3].copy())
+
+        return joint_positions
+
+    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+        """
+        Check if any part of the robot (all joints) goes below the table.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed Z position (meters).
+                        Default -0.01 means 1cm below table is still allowed.
+            verbose: If True, log which joint caused collision
+
+        Returns:
+            True if collision detected (any joint below threshold), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        for i, pos in enumerate(joint_positions):
+            if pos[2] < z_threshold:
+                if verbose:
+                    self.get_logger().warn(
+                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
+                        f"(threshold: {z_threshold*1000:.1f}mm)"
+                    )
+                return True  # Collision detected
+
+        return False  # No collision
+
+    def segment_distance(self, p1, p2, p3, p4):
+        """
+        Compute minimum distance between two line segments (p1-p2) and (p3-p4).
+        Used for capsule-based collision detection between robot links.
+
+        Args:
+            p1, p2: Start and end points of first segment (numpy arrays)
+            p3, p4: Start and end points of second segment (numpy arrays)
+
+        Returns:
+            Minimum distance between the two segments
+        """
+        d1 = p2 - p1  # Direction of segment 1
+        d2 = p4 - p3  # Direction of segment 2
+        r = p1 - p3
+
+        a = np.dot(d1, d1)  # Squared length of segment 1
+        e = np.dot(d2, d2)  # Squared length of segment 2
+        f = np.dot(d2, r)
+
+        EPSILON = 1e-8
+
+        # Check if both segments are points
+        if a < EPSILON and e < EPSILON:
+            return np.linalg.norm(p1 - p3)
+
+        # First segment is a point
+        if a < EPSILON:
+            s = 0.0
+            t = np.clip(f / e, 0.0, 1.0)
+        else:
+            c = np.dot(d1, r)
+            # Second segment is a point
+            if e < EPSILON:
+                t = 0.0
+                s = np.clip(-c / a, 0.0, 1.0)
+            else:
+                # General case
+                b = np.dot(d1, d2)
+                denom = a * e - b * b
+
+                if abs(denom) > EPSILON:
+                    s = np.clip((b * f - c * e) / denom, 0.0, 1.0)
+                else:
+                    s = 0.0
+
+                t = (b * s + f) / e
+
+                if t < 0.0:
+                    t = 0.0
+                    s = np.clip(-c / a, 0.0, 1.0)
+                elif t > 1.0:
+                    t = 1.0
+                    s = np.clip((b - c) / a, 0.0, 1.0)
+
+        closest1 = p1 + s * d1
+        closest2 = p3 + t * d2
+
+        return np.linalg.norm(closest1 - closest2)
+
+    def check_self_collision(self, joint_angles, verbose=False):
+        """
+        Check if the robot configuration causes self-collision.
+        Models links as capsules and checks distances between non-adjacent links.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            verbose: If True, log collision details
+
+        Returns:
+            True if self-collision detected, False otherwise
+        """
+        # UR5e approximate link radii (meters) - conservative estimates
+        # These represent the "thickness" of each link for collision purposes
+        link_radii = [
+            0.075,  # Base (joint 0-1)
+            0.065,  # Shoulder to elbow (joint 1-2) - upper arm
+            0.055,  # Elbow to wrist1 (joint 2-3) - forearm
+            0.045,  # Wrist1 to wrist2 (joint 3-4)
+            0.045,  # Wrist2 to wrist3 (joint 4-5)
+            0.040,  # Wrist3 to EE (joint 5-6)
+        ]
+
+        # Safety margin for collision detection
+        safety_margin = 0.01  # 1cm extra margin
+
+        # Get all joint positions
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # Check collisions between non-adjacent links
+        # Links are defined by consecutive joint positions
+        # Link i connects joint_positions[i] to joint_positions[i+1]
+        num_links = len(joint_positions) - 1
+
+        for i in range(num_links):
+            for j in range(i + 2, num_links):  # Skip adjacent links (i+1)
+                # Get segment endpoints
+                p1 = np.array(joint_positions[i])
+                p2 = np.array(joint_positions[i + 1])
+                p3 = np.array(joint_positions[j])
+                p4 = np.array(joint_positions[j + 1])
+
+                # Compute distance between segments
+                dist = self.segment_distance(p1, p2, p3, p4)
+
+                # Minimum allowed distance is sum of link radii plus safety margin
+                min_dist = link_radii[i] + link_radii[j] + safety_margin
+
+                if dist < min_dist:
+                    if verbose:
+                        self.get_logger().warn(
+                            f"Self-collision detected: Link {i} and Link {j} "
+                            f"distance={dist*1000:.1f}mm < threshold={min_dist*1000:.1f}mm"
+                        )
+                    return True  # Collision detected
+
+        return False  # No collision
+
+    def check_ee_below_base(self, joint_angles, z_threshold=0.1625, verbose=False):
+        """
+        Check if the end-effector goes below the robot base height.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed EE Z position (meters).
+                        Default 0.1625 is the robot base height (first DH d parameter).
+            verbose: If True, log details
+
+        Returns:
+            True if EE is below threshold, False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+        # EE position is the last element
+        ee_pos = joint_positions[-1]
+
+        if ee_pos[2] < z_threshold:
+            if verbose:
+                self.get_logger().warn(
+                    f"EE below base: Z={ee_pos[2]*1000:.1f}mm < threshold={z_threshold*1000:.1f}mm"
+                )
+            return True  # EE too low
+
+        return False  # EE height OK
+
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
         Compute IK using current joint angles as seed (similar to move_down.py)
@@ -380,6 +590,7 @@ class TranslateForAssembly(Node):
         solution_found = False
         best_result = None
         best_cost = float('inf')
+        best_joint_distance = float('inf')  # Track joint space distance from current config
         
         for i in range(max_tries):
             if solution_found:
@@ -400,24 +611,39 @@ class TranslateForAssembly(Node):
             
             if result.success:
                 cost = ik_objective_quaternion(result.x, perturbed_pose)
-                
-                # Check if this is a good solution
-                if cost < 0.01:
-                    # self.get_logger().info(f"Quaternion-based IK succeeded with current joint angles seed (perturbation {i}), cost={cost:.6f}")
-                    
-                    # Verify orientation accuracy
-                    # T_result = forward_kinematics(dh_params, result.x)
-                    # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                    # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-                    
-                    return result.x
-                
-                # Keep track of best solution
-                if cost < best_cost:
-                    best_cost = cost
-                    best_result = result.x
-        
-        # If we found any reasonable solution, use it
+
+                # Check for collisions (sim mode only)
+                has_collision = False
+                if self.mode == 'sim':
+                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                    has_self_collision = self.check_self_collision(result.x)
+                    has_ee_below_base = self.check_ee_below_base(result.x)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
+
+                # Check if this is a good solution (low cost and no collision)
+                if cost < 0.01 and not has_collision:
+                    # Calculate joint space distance from current configuration
+                    joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
+
+                    # Return immediately if this is very close (< 0.5 radians total)
+                    if joint_distance < 0.5:
+                        return result.x
+
+                    # Otherwise, track as candidate if it's closer than previous best
+                    if joint_distance < best_joint_distance:
+                        best_joint_distance = joint_distance
+                        best_result = result.x
+                        best_cost = cost
+                        solution_found = True  # Mark that we found at least one good solution
+                elif not has_collision:
+                    # Solution has higher cost but no collision - track by joint distance
+                    joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
+                    if joint_distance < best_joint_distance:
+                        best_joint_distance = joint_distance
+                        best_result = result.x
+                        best_cost = cost
+
+        # If we found any reasonable solution (without collision), use it
         if best_result is not None and best_cost < 0.1:
             # self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
             
@@ -454,9 +680,10 @@ class TranslateForAssembly(Node):
         ]
         
         # self.get_logger().info(f"Trying {len(seed_configs)} alternative seed configurations...")
-        
+
         best_result = None
         best_cost = float('inf')
+        best_joint_distance = float('inf')  # Track joint space distance for fallback seeds too
         
         for seed_idx, q_guess_fallback in enumerate(seed_configs):
             for i in range(max_tries):
@@ -475,35 +702,45 @@ class TranslateForAssembly(Node):
                 
                 if result.success:
                     cost = ik_objective_quaternion(result.x, perturbed_pose)
-                    
-                    # Check if this is a good solution
-                    if cost < 0.01:
-                        # self.get_logger().info(f"IK succeeded with fallback seed {seed_idx+1}/{len(seed_configs)} (perturbation {i}), cost={cost:.6f}")
-                        
-                        # Verify orientation accuracy
-                        # T_result = forward_kinematics(dh_params, result.x)
-                        # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                        # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-                        
-                        return result.x
-                    
-                    # Keep track of best solution
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-        
-        # If we found any reasonable solution with fallback seeds, use it
+
+                    # Check for collisions (sim mode only)
+                    has_collision = False
+                    if self.mode == 'sim':
+                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                        has_self_collision = self.check_self_collision(result.x)
+                        has_ee_below_base = self.check_ee_below_base(result.x)
+                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
+
+                    # Check if this is a good solution (low cost and no collision)
+                    if cost < 0.01 and not has_collision:
+                        # Calculate joint space distance from current configuration
+                        joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
+
+                        # Return immediately if this is very close (< 0.5 radians total)
+                        if joint_distance < 0.5:
+                            return result.x
+
+                        # Otherwise, track as candidate if it's closer than previous best
+                        if joint_distance < best_joint_distance:
+                            best_joint_distance = joint_distance
+                            best_result = result.x
+                            best_cost = cost
+                    elif not has_collision:
+                        # Solution has higher cost but no collision - track by joint distance
+                        joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
+                        if joint_distance < best_joint_distance:
+                            best_joint_distance = joint_distance
+                            best_result = result.x
+                            best_cost = cost
+
+        # If we found any reasonable solution with fallback seeds (without collision), use it
         if best_result is not None and best_cost < 0.1:
-            # self.get_logger().info(f"Using best fallback IK solution with cost={best_cost:.6f}")
-            
-            # Verify orientation accuracy
-            # T_result = forward_kinematics(dh_params, best_result)
-            # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-            # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-            
             return best_result
-        
-        self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+
+        if self.mode == 'sim':
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
+        else:
+            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None
     
     def translate_for_target_sim(self, object_name, base_name, duration=20.0):
@@ -592,7 +829,7 @@ class TranslateForAssembly(Node):
         
         # Log final object position
         self.get_logger().info(f"Final object position: [{target_object_position_abs[0]:.4f}, {target_object_position_abs[1]:.4f}, {target_object_position_abs[2]:.4f}]")
-        
+
         # Read current joint angles before computing IK
         if self.current_joint_angles is None:
             joint_angles = self.read_current_joint_angles()
@@ -612,6 +849,13 @@ class TranslateForAssembly(Node):
         target_position = hover_position
 
         self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
+
+        # Add initial waypoint at t=0 with current joint angles to avoid velocity spikes
+        trajectory_points.append({
+            "positions": [float(x) for x in self.current_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=0, nanosec=0)
+        })
 
         for i in range(1, num_waypoints + 1):
             # Linear interpolation in Cartesian space
@@ -778,7 +1022,7 @@ class TranslateForAssembly(Node):
         self.get_logger().info(f"  Gripper center: {gripper_center_position}")
         self.get_logger().info(f"  EE (TCP) position: {ee_target_position}")
         self.get_logger().info(f"  Hover position (with {HOVER_HEIGHT}m height offset): {hover_position}")
-        
+
         # Read current joint angles before computing IK
         if self.current_joint_angles is None:
             joint_angles = self.read_current_joint_angles()
@@ -798,6 +1042,13 @@ class TranslateForAssembly(Node):
         target_position = hover_position
 
         self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
+
+        # Add initial waypoint at t=0 with current joint angles to avoid velocity spikes
+        trajectory_points.append({
+            "positions": [float(x) for x in self.current_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=0, nanosec=0)
+        })
 
         for i in range(1, num_waypoints + 1):
             # Linear interpolation in Cartesian space

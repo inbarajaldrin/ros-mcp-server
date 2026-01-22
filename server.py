@@ -998,10 +998,11 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
     1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
     2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
     3. Call move_down to place the object on the table
-    4. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
-    5. Call move_to_grasp to grasp the object again
-    6. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
-    7. Continue with what you were doing
+    4. Call control_gripper to release the object
+    5. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
+    6. Call move_to_grasp to grasp the object again
+    7. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
+    8. Continue with what you were doing
 
     Args:
         action: Which step to perform (move_to_clear_space, move_down, or move_ee_top_down)
