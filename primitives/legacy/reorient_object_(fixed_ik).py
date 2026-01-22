@@ -1299,6 +1299,12 @@ class ReorientForAssembly(Node):
     def goal_result_callback(self, future):
         result = future.result()
         self.trajectory_success = (result.status == 4)
+        if not self.trajectory_success:
+            result_msg = result.result
+            if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                self.get_logger().error("Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this.")
+            else:
+                self.get_logger().error(f"Trajectory failed with status code {result.status}")
         self.trajectory_completed = True
 
 

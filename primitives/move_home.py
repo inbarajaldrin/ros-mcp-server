@@ -108,8 +108,31 @@ class HomeRunner(Node):
         goal_handle.get_result_async().add_done_callback(self.goal_result)
 
     def goal_result(self, future):
-        self.success = True
-        self.get_logger().info("Movement completed successfully")
+        result = future.result()
+        result_msg = result.result
+        
+        # Check if trajectory execution was successful
+        if result_msg.error_code == FollowJointTrajectory.Result.SUCCESSFUL:
+            self.success = True
+            self.get_logger().info("Movement completed successfully")
+        else:
+            self.success = False
+            # Map error codes to user-friendly messages
+            error_messages = {
+                FollowJointTrajectory.Result.INVALID_GOAL: "Trajectory rejected: invalid goal (may indicate velocity/acceleration limits exceeded or joint limits violated)",
+                FollowJointTrajectory.Result.INVALID_JOINTS: "Invalid joints: joint names don't match",
+                FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP: "Old header timestamp: trajectory is too old",
+                FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED: "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this.",
+                FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED: "Goal tolerance violated: did not reach target position",
+            }
+            
+            # Get error message or use default
+            error_msg = error_messages.get(result_msg.error_code, f"Trajectory execution failed with error code: {result_msg.error_code}")
+            self.error = error_msg
+            
+            # Log detailed error information for debugging
+            self.get_logger().error(f"{self.error} (error_code: {result_msg.error_code}, status: {result.status})")
+        
         self.shutdown()
 
 def main(args=None):

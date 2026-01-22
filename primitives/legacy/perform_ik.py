@@ -117,7 +117,11 @@ class PerformIKRunner(Node):
             self.get_logger().info("Movement completed successfully")
             self.trajectory_success = True
         else:
-            self.get_logger().error(f"Trajectory failed with status: {result.status}")
+            result_msg = result.result
+            if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                self.get_logger().error("Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this.")
+            else:
+                self.get_logger().error(f"Trajectory failed with status: {result.status}")
             self.trajectory_success = False
         self.trajectory_completed = True
         self.shutdown()

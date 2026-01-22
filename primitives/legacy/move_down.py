@@ -962,7 +962,11 @@ class MoveDown(Node):
             elif result.status == 4:  # ABORTED
                 pass  # Continue to check force threshold
             else:
-                self.error_message = f"Trajectory failed with status: {result.status}"
+                result_msg = result.result
+                if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                    self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
+                else:
+                    self.error_message = f"Trajectory failed with status: {result.status}"
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
