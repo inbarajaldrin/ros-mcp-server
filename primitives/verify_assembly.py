@@ -596,10 +596,15 @@ def main(args=None):
             node.get_logger().info("Assembly pose verification: SUCCESS")
         else:
             node.get_logger().error("Assembly pose verification: FAILED - Placement failed")
-        
+
         # Check other objects in the same assembly
         try:
             unassembled_objects = node.get_unassembled_objects(args.base_name, args.object_name)
+
+            # If the object being verified itself failed assembly, include it in the list
+            if not success:
+                unassembled_objects.append(args.object_name)
+
             if unassembled_objects:
                 node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
             else:
