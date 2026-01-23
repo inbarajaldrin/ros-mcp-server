@@ -919,38 +919,41 @@ class ReorientForAssembly(Node):
             R_object_current, best_target_R
         )
         
-        # Always snap EE to nearest cardinal if within threshold
+        # Find nearest cardinal EE orientation - MUST snap to a cardinal
+        # Use a reasonable threshold; if no cardinal is close, reject this optimization
+        EE_SNAP_THRESHOLD = 45.0  # degrees - if computed EE is > 45° from all cardinals, reject
         EE_cardinal_name, EE_cardinal_quat, EE_cardinal_dist = \
-            ExtendedCardinalOrientations.find_closest_cardinal(R_EE_new, threshold_deg=15.0)
-        
-        if EE_cardinal_name is not None:
-            # Save original object error for logging
-            original_object_error = object_error
-            
-            # Use the cardinal EE orientation
-            R_EE_cardinal = R.from_quat(EE_cardinal_quat).as_matrix()
-            R_object_from_cardinal = R_EE_cardinal @ R_grasp
-            
-            # Find the closest equivalent target to the object orientation from cardinal EE
-            cardinal_object_error = float('inf')
-            best_cardinal_target_R = None
-            for R_target_equiv in equivalent_targets:
-                error = ExtendedCardinalOrientations.rotation_matrix_distance(
-                    R_object_from_cardinal, R_target_equiv
-                )
-                if error < cardinal_object_error:
-                    cardinal_object_error = error
-                    best_cardinal_target_R = R_target_equiv
-            
-            # Always snap to cardinal (prioritize EE cardinal pose over object error)
-            R_EE_new = R_EE_cardinal
-            R_object_result = R_object_from_cardinal
-            object_error = cardinal_object_error
-            best_target_R = best_cardinal_target_R
-        
+            ExtendedCardinalOrientations.find_closest_cardinal(R_EE_new, threshold_deg=EE_SNAP_THRESHOLD)
+
+        if EE_cardinal_name is None:
+            # Computed EE is too far from any cardinal - reject and let full search handle it
+            self.get_logger().info(f"  → Computed EE is {EE_cardinal_dist:.1f}° from nearest cardinal (> {EE_SNAP_THRESHOLD}°), falling back to full search")
+            return (False, None, None, None, float('inf'))
+
+        # Use the cardinal EE orientation (always snap to cardinal)
+        R_EE_cardinal = R.from_quat(EE_cardinal_quat).as_matrix()
+        R_object_from_cardinal = R_EE_cardinal @ R_grasp
+
+        # Find the closest equivalent target to the object orientation from cardinal EE
+        cardinal_object_error = float('inf')
+        best_cardinal_target_R = None
+        for R_target_equiv in equivalent_targets:
+            error = ExtendedCardinalOrientations.rotation_matrix_distance(
+                R_object_from_cardinal, R_target_equiv
+            )
+            if error < cardinal_object_error:
+                cardinal_object_error = error
+                best_cardinal_target_R = R_target_equiv
+
+        # Use the snapped cardinal EE
+        R_EE_new = R_EE_cardinal
+        R_object_result = R_object_from_cardinal
+        object_error = cardinal_object_error
+        best_target_R = best_cardinal_target_R
+
         # Convert to quaternion
         best_quat = R.from_matrix(R_EE_new).as_quat()
-        
+
         return (True, best_quat, R_object_result, best_target_R, object_error)
     
     def find_best_cardinal_for_assembly(self, R_object_target_world, R_grasp, fold_data, R_object_current=None, R_EE_current=None):
@@ -1365,47 +1368,11 @@ class ReorientForAssembly(Node):
         best_quat = best_quat_cardinal
         object_error = cardinal_object_error
         
-        # === Calculate RPY for redirect check ===
-        EE_rpy = R.from_matrix(R.from_quat(best_quat).as_matrix()).as_euler('xyz', degrees=True)
-        
-        # === Redirect EE orientation if facing towards robot base ===
-        # Check if EE RPY is approximately (90, 0, 180) and redirect to (90, 0, 0)
-        # This prevents the EE from facing towards the robot base
-        rpy_tolerance = 5.0  # degrees tolerance
-        if (abs(EE_rpy[0] - 90.0) < rpy_tolerance and 
-            abs(EE_rpy[1] - 0.0) < rpy_tolerance and 
-            abs(EE_rpy[2] - 180.0) < rpy_tolerance):
-            # Create new quaternion from (90, 0, 0) RPY
-            R_EE_redirected = R.from_euler('xyz', [90.0, 0.0, 0.0], degrees=True)
-            best_quat = R_EE_redirected.as_quat()
-            
-            # Recalculate resulting object orientation with redirected EE
-            R_EE_redirected_matrix = R_EE_redirected.as_matrix()
-            resulting_object_R = R_EE_redirected_matrix @ R_grasp
-            
-            # Find closest equivalent target to verify alignment is still good
-            equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-                R_object_target_world, fold_data, None
-            )
-            object_error_redirected = float('inf')
-            best_target_R_redirected = None
-            for R_target_equiv in equivalent_targets:
-                error = ExtendedCardinalOrientations.rotation_matrix_distance(
-                    resulting_object_R, R_target_equiv
-                )
-                if error < object_error_redirected:
-                    object_error_redirected = error
-                    best_target_R_redirected = R_target_equiv
-            
-            # Update matched target and error
-            matched_target_R = best_target_R_redirected
-            object_error = object_error_redirected
-            
-            # Recalculate RPY for logging
-            EE_rpy = [90.0, 0.0, 0.0]
-            resulting_rpy = R.from_matrix(resulting_object_R).as_euler('xyz', degrees=True)
-            matched_rpy = R.from_matrix(matched_target_R).as_euler('xyz', degrees=True)
-            
+        # Note: Previous redirect logic for "EE facing robot base" was removed because:
+        # 1. Checking only yaw=180° is too simplistic - roll changes the effective direction
+        # 2. The cardinal search already finds the best orientation for correct object placement
+        # 3. The redirect was causing false positives and unnecessary warnings
+
         # === Check if error is acceptable ===
         if object_error > 30.0:
             self.get_logger().warn(f"High alignment error ({object_error:.1f}°) - result may not be ideal")
