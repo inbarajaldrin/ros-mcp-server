@@ -556,6 +556,43 @@ class TranslateForAssembly(Node):
 
         return False  # EE height OK
 
+    def check_compact_configuration(self, joint_angles, min_wrist_shoulder_xy=0.20, verbose=False):
+        """
+        Check if the robot configuration is too compact (wrist too close to shoulder).
+
+        This detects problematic configurations where the arm is folded back on itself,
+        causing the wrist to be physically close to the shoulder/base area even though
+        standard link-to-link collision checks pass.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            min_wrist_shoulder_xy: Minimum allowed XY distance (meters) between
+                                   wrist2 and shoulder. Default 0.30m (300mm).
+            verbose: If True, log details
+
+        Returns:
+            True if configuration is too compact (should be rejected), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # Shoulder position is at index 1 (after first joint)
+        # Wrist2 position is at index 5
+        shoulder_pos = np.array(joint_positions[1])
+        wrist2_pos = np.array(joint_positions[5])
+
+        # Calculate XY (horizontal) distance between wrist and shoulder
+        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
+
+        if xy_dist < min_wrist_shoulder_xy:
+            if verbose:
+                self.get_logger().warn(
+                    f"Compact configuration detected: wrist-shoulder XY distance="
+                    f"{xy_dist*1000:.1f}mm < threshold={min_wrist_shoulder_xy*1000:.1f}mm"
+                )
+            return True  # Too compact
+
+        return False  # Configuration OK
+
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
         Compute IK using current joint angles as seed (similar to move_down.py)
@@ -618,7 +655,8 @@ class TranslateForAssembly(Node):
                     has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                     has_self_collision = self.check_self_collision(result.x)
                     has_ee_below_base = self.check_ee_below_base(result.x)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
+                    has_compact_config = self.check_compact_configuration(result.x)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config
 
                 # Check if this is a good solution (low cost and no collision)
                 if cost < 0.01 and not has_collision:
@@ -709,7 +747,8 @@ class TranslateForAssembly(Node):
                         has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                         has_self_collision = self.check_self_collision(result.x)
                         has_ee_below_base = self.check_ee_below_base(result.x)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
+                        has_compact_config = self.check_compact_configuration(result.x)
+                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config
 
                     # Check if this is a good solution (low cost and no collision)
                     if cost < 0.01 and not has_collision:
@@ -738,7 +777,7 @@ class TranslateForAssembly(Node):
             return best_result
 
         if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config) even with multiple seeds")
         else:
             self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None

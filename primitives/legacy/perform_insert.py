@@ -711,8 +711,8 @@ class PerformInsertController(Node):
                     has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                     # Check self-collision
                     has_self_collision = self.check_self_collision(result.x)
-                    # Check EE below robot base
-                    has_ee_below_base = self.check_ee_below_base(result.x)
+                    # Check EE below robot base (lower threshold for insertion operations)
+                    has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
                     has_collision = has_table_collision or has_self_collision or has_ee_below_base
 
                 # Check if this is a good solution (low cost and no collision)
@@ -779,8 +779,8 @@ class PerformInsertController(Node):
                         has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
                         # Check self-collision
                         has_self_collision = self.check_self_collision(result.x)
-                        # Check EE below robot base
-                        has_ee_below_base = self.check_ee_below_base(result.x)
+                        # Check EE below robot base (lower threshold for insertion operations)
+                        has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
                         has_collision = has_table_collision or has_self_collision or has_ee_below_base
 
                     # Check if this is a good solution (low cost and no collision)

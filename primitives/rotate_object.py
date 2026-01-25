@@ -721,6 +721,91 @@ class ReorientForAssembly(Node):
 
         return False  # EE height OK
 
+    def check_compact_configuration(self, joint_angles, min_wrist_shoulder_xy=0.20, verbose=False):
+        """
+        Check if the robot configuration is too compact (wrist too close to shoulder).
+
+        This detects problematic configurations where the arm is folded back on itself,
+        causing the wrist to be physically close to the shoulder/base area even though
+        standard link-to-link collision checks pass.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            min_wrist_shoulder_xy: Minimum allowed XY distance (meters) between
+                                   wrist2 and shoulder. Default 0.20m (200mm).
+            verbose: If True, log details
+
+        Returns:
+            True if configuration is too compact (should be rejected), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # Shoulder position is at index 1 (after first joint)
+        # Wrist2 position is at index 5
+        shoulder_pos = np.array(joint_positions[1])
+        wrist2_pos = np.array(joint_positions[5])
+
+        # Calculate XY (horizontal) distance between wrist and shoulder
+        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
+
+        if xy_dist < min_wrist_shoulder_xy:
+            if verbose:
+                self.get_logger().warn(
+                    f"Compact configuration detected: wrist-shoulder XY distance="
+                    f"{xy_dist*1000:.1f}mm < threshold={min_wrist_shoulder_xy*1000:.1f}mm"
+                )
+            return True  # Too compact
+
+        return False  # Configuration OK
+
+    def check_ee_facing_robot(self, R_EE, ee_position, threshold_deg=60.0):
+        """
+        Check if the EE tool face is pointing towards the robot base.
+
+        The tool Z-axis (third column of rotation matrix) indicates where the tool is pointing.
+        If this direction points towards the robot base (0, 0, 0), that's problematic
+        because subsequent operations may be blocked.
+
+        Args:
+            R_EE: 3x3 rotation matrix of EE orientation
+            ee_position: [x, y, z] position of EE
+            threshold_deg: Angle threshold - if tool direction is within this angle
+                          of pointing at robot base (in XY plane), it's considered facing
+
+        Returns:
+            (facing_robot, angle_to_base):
+                facing_robot: True if tool is facing the robot
+                angle_to_base: Angle in degrees between tool XY direction and base direction
+        """
+        # Tool Z-axis (where the tool is pointing)
+        tool_z_axis = R_EE[:, 2]
+
+        # Vector from EE to robot base (in XY plane only - horizontal direction)
+        ee_pos = np.array(ee_position)
+        vector_to_base_xy = np.array([-ee_pos[0], -ee_pos[1], 0])
+        norm_xy = np.linalg.norm(vector_to_base_xy)
+        if norm_xy < 1e-6:
+            # EE is directly above base, can't determine facing direction
+            return False, 90.0
+        vector_to_base_xy_norm = vector_to_base_xy / norm_xy
+
+        # Project tool Z-axis to XY plane
+        tool_z_xy = np.array([tool_z_axis[0], tool_z_axis[1], 0])
+        norm_tool_xy = np.linalg.norm(tool_z_xy)
+        if norm_tool_xy < 1e-6:
+            # Tool is pointing straight up or down, not facing robot horizontally
+            return False, 90.0
+        tool_z_xy_norm = tool_z_xy / norm_tool_xy
+
+        # Angle between tool direction (XY) and vector to base (XY)
+        dot_product = np.dot(tool_z_xy_norm, vector_to_base_xy_norm)
+        angle_to_base = np.degrees(np.arccos(np.clip(dot_product, -1.0, 1.0)))
+
+        # If angle < threshold, the tool is pointing towards the base
+        facing_robot = angle_to_base < threshold_deg
+
+        return facing_robot, angle_to_base
+
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
@@ -752,7 +837,15 @@ class ReorientForAssembly(Node):
                     has_self_collision = self.check_self_collision(result.x)
                     # Check EE below robot base
                     has_ee_below_base = self.check_ee_below_base(result.x)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
+                    # Check compact configuration
+                    has_compact_config = self.check_compact_configuration(result.x)
+                    # Check if EE is facing the robot (using FK to get EE pose)
+                    joint_positions = self.compute_all_joint_positions(result.x)
+                    ee_pos_from_fk = joint_positions[-1]
+                    T_ee = forward_kinematics(dh_params, result.x)
+                    R_ee = T_ee[:3, :3]
+                    has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot
 
                 # Check if this is a good solution (low cost and no collision)
                 if cost < 0.01 and not has_collision:
@@ -773,10 +866,22 @@ class ReorientForAssembly(Node):
         yaw_deg = np.degrees(yaw_rad)
 
         seeds = [
+            # Original seeds with wrist_2 = -90
             np.radians([85, -80, 90, -90, -90, yaw_deg]),
             np.radians([90, -90, 90, -90, -90, yaw_deg]),
             np.radians([0, -90, 90, -90, -90, yaw_deg]),
             np.radians([180, -90, 90, -90, -90, yaw_deg]),
+            # Additional seeds with wrist_2 = +90 (to avoid facing robot)
+            np.radians([85, -80, 90, -90, 90, yaw_deg]),
+            np.radians([90, -90, 90, -90, 90, yaw_deg]),
+            np.radians([0, -90, 90, -90, 90, yaw_deg]),
+            np.radians([180, -90, 90, -90, 90, yaw_deg]),
+            # Seeds with wrist_2 = +75 (closer to user's good config)
+            np.radians([85, -108, 106, 2, 76, yaw_deg]),
+            np.radians([75, -108, 106, 2, 76, yaw_deg]),
+            # Seeds with different wrist_1 configurations
+            np.radians([85, -80, 90, 90, -90, yaw_deg]),
+            np.radians([85, -80, 90, 90, 90, yaw_deg]),
         ]
 
         for seed in seeds:
@@ -797,7 +902,15 @@ class ReorientForAssembly(Node):
                         has_self_collision = self.check_self_collision(result.x)
                         # Check EE below robot base
                         has_ee_below_base = self.check_ee_below_base(result.x)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
+                        # Check compact configuration
+                        has_compact_config = self.check_compact_configuration(result.x)
+                        # Check if EE is facing the robot (using FK to get EE pose)
+                        joint_positions = self.compute_all_joint_positions(result.x)
+                        ee_pos_from_fk = joint_positions[-1]
+                        T_ee = forward_kinematics(dh_params, result.x)
+                        R_ee = T_ee[:3, :3]
+                        has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
+                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot
 
                     # Check if this is a good solution (low cost and no collision)
                     if cost < 0.01 and not has_collision:
@@ -807,7 +920,7 @@ class ReorientForAssembly(Node):
                         best_cost, best_result = cost, result.x
 
         if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config + EE facing robot) even with multiple seeds")
         else:
             self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return best_result if best_cost < 0.1 else None
@@ -956,11 +1069,11 @@ class ReorientForAssembly(Node):
 
         return (True, best_quat, R_object_result, best_target_R, object_error)
     
-    def find_best_cardinal_for_assembly(self, R_object_target_world, R_grasp, fold_data, R_object_current=None, R_EE_current=None):
+    def find_best_cardinal_for_assembly(self, R_object_target_world, R_grasp, fold_data, R_object_current=None, R_EE_current=None, ee_position=None, R_base=None):
         """
-        Find the cardinal EE orientation that places the OBJECT closest 
+        Find the cardinal EE orientation that places the OBJECT closest
         to a valid assembly pose (considering fold symmetry).
-        
+
         Algorithm:
         1. Generate all equivalent target orientations using fold symmetry
         2. If current object is already close to canonical, prefer minimal adjustments:
@@ -971,8 +1084,12 @@ class ReorientForAssembly(Node):
            - Calculate resulting object orientation: R_object = R_EE × R_grasp
            - Find minimum distance to ANY equivalent target
            - Calculate rotation distance from current EE to this cardinal
+           - Check if EE would face the robot (penalize heavily)
         4. Return cardinal with best object alignment error, preferring smaller EE rotations
-           when object errors are similar (within 5° tolerance)
+           when object errors are similar (within 5° tolerance), avoiding facing-robot configs
+
+        Args:
+            R_base: If provided, used to transform cardinals to world frame for facing-robot check
         """
         # Generate all symmetry-equivalent target orientations
         equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
@@ -1065,10 +1182,22 @@ class ReorientForAssembly(Node):
                 ee_rotation_distance = ExtendedCardinalOrientations.rotation_matrix_distance(
                     R_EE_current, R_EE_cardinal
                 )
-            
+
+            # Check if this cardinal would result in EE facing the robot
+            facing_robot_penalty = 0.0
+            if ee_position is not None:
+                facing_robot, angle_to_base = self.check_ee_facing_robot(
+                    R_EE_cardinal, ee_position, threshold_deg=60.0
+                )
+                if facing_robot:
+                    # Heavy penalty: 180 - angle_to_base (closer to robot = higher penalty)
+                    # This makes facing-robot cardinals much less preferred
+                    facing_robot_penalty = 180.0 - angle_to_base
+
             candidates.append((
-                card_name, card_quat, R_object_result, 
-                best_target_for_cardinal, min_error_for_cardinal, ee_rotation_distance
+                card_name, card_quat, R_object_result,
+                best_target_for_cardinal, min_error_for_cardinal, ee_rotation_distance,
+                facing_robot_penalty
             ))
             
             if min_error_for_cardinal < best_object_error:
@@ -1078,18 +1207,21 @@ class ReorientForAssembly(Node):
                 best_resulting_object_R = R_object_result
                 best_matched_target_R = best_target_for_cardinal
         
-        # Sort candidates: first by object error, then by EE rotation distance (when errors are similar)
+        # Sort candidates: penalize facing-robot, then by object error, then by EE rotation distance
         # Use a tolerance of 5° - if two candidates have object errors within 5°, prefer the one with smaller EE rotation
         error_tolerance = 5.0  # degrees
-        
+
         def sort_key(candidate):
             obj_error = candidate[4]
             ee_rotation = candidate[5]
-            # Primary sort: object error (rounded to nearest tolerance)
-            # Secondary sort: EE rotation distance
+            facing_penalty = candidate[6] if len(candidate) > 6 else 0.0
+            # Primary sort: facing-robot penalty (0 = not facing, >0 = facing)
+            # Secondary sort: object error (rounded to nearest tolerance)
+            # Tertiary sort: EE rotation distance
+            facing_bucket = 1 if facing_penalty > 0 else 0  # Binary: facing or not
             error_bucket = round(obj_error / error_tolerance) * error_tolerance
-            return (error_bucket, ee_rotation)
-        
+            return (facing_bucket, error_bucket, ee_rotation)
+
         candidates.sort(key=sort_key)
         
         # Update best selection if we have a better candidate (same error but smaller rotation)
@@ -1257,9 +1389,11 @@ class ReorientForAssembly(Node):
             cardinal_object_error = object_error
         else:
             # === Fall back to full search (in base-relative frame) ===
-            (best_cardinal, best_quat_cardinal_base_relative, resulting_object_R_base_relative, 
+            # Note: ee_position is passed in world frame for facing-robot check
+            (best_cardinal, best_quat_cardinal_base_relative, resulting_object_R_base_relative,
              matched_target_R_base_relative, object_error, candidates) = self.find_best_cardinal_for_assembly(
-                R_object_target_base_relative, R_grasp, fold_data, R_object_current_base_relative, R_EE_current_base_relative
+                R_object_target_base_relative, R_grasp, fold_data, R_object_current_base_relative,
+                R_EE_current_base_relative, ee_position=ee_position
             )
             
             # Transform result back to world frame
@@ -1273,13 +1407,20 @@ class ReorientForAssembly(Node):
             # Transform candidates back to world frame for later use
             if candidates is not None:
                 transformed_candidates = []
-                for card_name, card_quat_base_rel, card_obj_R_base_rel, card_target_R_base_rel, card_error, ee_rot_dist in candidates:
+                for cand in candidates:
+                    card_name = cand[0]
+                    card_quat_base_rel = cand[1]
+                    card_obj_R_base_rel = cand[2]
+                    card_target_R_base_rel = cand[3]
+                    card_error = cand[4]
+                    ee_rot_dist = cand[5]
+                    facing_penalty = cand[6] if len(cand) > 6 else 0.0
                     R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
                     R_EE_cand_world = R_base @ R_EE_cand_base_rel
                     card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
                     card_obj_R_world = R_base @ card_obj_R_base_rel
                     card_target_R_world = R_base @ card_target_R_base_rel
-                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist))
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_penalty))
                 candidates = transformed_candidates
             
             cardinal_object_error = object_error
@@ -1298,13 +1439,14 @@ class ReorientForAssembly(Node):
         if candidates is not None and len(candidates) > 0:
             candidate_list = candidates
         else:
-            # Create a single candidate from the best cardinal (include EE rotation distance as 6th element)
+            # Create a single candidate from the best cardinal (7 elements: name, quat, obj_R, target_R, error, ee_rot_dist, facing_penalty)
             # Use 0.0 as placeholder since we don't have R_EE_current at this point
-            candidate_list = [(best_cardinal, best_quat_cardinal, resulting_object_R, matched_target_R, cardinal_object_error, 0.0)]
-        
+            candidate_list = [(best_cardinal, best_quat_cardinal, resulting_object_R, matched_target_R, cardinal_object_error, 0.0, 0.0)]
+
         while not cardinal_found and candidate_index < len(candidate_list):
-            # Get current candidate (now includes EE rotation distance as 6th element)
-            card_name, card_quat, card_object_R, card_target_R, card_error, _ = candidate_list[candidate_index]
+            # Get current candidate (7 elements, ignore last two: ee_rot_dist and facing_penalty)
+            cand = candidate_list[candidate_index]
+            card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
             
             
             # Recalculate object error from this cardinal to ensure consistency
@@ -1389,7 +1531,8 @@ class ReorientForAssembly(Node):
         
         # If IK fails and we have alternative candidates, try them
         if joint_angles is None and candidates is not None:
-            for i, (card_name, card_quat, card_object_R, card_target_R, card_error, _) in enumerate(candidates[1:6], 1):  # Try top 5 alternatives
+            for i, cand in enumerate(candidates[1:6], 1):  # Try top 5 alternatives
+                card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
                 # Snap to exact equivalent target
                 R_EE_card_exact = card_target_R @ R_grasp.T
                 card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
@@ -1424,13 +1567,43 @@ class ReorientForAssembly(Node):
         # Log final EE orientation (before execution)
         final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
         self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
-        
-        # === Execute ===
-        trajectory = {"traj1": [{
-            "positions": [float(x) for x in joint_angles],
+
+        # === Execute with multiple waypoints for smooth motion ===
+        num_waypoints = 10
+        trajectory_points = []
+
+        # Get current joint angles as starting point
+        start_joints = self.current_joint_angles.copy()
+        target_joints = np.array(joint_angles)
+
+        # Handle joint wrapping for wrist_3 (index 5) to take shortest path
+        for i in range(6):
+            diff = target_joints[i] - start_joints[i]
+            # If difference is more than pi, wrap around
+            if diff > np.pi:
+                target_joints[i] -= 2 * np.pi
+            elif diff < -np.pi:
+                target_joints[i] += 2 * np.pi
+
+        # Add starting point at t=0
+        trajectory_points.append({
+            "positions": [float(x) for x in start_joints],
             "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(duration))
-        }]}
+            "time_from_start": Duration(sec=0, nanosec=0)
+        })
+
+        # Add intermediate waypoints
+        for i in range(1, num_waypoints + 1):
+            alpha = i / num_waypoints
+            interpolated_joints = start_joints + alpha * (target_joints - start_joints)
+            time_from_start = (i / num_waypoints) * duration
+            trajectory_points.append({
+                "positions": [float(x) for x in interpolated_joints],
+                "velocities": [0.0] * 6,
+                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
+            })
+
+        trajectory = {"traj1": trajectory_points}
         
         success = self.execute_trajectory(trajectory)
 
@@ -1452,16 +1625,18 @@ class ReorientForAssembly(Node):
     
     def execute_trajectory(self, trajectory):
         try:
-            point = trajectory['traj1'][0]
+            points = trajectory['traj1']
 
             traj_msg = JointTrajectory()
             traj_msg.joint_names = self.joint_names
 
-            traj_point = JointTrajectoryPoint()
-            traj_point.positions = point['positions']
-            traj_point.velocities = [0.0] * 6
-            traj_point.time_from_start = point['time_from_start']
-            traj_msg.points.append(traj_point)
+            # Add all trajectory points
+            for point in points:
+                traj_point = JointTrajectoryPoint()
+                traj_point.positions = point['positions']
+                traj_point.velocities = point.get('velocities', [0.0] * 6)
+                traj_point.time_from_start = point['time_from_start']
+                traj_msg.points.append(traj_point)
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
@@ -1470,7 +1645,7 @@ class ReorientForAssembly(Node):
             self.trajectory_completed = False
             self.trajectory_success = False
 
-            self.get_logger().info("Trajectory sent and accepted")
+            self.get_logger().info(f"Trajectory with {len(points)} waypoints sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response_callback)
 

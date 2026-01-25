@@ -314,10 +314,10 @@ class MoveToClearArea(Node):
                         perturbed_pose = target_pose.copy()
                         perturbed_pose[:3, 3] = perturbed_position
                         
-                        joint_bounds = [(-np.pi, np.pi)] * 6
-                        
+                        joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
+
                         # Use quaternion-based objective directly - NO RPY conversion!
-                        result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
+                        result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
                                         method='L-BFGS-B', bounds=joint_bounds)
                         
                         if result.success:
@@ -357,8 +357,8 @@ class MoveToClearArea(Node):
                         q_perturbed += np.array(seed_pert)
                         
                         # Try with original position first
-                        result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,), 
-                                        method='L-BFGS-B', bounds=joint_bounds)
+                        result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,),
+                                        method='L-BFGS-B', bounds=[(-2*np.pi, 2*np.pi)] * 6)
                         
                         if result.success:
                             cost = ik_objective_quaternion(result.x, target_pose)
@@ -385,149 +385,56 @@ class MoveToClearArea(Node):
                     rclpy.shutdown()
                     return
 
-                # Create Cartesian path with multiple waypoints to maintain orientation
-                num_waypoints = 10  # Number of intermediate waypoints
-                total_duration = 5.0  # Total movement duration in seconds
+                # Create joint-space interpolated trajectory (smoother, wider arcs)
+                num_waypoints = 10
+                total_duration = 5.0
+
+                # Get start and target joint angles
+                start_joints = self.current_joint_angles.copy()
+                target_joints = np.array(joint_angles).copy()
+
+                # Handle joint wrapping for shortest path
+                for i in range(6):
+                    diff = target_joints[i] - start_joints[i]
+                    if diff > np.pi:
+                        target_joints[i] -= 2 * np.pi
+                    elif diff < -np.pi:
+                        target_joints[i] += 2 * np.pi
+
+                self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
 
                 trajectory_points = []
-                current_pos_array = np.array(current_pos)
-                target_pos_array = np.array(tcp_position)
 
-                self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
+                # Add starting point at t=0
+                trajectory_points.append(JointTrajectoryPoint(
+                    positions=[float(x) for x in start_joints],
+                    velocities=[0.0] * 6,
+                    time_from_start=Duration(sec=0, nanosec=0)
+                ))
 
+                # Add intermediate waypoints with linear joint-space interpolation
                 for i in range(1, num_waypoints + 1):
-                    # Linear interpolation in Cartesian space
                     alpha = i / num_waypoints
-                    waypoint_position = current_pos_array + alpha * (target_pos_array - current_pos_array)
-
-                    # Maintain the SAME orientation for all waypoints
-                    waypoint_pose = np.eye(4)
-                    waypoint_pose[:3, 3] = waypoint_position
-                    waypoint_pose[:3, :3] = target_rot_matrix  # Same orientation!
-
-                    # Compute IK for this waypoint
-                    waypoint_joint_angles = None
-                    best_result_wp = None
-                    best_cost_wp = float('inf')
-
-                    # Use previous waypoint's joint angles as seed (or current for first waypoint)
-                    if i == 1:
-                        q_seed = self.current_joint_angles.copy()
-                    else:
-                        q_seed = trajectory_points[-1].positions  # Use previous waypoint
-
-                    # Try IK with position perturbations (robust strategy matching translate_for_assembly)
-                    max_wp_tries = 10  # Increased from 3 to 10
-                    dx_wp = 0.001
-                    solution_found_wp = False
-
-                    # Strategy 1: Position perturbations with current seed (both positive and negative, X and Y)
-                    for j in range(max_wp_tries):
-                        if solution_found_wp:
-                            break
-
-                        # Try both positive and negative perturbations
-                        perturbations = [(j * dx_wp, 0), (-j * dx_wp, 0)] if j > 0 else [(0, 0)]
-
-                        # Add Y perturbations after half the attempts
-                        if j > max_wp_tries // 2:
-                            perturbations.extend([(0, j * dx_wp), (0, -j * dx_wp)])
-                            perturbations.extend([(j * dx_wp * 0.5, j * dx_wp * 0.5), (-j * dx_wp * 0.5, -j * dx_wp * 0.5)])
-
-                        for dx_pert, dy_pert in perturbations:
-                            if solution_found_wp:
-                                break
-
-                            perturbed_position_wp = np.array(waypoint_position).copy()
-                            perturbed_position_wp[0] += dx_pert
-                            perturbed_position_wp[1] += dy_pert
-
-                            perturbed_pose_wp = waypoint_pose.copy()
-                            perturbed_pose_wp[:3, 3] = perturbed_position_wp
-
-                            result_wp = minimize(ik_objective_quaternion, q_seed, args=(perturbed_pose_wp,),
-                                               method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
-
-                            if result_wp.success:
-                                cost_wp = ik_objective_quaternion(result_wp.x, perturbed_pose_wp)
-
-                                if cost_wp < 0.01:
-                                    waypoint_joint_angles = result_wp.x
-                                    solution_found_wp = True
-                                    break
-
-                                if cost_wp < best_cost_wp:
-                                    best_cost_wp = cost_wp
-                                    best_result_wp = result_wp.x
-
-                    # Strategy 2: Try with perturbed joint angle seeds if first strategy failed
-                    if not solution_found_wp and waypoint_joint_angles is None:
-                        seed_perturbations_wp = [
-                            [0.1, 0, 0, 0, 0, 0],
-                            [-0.1, 0, 0, 0, 0, 0],
-                            [0, 0.1, 0, 0, 0, 0],
-                            [0, -0.1, 0, 0, 0, 0],
-                            [0, 0, 0.1, 0, 0, 0],
-                            [0, 0, -0.1, 0, 0, 0],
-                            [0.05, 0.05, 0.05, 0, 0, 0],
-                            [-0.05, -0.05, -0.05, 0, 0, 0]
-                        ]
-
-                        for seed_pert in seed_perturbations_wp:
-                            if solution_found_wp:
-                                break
-
-                            q_perturbed_wp = np.array(q_seed).copy()
-                            q_perturbed_wp += np.array(seed_pert)
-
-                            # Try with original position and perturbed seed
-                            result_wp = minimize(ik_objective_quaternion, q_perturbed_wp, args=(waypoint_pose,),
-                                               method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
-
-                            if result_wp.success:
-                                cost_wp = ik_objective_quaternion(result_wp.x, waypoint_pose)
-
-                                if cost_wp < 0.01:
-                                    waypoint_joint_angles = result_wp.x
-                                    solution_found_wp = True
-                                    break
-
-                                if cost_wp < best_cost_wp:
-                                    best_cost_wp = cost_wp
-                                    best_result_wp = result_wp.x
-
-                    # Use best solution if no perfect solution found
-                    if waypoint_joint_angles is None and best_result_wp is not None and best_cost_wp < 0.1:
-                        waypoint_joint_angles = best_result_wp
-
-                    if waypoint_joint_angles is None:
-                        self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
-                        self.get_logger().error(self.error_message)
-                        self.operation_success = False
-                        self.operation_complete = True
-                        rclpy.shutdown()
-                        return
-
-                    # Create trajectory point for this waypoint
+                    interpolated_joints = start_joints + alpha * (target_joints - start_joints)
                     time_from_start = (i / num_waypoints) * total_duration
-                    point = JointTrajectoryPoint(
-                        positions=[float(x) for x in waypoint_joint_angles],
+
+                    trajectory_points.append(JointTrajectoryPoint(
+                        positions=[float(x) for x in interpolated_joints],
                         velocities=[0.0] * 6,
                         time_from_start=Duration(sec=int(time_from_start),
                                                 nanosec=int((time_from_start % 1) * 1e9))
-                    )
-                    trajectory_points.append(point)
+                    ))
 
-                # Create and send trajectory with all waypoints
+                # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
                 traj = JointTrajectory()
                 traj.joint_names = self.joint_names
-                traj.points = trajectory_points  # Multiple waypoints!
+                traj.points = trajectory_points
 
                 goal.trajectory = traj
                 goal.goal_time_tolerance = Duration(sec=1)
 
-                self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints sent")
+                self.get_logger().info(f"Joint-space trajectory with {len(trajectory_points)} waypoints sent")
                 self._send_goal_future = self.action_client.send_goal_async(goal)
                 self._send_goal_future.add_done_callback(self.goal_response)
                 

@@ -803,7 +803,8 @@ class MoveDown(Node):
                 rclpy.shutdown()
                 return
             
-            q_guess = self.current_joint_angles.copy()
+            # Normalize joint angles to [-pi, pi] to avoid issues with joints outside bounds
+            q_guess = np.array([np.arctan2(np.sin(a), np.cos(a)) for a in self.current_joint_angles])
             
             joint_angles = None
             best_result = None
@@ -895,18 +896,59 @@ class MoveDown(Node):
                     return
                 
             self.get_logger().info(f"Computed joint angles: {joint_angles}")
-            
-            # Create and send trajectory
-            point = JointTrajectoryPoint(
-                positions=[float(x) for x in joint_angles],
+
+            # Create joint-space interpolated trajectory (smoother, prevents swinging)
+            num_waypoints = 10
+            total_duration = MOVEMENT_DURATION
+
+            # Use RAW current joint angles as start (where robot actually is)
+            start_joints = self.current_joint_angles.copy()
+            # Normalize target joints first
+            target_joints = np.array([np.arctan2(np.sin(a), np.cos(a)) for a in joint_angles])
+
+            # Wrap target to be within π of the RAW start (shortest path from actual position)
+            for i in range(6):
+                # Keep adding/subtracting 2π until target is within π of start
+                while target_joints[i] - start_joints[i] > np.pi:
+                    target_joints[i] -= 2 * np.pi
+                while target_joints[i] - start_joints[i] < -np.pi:
+                    target_joints[i] += 2 * np.pi
+
+            self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
+
+            trajectory_points = []
+
+            # Add starting point at t=0 (zero velocity - starting from rest)
+            trajectory_points.append(JointTrajectoryPoint(
+                positions=[float(x) for x in start_joints],
                 velocities=[0.0] * 6,
-                time_from_start=Duration(sec=int(MOVEMENT_DURATION))
-            )
-            
+                time_from_start=Duration(sec=0, nanosec=0)
+            ))
+
+            # Add intermediate waypoints (no velocity specified - controller computes smooth velocities)
+            for i in range(1, num_waypoints):
+                alpha = i / num_waypoints
+                interpolated_joints = start_joints + alpha * (target_joints - start_joints)
+                time_from_start = (i / num_waypoints) * total_duration
+
+                trajectory_points.append(JointTrajectoryPoint(
+                    positions=[float(x) for x in interpolated_joints],
+                    time_from_start=Duration(sec=int(time_from_start),
+                                            nanosec=int((time_from_start % 1) * 1e9))
+                ))
+
+            # Add final point (zero velocity - stop at end)
+            trajectory_points.append(JointTrajectoryPoint(
+                positions=[float(x) for x in target_joints],
+                velocities=[0.0] * 6,
+                time_from_start=Duration(sec=int(total_duration),
+                                        nanosec=int((total_duration % 1) * 1e9))
+            ))
+
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
-            traj.points = [point]
-            
+            traj.points = trajectory_points
+
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
@@ -918,7 +960,7 @@ class MoveDown(Node):
             self._send_goal_future = None
             self._get_result_future = None
             
-            self.get_logger().info("Trajectory sent and accepted")
+            self.get_logger().info(f"Joint-space trajectory with {len(trajectory_points)} waypoints sent")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             

@@ -279,8 +279,8 @@ Examples:
   # Sim mode - safe height only
   python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-to-base
 
-  # Sim mode - move down only
-  python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-down
+  # Sim mode - perform insert only
+  python3 translate_object.py --mode sim --object-name fork_orange --base-name base --perform-insert
 
   # Sim mode - move to safe height only
   python3 translate_object.py --mode sim --move-to-safe-height
@@ -291,8 +291,8 @@ Examples:
   # Real mode - safe height only (using defaults)
   python3 translate_object.py --mode real --base-name base --move-to-base --use-default-base-position
 
-  # Real mode - move down only with force compliance
-  python3 translate_object.py --mode real --move-down --speed 0.01 --gain 2.0
+  # Real mode - perform insert only with force compliance
+  python3 translate_object.py --mode real --perform-insert --speed 0.01 --gain 2.0
 
   # Real mode - move to safe height only
   python3 translate_object.py --mode real --move-to-safe-height
@@ -314,7 +314,8 @@ Examples:
     # Movement mode flags
     parser.add_argument('--move-to-base', action='store_true',
                        help='Call translate_for_assembly to move to safe height')
-    parser.add_argument('--move-down', action='store_true',
+    parser.add_argument('--perform-insert', action='store_true',
+                       dest='perform_insert',
                        help='Call perform_insert to move down to final position')
     parser.add_argument('--move-to-safe-height', action='store_true',
                        help='Move to safe height (after closing gripper)')
@@ -349,12 +350,12 @@ Examples:
     args = parser.parse_args()
 
     # Validate arguments
-    flags_set = sum([args.move_to_base, args.move_down, args.move_to_safe_height, args.move_away_from_base])
+    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.move_away_from_base])
     if flags_set == 0:
-        parser.error("At least one of --move-to-base, --move-down, --move-to-safe-height, or --move-away-from-base must be specified")
+        parser.error("At least one of --move-to-base, --perform-insert, --move-to-safe-height, or --move-away-from-base must be specified")
 
     if flags_set > 1:
-        parser.error("Cannot use multiple movement flags together. Use exactly one of --move-to-base, --move-down, --move-to-safe-height, or --move-away-from-base")
+        parser.error("Cannot use multiple movement flags together. Use exactly one of --move-to-base, --perform-insert, --move-to-safe-height, or --move-away-from-base")
 
     # Validate sim mode requirements
     if args.mode == 'sim':
@@ -366,8 +367,8 @@ Examples:
                 parser.error("--object-name is required in sim mode")
             if args.base_name is None and args.move_to_base:
                 parser.error("--base-name is required when using --move-to-base in sim mode")
-            if args.base_name is None and args.move_down:
-                parser.error("--base-name is required when using --move-down in sim mode")
+            if args.base_name is None and args.perform_insert:
+                parser.error("--base-name is required when using --perform-insert in sim mode")
 
     # Validate real mode requirements for translate_for_assembly
     if args.mode == 'real' and args.move_to_base:
@@ -512,8 +513,8 @@ Examples:
             rclpy.shutdown()
             sys.exit(0)
 
-        # Call perform_insert if --move-down is specified
-        if args.move_down:
+        # Call perform_insert if --perform-insert is specified
+        if args.perform_insert:
             success, output_text = run_perform_insert(args, logger)
             subprocess_json = extract_json_from_output(output_text)
 
@@ -521,13 +522,13 @@ Examples:
                 logger.error("perform_insert failed, aborting")
                 # Use subprocess error if available, otherwise generic error
                 if subprocess_json:
-                    subprocess_json["movement_type"] = "move_down"
+                    subprocess_json["movement_type"] = "perform_insert"
                     output_result(subprocess_json)
                 else:
                     result = {
                         "result": "failure",
                         "mode": args.mode,
-                        "movement_type": "move_down",
+                        "movement_type": "perform_insert",
                         "error": "perform_insert failed"
                     }
                     if args.mode == 'sim':
@@ -541,13 +542,13 @@ Examples:
             logger.info("Operation completed successfully!")
             # Add movement_type to subprocess JSON or create success JSON
             if subprocess_json:
-                subprocess_json["movement_type"] = "move_down"
+                subprocess_json["movement_type"] = "perform_insert"
                 output_result(subprocess_json)
             else:
                 result = {
                     "result": "success",
                     "mode": args.mode,
-                    "movement_type": "move_down"
+                    "movement_type": "perform_insert"
                 }
                 if args.mode == 'sim':
                     result["object_name"] = args.object_name

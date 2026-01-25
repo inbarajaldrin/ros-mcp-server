@@ -37,7 +37,7 @@ Mode = Literal["sim", "real"]
 GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
-TranslateAction = Literal["move_to_base", "move_down", "move_to_safe_height", "move_away_from_base"]
+TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -1027,7 +1027,7 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
 
     Workflow for assembly:
     1. Call move_to_base to move to the base
-    2. Call move_down to move down to the final position (Make sure the object orientation is correct before this call)
+    2. Call perform_insert to move down to the final position (Make sure the object orientation is correct before this call)
     3. Call control_gripper to release the object
     4. Call move_to_safe_height to move to the safe height (z=0.3m)
 
@@ -1036,23 +1036,23 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
     2. Call control_gripper to release the object
 
     Args:
-        action: Which step to perform (move_to_base, move_down, move_to_safe_height, or move_away_from_base)
+        action: Which step to perform (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
         mode: Robot mode
-        base_name: Required for move_to_base/move_down in sim mode
-        object_name: Required for move_to_base/move_down in sim mode
+        base_name: Required for move_to_base/perform_insert in sim mode
+        object_name: Required for move_to_base/perform_insert in sim mode
         use_default_base_position: Use default base position (for real mode)
 
     Returns:
         Dictionary containing:
         - "result": "success" or "failure"
         - "mode": Robot mode ("sim" or "real")
-        - "movement_type": The action that was performed (move_to_base, move_down, move_to_safe_height, or move_away_from_base)
+        - "movement_type": The action that was performed (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
         - "object_name": Name of the object (present in sim mode for certain actions)
         - "base_name": Name of the base (present in sim mode for certain actions)
         - "error": Error message (only present if result is "failure")
     """
     # Validate sim mode requirements for certain actions
-    if mode == "sim" and action in ["move_to_base", "move_down"]:
+    if mode == "sim" and action in ["move_to_base", "perform_insert"]:
         if object_name is None:
             return {"output": "Error: object_name is required in sim mode for this action"}
         if base_name is None:
@@ -1068,7 +1068,7 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
         cmd += " --use-default-base-position"
 
     # Adjust timeout based on action
-    if action == "move_down":
+    if action == "perform_insert":
         timeout = 300
     elif action in ["move_to_safe_height", "move_away_from_base"]:
         timeout = 60
@@ -1085,12 +1085,12 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
     Rotates object from current to target orientation relative to base orientation.
 
     Args:
-        object_name: Name of the object to rotate
-        base_name: Name of the base object
-        mode: Robot mode
-        current_object_orientation: Current object orientation quaternion [x, y, z, w] (required in real mode)
-        target_base_orientation: Target base orientation quaternion [x, y, z, w] (optional in sim mode)
-        use_default_base_orientation: Use default base orientation [0, 0, 0, 1] (for real mode)
+        object_name: Name of the object to rotate (required)
+        base_name: Name of the base object (required)
+        mode: Robot mode (default: "sim")
+        current_object_orientation: Current object orientation quaternion [x, y, z, w]. Required in real mode, optional in sim mode (reads from ROS topic if not provided)
+        target_base_orientation: Target base orientation quaternion [x, y, z, w]. Optional in sim mode (reads from ROS topic if not provided), required in real mode unless use_default_base_orientation is True
+        use_default_base_orientation: Use default base orientation [0, 0, 0, 1]. Optional, mainly for real mode
 
     Returns:
         Dictionary containing:
@@ -1111,11 +1111,13 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
     """
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
-        cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
+        # Format numbers to avoid scientific notation which can confuse argument parser
+        cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
     if use_default_base_orientation:
         cmd += " --use-default-base-orientation"
     elif target_base_orientation is not None:
-        cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
+        # Format numbers to avoid scientific notation which can confuse argument parser
+        cmd += f" --target-base-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in target_base_orientation)}"
     return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 ## ############################################################################################## ##
