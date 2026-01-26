@@ -45,8 +45,11 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-import rclpy
-from rclpy.node import Node
+import logging
+
+# Set up Python logging (don't use ROS logging in parent - we spawn ROS subprocesses)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger('translate_object')
 
 
 def output_result(result):
@@ -69,7 +72,7 @@ def extract_json_from_output(output_text):
     return None
 
 
-def stream_output(pipe, logger, output_lines, prefix=""):
+def stream_output(pipe, output_lines, prefix=""):
     """Stream subprocess output line by line and capture to output_lines"""
     for line in iter(pipe.readline, ''):
         if line:
@@ -81,7 +84,7 @@ def stream_output(pipe, logger, output_lines, prefix=""):
     pipe.close()
 
 
-def run_translate_for_assembly(args, logger):
+def run_translate_for_assembly(args):
     """Run translate_for_assembly script and return (success, output_text)"""
     script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'translate_for_assembly.py')
 
@@ -125,7 +128,7 @@ def run_translate_for_assembly(args, logger):
     # Stream output in a separate thread
     output_thread = threading.Thread(
         target=stream_output,
-        args=(process.stdout, logger, output_lines),
+        args=(process.stdout, output_lines),
         daemon=True
     )
     output_thread.start()
@@ -144,7 +147,7 @@ def run_translate_for_assembly(args, logger):
     return True, output_text
 
 
-def run_perform_insert(args, logger):
+def run_perform_insert(args):
     """Run perform_insert script and return (success, output_text)"""
     script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'perform_insert.py')
 
@@ -197,7 +200,7 @@ def run_perform_insert(args, logger):
     # Stream output in a separate thread
     output_thread = threading.Thread(
         target=stream_output,
-        args=(process.stdout, logger, output_lines),
+        args=(process.stdout, output_lines),
         daemon=True
     )
     output_thread.start()
@@ -216,7 +219,7 @@ def run_perform_insert(args, logger):
     return True, output_text
 
 
-def run_move_to_clear_area(logger):
+def run_move_to_clear_area():
     """Run move_to_clear_area script and return (success, output_text)"""
     script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'move_to_clear_area.py')
 
@@ -251,7 +254,7 @@ def run_move_to_clear_area(logger):
     # Stream output in a separate thread
     output_thread = threading.Thread(
         target=stream_output,
-        args=(process.stdout, logger, output_lines),
+        args=(process.stdout, output_lines),
         daemon=True
     )
     output_thread.start()
@@ -377,11 +380,6 @@ Examples:
         if not args.use_default_base_position and args.final_base_pos is None:
             parser.error("In real mode with --move-to-base, either --final-base-pos or --use-default-base-position is required")
 
-    # Initialize ROS
-    rclpy.init()
-    node = Node('translate_object')
-    logger = node.get_logger()
-    
     logger.info(f"Using {args.mode.upper()} mode")
 
     try:
@@ -415,7 +413,7 @@ Examples:
             # Stream output in a separate thread
             output_thread = threading.Thread(
                 target=stream_output,
-                args=(process.stdout, logger, output_lines),
+                args=(process.stdout, output_lines),
                 daemon=True
             )
             output_thread.start()
@@ -433,8 +431,6 @@ Examples:
                     "movement_type": "move_to_safe_height",
                     "error": "move_to_safe_height timed out"
                 })
-                node.destroy_node()
-                rclpy.shutdown()
                 sys.exit(1)
 
             output_text = '\n'.join(output_lines)
@@ -453,8 +449,6 @@ Examples:
                         "movement_type": "move_to_safe_height",
                         "error": f"move_to_safe_height failed with return code {returncode}"
                     })
-                node.destroy_node()
-                rclpy.shutdown()
                 sys.exit(1)
 
             logger.info("move_to_safe_height completed successfully")
@@ -468,13 +462,11 @@ Examples:
                     "mode": args.mode,
                     "movement_type": "move_to_safe_height"
                 })
-            node.destroy_node()
-            rclpy.shutdown()
             sys.exit(0)
 
         # Call translate_for_assembly if --move-to-base is specified
         if args.move_to_base:
-            success, output_text = run_translate_for_assembly(args, logger)
+            success, output_text = run_translate_for_assembly(args)
             subprocess_json = extract_json_from_output(output_text)
 
             if not success:
@@ -492,8 +484,6 @@ Examples:
                         "base_name": args.base_name,
                         "error": "translate_for_assembly failed"
                     })
-                node.destroy_node()
-                rclpy.shutdown()
                 sys.exit(1)
 
             logger.info("Operation completed successfully!")
@@ -509,13 +499,11 @@ Examples:
                     "object_name": args.object_name,
                     "base_name": args.base_name
                 })
-            node.destroy_node()
-            rclpy.shutdown()
             sys.exit(0)
 
         # Call perform_insert if --perform-insert is specified
         if args.perform_insert:
-            success, output_text = run_perform_insert(args, logger)
+            success, output_text = run_perform_insert(args)
             subprocess_json = extract_json_from_output(output_text)
 
             if not success:
@@ -535,8 +523,6 @@ Examples:
                         result["object_name"] = args.object_name
                         result["base_name"] = args.base_name
                     output_result(result)
-                node.destroy_node()
-                rclpy.shutdown()
                 sys.exit(1)
 
             logger.info("Operation completed successfully!")
@@ -554,13 +540,11 @@ Examples:
                     result["object_name"] = args.object_name
                     result["base_name"] = args.base_name
                 output_result(result)
-            node.destroy_node()
-            rclpy.shutdown()
             sys.exit(0)
 
         # Call move_to_clear_area if --move-away-from-base is specified
         if args.move_away_from_base:
-            success, output_text = run_move_to_clear_area(logger)
+            success, output_text = run_move_to_clear_area()
             subprocess_json = extract_json_from_output(output_text)
 
             if not success:
@@ -576,8 +560,6 @@ Examples:
                         "movement_type": "move_away_from_base",
                         "error": "move_to_clear_area failed"
                     })
-                node.destroy_node()
-                rclpy.shutdown()
                 sys.exit(1)
 
             logger.info("Operation completed successfully!")
@@ -591,13 +573,9 @@ Examples:
                     "mode": args.mode,
                     "movement_type": "move_away_from_base"
                 })
-            node.destroy_node()
-            rclpy.shutdown()
             sys.exit(0)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-        node.destroy_node()
-        rclpy.shutdown()
         sys.exit(1)
 
 

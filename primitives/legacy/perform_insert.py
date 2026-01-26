@@ -1131,14 +1131,52 @@ class PerformInsertController(Node):
         
         return (next_x, next_y, next_z)
     
+    def wait_for_poses_with_retry(self, timeout_per_attempt=5.0, max_retries=3):
+        """
+        Wait for object poses from /objects_poses_sim topic with retry logic.
+
+        Args:
+            timeout_per_attempt: Timeout in seconds for each attempt
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            True if poses received, False if all retries exhausted
+        """
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                self.get_logger().info(f"Retry attempt {attempt}/{max_retries} - waiting for object poses...")
+                time.sleep(0.5)  # Small delay between retries
+
+            start_time = time.time()
+            while rclpy.ok() and (time.time() - start_time) < timeout_per_attempt:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self.current_poses:
+                    self.get_logger().info(f"Object poses received after {attempt} attempt(s)")
+                    return True
+                time.sleep(0.1)
+
+            if attempt < max_retries:
+                self.get_logger().warn(
+                    f"Timeout waiting for object poses on /objects_poses_sim topic "
+                    f"(attempt {attempt}/{max_retries}, waited {timeout_per_attempt:.1f}s)"
+                )
+
+        # All retries exhausted
+        self.error_message = (
+            f"Failed to receive object poses from /objects_poses_sim topic after {max_retries} attempts "
+            f"(timeout: {timeout_per_attempt:.1f}s per attempt). "
+            f"Ensure the simulation is running and publishing object poses."
+        )
+        self.get_logger().error(self.error_message)
+        return False
+
     def run(self):
         """Main run method - different behavior for sim vs real mode"""
         if self.mode == 'sim':
             # Sim mode: execute step 2 (move down to final position)
-            # Wait for object and base poses from topics
-            while not self.current_poses:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                time.sleep(0.1)
+            # Wait for object and base poses from topics with retry logic
+            if not self.wait_for_poses_with_retry(timeout_per_attempt=5.0, max_retries=3):
+                return False
             return self.move_down_sim(duration=10.0)
         else:
             # Real mode: original force-compliant movement

@@ -30,7 +30,7 @@ def pick():
 def move(position, rpy, seconds):
     if len(position) != 3:
         raise ValueError(f"Expected 3D position, got {position}")
-    joint_angles = compute_ik(position, rpy)
+    joint_angles = compute_ik_robust(position, rpy)
     # (j1, j2, j3, j4, j5, j6) = joint_angles
     # print(f"{j1:.3f}, {j2:.3f}, {j3:.3f}, {j4:.3f}, {j5:.3f}, {j6:.3f}")
     if joint_angles is not None:

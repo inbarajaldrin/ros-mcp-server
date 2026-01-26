@@ -23,22 +23,22 @@ import yaml
 from primitives.utils.ik_solver import compute_ik, compute_ik_robust
 
 class MoveToSafeHeight(Node):
-    def __init__(self):
+    def __init__(self, height=None):
         super().__init__('move_to_safe_height')
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
         ]
-        
+
         # Action client for trajectory control
         self.action_client = ActionClient(
-            self, 
-            FollowJointTrajectory, 
+            self,
+            FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
-        
-        # Safe height target
-        self.safe_height = 0.3
+
+        # Safe height target (default 0.3, can be overridden)
+        self.safe_height = height if height is not None else 0.3
         
         # EE pose data storage
         self.ee_pose_received = False
@@ -362,8 +362,21 @@ def output_result(result):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = MoveToSafeHeight()
+    import argparse
+    parser = argparse.ArgumentParser(description='Move robot to safe height')
+    parser.add_argument('--height', type=float, default=None,
+                       help='Custom height in meters (default: 0.3)')
+
+    known_args, remaining = parser.parse_known_args()
+
+    rclpy.init(args=remaining)
+
+    # Pass custom height to constructor (None uses default 0.3)
+    node = MoveToSafeHeight(height=known_args.height)
+
+    if known_args.height is not None:
+        node.get_logger().info(f"Using custom height: {known_args.height} meters")
+
     try:
         rclpy.spin(node)
     finally:

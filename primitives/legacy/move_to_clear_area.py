@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import subprocess
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -140,6 +141,218 @@ class MoveToClearArea(Node):
         
         return [roll, pitch, yaw]
 
+    def compute_all_joint_positions(self, joint_angles):
+        """
+        Compute the 3D positions of all joints in the robot arm using forward kinematics.
+
+        Args:
+            joint_angles: Array of 6 joint angles in radians
+
+        Returns:
+            List of 7 positions (base + 6 joints) as numpy arrays [x, y, z]
+        """
+        # UR5e DH parameters (same as in ik_solver.py)
+        dh_params_local = [
+            (0,  0.1625,  0,     np.pi/2),   # Joint 1
+            (0,  0,      -0.425,  0),         # Joint 2
+            (0,  0,      -0.3922, 0),         # Joint 3
+            (0,  0.1333,  0,     np.pi/2),   # Joint 4
+            (0,  0.0997,  0,    -np.pi/2),   # Joint 5
+            (0,  0.0996,  0,     0)           # Joint 6
+        ]
+
+        def dh_transform(theta, d, a, alpha):
+            ct, st = np.cos(theta), np.sin(theta)
+            ca, sa = np.cos(alpha), np.sin(alpha)
+            return np.array([
+                [ct, -st * ca,  st * sa, a * ct],
+                [st,  ct * ca, -ct * sa, a * st],
+                [0,   sa,       ca,      d],
+                [0,   0,        0,       1]
+            ])
+
+        # Compute cumulative transformations and extract positions
+        joint_positions = []
+        T = np.eye(4)
+
+        # Add base position (always at origin)
+        joint_positions.append(T[:3, 3].copy())
+
+        # Compute position of each joint
+        for i, (theta, d, a, alpha) in enumerate(dh_params_local):
+            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
+            T = np.dot(T, T_i)
+            joint_positions.append(T[:3, 3].copy())
+
+        return joint_positions
+
+    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+        """
+        Check if any part of the robot (all joints) goes below the table.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            z_threshold: Minimum allowed Z position (meters).
+                        Default -0.01 means 1cm below table is still allowed.
+            verbose: If True, log which joint caused collision
+
+        Returns:
+            True if collision detected (any joint below threshold), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        for i, pos in enumerate(joint_positions):
+            if pos[2] < z_threshold:
+                if verbose:
+                    self.get_logger().warn(
+                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
+                        f"(threshold: {z_threshold*1000:.1f}mm)"
+                    )
+                return True  # Collision detected
+
+        return False  # No collision
+
+    def segment_distance(self, p1, p2, p3, p4):
+        """
+        Compute the minimum distance between two line segments.
+
+        Args:
+            p1, p2: Start and end points of first segment (numpy arrays)
+            p3, p4: Start and end points of second segment (numpy arrays)
+
+        Returns:
+            Minimum distance between the two segments
+        """
+        d1 = p2 - p1  # Direction of segment 1
+        d2 = p4 - p3  # Direction of segment 2
+        r = p1 - p3
+
+        a = np.dot(d1, d1)  # Squared length of segment 1
+        e = np.dot(d2, d2)  # Squared length of segment 2
+        f = np.dot(d2, r)
+
+        EPSILON = 1e-8
+
+        # Check if both segments are points
+        if a < EPSILON and e < EPSILON:
+            return np.linalg.norm(p1 - p3)
+
+        # First segment is a point
+        if a < EPSILON:
+            s = 0.0
+            t = np.clip(f / e, 0.0, 1.0)
+        else:
+            c = np.dot(d1, r)
+            # Second segment is a point
+            if e < EPSILON:
+                t = 0.0
+                s = np.clip(-c / a, 0.0, 1.0)
+            else:
+                # General case
+                b = np.dot(d1, d2)
+                denom = a * e - b * b
+
+                if abs(denom) > EPSILON:
+                    s = np.clip((b * f - c * e) / denom, 0.0, 1.0)
+                else:
+                    s = 0.0
+
+                t = (b * s + f) / e
+
+                if t < 0.0:
+                    t = 0.0
+                    s = np.clip(-c / a, 0.0, 1.0)
+                elif t > 1.0:
+                    t = 1.0
+                    s = np.clip((b - c) / a, 0.0, 1.0)
+
+        closest1 = p1 + s * d1
+        closest2 = p3 + t * d2
+
+        return np.linalg.norm(closest1 - closest2)
+
+    def check_self_collision(self, joint_angles, verbose=False):
+        """
+        Check if the robot configuration causes self-collision.
+        Models links as capsules and checks distances between non-adjacent links.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            verbose: If True, log collision details
+
+        Returns:
+            True if self-collision detected, False otherwise
+        """
+        # UR5e approximate link radii (meters) - conservative estimates
+        # These represent the "thickness" of each link for collision purposes
+        link_radii = [
+            0.075,  # Base (joint 0-1)
+            0.065,  # Shoulder to elbow (joint 1-2) - upper arm
+            0.055,  # Elbow to wrist1 (joint 2-3) - forearm
+            0.045,  # Wrist1 to wrist2 (joint 3-4)
+            0.045,  # Wrist2 to wrist3 (joint 4-5)
+            0.040,  # Wrist3 to EE (joint 5-6)
+        ]
+
+        # Safety margin for collision detection
+        safety_margin = 0.01  # 1cm extra margin
+
+        # Get all joint positions
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        # Check collisions between non-adjacent links
+        # Links are defined by consecutive joint positions
+        # Link i connects joint_positions[i] to joint_positions[i+1]
+        num_links = len(joint_positions) - 1
+
+        for i in range(num_links):
+            for j in range(i + 2, num_links):  # Skip adjacent links (i+1)
+                # Get segment endpoints
+                p1 = np.array(joint_positions[i])
+                p2 = np.array(joint_positions[i + 1])
+                p3 = np.array(joint_positions[j])
+                p4 = np.array(joint_positions[j + 1])
+
+                # Compute distance between segments
+                dist = self.segment_distance(p1, p2, p3, p4)
+
+                # Minimum allowed distance is sum of link radii plus safety margin
+                min_dist = link_radii[i] + link_radii[j] + safety_margin
+
+                if dist < min_dist:
+                    if verbose:
+                        self.get_logger().warn(
+                            f"Self-collision detected: Link {i} and Link {j} "
+                            f"distance={dist*1000:.1f}mm < threshold={min_dist*1000:.1f}mm"
+                        )
+                    return True  # Collision detected
+
+        return False  # No collision
+
+    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=-0.01):
+        """
+        Check if any point along the interpolated trajectory has a collision.
+
+        Args:
+            start_joints: Starting joint configuration
+            target_joints: Target joint configuration
+            num_samples: Number of samples along the trajectory to check
+            z_threshold: Minimum allowed Z position (meters)
+
+        Returns:
+            True if collision detected along trajectory, False otherwise
+        """
+        for i in range(num_samples + 1):
+            alpha = i / num_samples
+            interpolated_joints = start_joints + alpha * (target_joints - start_joints)
+            if self.check_collision_with_table(interpolated_joints, z_threshold=z_threshold):
+                self.get_logger().warn(f"Trajectory table collision at alpha={alpha:.2f}")
+                return True
+            if self.check_self_collision(interpolated_joints):
+                self.get_logger().warn(f"Trajectory self-collision at alpha={alpha:.2f}")
+                return True
+        return False
+
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber"""
         # Reset the flags
@@ -196,6 +409,32 @@ class MoveToClearArea(Node):
         
         # Determine target orientation based on mode
         if self.mode == 'hover':
+            # Step 1: First move to intermediate height (0.15m) to normalize joint positions
+            # This prevents joint limit issues when transitioning to hover position
+            self.get_logger().info("Step 1: Moving to intermediate height (0.15m) first...")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            safe_height_cmd = f"timeout 30 /usr/bin/python3 {script_dir}/move_to_safe_height.py --height 0.15"
+
+            try:
+                result = subprocess.run(
+                    safe_height_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=script_dir
+                )
+                if result.returncode != 0:
+                    self.get_logger().warn(f"move_to_safe_height returned code {result.returncode}")
+                    if result.stderr:
+                        self.get_logger().warn(f"stderr: {result.stderr[:200]}")
+                else:
+                    self.get_logger().info("Intermediate height reached successfully")
+            except Exception as e:
+                self.get_logger().warn(f"Failed to run move_to_safe_height: {e}")
+
+            # Step 2: Now do the actual hover movement
+            self.get_logger().info("Step 2: Moving to hover position with top-down orientation...")
+
             # Hover mode: Use same approach as move_home - use compute_ik with RPY [0, 180, 0]
             # Import compute_ik for hover mode
             from primitives.utils.ik_solver import compute_ik, rpy_to_matrix
@@ -217,7 +456,7 @@ class MoveToClearArea(Node):
             # Use compute_ik exactly like move_home does
             # compute_ik(position, rpy, q_guess=None, max_tries=5, dx=0.001)
             joint_angles = compute_ik(tcp_position, [0, 180, 0])
-            
+
             if joint_angles is None:
                 self.error_message = "IK solver failed: no valid solution to perform clear space move"
                 self.get_logger().error(self.error_message)
@@ -225,23 +464,23 @@ class MoveToClearArea(Node):
                 self.operation_complete = True
                 rclpy.shutdown()
                 return
-            
+
             # Create trajectory point - same duration as move_home (5 seconds)
             point = JointTrajectoryPoint(
                 positions=[float(x) for x in joint_angles],
                 velocities=[0.0] * 6,
                 time_from_start=Duration(sec=5)  # 5 seconds movement (same as HOME_MOVEMENT_DURATION)
             )
-            
+
             # Create and send trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
             traj.points = [point]
-            
+
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
-            
+
             self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
@@ -269,12 +508,9 @@ class MoveToClearArea(Node):
                 target_pose[:3, :3] = target_rot_matrix
                 
                 # Use quaternion-based IK directly - no RPY conversion at all!
-                joint_angles = None
-                best_result = None
-                best_cost = float('inf')
-                max_tries = 10  # Increased from 5 to 10
+                max_tries = 10
                 dx = 0.001
-                
+
                 # Primary seed: use current joint angles from joint state subscription
                 if self.current_joint_angles is None:
                     self.error_message = "Current joint angles not available! Cannot compute IK."
@@ -283,123 +519,147 @@ class MoveToClearArea(Node):
                     self.operation_complete = True
                     rclpy.shutdown()
                     return
-                
+
                 q_guess = self.current_joint_angles.copy()
-                
-                # Try IK with multiple strategies:
-                # 1. Current joint angles with position perturbations (both positive and negative)
-                # 2. Try with slightly perturbed joint angles as seeds
-                solution_found = False
-                
+                start_joints = self.current_joint_angles.copy()
+
+                # Collect ALL valid IK solutions (collision-free at target)
+                candidate_solutions = []
+
                 # Strategy 1: Position perturbations with current joint angles
                 for i in range(max_tries):
-                    if solution_found:
-                        break
-                    
-                    # Try both positive and negative perturbations
                     perturbations = [i * dx, -i * dx] if i > 0 else [0]
-                    
+
                     for perturbation in perturbations:
-                        if solution_found:
-                            break
-                            
-                        # Try small x-shift (helps with workspace boundaries)
                         perturbed_position = np.array(tcp_position).copy()
                         perturbed_position[0] += perturbation
-                        
-                        # Also try y-shift if x-shift doesn't work
+
                         if i > max_tries // 2:
                             perturbed_position[1] += perturbation * 0.5
-                        
+
                         perturbed_pose = target_pose.copy()
                         perturbed_pose[:3, 3] = perturbed_position
-                        
-                        joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
 
-                        # Use quaternion-based objective directly - NO RPY conversion!
+                        joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
                         result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
                                         method='L-BFGS-B', bounds=joint_bounds)
-                        
+
                         if result.success:
                             cost = ik_objective_quaternion(result.x, perturbed_pose)
-                            
-                            # Check if this is a good solution
-                            if cost < 0.01:
-                                joint_angles = result.x
-                                solution_found = True
-                                break
-                            
-                            # Keep track of best solution
-                            if cost < best_cost:
-                                best_cost = cost
-                                best_result = result.x
-                
-                # Strategy 2: Try with slightly perturbed joint angles as seeds if first strategy failed
-                if not solution_found:
-                    # Try different joint angle seeds by adding small deterministic perturbations
-                    seed_perturbations = [
-                        [0.1, 0, 0, 0, 0, 0],
-                        [-0.1, 0, 0, 0, 0, 0],
-                        [0, 0.1, 0, 0, 0, 0],
-                        [0, -0.1, 0, 0, 0, 0],
-                        [0, 0, 0.1, 0, 0, 0],
-                        [0, 0, -0.1, 0, 0, 0],
-                        [0.05, 0.05, 0, 0, 0, 0],
-                        [-0.05, -0.05, 0, 0, 0, 0]
-                    ]
-                    
-                    for seed_pert in seed_perturbations:
-                        if solution_found:
-                            break
-                            
-                        # Create perturbed seed
-                        q_perturbed = q_guess.copy()
-                        q_perturbed += np.array(seed_pert)
-                        
-                        # Try with original position first
-                        result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,),
-                                        method='L-BFGS-B', bounds=[(-2*np.pi, 2*np.pi)] * 6)
-                        
-                        if result.success:
-                            cost = ik_objective_quaternion(result.x, target_pose)
-                            
-                            if cost < 0.01:
-                                joint_angles = result.x
-                                solution_found = True
-                                break
-                            
-                            # Keep track of best solution
-                            if cost < best_cost:
-                                best_cost = cost
-                                best_result = result.x
-                
-                # If we found any reasonable solution, use it
-                if joint_angles is None and best_result is not None and best_cost < 0.1:
-                    joint_angles = best_result
-                
-                if joint_angles is None:
-                    self.error_message = "IK solver failed: no valid solution to perform clear space move"
+                            has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                            has_self_collision = self.check_self_collision(result.x)
+
+                            if cost < 0.1 and not has_table_collision and not has_self_collision:
+                                candidate_solutions.append((cost, result.x.copy()))
+
+                # Strategy 2: Try with different joint angle seeds
+                seed_perturbations = [
+                    [0.1, 0, 0, 0, 0, 0],
+                    [-0.1, 0, 0, 0, 0, 0],
+                    [0, 0.1, 0, 0, 0, 0],
+                    [0, -0.1, 0, 0, 0, 0],
+                    [0, 0, 0.1, 0, 0, 0],
+                    [0, 0, -0.1, 0, 0, 0],
+                    [0.5, 0, 0, 0, 0, 0],
+                    [-0.5, 0, 0, 0, 0, 0],
+                    [0, 0.5, 0, 0, 0, 0],
+                    [0, -0.5, 0, 0, 0, 0],
+                    [np.pi, 0, 0, 0, 0, 0],  # Try flipping shoulder
+                    [-np.pi, 0, 0, 0, 0, 0],
+                    [0, np.pi/2, 0, 0, 0, 0],  # Different elbow config
+                    [0, -np.pi/2, 0, 0, 0, 0],
+                ]
+
+                for seed_pert in seed_perturbations:
+                    q_perturbed = q_guess.copy()
+                    q_perturbed += np.array(seed_pert)
+
+                    result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,),
+                                    method='L-BFGS-B', bounds=[(-2*np.pi, 2*np.pi)] * 6)
+
+                    if result.success:
+                        cost = ik_objective_quaternion(result.x, target_pose)
+                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                        has_self_collision = self.check_self_collision(result.x)
+
+                        if cost < 0.1 and not has_table_collision and not has_self_collision:
+                            candidate_solutions.append((cost, result.x.copy()))
+
+                if not candidate_solutions:
+                    self.error_message = "IK solver failed: no collision-free solution found for clear space move"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
                     rclpy.shutdown()
                     return
 
-                # Create joint-space interpolated trajectory (smoother, wider arcs)
+                # Sort by cost (best first)
+                candidate_solutions.sort(key=lambda x: x[0])
+                self.get_logger().info(f"Found {len(candidate_solutions)} candidate IK solutions")
+
+                # Try each candidate solution with different joint wrapping options
+                # Collect ALL collision-free trajectories, then pick shortest path
                 num_waypoints = 10
                 total_duration = 5.0
+                collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost)
 
-                # Get start and target joint angles
-                start_joints = self.current_joint_angles.copy()
-                target_joints = np.array(joint_angles).copy()
+                for cost, candidate_joints in candidate_solutions:
+                    target_joints = np.array(candidate_joints).copy()
 
-                # Handle joint wrapping for shortest path
-                for i in range(6):
-                    diff = target_joints[i] - start_joints[i]
-                    if diff > np.pi:
-                        target_joints[i] -= 2 * np.pi
-                    elif diff < -np.pi:
-                        target_joints[i] += 2 * np.pi
+                    # Generate multiple joint wrapping variants for this solution
+                    # Try different combinations of ±2π on joints that have large differences
+                    wrapping_variants = [target_joints.copy()]
+
+                    for joint_idx in range(6):
+                        diff = target_joints[joint_idx] - start_joints[joint_idx]
+                        new_variants = []
+
+                        for variant in wrapping_variants:
+                            # Keep original
+                            new_variants.append(variant.copy())
+
+                            # Try +2π if diff is negative and large
+                            if diff < -np.pi/2:
+                                v = variant.copy()
+                                v[joint_idx] += 2 * np.pi
+                                new_variants.append(v)
+
+                            # Try -2π if diff is positive and large
+                            if diff > np.pi/2:
+                                v = variant.copy()
+                                v[joint_idx] -= 2 * np.pi
+                                new_variants.append(v)
+
+                        wrapping_variants = new_variants
+
+                    # Test each wrapping variant for collision-free trajectory
+                    for variant in wrapping_variants:
+                        # Also check that wrapped solution is still collision-free
+                        if self.check_collision_with_table(variant, z_threshold=-0.01):
+                            continue
+                        if self.check_self_collision(variant):
+                            continue
+
+                        # Check trajectory collision
+                        if not self.check_trajectory_collision(start_joints, variant, num_samples=20, z_threshold=-0.01):
+                            # Calculate total joint travel distance (sum of absolute angle changes)
+                            travel_distance = np.sum(np.abs(variant - start_joints))
+                            collision_free_trajectories.append((travel_distance, variant.copy(), cost))
+
+                if not collision_free_trajectories:
+                    self.error_message = "IK solution rejected: all candidate trajectories would cause collision"
+                    self.get_logger().error(self.error_message)
+                    self.operation_success = False
+                    self.operation_complete = True
+                    rclpy.shutdown()
+                    return
+
+                # Sort by travel distance (shortest path first)
+                collision_free_trajectories.sort(key=lambda x: x[0])
+
+                shortest_travel, target_joints, best_cost = collision_free_trajectories[0]
+                self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
+                self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}")
 
                 self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
 
@@ -435,15 +695,29 @@ class MoveToClearArea(Node):
                 goal.goal_time_tolerance = Duration(sec=1)
 
                 self.get_logger().info(f"Joint-space trajectory with {len(trajectory_points)} waypoints sent")
-                self._send_goal_future = self.action_client.send_goal_async(goal)
+                self._send_goal_future = self.action_client.send_goal_async(
+                    goal,
+                    feedback_callback=self.feedback_callback
+                )
                 self._send_goal_future.add_done_callback(self.goal_response)
-                
+
             except Exception as e:
                 self.error_message = f"Failed to compute IK: {e}"
                 self.get_logger().error(self.error_message)
                 self.operation_success = False
                 self.operation_complete = True
                 rclpy.shutdown()
+
+    def feedback_callback(self, feedback_msg):
+        """Handle trajectory execution feedback"""
+        feedback = feedback_msg.feedback
+        # Log progress - feedback contains actual vs desired positions
+        if hasattr(feedback, 'error') and feedback.error:
+            # Check for position errors that might indicate problems
+            if hasattr(feedback.error, 'positions') and feedback.error.positions:
+                max_error = max(abs(e) for e in feedback.error.positions)
+                if max_error > 0.1:  # More than 0.1 rad error
+                    self.get_logger().warn(f"Large trajectory tracking error: {np.degrees(max_error):.1f}deg")
 
     def goal_response(self, future):
         """Handle goal response"""
@@ -471,10 +745,23 @@ class MoveToClearArea(Node):
             self.operation_success = True
         else:
             result_msg = result.result
-            if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
-                self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
+            # Handle various error codes
+            error_code = result_msg.error_code
+            if error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                self.error_message = "PATH_TOLERANCE_VIOLATED: Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits."
+            elif error_code == FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED:
+                self.error_message = "GOAL_TOLERANCE_VIOLATED: Final position tolerance exceeded."
+            elif error_code == FollowJointTrajectory.Result.INVALID_GOAL:
+                self.error_message = "INVALID_GOAL: The trajectory goal is invalid."
+            elif error_code == FollowJointTrajectory.Result.INVALID_JOINTS:
+                self.error_message = "INVALID_JOINTS: Invalid joint names in trajectory."
+            elif error_code == FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP:
+                self.error_message = "OLD_HEADER_TIMESTAMP: Trajectory header timestamp is too old."
             else:
-                self.error_message = f"Trajectory failed with status: {result.status}"
+                # Status codes: 1=ACCEPTED, 2=EXECUTING, 3=CANCELING, 4=SUCCEEDED, 5=CANCELED, 6=ABORTED
+                status_names = {1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING", 4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
+                status_name = status_names.get(result.status, f"UNKNOWN({result.status})")
+                self.error_message = f"Trajectory failed: status={status_name}, error_code={error_code}"
             self.get_logger().error(self.error_message)
             self.operation_success = False
         self.operation_complete = True
@@ -531,14 +818,31 @@ def main(args=None):
     rclpy.init()
     node = MoveToClearArea(mode=mode)
     try:
-        # Spin until operation is complete
+        # Spin until operation is complete with timeout
+        import time
+        start_time = time.time()
+        timeout_sec = 30.0  # 30 second timeout for trajectory execution
+
         while rclpy.ok() and not node.operation_complete:
             rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Check for timeout
+            elapsed = time.time() - start_time
+            if elapsed > timeout_sec:
+                node.error_message = f"Trajectory execution timed out after {timeout_sec:.0f}s - robot may have hit velocity limits or stalled"
+                node.get_logger().error(node.error_message)
+                node.operation_success = False
+                node.operation_complete = True
+                break
+
     except KeyboardInterrupt:
+        node.error_message = "Operation cancelled by user (Ctrl+C)"
+        node.get_logger().warn(node.error_message)
         node.operation_success = False
         node.operation_complete = True
     except Exception as e:
-        node.get_logger().error(f"Error during spin: {e}")
+        node.error_message = f"Error during spin: {e}"
+        node.get_logger().error(node.error_message)
         node.operation_success = False
         node.operation_complete = True
     finally:

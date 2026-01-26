@@ -605,9 +605,14 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     else:
         env['PYTHONPATH'] = script_dir
     
+    # Use sys.executable to ensure we use the same Python interpreter as the MCP server
+    # This preserves conda/virtualenv environment and ROS2 DDS configuration
+    import sys
+    python_executable = sys.executable
+
     cmd_parts = [
         f"cd {script_dir}/primitives",
-        f"timeout {timeout} /usr/bin/python3 -u {script_name} {command_args}".strip()
+        f"timeout {timeout} {python_executable} -u {script_name} {command_args}".strip()
     ]
     
     cmd = "\n".join(cmd_parts)

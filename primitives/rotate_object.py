@@ -370,6 +370,11 @@ class ReorientForAssembly(Node):
         self.cardinal_error_threshold_increment = 10.0  # Increment threshold by this amount each retry
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
 
+        # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
+        # This matches the offset used in move_to_grasp.py
+        # When rotating, we keep the gripper center (where the object is) fixed, not the TCP
+        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm (distance from TCP to gripper center)
+
         # JSON output tracking
         self.error_message = None
         self.object_name = None
@@ -806,6 +811,77 @@ class ReorientForAssembly(Node):
 
         return facing_robot, angle_to_base
 
+    def check_extended_gripper_collision(self, joint_angles, verbose=False):
+        """
+        Check if the extended gripper geometry would collide with the robot body.
+
+        The gripper extends 24cm from the TCP along the gripper Z-axis. This method
+        checks if that extended geometry would collide with the robot base or upper arm.
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            verbose: If True, log collision details
+
+        Returns:
+            True if collision detected, False otherwise
+        """
+        # Get joint positions and EE pose from FK
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+        T_ee = forward_kinematics(dh_params, joint_angles)
+        ee_pos = T_ee[:3, 3]
+        R_ee = T_ee[:3, :3]
+
+        # Compute gripper tip position (24cm along gripper Z-axis from TCP)
+        gripper_z_axis = R_ee[:, 2]  # Third column is Z-axis
+        gripper_tip = ee_pos + self.tcp_to_gripper_center_offset * gripper_z_axis
+
+        # Minimum safe distance from robot body (gripper radius + small margin)
+        gripper_radius = 0.04  # 4cm approximate gripper radius
+        safety_margin = 0.02  # 2cm safety margin
+        min_safe_distance = gripper_radius + safety_margin
+
+        # Check 1: Gripper tip below table level (definite collision)
+        if gripper_tip[2] < 0.0:
+            if verbose:
+                self.get_logger().warn(
+                    f"Extended gripper collision: tip below table "
+                    f"(Z: {gripper_tip[2]*1000:.1f}mm)"
+                )
+            return True
+
+        # Check 2: Gripper tip inside robot base cylinder (only when very close to base)
+        # Base is at origin with ~8cm radius, check only within 20cm height
+        tip_xy_dist_to_base = np.linalg.norm(gripper_tip[:2])
+        base_column_radius = 0.08  # 8cm actual base radius
+
+        if tip_xy_dist_to_base < base_column_radius + min_safe_distance:
+            if gripper_tip[2] < 0.20:  # Only check very close to base (below 20cm)
+                if verbose:
+                    self.get_logger().warn(
+                        f"Extended gripper collision: tip inside base column "
+                        f"(XY dist: {tip_xy_dist_to_base*1000:.1f}mm, Z: {gripper_tip[2]*1000:.1f}mm)"
+                    )
+                return True
+
+        # Check 3: Gripper collision with upper arm (link 1: shoulder to elbow)
+        # This is the most likely collision during rotation
+        shoulder_pos = np.array(joint_positions[1])
+        elbow_pos = np.array(joint_positions[2])
+
+        # Distance from gripper segment (TCP to tip) to upper arm segment
+        gripper_to_upper_arm_dist = self.segment_distance(ee_pos, gripper_tip, shoulder_pos, elbow_pos)
+        upper_arm_radius = 0.05  # 5cm radius for upper arm
+
+        if gripper_to_upper_arm_dist < upper_arm_radius + min_safe_distance:
+            if verbose:
+                self.get_logger().warn(
+                    f"Extended gripper collision: gripper too close to upper arm "
+                    f"(dist: {gripper_to_upper_arm_dist*1000:.1f}mm)"
+                )
+            return True
+
+        return False
+
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
@@ -845,7 +921,9 @@ class ReorientForAssembly(Node):
                     T_ee = forward_kinematics(dh_params, result.x)
                     R_ee = T_ee[:3, :3]
                     has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot
+                    # Check extended gripper collision (24cm extension from TCP)
+                    has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
 
                 # Check if this is a good solution (low cost and no collision)
                 if cost < 0.01 and not has_collision:
@@ -910,7 +988,9 @@ class ReorientForAssembly(Node):
                         T_ee = forward_kinematics(dh_params, result.x)
                         R_ee = T_ee[:3, :3]
                         has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot
+                        # Check extended gripper collision (24cm extension from TCP)
+                        has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
+                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
 
                     # Check if this is a good solution (low cost and no collision)
                     if cost < 0.01 and not has_collision:
@@ -920,7 +1000,7 @@ class ReorientForAssembly(Node):
                         best_cost, best_result = cost, result.x
 
         if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config + EE facing robot) even with multiple seeds")
+            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config + EE facing robot + extended gripper) even with multiple seeds")
         else:
             self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return best_result if best_cost < 0.1 else None
@@ -1525,10 +1605,10 @@ class ReorientForAssembly(Node):
                 self.error_message = "Joint angles data is None"
                 self.get_logger().error(self.error_message)
                 return False
-        
-        # Try IK with best solution first
+
+        # Try IK with best solution first (rotate about TCP, collision checks account for extended gripper)
         joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), best_quat.tolist())
-        
+
         # If IK fails and we have alternative candidates, try them
         if joint_angles is None and candidates is not None:
             for i, cand in enumerate(candidates[1:6], 1):  # Try top 5 alternatives
@@ -1536,20 +1616,20 @@ class ReorientForAssembly(Node):
                 # Snap to exact equivalent target
                 R_EE_card_exact = card_target_R @ R_grasp.T
                 card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
-                
+
                 # Verify exact result
                 R_object_card_exact = R_EE_card_exact @ R_grasp
                 card_exact_error = ExtendedCardinalOrientations.rotation_matrix_distance(
                     R_object_card_exact, card_target_R
                 )
-                
+
                 if card_exact_error < 1.0:
                     card_quat = card_quat_exact
                     card_object_R = R_object_card_exact
                     card_error = card_exact_error
-                
+
                 joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), card_quat.tolist())
-                
+
                 if joint_angles is not None:
                     # Update to use this alternative
                     best_cardinal = card_name
