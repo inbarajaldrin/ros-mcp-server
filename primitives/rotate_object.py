@@ -895,6 +895,69 @@ class ReorientForAssembly(Node):
         best_result, best_cost = None, float('inf')
         joint_bounds = [(-np.pi, np.pi)] * 6
 
+        # Compute current EE orientation from FK
+        T_current = forward_kinematics(dh_params, self.current_joint_angles)
+        R_current = T_current[:3, :3]
+
+        # Compute orientation difference (rotation from current to target)
+        R_diff = target_rot @ R_current.T
+        angle_diff = np.arccos(np.clip((np.trace(R_diff) - 1) / 2, -1, 1))
+
+        # Check if this is primarily a yaw-only rotation (wrist_2 near ±90°)
+        # When wrist_2 is near ±90°, changing wrist_3 produces yaw rotation
+        wrist_2_near_singular = abs(abs(self.current_joint_angles[4]) - np.pi/2) < np.radians(15)
+
+        # For small orientation changes or yaw-only rotations, try wrist_3-adjusted seed first
+        if wrist_2_near_singular and angle_diff < np.radians(90):
+            # Compute yaw difference between current and target EE
+            current_yaw = np.arctan2(R_current[1, 0], R_current[0, 0])
+            target_yaw = np.arctan2(target_rot[1, 0], target_rot[0, 0])
+            yaw_diff = target_yaw - current_yaw
+
+            # Normalize to [-pi, pi]
+            while yaw_diff > np.pi:
+                yaw_diff -= 2 * np.pi
+            while yaw_diff < -np.pi:
+                yaw_diff += 2 * np.pi
+
+            # Create a seed with wrist_3 adjusted for the yaw change
+            # The sign relationship depends on wrist_2 sign:
+            # - wrist_2 ≈ -90°: EE yaw change = -wrist_3 change → wrist_3_change = -yaw_diff
+            # - wrist_2 ≈ +90°: EE yaw change = +wrist_3 change → wrist_3_change = +yaw_diff
+            yaw_adjusted_seed = self.current_joint_angles.copy()
+            if self.current_joint_angles[4] < 0:
+                # wrist_2 ≈ -90°
+                yaw_adjusted_seed[5] -= yaw_diff
+            else:
+                # wrist_2 ≈ +90°
+                yaw_adjusted_seed[5] += yaw_diff
+
+            # Try the yaw-adjusted seed
+            result = minimize(ik_objective_quaternion, yaw_adjusted_seed, args=(target_pose,),
+                            method='L-BFGS-B', bounds=joint_bounds)
+            if result.success or ik_objective_quaternion(result.x, target_pose) < 0.01:
+                cost = ik_objective_quaternion(result.x, target_pose)
+
+                # Check for collisions (sim mode only)
+                has_collision = False
+                if self.mode == 'sim':
+                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
+                    has_self_collision = self.check_self_collision(result.x)
+                    has_ee_below_base = self.check_ee_below_base(result.x)
+                    has_compact_config = self.check_compact_configuration(result.x)
+                    joint_positions = self.compute_all_joint_positions(result.x)
+                    ee_pos_from_fk = joint_positions[-1]
+                    T_ee = forward_kinematics(dh_params, result.x)
+                    R_ee = T_ee[:3, :3]
+                    has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
+                    has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
+                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
+
+                if cost < 0.01 and not has_collision:
+                    return result.x
+                if not has_collision and cost < best_cost:
+                    best_cost, best_result = cost, result.x
+
         for i in range(max_tries):
             perturbed = target_pose.copy()
             perturbed[0, 3] += i * dx
@@ -1023,67 +1086,39 @@ class ReorientForAssembly(Node):
             or (False, None, None, None, inf) if optimization not applicable
         """
         CARDINAL_THRESHOLD = 45.0  # degrees
-        
-        # Check if current object is close to a cardinal
-        current_cardinal_name, current_cardinal_quat, current_dist = \
-            ExtendedCardinalOrientations.find_closest_cardinal(R_object_current, CARDINAL_THRESHOLD)
-        
-        if current_cardinal_name is None:
-            return (False, None, None, None, float('inf'))
-        
-        # Generate equivalent targets and check if any is close to a cardinal
+
+        # Generate equivalent targets first
         equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
             R_object_target_world, fold_data, None  # Don't log here
         )
         
-        # First, find which equivalent target is closest to a cardinal (for validation)
-        best_target_cardinal = None
-        best_target_cardinal_quat = None
-        best_target_dist = float('inf')
-        
-        for R_target_equiv in equivalent_targets:
-            target_cardinal_name, target_cardinal_quat, target_dist = \
-                ExtendedCardinalOrientations.find_closest_cardinal(R_target_equiv, CARDINAL_THRESHOLD)
-            
-            if target_cardinal_name is not None and target_dist < best_target_dist:
-                best_target_dist = target_dist
-                best_target_cardinal = target_cardinal_name
-                best_target_cardinal_quat = target_cardinal_quat
-        
-        if best_target_cardinal is None:
-            return (False, None, None, None, float('inf'))
-        
-        # Now find the equivalent target that's closest to the CURRENT object orientation
-        # This ensures we make the smallest possible adjustment
+        # Find the equivalent target that's closest to the CURRENT object orientation
+        # AND whose required EE orientation is close to a cardinal
+        # This ensures we make the smallest possible adjustment using a cardinal EE
         best_target_R = None
         min_distance_to_current = float('inf')
-        
+
         for R_target_equiv in equivalent_targets:
-            # Check if this equivalent target is close to a cardinal (must be valid)
-            target_cardinal_name, _, target_dist = \
-                ExtendedCardinalOrientations.find_closest_cardinal(R_target_equiv, CARDINAL_THRESHOLD)
-            
-            if target_cardinal_name is not None:
+            # Calculate the EE required to achieve this target: R_EE = R_target @ R_grasp^T
+            R_EE_required = R_target_equiv @ R_grasp.T
+
+            # Check if this required EE is close to a cardinal
+            ee_cardinal_name, _, ee_dist = \
+                ExtendedCardinalOrientations.find_closest_cardinal(R_EE_required, CARDINAL_THRESHOLD)
+
+            if ee_cardinal_name is not None:
+                # This target can be achieved with a cardinal EE
                 # Calculate distance from current object to this equivalent target
                 distance_to_current = ExtendedCardinalOrientations.rotation_matrix_distance(
                     R_object_current, R_target_equiv
                 )
-                
+
                 if distance_to_current < min_distance_to_current:
                     min_distance_to_current = distance_to_current
                     best_target_R = R_target_equiv
-        
+
         if best_target_R is None:
-            # Fallback: use the first equivalent target that's close to a cardinal
-            for R_target_equiv in equivalent_targets:
-                target_cardinal_name, _, _ = \
-                    ExtendedCardinalOrientations.find_closest_cardinal(R_target_equiv, CARDINAL_THRESHOLD)
-                if target_cardinal_name is not None:
-                    best_target_R = R_target_equiv
-                    break
-        
-        if best_target_R is None:
-            self.get_logger().error("  Failed to find valid equivalent target")
+            # No equivalent target can be achieved with a cardinal EE within threshold
             return (False, None, None, None, float('inf'))
         
         # Log which equivalent target we're using
@@ -1197,8 +1232,9 @@ class ReorientForAssembly(Node):
                     min_distance_to_current = distance
                     closest_target_to_current = R_target_equiv
             
-            # If current object is already close to canonical (within 15°), prefer minimal adjustment
-            if min_distance_to_current < 15.0:
+            # If current object is already close to canonical (within 45°), prefer minimal adjustment
+            # This threshold should match CARDINAL_THRESHOLD to ensure consistency
+            if min_distance_to_current < 45.0:
                 
                 # Calculate current EE orientation from current object and grasp
                 # R_object_current = R_EE_current @ R_grasp
