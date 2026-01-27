@@ -778,7 +778,18 @@ class MoveDown(Node):
         distance_to_target = abs(current_z - target_position[2])
         if distance_to_target < 0.001:  # Already at target (within 1mm)
             self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Exiting.")
-            rclpy.shutdown()
+            # Use delayed shutdown with os._exit() to ensure clean exit
+            # (same pattern as contact_detected_stop)
+            def delayed_shutdown():
+                try:
+                    rclpy.shutdown()
+                except:
+                    pass
+                os._exit(0)
+
+            shutdown_timer = threading.Timer(0.1, delayed_shutdown)
+            shutdown_timer.daemon = True
+            shutdown_timer.start()
             return
         
         # Check workspace limit (safety check)

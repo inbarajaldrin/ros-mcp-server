@@ -1684,8 +1684,7 @@ class ReorientForAssembly(Node):
         final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
         self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
 
-        # === Execute with multiple waypoints for smooth motion ===
-        num_waypoints = 10
+        # === Execute with single target point ===
         trajectory_points = []
 
         # Get current joint angles as starting point
@@ -1708,16 +1707,12 @@ class ReorientForAssembly(Node):
             "time_from_start": Duration(sec=0, nanosec=0)
         })
 
-        # Add intermediate waypoints
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            interpolated_joints = start_joints + alpha * (target_joints - start_joints)
-            time_from_start = (i / num_waypoints) * duration
-            trajectory_points.append({
-                "positions": [float(x) for x in interpolated_joints],
-                "velocities": [0.0] * 6,
-                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
-            })
+        # Add target point at t=duration
+        trajectory_points.append({
+            "positions": [float(x) for x in target_joints],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=int(duration), nanosec=int((duration % 1) * 1e9))
+        })
 
         trajectory = {"traj1": trajectory_points}
         

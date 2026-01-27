@@ -672,18 +672,25 @@ class MoveToClearArea(Node):
                     time_from_start=Duration(sec=0, nanosec=0)
                 ))
 
-                # Add intermediate waypoints with linear joint-space interpolation
-                for i in range(1, num_waypoints + 1):
+                # Add intermediate waypoints (no velocity specified - controller computes smooth velocities)
+                for i in range(1, num_waypoints):
                     alpha = i / num_waypoints
                     interpolated_joints = start_joints + alpha * (target_joints - start_joints)
                     time_from_start = (i / num_waypoints) * total_duration
 
                     trajectory_points.append(JointTrajectoryPoint(
                         positions=[float(x) for x in interpolated_joints],
-                        velocities=[0.0] * 6,
                         time_from_start=Duration(sec=int(time_from_start),
                                                 nanosec=int((time_from_start % 1) * 1e9))
                     ))
+
+                # Add final point (zero velocity - stop at end)
+                trajectory_points.append(JointTrajectoryPoint(
+                    positions=[float(x) for x in target_joints],
+                    velocities=[0.0] * 6,
+                    time_from_start=Duration(sec=int(total_duration),
+                                            nanosec=int((total_duration % 1) * 1e9))
+                ))
 
                 # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
