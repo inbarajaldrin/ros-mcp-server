@@ -59,15 +59,27 @@ else:
     SCREENSHOTS_DIR = "screenshots"
     PYTHON_EXECUTIONS_DIR = "python_executions"
 
-# Grasp points publisher process (started automatically on client connect)
+# Subprocess processes (started automatically on client connect)
 grasp_publisher_process = None
+rosbridge_process = None
 
 @asynccontextmanager
 async def lifespan(app):
-    """Lifespan context manager - starts grasp points publisher on client connect."""
-    global grasp_publisher_process
+    """Lifespan context manager - starts managed subprocesses on client connect."""
+    global grasp_publisher_process, rosbridge_process
 
-    # Start grasp points publisher on server startup (client connect)
+    # Start rosbridge WebSocket server
+    try:
+        rosbridge_process = subprocess.Popen(
+            ["ros2", "launch", "rosbridge_server", "rosbridge_websocket_launch.xml"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print(f"Started rosbridge server (PID: {rosbridge_process.pid})", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Could not start rosbridge server: {e}", file=sys.stderr)
+
+    # Start grasp points publisher
     script_dir = os.path.dirname(os.path.abspath(__file__))
     grasp_publisher_path = os.path.join(script_dir, "primitives/utils/grasp_points_publisher.py")
 
@@ -84,15 +96,16 @@ async def lifespan(app):
     yield {}  # Server runs here
 
     # Cleanup on server shutdown (client disconnect)
-    if grasp_publisher_process:
-        try:
-            grasp_publisher_process.terminate()
-            grasp_publisher_process.wait(timeout=5)
-            print("Stopped grasp points publisher", file=sys.stderr)
-        except Exception as e:
-            print(f"Warning: Error stopping grasp points publisher: {e}", file=sys.stderr)
+    for name, proc in [("rosbridge server", rosbridge_process), ("grasp points publisher", grasp_publisher_process)]:
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+                print(f"Stopped {name}", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: Error stopping {name}: {e}", file=sys.stderr)
 
-# Initialize MCP with lifespan to auto-start grasp points publisher
+# Initialize MCP with lifespan to auto-start managed subprocesses
 mcp = FastMCP("ros-mcp-server", lifespan=lifespan)
 
 
