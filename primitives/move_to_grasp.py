@@ -50,7 +50,7 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
     """IK solver with wrist_3 joint range extended to (-2pi, 2pi).
     All other joints remain at (-pi, pi).
     If current_joints is provided, it is used as the primary seed."""
-    from scipy.optimize import minimize as sp_minimize
+    from primitives.utils.unified_ik import IKSolverConfig, IKSolver
 
     original_position = np.array(position)
     target_rot_matrix = R.from_euler('xyz', rpy, degrees=True).as_matrix()
@@ -79,7 +79,7 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
         np.radians([85, -90, 100, -100, -90, rpy[2]]),
     ])
 
-    joint_bounds = [
+    wrist3_extended_bounds = [
         (-np.pi, np.pi),
         (-np.pi, np.pi),
         (-np.pi, np.pi),
@@ -88,31 +88,13 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
         (-2*np.pi, 2*np.pi)
     ]
 
-    best_result = None
-    best_cost = float('inf')
-
-    for q_guess in seed_configs:
-        for i in range(max_tries):
-            perturbed_position = original_position.copy()
-            perturbed_position[0] += i * dx
-
-            perturbed_pose = target_pose.copy()
-            perturbed_pose[:3, 3] = perturbed_position
-
-            result = sp_minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
-                                 method='L-BFGS-B', bounds=joint_bounds)
-
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed_pose)
-                if cost < 0.01:
-                    return result.x
-                if cost < best_cost:
-                    best_cost = cost
-                    best_result = result.x
-
-    if best_result is not None and best_cost < 0.1:
-        return best_result
-    return None
+    solver = IKSolver(IKSolverConfig(joint_bounds=wrist3_extended_bounds))
+    return solver.solve(
+        seeds=seed_configs,
+        target_pose=target_pose,
+        perturbations=max_tries,
+        dx=dx,
+    )
 
 
 def output_result(result):

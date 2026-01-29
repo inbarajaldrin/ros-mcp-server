@@ -801,101 +801,70 @@ class MoveDown(Node):
 
         # Compute inverse kinematics
         try:
-            from scipy.optimize import minimize
-            from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-            
+            from primitives.utils.ik_solver import forward_kinematics, dh_params
+            from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
             target_pose = np.eye(4)
             target_pose[:3, 3] = target_position
             target_pose[:3, :3] = target_rot_matrix
-            
+
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
-            
+
             # Normalize joint angles to [-pi, pi] to avoid issues with joints outside bounds
             q_guess = np.array([np.arctan2(np.sin(a), np.cos(a)) for a in self.current_joint_angles])
-            
-            joint_angles = None
-            best_result = None
-            best_cost = float('inf')
-            max_tries = 5
-            dx = 0.001
-            
-            for i in range(max_tries):
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
 
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
+            # Collision checker for sim mode
+            def collision_checker(joint_angles_candidate):
+                if self.mode != 'sim':
+                    return False
+                return (self.check_collision_with_table(joint_angles_candidate, z_threshold=-0.01)
+                        or self.check_self_collision(joint_angles_candidate))
 
-                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
-                                method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
+            solver = IKSolver(IKSolverConfig())
 
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
+            # Stage 1: Position perturbations at target Z
+            joint_angles = solver.solve(
+                seeds=[q_guess],
+                target_pose=target_pose,
+                collision_checker=collision_checker,
+                perturbations=5,
+                dx=0.001,
+            )
 
-                    # Check for collisions (sim mode only)
-                    has_collision = False
-                    if self.mode == 'sim':
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        has_self_collision = self.check_self_collision(result.x)
-                        has_collision = has_table_collision or has_self_collision
-
-                    # Check if this is a good solution (low cost and no collision)
-                    if cost < 0.01 and not has_collision:
-                        joint_angles = result.x
-                        break
-
-                    # Keep track of best solution (only if no collision)
-                    if not has_collision and cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-            
-            if joint_angles is None and best_result is not None and best_cost < 0.1:
-                self.get_logger().info(f"Using best IK solution with cost={best_cost:.6f}")
-                joint_angles = best_result
+            if joint_angles is None and solver._best_result is not None:
+                self.get_logger().info(f"Using best IK solution with cost={solver._best_result.cost:.6f}")
+                joint_angles = solver._best_result.joint_angles
                 T_result = forward_kinematics(dh_params, joint_angles)
                 orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
                 self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-            
-            # If IK failed at target Z, try incrementally higher Z values until IK succeeds
+
+            # Stage 2: If IK failed at target Z, try incrementally higher Z values
             if joint_angles is None:
                 self.get_logger().warn(f"IK failed at target Z={target_position[2]:.3f}m. Trying higher Z values...")
-                z_increment = 0.05  # Try 5cm increments
-                max_z_attempts = 10  # Try up to 0.5m above target
+                z_increment = 0.05
+                max_z_attempts = 10
 
+                # Try each Z level sequentially, lowest first (early exit on first success)
+                solver2 = IKSolver(IKSolverConfig())
                 for z_attempt in range(1, max_z_attempts + 1):
                     test_z = target_position[2] + z_attempt * z_increment
                     self.get_logger().info(f"Trying IK at Z={test_z:.3f}m (attempt {z_attempt}/{max_z_attempts})")
 
-                    test_position = np.array(target_position).copy()
-                    test_position[2] = test_z
                     test_pose = target_pose.copy()
-                    test_pose[:3, 3] = test_position
+                    test_pose[2, 3] = test_z
 
-                    # Try IK with current joint angles as seed
-                    result = minimize(ik_objective_quaternion, q_guess, args=(test_pose,),
-                                    method='L-BFGS-B', bounds=[(-np.pi, np.pi)] * 6)
-
-                    if result.success:
-                        cost = ik_objective_quaternion(result.x, test_pose)
-
-                        # Check for collisions (sim mode only)
-                        has_collision = False
-                        if self.mode == 'sim':
-                            has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                            has_self_collision = self.check_self_collision(result.x)
-                            has_collision = has_table_collision or has_self_collision
-
-                        # Accept solution if cost is good and no collision
-                        if cost < 0.01 and not has_collision:
-                            self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m (cost={cost:.6f})")
-                            joint_angles = result.x
-                            target_position[2] = test_z  # Update target to reachable Z
-                            self.get_logger().info(f"Updated target Z to {test_z:.3f}m (lowest reachable height)")
-                            break
+                    ik_result = solver2._solve_single(q_guess, test_pose, collision_checker, None)
+                    if (ik_result is not None and not ik_result.has_collision
+                            and ik_result.cost < solver2.config.cost_threshold):
+                        joint_angles = ik_result.joint_angles
+                        target_position[2] = test_z
+                        self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m (cost={ik_result.cost:.6f})")
+                        self.get_logger().info(f"Updated target Z to {test_z:.3f}m (lowest reachable height)")
+                        break
 
                 if joint_angles is None:
                     if self.mode == 'sim':
@@ -905,7 +874,7 @@ class MoveDown(Node):
                     self.get_logger().error(self.error_message)
                     rclpy.shutdown()
                     return
-                
+
             self.get_logger().info(f"Computed joint angles: {joint_angles}")
 
             # Create joint-space interpolated trajectory (smoother, prevents swinging)

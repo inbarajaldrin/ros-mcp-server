@@ -206,11 +206,9 @@ class MoveToSafeHeight(Node):
         
         # Convert quaternion directly to rotation matrix to avoid precision loss from RPY conversion
         from scipy.spatial.transform import Rotation as Rot
-        from scipy.optimize import minimize
-        from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-        
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
         # Keep the current orientation (don't change it, just move to safe height)
-        # Convert quaternion directly to rotation matrix for more accurate IK
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
@@ -218,68 +216,28 @@ class MoveToSafeHeight(Node):
         target_position = current_pos.copy()
         target_position[2] = self.safe_height  # Set z to safe height
 
-        # Compute inverse kinematics for target pose
-        # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
         try:
-            # Create target pose with quaternion-derived rotation matrix
             target_pose = np.eye(4)
             target_pose[:3, 3] = target_position
             target_pose[:3, :3] = target_rot_matrix
-            
-            # Use quaternion-based IK directly - no RPY conversion at all!
-            # Since we're only moving up to safe height, current joint angles should be very close to the solution
-            joint_angles = None
-            best_result = None
-            best_cost = float('inf')
-            max_tries = 5
-            dx = 0.001
-            
-            # Primary seed: use current joint angles from joint state subscription
-            # This is the best seed since we're only moving up (small Z change)
+
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
-            
+
             q_guess = self.current_joint_angles.copy()
-            
-            # Try IK with current joint angles and position perturbations
-            solution_found = False
-            for i in range(max_tries):
-                if solution_found:
-                    break
-                    
-                # Try small x-shift each iteration (helps with workspace boundaries)
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
-                
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-                
-                joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
-                
-                # Use quaternion-based objective directly - NO RPY conversion!
-                result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
-                                method='L-BFGS-B', bounds=joint_bounds)
-                
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
-                    
-                    # Check if this is a good solution
-                    if cost < 0.01:
-                        joint_angles = result.x
-                        solution_found = True
-                        break
-                    
-                    # Keep track of best solution
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-            
-            # If we found any reasonable solution, use it
-            if joint_angles is None and best_result is not None and best_cost < 0.1:
-                joint_angles = best_result
+
+            solver = IKSolver(IKSolverConfig(
+                joint_bounds=[(-2*np.pi, 2*np.pi)] * 6,
+            ))
+            joint_angles = solver.solve(
+                seeds=[q_guess],
+                target_pose=target_pose,
+                perturbations=5,
+                dx=0.001,
+            )
 
             if joint_angles is None:
                 self.error_message = "IK solver failed: no valid solution to perform safe height move"

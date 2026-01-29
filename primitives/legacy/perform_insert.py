@@ -652,149 +652,97 @@ class PerformInsertController(Node):
     
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
-        Compute IK using current joint angles as seed (exactly like translate_for_assembly_old step 2)
-        
+        Compute IK using current joint angles as seed.
+        Uses unified IK solver with early termination for faster convergence.
+
         Args:
             target_position: [x, y, z] target position
             target_quat: [x, y, z, w] target orientation quaternion
             max_tries: Number of position perturbations to try
             dx: Position perturbation step size
-            
+
         Returns:
             Joint angles if successful, None otherwise
         """
-        # Convert quaternion to rotation matrix
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
         target_rotation = R.from_quat(target_quat)
         target_rot_matrix = target_rotation.as_matrix()
-        
-        # Create target pose
+
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot_matrix
-        
-        # Use current joint angles as seed
+
         if self.joints is None:
             self.get_logger().error("Current joint angles not available! Cannot compute IK.")
             return None
-        
+
         q_guess = self.joints.copy()
-        
-        # Try IK with current joint angles and position perturbations
-        solution_found = False
-        best_result = None
-        best_cost = float('inf')
-        
-        for i in range(max_tries):
-            if solution_found:
-                break
-                
-            # Try small x-shift each iteration (helps with workspace boundaries)
-            perturbed_position = np.array(target_position).copy()
-            perturbed_position[0] += i * dx
-            
-            perturbed_pose = target_pose.copy()
-            perturbed_pose[:3, 3] = perturbed_position
-            
-            joint_bounds = [(-np.pi, np.pi)] * 6
-            
-            # Use quaternion-based objective
-            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
-                            method='L-BFGS-B', bounds=joint_bounds)
-            
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed_pose)
 
-                # Check for collisions (sim mode only)
-                has_collision = False
-                if self.mode == 'sim':
-                    # Check table collision
-                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                    # Check self-collision
-                    has_self_collision = self.check_self_collision(result.x)
-                    # Check EE below robot base (lower threshold for insertion operations)
-                    has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
+        # Collision checker with lower EE threshold for insertion operations
+        def collision_checker(joint_angles):
+            if self.mode != 'sim':
+                return False
+            return (self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+                    or self.check_self_collision(joint_angles)
+                    or self.check_ee_below_base(joint_angles, z_threshold=0.05))
 
-                # Check if this is a good solution (low cost and no collision)
-                if cost < 0.01 and not has_collision:
-                    return result.x
+        solver = IKSolver(IKSolverConfig())
 
-                # Keep track of best solution (only if no collision)
-                if not has_collision and cost < best_cost:
-                    best_cost = cost
-                    best_result = result.x
+        # Phase 1: Current joint angles as seed with perturbations
+        result = solver.solve(
+            seeds=[q_guess],
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
-        # If we found any reasonable solution (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
+        # Phase 2: Fallback predefined seeds
+        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True).tolist()
 
-        # Fallback: Try multiple predefined seeds if current seed failed
-        # Convert target quaternion to RPY for seed generation
-        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
-        target_rpy_deg = target_rpy_deg.tolist()
-        
-        # Generate diverse seed configurations (same as translate_for_assembly_old)
         seed_configs = [
-            # Standard seeds
             np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
             np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([180, -90, 90, -90, -90, target_rpy_deg[2]]),
-            # Elbow-up configurations
             np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
             np.radians([85, -60, 60, -90, -90, target_rpy_deg[2]]),
-            # Wrist variations
             np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
             np.radians([85, -80, 90, -90, -180, target_rpy_deg[2]]),
-            # Additional variations for pitch
             np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
             np.radians([85, -90, 100, -100, -90, target_rpy_deg[2]]),
         ]
-        
-        best_result = None
-        best_cost = float('inf')
-        
-        for seed_idx, q_guess_fallback in enumerate(seed_configs):
-            for i in range(max_tries):
-                # Try small x-shift each iteration
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
-                
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-                
-                joint_bounds = [(-np.pi, np.pi)] * 6
-                
-                # Use quaternion-based objective
-                result = minimize(ik_objective_quaternion, q_guess_fallback, args=(perturbed_pose,), 
-                                method='L-BFGS-B', bounds=joint_bounds)
-                
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
 
-                    # Check for collisions (sim mode only)
-                    has_collision = False
-                    if self.mode == 'sim':
-                        # Check table collision
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        # Check self-collision
-                        has_self_collision = self.check_self_collision(result.x)
-                        # Check EE below robot base (lower threshold for insertion operations)
-                        has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
+        # Phase 2a: Probe each fallback seed once (1 perturbation) — fast
+        solver = IKSolver(IKSolverConfig())
+        result = solver.solve(
+            seeds=seed_configs,
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=1,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
-                    # Check if this is a good solution (low cost and no collision)
-                    if cost < 0.01 and not has_collision:
-                        return result.x
-
-                    # Keep track of best solution (only if no collision)
-                    if not has_collision and cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-
-        # If we found any reasonable solution with fallback seeds (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
+        # Phase 2b: Full perturbation search on fallback seeds — slower
+        # TEMPORARILY SKIPPED: Phase 2b costs ~50 scipy calls.
+        # Phase 2a probe results are usually sufficient.
+        # Revert: change "if False and" back to "if"
+        if False and max_tries > 1:
+            solver = IKSolver(IKSolverConfig())
+            result = solver.solve(
+                seeds=seed_configs,
+                target_pose=target_pose,
+                collision_checker=collision_checker,
+                perturbations=max_tries,
+                dx=dx,
+            )
+            if result is not None:
+                return result
 
         if self.mode == 'sim':
             self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")

@@ -477,62 +477,49 @@ class ReorientForAssembly(Node):
         return self.current_joint_angles.copy() if self.joint_angles_received else None
     
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot
-        
+
         if self.current_joint_angles is None:
             return None
-        
+
         q_guess = self.current_joint_angles.copy()
-        best_result, best_cost = None, float('inf')
-        joint_bounds = [(-np.pi, np.pi)] * 6
-        
-        for i in range(max_tries):
-            perturbed = target_pose.copy()
-            perturbed[0, 3] += i * dx
-            
-            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed,),
-                            method='L-BFGS-B', bounds=joint_bounds)
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed)
-                if cost < 0.01:
-                    return result.x
-                if cost < best_cost:
-                    best_cost, best_result = cost, result.x
-        
-        if best_result is not None and best_cost < 0.1:
-            return best_result
-        
-        # Fallback seeds - use quaternion to extract yaw component without gimbal lock
-        # Extract yaw from input quaternion directly (avoids gimbal lock from RPY conversion)
-        # Yaw from quaternion: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
-        yaw_rad = np.arctan2(2.0 * (target_quat[3] * target_quat[2] + target_quat[0] * target_quat[1]), 
+        solver = IKSolver(IKSolverConfig())
+
+        # Phase 1: Current seed with perturbations
+        result = solver.solve(
+            seeds=[q_guess],
+            target_pose=target_pose,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
+
+        # Phase 2: Fallback seeds
+        yaw_rad = np.arctan2(2.0 * (target_quat[3] * target_quat[2] + target_quat[0] * target_quat[1]),
                             1.0 - 2.0 * (target_quat[1]**2 + target_quat[2]**2))
         yaw_deg = np.degrees(yaw_rad)
-        
+
         seeds = [
             np.radians([85, -80, 90, -90, -90, yaw_deg]),
             np.radians([90, -90, 90, -90, -90, yaw_deg]),
             np.radians([0, -90, 90, -90, -90, yaw_deg]),
             np.radians([180, -90, 90, -90, -90, yaw_deg]),
         ]
-        
-        for seed in seeds:
-            for i in range(max_tries):
-                perturbed = target_pose.copy()
-                perturbed[0, 3] += i * dx
-                result = minimize(ik_objective_quaternion, seed, args=(perturbed,),
-                                method='L-BFGS-B', bounds=joint_bounds)
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed)
-                    if cost < 0.01:
-                        return result.x
-                    if cost < best_cost:
-                        best_cost, best_result = cost, result.x
-        
-        return best_result if best_cost < 0.1 else None
+
+        solver = IKSolver(IKSolverConfig())
+        result = solver.solve(
+            seeds=seeds,
+            target_pose=target_pose,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        return result
     
     def compute_cardinal_to_cardinal_adjustment(self, R_object_current, R_object_target_world, 
                                                  R_EE_current, R_grasp, fold_data):

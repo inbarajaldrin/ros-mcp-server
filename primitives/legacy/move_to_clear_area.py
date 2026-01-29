@@ -537,40 +537,37 @@ class MoveToClearArea(Node):
                     rclpy.shutdown()
                     return
 
+                from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
                 q_guess = self.current_joint_angles.copy()
                 start_joints = self.current_joint_angles.copy()
 
-                # Collect ALL valid IK solutions (collision-free at target)
-                candidate_solutions = []
+                def collision_checker(joint_angles):
+                    return (self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+                            or self.check_self_collision(joint_angles))
+
+                extended_bounds = [(-2*np.pi, 2*np.pi)] * 6
+                config = IKSolverConfig(
+                    early_termination=False,
+                    joint_bounds=extended_bounds,
+                )
 
                 # Strategy 1: Position perturbations with current joint angles
+                # Build custom perturbed poses (positive AND negative x-shifts, y-shifts for later)
+                strategy1_tasks = []
                 for i in range(max_tries):
-                    perturbations = [i * dx, -i * dx] if i > 0 else [0]
-
-                    for perturbation in perturbations:
+                    perturbation_values = [i * dx, -i * dx] if i > 0 else [0]
+                    for perturbation in perturbation_values:
                         perturbed_position = np.array(tcp_position).copy()
                         perturbed_position[0] += perturbation
-
                         if i > max_tries // 2:
                             perturbed_position[1] += perturbation * 0.5
+                        pose = target_pose.copy()
+                        pose[:3, 3] = perturbed_position
+                        strategy1_tasks.append(pose)
 
-                        perturbed_pose = target_pose.copy()
-                        perturbed_pose[:3, 3] = perturbed_position
-
-                        joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
-                        result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
-                                        method='L-BFGS-B', bounds=joint_bounds)
-
-                        if result.success:
-                            cost = ik_objective_quaternion(result.x, perturbed_pose)
-                            has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                            has_self_collision = self.check_self_collision(result.x)
-
-                            if cost < 0.1 and not has_table_collision and not has_self_collision:
-                                candidate_solutions.append((cost, result.x.copy()))
-
-                # Strategy 2: Try with different joint angle seeds
-                seed_perturbations = [
+                # Strategy 2: Different joint angle seeds (perturbations of current joints)
+                seed_perturbation_offsets = [
                     [0.1, 0, 0, 0, 0, 0],
                     [-0.1, 0, 0, 0, 0, 0],
                     [0, 0.1, 0, 0, 0, 0],
@@ -581,26 +578,27 @@ class MoveToClearArea(Node):
                     [-0.5, 0, 0, 0, 0, 0],
                     [0, 0.5, 0, 0, 0, 0],
                     [0, -0.5, 0, 0, 0, 0],
-                    [np.pi, 0, 0, 0, 0, 0],  # Try flipping shoulder
+                    [np.pi, 0, 0, 0, 0, 0],
                     [-np.pi, 0, 0, 0, 0, 0],
-                    [0, np.pi/2, 0, 0, 0, 0],  # Different elbow config
+                    [0, np.pi/2, 0, 0, 0, 0],
                     [0, -np.pi/2, 0, 0, 0, 0],
                 ]
+                strategy2_seeds = [q_guess + np.array(pert) for pert in seed_perturbation_offsets]
 
-                for seed_pert in seed_perturbations:
-                    q_perturbed = q_guess.copy()
-                    q_perturbed += np.array(seed_pert)
+                solver = IKSolver(config)
+                candidate_solutions = []
 
-                    result = minimize(ik_objective_quaternion, q_perturbed, args=(target_pose,),
-                                    method='L-BFGS-B', bounds=[(-2*np.pi, 2*np.pi)] * 6)
+                # Strategy 1: same seed, custom perturbed poses
+                for pose in strategy1_tasks:
+                    ik_result = solver._solve_single(q_guess, pose, collision_checker, None)
+                    if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
+                        candidate_solutions.append((ik_result.cost, ik_result.joint_angles))
 
-                    if result.success:
-                        cost = ik_objective_quaternion(result.x, target_pose)
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        has_self_collision = self.check_self_collision(result.x)
-
-                        if cost < 0.1 and not has_table_collision and not has_self_collision:
-                            candidate_solutions.append((cost, result.x.copy()))
+                # Strategy 2: different seeds, same target pose
+                for seed in strategy2_seeds:
+                    ik_result = solver._solve_single(seed, target_pose, collision_checker, None)
+                    if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
+                        candidate_solutions.append((ik_result.cost, ik_result.joint_angles))
 
                 if not candidate_solutions:
                     self.error_message = "IK solver failed: no collision-free solution found for clear space move"

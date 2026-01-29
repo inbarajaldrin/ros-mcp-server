@@ -155,6 +155,41 @@ class ExtendedCardinalOrientations:
         return np.degrees(np.arccos(cos_angle))
     
     @staticmethod
+    def get_relevant_cardinals(equivalent_targets, R_grasp, top_k=3):
+        """
+        Filter cardinals to only those geometrically relevant given fold symmetry.
+
+        For each equivalent target, computes the ideal EE orientation:
+            R_EE_required = R_target @ R_grasp^T
+        Then finds the top_k closest cardinals to each required EE.
+        Returns only the unique set of relevant cardinals.
+
+        Math justification: rotation distance is right-invariant, so
+        dist(R_EE @ R_grasp, R_target) = dist(R_EE, R_target @ R_grasp^T).
+        The cardinal closest to R_target @ R_grasp^T also minimizes object error.
+        """
+        all_cardinals = ExtendedCardinalOrientations.get_all_extended_cardinals()
+        relevant = {}
+        R_grasp_inv = R_grasp.T
+
+        for R_target in equivalent_targets:
+            R_EE_required = R_target @ R_grasp_inv
+            distances = []
+            for card_name, card_quat in all_cardinals.items():
+                R_cardinal = R.from_quat(card_quat).as_matrix()
+                dist = ExtendedCardinalOrientations.rotation_matrix_distance(
+                    R_EE_required, R_cardinal
+                )
+                distances.append((dist, card_name, card_quat))
+            distances.sort(key=lambda x: x[0])
+            for i in range(min(top_k, len(distances))):
+                name = distances[i][1]
+                if name not in relevant:
+                    relevant[name] = distances[i][2]
+
+        return relevant
+
+    @staticmethod
     def get_cardinal_rpy(name):
         parts = name.split('_')
         roll = int(parts[-1].replace('roll', ''))
@@ -911,22 +946,53 @@ class ReorientForAssembly(Node):
             max_change = max(max_change, abs(diff))
         return max_change
 
+    _collision_log_count = 0  # Class-level counter for verbose logging
+
     def _check_collision(self, joint_angles):
-        """Check all collision criteria. Returns True if collision detected."""
+        """Check all collision criteria. Returns True if collision detected.
+
+        Optimized: computes FK once and short-circuits on first collision.
+        """
         if self.mode != 'sim':
             return False
-        has_table_collision = self.check_collision_with_table(joint_angles, z_threshold=-0.01)
-        has_self_collision = self.check_self_collision(joint_angles)
-        has_ee_below_base = self.check_ee_below_base(joint_angles)
-        has_compact_config = self.check_compact_configuration(joint_angles)
+
+        # Compute FK once (previously computed 6-8 times across sub-checks)
         joint_positions = self.compute_all_joint_positions(joint_angles)
-        ee_pos_from_fk = joint_positions[-1]
         T_ee = forward_kinematics(dh_params, joint_angles)
+
+        # Short-circuit: check cheapest tests first, return on first collision
+        # 1. Table collision (cheap: iterate positions, check Z)
+        for pos in joint_positions:
+            if pos[2] < -0.01:
+                return True
+
+        # 2. EE below base (cheap: single Z check)
+        ee_pos = joint_positions[-1]
+        if ee_pos[2] < 0.1625:
+            return True
+
+        # 3. Compact configuration (cheap: XY distance)
+        shoulder_pos = np.array(joint_positions[1])
+        wrist2_pos = np.array(joint_positions[5])
+        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
+        if xy_dist < 0.20:
+            return True
+
+        # 4. EE facing robot (moderate: vector math)
         R_ee = T_ee[:3, :3]
-        has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-        has_extended_gripper_collision = self.check_extended_gripper_collision(joint_angles)
-        return (has_table_collision or has_self_collision or has_ee_below_base
-                or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision)
+        has_ee_facing, _ = self.check_ee_facing_robot(R_ee, ee_pos, threshold_deg=60.0)
+        if has_ee_facing:
+            return True
+
+        # 5. Self collision (expensive: O(n^2) segment distances)
+        if self.check_self_collision(joint_angles):
+            return True
+
+        # 6. Extended gripper collision (moderate: segment distance)
+        if self.check_extended_gripper_collision(joint_angles):
+            return True
+
+        return False
 
     def _try_ik_seed(self, seed, target_pose, joint_bounds):
         """Try IK with a single seed. Returns (joint_angles, cost) or (None, inf)."""
@@ -939,6 +1005,10 @@ class ReorientForAssembly(Node):
         return None, float('inf')
 
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
+        ReorientForAssembly._collision_log_count = 0  # Reset for each IK attempt
+
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
@@ -948,19 +1018,24 @@ class ReorientForAssembly(Node):
             return None
 
         q_guess = self.current_joint_angles.copy()
-        joint_bounds = [(-np.pi, np.pi)] * 6
+
+        solver = IKSolver(IKSolverConfig(early_termination=False))
+        collision_checker = self._check_collision
 
         # Collect ALL valid solutions, then pick the best one
         all_solutions = []  # list of (joints, cost)
 
-        def _record(joints, cost):
-            """Record a valid IK solution for later selection."""
-            # Deduplicate: skip if wrist_2 is within 3° of an existing solution
-            w2 = joints[4]
-            for existing_joints, _ in all_solutions:
-                if abs(existing_joints[4] - w2) < np.radians(3):
-                    return
-            all_solutions.append((joints.copy(), cost))
+        def _dedupe_record(solutions):
+            """Deduplicate solutions: skip if wrist_2 is within 3deg of existing."""
+            for joints, cost in solutions:
+                w2 = joints[4]
+                duplicate = False
+                for existing_joints, _ in all_solutions:
+                    if abs(existing_joints[4] - w2) < np.radians(3):
+                        duplicate = True
+                        break
+                if not duplicate:
+                    all_solutions.append((joints.copy(), cost))
 
         # Compute current EE orientation from FK
         T_current = forward_kinematics(dh_params, self.current_joint_angles)
@@ -970,18 +1045,14 @@ class ReorientForAssembly(Node):
         R_diff = target_rot @ R_current.T
         angle_diff = np.arccos(np.clip((np.trace(R_diff) - 1) / 2, -1, 1))
 
-        # Check if this is primarily a yaw-only rotation (wrist_2 near ±90°)
-        # When wrist_2 is near ±90°, changing wrist_3 produces yaw rotation
+        # Check if this is primarily a yaw-only rotation (wrist_2 near +/-90deg)
         wrist_2_near_singular = abs(abs(self.current_joint_angles[4]) - np.pi/2) < np.radians(15)
 
         # For small orientation changes or yaw-only rotations, try wrist_3-adjusted seed first
         if wrist_2_near_singular and angle_diff < np.radians(90):
-            # Compute yaw difference between current and target EE
             current_yaw = np.arctan2(R_current[1, 0], R_current[0, 0])
             target_yaw = np.arctan2(target_rot[1, 0], target_rot[0, 0])
             yaw_diff = target_yaw - current_yaw
-
-            # Normalize to [-pi, pi]
             while yaw_diff > np.pi:
                 yaw_diff -= 2 * np.pi
             while yaw_diff < -np.pi:
@@ -993,17 +1064,31 @@ class ReorientForAssembly(Node):
             else:
                 yaw_adjusted_seed[5] += yaw_diff
 
-            joints, cost = self._try_ik_seed(yaw_adjusted_seed, target_pose, joint_bounds)
-            if joints is not None:
-                _record(joints, cost)
+            # Preserve raw yaw-adjusted seed: evaluate directly without L-BFGS-B.
+            # L-BFGS-B may drift to a wrist-flip; this ensures the wrist_3-only
+            # solution is always available for _select_best to prefer.
+            raw_cost = ik_objective_quaternion(yaw_adjusted_seed, target_pose)
+            if raw_cost < 0.1 and (collision_checker is None or not collision_checker(yaw_adjusted_seed)):
+                all_solutions.append((yaw_adjusted_seed.copy(), raw_cost))
+
+            yaw_results = solver.solve_collect(
+                seeds=[yaw_adjusted_seed],
+                target_pose=target_pose,
+                collision_checker=collision_checker,
+                perturbations=1,
+                dx=dx,
+            )
+            _dedupe_record(yaw_results)
 
         # Phase 1: Try current seed with perturbations
-        for i in range(max_tries):
-            perturbed = target_pose.copy()
-            perturbed[0, 3] += i * dx
-            joints, cost = self._try_ik_seed(q_guess, perturbed, joint_bounds)
-            if joints is not None:
-                _record(joints, cost)
+        phase1_results = solver.solve_collect(
+            seeds=[q_guess],
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        _dedupe_record(phase1_results)
 
         # Phase 2: Fallback seeds
         yaw_rad = np.arctan2(2.0 * (target_quat[3] * target_quat[2] + target_quat[0] * target_quat[1]),
@@ -1011,42 +1096,59 @@ class ReorientForAssembly(Node):
         yaw_deg = np.degrees(yaw_rad)
 
         seeds = [
-            # Original seeds with wrist_2 = -90
             np.radians([85, -80, 90, -90, -90, yaw_deg]),
             np.radians([90, -90, 90, -90, -90, yaw_deg]),
             np.radians([0, -90, 90, -90, -90, yaw_deg]),
             np.radians([180, -90, 90, -90, -90, yaw_deg]),
-            # Additional seeds with wrist_2 = +90 (to avoid facing robot)
             np.radians([85, -80, 90, -90, 90, yaw_deg]),
             np.radians([90, -90, 90, -90, 90, yaw_deg]),
             np.radians([0, -90, 90, -90, 90, yaw_deg]),
             np.radians([180, -90, 90, -90, 90, yaw_deg]),
-            # Seeds with wrist_2 = +75 (closer to user's good config)
             np.radians([85, -108, 106, 2, 76, yaw_deg]),
             np.radians([75, -108, 106, 2, 76, yaw_deg]),
-            # Seeds with different wrist_1 configurations
             np.radians([85, -80, 90, 90, -90, yaw_deg]),
             np.radians([85, -80, 90, 90, 90, yaw_deg]),
-            # Targeted seeds: shoulder_pan ≈ wrist_2 pattern (for face-down orientations)
             np.radians([45, -96, 125, -30, 45, yaw_deg]),
             np.radians([60, -96, 120, -30, 60, yaw_deg]),
             np.radians([75, -96, 115, -25, 75, yaw_deg]),
         ]
 
-        for seed in seeds:
-            for i in range(max_tries):
-                perturbed = target_pose.copy()
-                perturbed[0, 3] += i * dx
-                joints, cost = self._try_ik_seed(seed, perturbed, joint_bounds)
-                if joints is not None:
-                    _record(joints, cost)
-                    break  # One valid perturbation per seed is enough
+        # Phase 2: Two-stage progressive search
+        # Stage 1: Probe each seed once (1 perturbation) with fail-fast.
+        # If orientation is collision-blocked, bail after 15 consecutive failures (~2s).
+        # If feasible, proceed to full perturbations.
+        fail_fast = 5 if (not all_solutions and collision_checker is not None) else 0
+
+        probe_results = solver.solve_collect(
+            seeds=seeds,
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=1,
+            dx=dx,
+            max_consecutive_collisions=fail_fast,
+        )
+        _dedupe_record(probe_results)
+
+        # Stage 2: Full perturbations (skip perturbation=0, already probed)
+        # TEMPORARILY SKIPPED: Phase 2b costs ~60 scipy calls (~8-9s).
+        # Probe results from Phase 2a are usually sufficient.
+        # Revert: change "if False and" back to "if"
+        if False and all_solutions and max_tries > 1:
+            deep_results = solver.solve_collect(
+                seeds=seeds,
+                target_pose=target_pose,
+                collision_checker=collision_checker,
+                perturbations=max_tries,
+                dx=dx,
+                perturbation_start=1,
+            )
+            _dedupe_record(deep_results)
 
         # === Select best solution ===
         MAX_JOINT_CHANGE = np.radians(143)
 
         def _select_best(solutions):
-            """Score and sort solutions: normal arm first, then by wrist_1 quality (closer to 0°)."""
+            """Score and sort solutions: normal arm first, then by wrist_1 quality (closer to 0deg)."""
             if not solutions:
                 return None
             scored = []
@@ -1062,7 +1164,10 @@ class ReorientForAssembly(Node):
 
         if best is None:
             if self.mode == 'sim':
-                self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
+                if fail_fast > 0 and not all_solutions:
+                    self.get_logger().error(f"IK failed: no collision-free solutions (fail-fast: {fail_fast} seed probes all collided, skipped full search)")
+                else:
+                    self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
             else:
                 self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
             return None
@@ -1104,11 +1209,12 @@ class ReorientForAssembly(Node):
             R_object_target_world, fold_data, None  # Don't log here
         )
         
-        # Find the equivalent target that's closest to the CURRENT object orientation
-        # AND whose required EE orientation is close to a cardinal
-        # This ensures we make the smallest possible adjustment using a cardinal EE
+        # Find the equivalent target whose required EE orientation is closest to the
+        # CURRENT EE orientation AND is close to a cardinal.
+        # All equivalent targets are physically identical (symmetry), so the correct
+        # criterion is minimal EE motion — not minimal object distance.
         best_target_R = None
-        min_distance_to_current = float('inf')
+        min_ee_adjustment = float('inf')
 
         for R_target_equiv in equivalent_targets:
             # Calculate the EE required to achieve this target: R_EE = R_target @ R_grasp^T
@@ -1120,13 +1226,13 @@ class ReorientForAssembly(Node):
 
             if ee_cardinal_name is not None:
                 # This target can be achieved with a cardinal EE
-                # Calculate distance from current object to this equivalent target
-                distance_to_current = ExtendedCardinalOrientations.rotation_matrix_distance(
-                    R_object_current, R_target_equiv
+                # Calculate EE adjustment distance (how far the EE must move)
+                ee_adjustment = ExtendedCardinalOrientations.rotation_matrix_distance(
+                    R_EE_current, R_EE_required
                 )
 
-                if distance_to_current < min_distance_to_current:
-                    min_distance_to_current = distance_to_current
+                if ee_adjustment < min_ee_adjustment:
+                    min_ee_adjustment = ee_adjustment
                     best_target_R = R_target_equiv
 
         if best_target_R is None:
@@ -1135,7 +1241,10 @@ class ReorientForAssembly(Node):
         
         # Log which equivalent target we're using
         target_rpy = R.from_matrix(best_target_R).as_euler('xyz', degrees=True)
-        self.get_logger().info(f"  → Using equivalent target RPY: [{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}] (closest to current: {min_distance_to_current:.1f}°)")
+        object_distance = ExtendedCardinalOrientations.rotation_matrix_distance(
+            R_object_current, best_target_R
+        )
+        self.get_logger().info(f"  → Using equivalent target RPY: [{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}] (EE adjustment: {min_ee_adjustment:.1f}°, object distance: {object_distance:.1f}°)")
         
         # Compute the rotation needed to go from current object to best target
         # R_adjust_object = R_target @ R_current^T
@@ -1223,8 +1332,13 @@ class ReorientForAssembly(Node):
             R_object_target_world, fold_data, self.get_logger()
         )
         
-        cardinals = ExtendedCardinalOrientations.get_all_extended_cardinals()
-        
+        cardinals = ExtendedCardinalOrientations.get_relevant_cardinals(
+            equivalent_targets, R_grasp, top_k=3
+        )
+        self.get_logger().info(
+            f"  -> Filtered to {len(cardinals)} relevant cardinals (from 24) based on fold symmetry"
+        )
+
         best_cardinal_name = None
         best_cardinal_quat = None
         best_resulting_object_R = None
@@ -1657,9 +1771,37 @@ class ReorientForAssembly(Node):
         # Try IK with best solution first (rotate about TCP, collision checks account for extended gripper)
         joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), best_quat.tolist())
 
+        # If IK fails and we have no candidates (optimization succeeded but IK failed),
+        # fall back to full cardinal search to get all candidates
+        if joint_angles is None and candidates is None:
+            self.get_logger().info("Optimized cardinal IK failed, falling back to full cardinal search")
+            (_, best_quat_cardinal_base_relative, resulting_object_R_base_relative,
+             matched_target_R_base_relative, _, candidates) = self.find_best_cardinal_for_assembly(
+                R_object_target_base_relative, R_grasp, fold_data, R_object_current_base_relative,
+                R_EE_current_base_relative, ee_position=ee_position
+            )
+            # Transform candidates back to world frame
+            if candidates is not None:
+                transformed_candidates = []
+                for cand in candidates:
+                    card_name = cand[0]
+                    card_quat_base_rel = cand[1]
+                    card_obj_R_base_rel = cand[2]
+                    card_target_R_base_rel = cand[3]
+                    card_error = cand[4]
+                    ee_rot_dist = cand[5]
+                    facing_penalty = cand[6] if len(cand) > 6 else 0.0
+                    R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
+                    R_EE_cand_world = R_base @ R_EE_cand_base_rel
+                    card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
+                    card_obj_R_world = R_base @ card_obj_R_base_rel
+                    card_target_R_world = R_base @ card_target_R_base_rel
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_penalty))
+                candidates = transformed_candidates
+
         # If IK fails and we have alternative candidates, try them
         if joint_angles is None and candidates is not None:
-            for i, cand in enumerate(candidates[1:6], 1):  # Try top 5 alternatives
+            for i, cand in enumerate(candidates[1:], 1):  # Try all alternatives
                 card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
                 # Snap to exact equivalent target
                 R_EE_card_exact = card_target_R @ R_grasp.T

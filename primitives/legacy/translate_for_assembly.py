@@ -595,186 +595,88 @@ class TranslateForAssembly(Node):
 
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
-        Compute IK using current joint angles as seed (similar to move_down.py)
-        
+        Compute IK using current joint angles as seed.
+        Uses unified IK solver with joint-distance tracking for smooth motion.
+
         Args:
             target_position: [x, y, z] target position
             target_quat: [x, y, z, w] target orientation quaternion
             max_tries: Number of position perturbations to try
             dx: Position perturbation step size
-            
+
         Returns:
             Joint angles if successful, None otherwise
         """
-        # Convert quaternion to rotation matrix
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
         target_rotation = R.from_quat(target_quat)
         target_rot_matrix = target_rotation.as_matrix()
-        
-        # Create target pose
+
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot_matrix
-        
-        # Use current joint angles as seed
+
         if self.current_joint_angles is None:
             self.get_logger().error("Current joint angles not available! Cannot compute IK.")
             return None
-        
+
         q_guess = self.current_joint_angles.copy()
-        # self.get_logger().info(f"Using current joint angles from joint state as seed: {q_guess}")
-        
-        # Try IK with current joint angles and position perturbations
-        solution_found = False
-        best_result = None
-        best_cost = float('inf')
-        best_joint_distance = float('inf')  # Track joint space distance from current config
-        
-        for i in range(max_tries):
-            if solution_found:
-                break
-                
-            # Try small x-shift each iteration (helps with workspace boundaries)
-            perturbed_position = np.array(target_position).copy()
-            perturbed_position[0] += i * dx
-            
-            perturbed_pose = target_pose.copy()
-            perturbed_pose[:3, 3] = perturbed_position
-            
-            joint_bounds = [(-np.pi, np.pi)] * 6
-            
-            # Use quaternion-based objective
-            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
-                            method='L-BFGS-B', bounds=joint_bounds)
-            
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed_pose)
 
-                # Check for collisions (sim mode only)
-                has_collision = False
-                if self.mode == 'sim':
-                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                    has_self_collision = self.check_self_collision(result.x)
-                    has_ee_below_base = self.check_ee_below_base(result.x)
-                    has_compact_config = self.check_compact_configuration(result.x)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config
+        # Collision checker for sim mode
+        def collision_checker(joint_angles):
+            if self.mode != 'sim':
+                return False
+            return (self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+                    or self.check_self_collision(joint_angles)
+                    or self.check_ee_below_base(joint_angles)
+                    or self.check_compact_configuration(joint_angles))
 
-                # Check if this is a good solution (low cost and no collision)
-                if cost < 0.01 and not has_collision:
-                    # Calculate joint space distance from current configuration
-                    joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
+        config = IKSolverConfig(
+            track_joint_distance=True,
+            joint_distance_immediate=0.5,
+        )
+        solver = IKSolver(config)
 
-                    # Return immediately if this is very close (< 0.5 radians total)
-                    if joint_distance < 0.5:
-                        return result.x
+        # Phase 1: Current joint angles as seed with perturbations
+        result = solver.solve(
+            seeds=[q_guess],
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            current_joints=self.current_joint_angles,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
-                    # Otherwise, track as candidate if it's closer than previous best
-                    if joint_distance < best_joint_distance:
-                        best_joint_distance = joint_distance
-                        best_result = result.x
-                        best_cost = cost
-                        solution_found = True  # Mark that we found at least one good solution
-                elif not has_collision:
-                    # Solution has higher cost but no collision - track by joint distance
-                    joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
-                    if joint_distance < best_joint_distance:
-                        best_joint_distance = joint_distance
-                        best_result = result.x
-                        best_cost = cost
+        # Phase 2: Fallback predefined seeds
+        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True).tolist()
 
-        # If we found any reasonable solution (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            # self.get_logger().info(f"Using best quaternion-based IK solution with cost={best_cost:.6f}")
-            
-            # Verify orientation accuracy
-            # T_result = forward_kinematics(dh_params, best_result)
-            # orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-            # self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
-            
-            return best_result
-        
-        # Fallback: Try multiple predefined seeds if current seed failed
-        # self.get_logger().warn("IK failed with current joint angles as seed. Trying multiple predefined seeds...")
-        
-        # Convert target quaternion to RPY for seed generation
-        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
-        target_rpy_deg = target_rpy_deg.tolist()
-        
-        # Generate diverse seed configurations (similar to compute_ik_robust)
         seed_configs = [
-            # Standard seeds
             np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
             np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([180, -90, 90, -90, -90, target_rpy_deg[2]]),
-            # Elbow-up configurations
             np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
             np.radians([85, -60, 60, -90, -90, target_rpy_deg[2]]),
-            # Wrist variations
             np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
             np.radians([85, -80, 90, -90, -180, target_rpy_deg[2]]),
-            # Additional variations for pitch
             np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
             np.radians([85, -90, 100, -100, -90, target_rpy_deg[2]]),
         ]
-        
-        # self.get_logger().info(f"Trying {len(seed_configs)} alternative seed configurations...")
 
-        best_result = None
-        best_cost = float('inf')
-        best_joint_distance = float('inf')  # Track joint space distance for fallback seeds too
-        
-        for seed_idx, q_guess_fallback in enumerate(seed_configs):
-            for i in range(max_tries):
-                # Try small x-shift each iteration
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
-                
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-                
-                joint_bounds = [(-np.pi, np.pi)] * 6
-                
-                # Use quaternion-based objective
-                result = minimize(ik_objective_quaternion, q_guess_fallback, args=(perturbed_pose,), 
-                                method='L-BFGS-B', bounds=joint_bounds)
-                
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
-
-                    # Check for collisions (sim mode only)
-                    has_collision = False
-                    if self.mode == 'sim':
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        has_self_collision = self.check_self_collision(result.x)
-                        has_ee_below_base = self.check_ee_below_base(result.x)
-                        has_compact_config = self.check_compact_configuration(result.x)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config
-
-                    # Check if this is a good solution (low cost and no collision)
-                    if cost < 0.01 and not has_collision:
-                        # Calculate joint space distance from current configuration
-                        joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
-
-                        # Return immediately if this is very close (< 0.5 radians total)
-                        if joint_distance < 0.5:
-                            return result.x
-
-                        # Otherwise, track as candidate if it's closer than previous best
-                        if joint_distance < best_joint_distance:
-                            best_joint_distance = joint_distance
-                            best_result = result.x
-                            best_cost = cost
-                    elif not has_collision:
-                        # Solution has higher cost but no collision - track by joint distance
-                        joint_distance = np.linalg.norm(result.x - self.current_joint_angles)
-                        if joint_distance < best_joint_distance:
-                            best_joint_distance = joint_distance
-                            best_result = result.x
-                            best_cost = cost
-
-        # If we found any reasonable solution with fallback seeds (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
+        # Reset solver state for fallback phase
+        solver = IKSolver(config)
+        result = solver.solve(
+            seeds=seed_configs,
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            current_joints=self.current_joint_angles,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
         if self.mode == 'sim':
             self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config) even with multiple seeds")
@@ -919,12 +821,16 @@ class TranslateForAssembly(Node):
             self.current_joint_angles = waypoint_joint_angles.copy()
 
             # Create trajectory point for this waypoint
+            # Only set zero velocities on the final waypoint (full stop).
+            # Intermediate points omit velocities so the controller interpolates smoothly.
             time_from_start = (i / num_waypoints) * total_duration
-            trajectory_points.append({
+            point = {
                 "positions": [float(x) for x in waypoint_joint_angles],
-                "velocities": [0.0] * 6,
                 "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
-            })
+            }
+            if i == num_waypoints:
+                point["velocities"] = [0.0] * 6
+            trajectory_points.append(point)
 
         self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
 
@@ -1112,12 +1018,16 @@ class TranslateForAssembly(Node):
             self.current_joint_angles = waypoint_joint_angles.copy()
 
             # Create trajectory point for this waypoint
+            # Only set zero velocities on the final waypoint (full stop).
+            # Intermediate points omit velocities so the controller interpolates smoothly.
             time_from_start = (i / num_waypoints) * total_duration
-            trajectory_points.append({
+            point = {
                 "positions": [float(x) for x in waypoint_joint_angles],
-                "velocities": [0.0] * 6,
                 "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
-            })
+            }
+            if i == num_waypoints:
+                point["velocities"] = [0.0] * 6
+            trajectory_points.append(point)
 
         self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
 
@@ -1143,7 +1053,8 @@ class TranslateForAssembly(Node):
             for point in points:
                 traj_point = JointTrajectoryPoint()
                 traj_point.positions = point['positions']
-                traj_point.velocities = point.get('velocities', [0.0] * 6)
+                if 'velocities' in point:
+                    traj_point.velocities = point['velocities']
                 traj_point.time_from_start = point['time_from_start']
                 traj_msg.points.append(traj_point)
 
