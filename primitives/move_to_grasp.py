@@ -21,6 +21,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import TransformStamped
+from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
@@ -33,6 +34,7 @@ from scipy.spatial.transform import Rotation as R
 
 # Import from local action_libraries file
 from primitives.utils.action_libraries import hover_over_grasp_quat
+from primitives.utils.ik_solver import rpy_to_matrix, ik_objective_quaternion, dh_params, forward_kinematics
 
 # Import quaternion controller for gimbal-lock-free gripper orientation
 from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
@@ -42,6 +44,75 @@ from primitives.utils.data_path_finder import get_symmetry_dir
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
+
+
+def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, dx=0.001):
+    """IK solver with wrist_3 joint range extended to (-2pi, 2pi).
+    All other joints remain at (-pi, pi).
+    If current_joints is provided, it is used as the primary seed."""
+    from scipy.optimize import minimize as sp_minimize
+
+    original_position = np.array(position)
+    target_rot_matrix = R.from_euler('xyz', rpy, degrees=True).as_matrix()
+
+    target_pose = np.eye(4)
+    target_pose[:3, 3] = original_position
+    target_pose[:3, :3] = target_rot_matrix
+
+    seed_configs = []
+
+    # Primary seed: current joint angles (closest solution preferred)
+    if current_joints is not None:
+        seed_configs.append(np.array(current_joints))
+
+    # Fallback seeds
+    seed_configs.extend([
+        np.radians([85, -80, 90, -90, -90, -(np.mod(rpy[2] + 180, 360) - 180)]),
+        np.radians([90, -90, 90, -90, -90, rpy[2]]),
+        np.radians([0, -90, 90, -90, -90, rpy[2]]),
+        np.radians([180, -90, 90, -90, -90, rpy[2]]),
+        np.radians([85, -100, 120, -110, -90, rpy[2]]),
+        np.radians([85, -60, 60, -90, -90, rpy[2]]),
+        np.radians([85, -80, 90, -90, 0, rpy[2]]),
+        np.radians([85, -80, 90, -90, -180, rpy[2]]),
+        np.radians([85, -70, 80, -100, -90, rpy[2]]),
+        np.radians([85, -90, 100, -100, -90, rpy[2]]),
+    ])
+
+    joint_bounds = [
+        (-np.pi, np.pi),
+        (-np.pi, np.pi),
+        (-np.pi, np.pi),
+        (-np.pi, np.pi),
+        (-np.pi, np.pi),
+        (-2*np.pi, 2*np.pi)
+    ]
+
+    best_result = None
+    best_cost = float('inf')
+
+    for q_guess in seed_configs:
+        for i in range(max_tries):
+            perturbed_position = original_position.copy()
+            perturbed_position[0] += i * dx
+
+            perturbed_pose = target_pose.copy()
+            perturbed_pose[:3, 3] = perturbed_position
+
+            result = sp_minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
+                                 method='L-BFGS-B', bounds=joint_bounds)
+
+            if result.success:
+                cost = ik_objective_quaternion(result.x, perturbed_pose)
+                if cost < 0.01:
+                    return result.x
+                if cost < best_cost:
+                    best_cost = cost
+                    best_result = result.x
+
+    if best_result is not None and best_cost < 0.1:
+        return best_result
+    return None
 
 
 def output_result(result):
@@ -152,7 +223,15 @@ class DirectObjectMove(Node):
         # Store current end-effector pose
         self.current_ee_pose = None
         self.ee_pose_received = False
-        
+
+        # Store current joint angles (for IK seeding)
+        self.current_joint_angles = None
+        self.joint_angles_received = False
+        self.joint_names = [
+            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
+        ]
+
         # Subscribe to object poses topic based on mode
         # Both sim and real modes use TFMessage (simulation publishes TFMessage, not ObjectPoseArray)
         if self.mode == 'sim':
@@ -187,7 +266,10 @@ class DirectObjectMove(Node):
             self.ee_pose_callback,
             qos_profile
         )
-        
+        self.joint_state_sub = self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback, 10
+        )
+
         # Subscribe to grasp points topic if grasp_id is provided
         if self.grasp_id is not None:
             self.grasp_points_sub = self.create_subscription(
@@ -481,7 +563,16 @@ class DirectObjectMove(Node):
         """Callback for end-effector pose data"""
         self.current_ee_pose = msg
         self.ee_pose_received = True
-    
+
+    def joint_state_callback(self, msg):
+        """Store current joint angles in standard order for IK seeding"""
+        if len(msg.name) == 6 and len(msg.position) == 6:
+            joint_dict = dict(zip(msg.name, msg.position))
+            positions = [joint_dict.get(name, 0) for name in self.joint_names]
+            if len(positions) == 6:
+                self.current_joint_angles = np.array(positions)
+                self.joint_angles_received = True
+
     def timer_callback(self):
         """Process pose and perform movement to object"""
         if self.movement_completed:
@@ -951,15 +1042,52 @@ class DirectObjectMove(Node):
         
         # Create target pose with calculated position (PURE QUATERNION, no RPY conversion)
         target_position = target_ee_position.tolist()
-        
-        # Keep quaternion representation throughout - NO RPY conversion
-        # hover_over_grasp_quat extracts yaw directly from quaternion without RPY
-        target_pose_quat = (target_position, target_quaternion)
-        
+
+        # Extract yaw from quaternion for IK (face-down orientation)
+        q_x, q_y, q_z, q_w = target_quaternion
+        yaw_radians = 2.0 * math.atan2(q_z, q_w)
+        yaw_degrees = math.degrees(yaw_radians)
+        yaw_degrees = ((yaw_degrees + 180) % 360) - 180
+        target_rot = [0, 180, yaw_degrees]
+
         # Use specified movement duration (same for both modes)
         movement_duration = self.movement_duration
-        
-        trajectory = hover_over_grasp_quat(target_pose_quat, target_ee_position[2], movement_duration)
+
+        # Solve IK for both yaw and yaw+180 (gripper is symmetric),
+        # then pick the solution requiring least joint movement.
+        from primitives.utils.action_libraries import make_point
+        ik_position = target_position.copy()
+        ik_position[2] = target_ee_position[2]
+
+        yaw_alt = yaw_degrees + 180.0
+        yaw_alt = ((yaw_alt + 180) % 360) - 180
+        target_rot_alt = [0, 180, yaw_alt]
+
+        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles)
+        sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles)
+
+        # Pick solution closest to current joints
+        if self.current_joint_angles is not None:
+            ref = np.array(self.current_joint_angles)
+            candidates = []
+            if sol_a is not None:
+                candidates.append(sol_a)
+            if sol_b is not None:
+                candidates.append(sol_b)
+            if candidates:
+                joint_angles = min(candidates, key=lambda s: np.linalg.norm(np.array(s) - ref))
+                chosen_yaw = yaw_degrees if (sol_a is not None and np.array_equal(joint_angles, sol_a)) else yaw_alt
+                self.get_logger().info(f"Chose yaw={chosen_yaw:.1f}° (joint distance: {np.linalg.norm(np.array(joint_angles) - ref):.3f} rad)")
+            else:
+                joint_angles = None
+        else:
+            joint_angles = sol_a if sol_a is not None else sol_b
+
+        if joint_angles is not None:
+            traj_point = make_point(joint_angles, movement_duration)
+            trajectory = {"traj1": [traj_point]}
+        else:
+            trajectory = {"traj1": []}
         
         # For step 1: store Z position for step 2 (both sim and real modes)
         if not self.step1_completed:

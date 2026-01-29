@@ -409,61 +409,78 @@ class MoveToClearArea(Node):
         
         # Determine target orientation based on mode
         if self.mode == 'hover':
-            # Step 1: First move to intermediate height (0.15m) to normalize joint positions
-            # This prevents joint limit issues when transitioning to hover position
-            self.get_logger().info("Step 1: Moving to intermediate height (0.15m) first...")
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            safe_height_cmd = f"timeout 30 /usr/bin/python3 {script_dir}/move_to_safe_height.py --height 0.15"
+            # Check if EE is already above 0.15m - if so, skip step 1
+            current_height = current_pos[2]
+            if current_height >= 0.15:
+                self.get_logger().info(f"EE already at height {current_height:.3f}m (>= 0.15m), skipping step 1")
+            else:
+                # Step 1: First move to intermediate height (0.15m) to normalize joint positions
+                # This prevents joint limit issues when transitioning to hover position
+                self.get_logger().info(f"Step 1: Moving to intermediate height (0.15m) from {current_height:.3f}m...")
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                safe_height_cmd = f"timeout 30 /usr/bin/python3 {script_dir}/move_to_safe_height.py --height 0.15"
 
-            try:
-                result = subprocess.run(
-                    safe_height_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=script_dir
-                )
-                if result.returncode != 0:
-                    self.get_logger().warn(f"move_to_safe_height returned code {result.returncode}")
-                    if result.stderr:
-                        self.get_logger().warn(f"stderr: {result.stderr[:200]}")
+                step1_success = False
+                step1_error = None
+
+                try:
+                    result = subprocess.run(
+                        safe_height_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        cwd=script_dir
+                    )
+
+                    # Parse JSON result to check actual success/failure
+                    if result.stdout and "__RESULT_JSON__" in result.stdout and "__END_RESULT_JSON__" in result.stdout:
+                        start_idx = result.stdout.rfind("__RESULT_JSON__") + len("__RESULT_JSON__")
+                        end_idx = result.stdout.rfind("__END_RESULT_JSON__")
+                        json_str = result.stdout[start_idx:end_idx].strip()
+                        try:
+                            import json
+                            step1_result = json.loads(json_str)
+                            if step1_result.get("result") == "success":
+                                step1_success = True
+                            else:
+                                step1_error = step1_result.get("error", "unknown error")
+                        except json.JSONDecodeError:
+                            step1_error = "Failed to parse JSON result"
+
+                    # Check return code
+                    if result.returncode == 124:
+                        step1_error = "Timed out after 30s"
+                    elif result.returncode != 0 and not step1_error:
+                        step1_error = f"Return code {result.returncode}"
+
+                except subprocess.TimeoutExpired:
+                    step1_error = "Subprocess timed out"
+                except Exception as e:
+                    step1_error = str(e)
+
+                if step1_success:
+                    self.get_logger().info("Step 1 completed successfully")
                 else:
-                    self.get_logger().info("Intermediate height reached successfully")
-            except Exception as e:
-                self.get_logger().warn(f"Failed to run move_to_safe_height: {e}")
+                    self.error_message = f"Step 1 failed: {step1_error or 'move_to_safe_height did not complete'}"
+                    self.get_logger().error(self.error_message)
+                    self.operation_success = False
+                    self.operation_complete = True
+                    rclpy.shutdown()
+                    return
 
             # Step 2: Now do the actual hover movement
-            self.get_logger().info("Step 2: Moving to hover position with top-down orientation...")
+            self.get_logger().info("Step 2: Moving to hover position...")
 
-            # Hover mode: Use same approach as move_home - use compute_ik with RPY [0, 180, 0]
-            # Import compute_ik for hover mode
-            from primitives.utils.ik_solver import compute_ik, rpy_to_matrix
-            
-            # Calculate TCP position from gripper center position using offset calculation
-            # Same approach as move mode - use rotation matrix to get gripper Z-axis
-            # For RPY [0, 180, 0], create rotation matrix to calculate offset properly
-            target_rpy = [0, 180, 0]
-            target_rot_matrix = rpy_to_matrix(target_rpy)
-            
-            # Calculate TCP position from gripper center position
-            # The gripper Z-axis points from TCP to gripper center
-            # Apply offset using the same method as move mode
-            gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
-            offset_vector = -self.tcp_to_gripper_center_offset * gripper_z_axis
-            tcp_position = np.array(self.target_gripper_center_position) + offset_vector
-            tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
-            
-            # Use compute_ik exactly like move_home does
-            # compute_ik(position, rpy, q_guess=None, max_tries=5, dx=0.001)
-            joint_angles = compute_ik(tcp_position, [0, 180, 0])
-
-            if joint_angles is None:
-                self.error_message = "IK solver failed: no valid solution to perform clear space move"
-                self.get_logger().error(self.error_message)
-                self.operation_success = False
-                self.operation_complete = True
-                rclpy.shutdown()
-                return
+            # Hover mode: Use fixed joint angles for top-down hover position
+            # Pre-computed joint angles for RPY [0, 180, 0]
+            joint_angles = [
+                0.775002,   # shoulder_pan_joint
+                -1.272476,  # shoulder_lift_joint
+                1.718332,   # elbow_joint
+                -2.016652,  # wrist_1_joint
+                -1.570796,  # wrist_2_joint
+                -0.795794,  # wrist_3_joint
+            ]
 
             # Create trajectory point - same duration as move_home (5 seconds)
             point = JointTrajectoryPoint(

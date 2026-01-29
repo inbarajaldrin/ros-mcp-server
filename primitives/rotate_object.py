@@ -882,6 +882,62 @@ class ReorientForAssembly(Node):
 
         return False
 
+    def _wrist1_quality(self, joint_angles):
+        """
+        Evaluate how close wrist_1 (joint index 3) is to its current value.
+        Returns 0 when wrist_1 matches current, higher values when farther away.
+        Uses wrapped distance so ±180° is the worst case.
+        """
+        w1 = joint_angles[3]
+        current_w1 = self.current_joint_angles[3]
+        diff = w1 - current_w1
+        # Wrap to [-pi, pi]
+        while diff > np.pi:
+            diff -= 2 * np.pi
+        while diff < -np.pi:
+            diff += 2 * np.pi
+        return abs(diff)
+
+    def _max_joint_change(self, joint_angles):
+        """Max wrapped joint change from current state to candidate (radians)."""
+        max_change = 0.0
+        for i in range(6):
+            diff = joint_angles[i] - self.current_joint_angles[i]
+            # Wrap to [-pi, pi]
+            while diff > np.pi:
+                diff -= 2 * np.pi
+            while diff < -np.pi:
+                diff += 2 * np.pi
+            max_change = max(max_change, abs(diff))
+        return max_change
+
+    def _check_collision(self, joint_angles):
+        """Check all collision criteria. Returns True if collision detected."""
+        if self.mode != 'sim':
+            return False
+        has_table_collision = self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+        has_self_collision = self.check_self_collision(joint_angles)
+        has_ee_below_base = self.check_ee_below_base(joint_angles)
+        has_compact_config = self.check_compact_configuration(joint_angles)
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+        ee_pos_from_fk = joint_positions[-1]
+        T_ee = forward_kinematics(dh_params, joint_angles)
+        R_ee = T_ee[:3, :3]
+        has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
+        has_extended_gripper_collision = self.check_extended_gripper_collision(joint_angles)
+        return (has_table_collision or has_self_collision or has_ee_below_base
+                or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision)
+
+    def _try_ik_seed(self, seed, target_pose, joint_bounds):
+        """Try IK with a single seed. Returns (joint_angles, cost) or (None, inf)."""
+        result = minimize(ik_objective_quaternion, seed, args=(target_pose,),
+                          method='L-BFGS-B', bounds=joint_bounds)
+        if result.success or ik_objective_quaternion(result.x, target_pose) < 0.01:
+            cost = ik_objective_quaternion(result.x, target_pose)
+            if cost < 0.1 and not self._check_collision(result.x):
+                return result.x, cost
+        return None, float('inf')
+
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
@@ -892,8 +948,19 @@ class ReorientForAssembly(Node):
             return None
 
         q_guess = self.current_joint_angles.copy()
-        best_result, best_cost = None, float('inf')
         joint_bounds = [(-np.pi, np.pi)] * 6
+
+        # Collect ALL valid solutions, then pick the best one
+        all_solutions = []  # list of (joints, cost)
+
+        def _record(joints, cost):
+            """Record a valid IK solution for later selection."""
+            # Deduplicate: skip if wrist_2 is within 3° of an existing solution
+            w2 = joints[4]
+            for existing_joints, _ in all_solutions:
+                if abs(existing_joints[4] - w2) < np.radians(3):
+                    return
+            all_solutions.append((joints.copy(), cost))
 
         # Compute current EE orientation from FK
         T_current = forward_kinematics(dh_params, self.current_joint_angles)
@@ -920,88 +987,25 @@ class ReorientForAssembly(Node):
             while yaw_diff < -np.pi:
                 yaw_diff += 2 * np.pi
 
-            # Create a seed with wrist_3 adjusted for the yaw change
-            # The sign relationship depends on wrist_2 sign:
-            # - wrist_2 ≈ -90°: EE yaw change = -wrist_3 change → wrist_3_change = -yaw_diff
-            # - wrist_2 ≈ +90°: EE yaw change = +wrist_3 change → wrist_3_change = +yaw_diff
             yaw_adjusted_seed = self.current_joint_angles.copy()
             if self.current_joint_angles[4] < 0:
-                # wrist_2 ≈ -90°
                 yaw_adjusted_seed[5] -= yaw_diff
             else:
-                # wrist_2 ≈ +90°
                 yaw_adjusted_seed[5] += yaw_diff
 
-            # Try the yaw-adjusted seed
-            result = minimize(ik_objective_quaternion, yaw_adjusted_seed, args=(target_pose,),
-                            method='L-BFGS-B', bounds=joint_bounds)
-            if result.success or ik_objective_quaternion(result.x, target_pose) < 0.01:
-                cost = ik_objective_quaternion(result.x, target_pose)
+            joints, cost = self._try_ik_seed(yaw_adjusted_seed, target_pose, joint_bounds)
+            if joints is not None:
+                _record(joints, cost)
 
-                # Check for collisions (sim mode only)
-                has_collision = False
-                if self.mode == 'sim':
-                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                    has_self_collision = self.check_self_collision(result.x)
-                    has_ee_below_base = self.check_ee_below_base(result.x)
-                    has_compact_config = self.check_compact_configuration(result.x)
-                    joint_positions = self.compute_all_joint_positions(result.x)
-                    ee_pos_from_fk = joint_positions[-1]
-                    T_ee = forward_kinematics(dh_params, result.x)
-                    R_ee = T_ee[:3, :3]
-                    has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-                    has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
-
-                if cost < 0.01 and not has_collision:
-                    return result.x
-                if not has_collision and cost < best_cost:
-                    best_cost, best_result = cost, result.x
-
+        # Phase 1: Try current seed with perturbations
         for i in range(max_tries):
             perturbed = target_pose.copy()
             perturbed[0, 3] += i * dx
+            joints, cost = self._try_ik_seed(q_guess, perturbed, joint_bounds)
+            if joints is not None:
+                _record(joints, cost)
 
-            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed,),
-                            method='L-BFGS-B', bounds=joint_bounds)
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed)
-
-                # Check for collisions (sim mode only)
-                has_collision = False
-                if self.mode == 'sim':
-                    # Check table collision
-                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                    # Check self-collision
-                    has_self_collision = self.check_self_collision(result.x)
-                    # Check EE below robot base
-                    has_ee_below_base = self.check_ee_below_base(result.x)
-                    # Check compact configuration
-                    has_compact_config = self.check_compact_configuration(result.x)
-                    # Check if EE is facing the robot (using FK to get EE pose)
-                    joint_positions = self.compute_all_joint_positions(result.x)
-                    ee_pos_from_fk = joint_positions[-1]
-                    T_ee = forward_kinematics(dh_params, result.x)
-                    R_ee = T_ee[:3, :3]
-                    has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-                    # Check extended gripper collision (24cm extension from TCP)
-                    has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
-
-                # Check if this is a good solution (low cost and no collision)
-                if cost < 0.01 and not has_collision:
-                    return result.x
-                # Keep track of best solution (only if no collision)
-                if not has_collision and cost < best_cost:
-                    best_cost, best_result = cost, result.x
-
-        # If we found any reasonable solution (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
-
-        # Fallback seeds - use quaternion to extract yaw component without gimbal lock
-        # Extract yaw from input quaternion directly (avoids gimbal lock from RPY conversion)
-        # Yaw from quaternion: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
+        # Phase 2: Fallback seeds
         yaw_rad = np.arctan2(2.0 * (target_quat[3] * target_quat[2] + target_quat[0] * target_quat[1]),
                             1.0 - 2.0 * (target_quat[1]**2 + target_quat[2]**2))
         yaw_deg = np.degrees(yaw_rad)
@@ -1023,50 +1027,58 @@ class ReorientForAssembly(Node):
             # Seeds with different wrist_1 configurations
             np.radians([85, -80, 90, 90, -90, yaw_deg]),
             np.radians([85, -80, 90, 90, 90, yaw_deg]),
+            # Targeted seeds: shoulder_pan ≈ wrist_2 pattern (for face-down orientations)
+            np.radians([45, -96, 125, -30, 45, yaw_deg]),
+            np.radians([60, -96, 120, -30, 60, yaw_deg]),
+            np.radians([75, -96, 115, -25, 75, yaw_deg]),
         ]
 
         for seed in seeds:
             for i in range(max_tries):
                 perturbed = target_pose.copy()
                 perturbed[0, 3] += i * dx
-                result = minimize(ik_objective_quaternion, seed, args=(perturbed,),
-                                method='L-BFGS-B', bounds=joint_bounds)
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed)
+                joints, cost = self._try_ik_seed(seed, perturbed, joint_bounds)
+                if joints is not None:
+                    _record(joints, cost)
+                    break  # One valid perturbation per seed is enough
 
-                    # Check for collisions (sim mode only)
-                    has_collision = False
-                    if self.mode == 'sim':
-                        # Check table collision
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        # Check self-collision
-                        has_self_collision = self.check_self_collision(result.x)
-                        # Check EE below robot base
-                        has_ee_below_base = self.check_ee_below_base(result.x)
-                        # Check compact configuration
-                        has_compact_config = self.check_compact_configuration(result.x)
-                        # Check if EE is facing the robot (using FK to get EE pose)
-                        joint_positions = self.compute_all_joint_positions(result.x)
-                        ee_pos_from_fk = joint_positions[-1]
-                        T_ee = forward_kinematics(dh_params, result.x)
-                        R_ee = T_ee[:3, :3]
-                        has_ee_facing_robot, _ = self.check_ee_facing_robot(R_ee, ee_pos_from_fk, threshold_deg=60.0)
-                        # Check extended gripper collision (24cm extension from TCP)
-                        has_extended_gripper_collision = self.check_extended_gripper_collision(result.x)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base or has_compact_config or has_ee_facing_robot or has_extended_gripper_collision
+        # === Select best solution ===
+        MAX_JOINT_CHANGE = np.radians(143)
 
-                    # Check if this is a good solution (low cost and no collision)
-                    if cost < 0.01 and not has_collision:
-                        return result.x
-                    # Keep track of best solution (only if no collision)
-                    if not has_collision and cost < best_cost:
-                        best_cost, best_result = cost, result.x
+        def _select_best(solutions):
+            """Score and sort solutions: normal arm first, then by wrist_1 quality (closer to 0°)."""
+            if not solutions:
+                return None
+            scored = []
+            for joints, cost in solutions:
+                w1_quality = self._wrist1_quality(joints)
+                max_change = self._max_joint_change(joints)
+                normal_arm = max_change < MAX_JOINT_CHANGE
+                scored.append((joints, cost, w1_quality, max_change, normal_arm))
+            scored.sort(key=lambda s: (s[2], not s[4]))
+            return scored[0]
 
-        if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config + EE facing robot + extended gripper) even with multiple seeds")
-        else:
-            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
-        return best_result if best_cost < 0.1 else None
+        best = _select_best(all_solutions)
+
+        if best is None:
+            if self.mode == 'sim':
+                self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
+            else:
+                self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+            return None
+
+        w1_deg = np.degrees(best[0][3])
+        w1_qual_deg = np.degrees(best[2])
+        max_change_deg = np.degrees(best[3])
+
+        if len(all_solutions) > 1:
+            self.get_logger().info(
+                f"  → IK: {len(all_solutions)} solutions found, selected wrist_1={w1_deg:.1f}° "
+                f"(quality={w1_qual_deg:.0f}° from current, max joint change={max_change_deg:.0f}°, "
+                f"normal_arm={best[4]})"
+            )
+
+        return best[0]
     
     def compute_cardinal_to_cardinal_adjustment(self, R_object_current, R_object_target_world, 
                                                  R_EE_current, R_grasp, fold_data):
@@ -1684,37 +1696,12 @@ class ReorientForAssembly(Node):
         final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
         self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
 
-        # === Execute with single target point ===
-        trajectory_points = []
-
-        # Get current joint angles as starting point
-        start_joints = self.current_joint_angles.copy()
-        target_joints = np.array(joint_angles)
-
-        # Handle joint wrapping for wrist_3 (index 5) to take shortest path
-        for i in range(6):
-            diff = target_joints[i] - start_joints[i]
-            # If difference is more than pi, wrap around
-            if diff > np.pi:
-                target_joints[i] -= 2 * np.pi
-            elif diff < -np.pi:
-                target_joints[i] += 2 * np.pi
-
-        # Add starting point at t=0
-        trajectory_points.append({
-            "positions": [float(x) for x in start_joints],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=0, nanosec=0)
-        })
-
-        # Add target point at t=duration
-        trajectory_points.append({
-            "positions": [float(x) for x in target_joints],
+        # === Execute with single target point (no joint wrapping — let controller choose path) ===
+        trajectory = {"traj1": [{
+            "positions": [float(x) for x in joint_angles],
             "velocities": [0.0] * 6,
             "time_from_start": Duration(sec=int(duration), nanosec=int((duration % 1) * 1e9))
-        })
-
-        trajectory = {"traj1": trajectory_points}
+        }]}
         
         success = self.execute_trajectory(trajectory)
 
@@ -1937,7 +1924,12 @@ def main(args=None):
     finally:
         try:
             node.output_result_json(success)
-            time.sleep(0.5)
+            # Explicitly destroy subscriptions and action client to avoid shutdown delays
+            if node.object_sub is not None:
+                node.destroy_subscription(node.object_sub)
+            node.destroy_subscription(node.ee_sub)
+            node.destroy_subscription(node.joint_state_sub)
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
         except Exception:

@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -136,63 +137,67 @@ class MoveToSafeHeight(Node):
         return [roll, pitch, yaw]
 
     def read_current_ee_pose(self):
-        """Read current end-effector pose and joint angles using ROS2 subscriber"""
-        # Reset the flags
-        self.ee_pose_received = False
-        self.joint_angles_received = False
-        
-        # Wait for both pose and joint angles to arrive (with timeout)
-        timeout_count = 0
-        max_timeout = 100  # 10 seconds (100 * 0.1s)
-        
-        while rclpy.ok() and (not self.ee_pose_received or not self.joint_angles_received) and timeout_count < max_timeout:
-            rclpy.spin_once(self, timeout_sec=0.1)
-            timeout_count += 1
-            
-            if timeout_count % 10 == 0:  # Log every second
-                status = []
-                if not self.ee_pose_received:
-                    status.append("EE pose")
-                if not self.joint_angles_received:
-                    status.append("joint angles")
-                self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
-        
-        if not self.ee_pose_received:
-            self.error_message = "Timeout waiting for EE pose message"
-            self.get_logger().error(self.error_message)
-            return None
+        """Read current end-effector pose and joint angles using ROS2 subscriber with retry"""
+        max_retries = 5
+        timeout_sec = 15.0
 
-        if not self.joint_angles_received:
-            self.error_message = "Timeout waiting for joint angles message"
-            self.get_logger().error(self.error_message)
-            return None
+        for attempt in range(max_retries):
+            # Reset the flags
+            self.ee_pose_received = False
+            self.joint_angles_received = False
 
-        if self.ee_position is None or self.ee_quat is None:
-            self.error_message = "EE pose data is None"
-            self.get_logger().error(self.error_message)
-            return None
+            if attempt > 0:
+                self.get_logger().info(f"Retrying EE pose read (attempt {attempt + 1}/{max_retries})...")
+                # Brief delay before retry
+                time.sleep(0.5)
 
-        if self.current_joint_angles is None:
-            self.error_message = "Joint angles data is None"
-            self.get_logger().error(self.error_message)
-            return None
-        
-        # Extract position and orientation
-        position = self.ee_position.tolist()
-        orientation = self.ee_quat.tolist()
-        
-        return {
-            'position': position,
-            'orientation': orientation
-        }
+            # Wait for both pose and joint angles to arrive (with timeout)
+            timeout_count = 0
+            max_timeout = int(timeout_sec / 0.1)  # Convert to count
+
+            while rclpy.ok() and (not self.ee_pose_received or not self.joint_angles_received) and timeout_count < max_timeout:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                timeout_count += 1
+
+                if timeout_count % 10 == 0:  # Log every second
+                    status = []
+                    if not self.ee_pose_received:
+                        status.append("EE pose")
+                    if not self.joint_angles_received:
+                        status.append("joint angles")
+                    self.get_logger().debug(f"Waiting for {' and '.join(status)}... ({timeout_count * 0.1:.1f}s)")
+
+            # Check if we got the data
+            if self.ee_pose_received and self.joint_angles_received:
+                if self.ee_position is not None and self.ee_quat is not None and self.current_joint_angles is not None:
+                    # Success!
+                    position = self.ee_position.tolist()
+                    orientation = self.ee_quat.tolist()
+                    return {
+                        'position': position,
+                        'orientation': orientation
+                    }
+
+            # Log what's missing
+            missing = []
+            if not self.ee_pose_received or self.ee_position is None or self.ee_quat is None:
+                missing.append("EE pose")
+            if not self.joint_angles_received or self.current_joint_angles is None:
+                missing.append("joint angles")
+            self.get_logger().warn(f"Timeout waiting for: {', '.join(missing)} (attempt {attempt + 1}/{max_retries})")
+
+        # All retries exhausted
+        self.error_message = f"Failed to read EE pose after {max_retries} attempts"
+        self.get_logger().error(self.error_message)
+        self.get_logger().error("SUGGESTION: Try running the same command again. The issue is often transient and succeeds on retry.")
+        return None
 
     def move_to_safe_height(self):
         """Move to safe height while maintaining current position and orientation"""
         pose_data = self.read_current_ee_pose()
 
         if pose_data is None:
-            self.error_message = "Could not read current end-effector pose"
-            self.get_logger().error(self.error_message)
+            # error_message already set by read_current_ee_pose()
             rclpy.shutdown()
             return
             
@@ -252,7 +257,7 @@ class MoveToSafeHeight(Node):
                 perturbed_pose = target_pose.copy()
                 perturbed_pose[:3, 3] = perturbed_position
                 
-                joint_bounds = [(-np.pi, np.pi)] * 6
+                joint_bounds = [(-2*np.pi, 2*np.pi)] * 6
                 
                 # Use quaternion-based objective directly - NO RPY conversion!
                 result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,), 
