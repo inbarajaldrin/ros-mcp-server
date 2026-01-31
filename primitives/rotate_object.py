@@ -832,8 +832,9 @@ class ReorientForAssembly(Node):
         # Project tool Z-axis to XY plane
         tool_z_xy = np.array([tool_z_axis[0], tool_z_axis[1], 0])
         norm_tool_xy = np.linalg.norm(tool_z_xy)
-        if norm_tool_xy < 1e-6:
-            # Tool is pointing straight up or down, not facing robot horizontally
+        if norm_tool_xy < 0.1:
+            # Tool is pointing nearly straight up or down (within ~5.7° of vertical).
+            # The horizontal facing direction is ill-defined, so don't flag as facing robot.
             return False, 90.0
         tool_z_xy_norm = tool_z_xy / norm_tool_xy
 
@@ -1117,7 +1118,7 @@ class ReorientForAssembly(Node):
         # Stage 1: Probe each seed once (1 perturbation) with fail-fast.
         # If orientation is collision-blocked, bail after 15 consecutive failures (~2s).
         # If feasible, proceed to full perturbations.
-        fail_fast = 5 if (not all_solutions and collision_checker is not None) else 0
+        fail_fast = 10 if (not all_solutions and collision_checker is not None) else 0
 
         probe_results = solver.solve_collect(
             seeds=seeds,
@@ -1268,8 +1269,23 @@ class ReorientForAssembly(Node):
             R_object_current, best_target_R
         )
         
-        # Find nearest cardinal EE orientation - MUST snap to a cardinal
-        # Use a reasonable threshold; if no cardinal is close, reject this optimization
+        # Check if the target EE is nearly vertical (tool Z-axis close to [0,0,±1]).
+        # When the tool points straight down/up, the "yaw" (spin around vertical) is
+        # continuous and cannot be captured by discrete cardinal orientations.
+        # In this case, use the exact computed EE orientation instead of snapping.
+        tool_z_axis = R_EE_new[:, 2]
+        tool_z_xy_norm = np.linalg.norm(tool_z_axis[:2])
+
+        if tool_z_xy_norm < 0.1 and object_error < 1.0:
+            # Nearly vertical tool — skip cardinal snap, use exact orientation
+            self.get_logger().info(
+                f"  → EE nearly vertical (tool Z XY norm={tool_z_xy_norm:.4f}), "
+                f"using exact orientation (object error={object_error:.2f}°)"
+            )
+            best_quat = R.from_matrix(R_EE_new).as_quat()
+            return (True, best_quat, R_object_result, best_target_R, object_error)
+
+        # Find nearest cardinal EE orientation - snap to a cardinal for non-vertical orientations
         EE_SNAP_THRESHOLD = 45.0  # degrees - if computed EE is > 45° from all cardinals, reject
         EE_cardinal_name, EE_cardinal_quat, EE_cardinal_dist = \
             ExtendedCardinalOrientations.find_closest_cardinal(R_EE_new, threshold_deg=EE_SNAP_THRESHOLD)
@@ -1279,7 +1295,7 @@ class ReorientForAssembly(Node):
             self.get_logger().info(f"  → Computed EE is {EE_cardinal_dist:.1f}° from nearest cardinal (> {EE_SNAP_THRESHOLD}°), falling back to full search")
             return (False, None, None, None, float('inf'))
 
-        # Use the cardinal EE orientation (always snap to cardinal)
+        # Use the cardinal EE orientation (snap to cardinal)
         R_EE_cardinal = R.from_quat(EE_cardinal_quat).as_matrix()
         R_object_from_cardinal = R_EE_cardinal @ R_grasp
 
