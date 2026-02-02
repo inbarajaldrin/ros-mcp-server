@@ -311,6 +311,10 @@ class DirectObjectMove(Node):
         self.recovery_wait_start_time = None  # Timestamp when recovery wait started
         self.recovery_wait_duration = 2.0  # Wait duration in seconds after recovery
         
+        # Grasp topic wait retry settings
+        self.grasp_wait_attempts = 0
+        self.max_grasp_wait_attempts = 3
+
         # Canonical pose threshold settings (used in _try_canonical_match_with_threshold)
         self.canonical_threshold_initial = 0.45  # Initial threshold (~90°)
         self.canonical_threshold_max = 0.9  # Maximum threshold to try (~100°)
@@ -658,13 +662,18 @@ class DirectObjectMove(Node):
             self.get_logger().info(step_msg)
             self.get_logger().info(f"Object at: ({object_position[0]:.3f}, {object_position[1]:.3f}, {object_position[2]:.3f})")
         elif self.grasp_id is not None:
-            # Grasp point mode: must have selected_grasp_point, exit if not available
+            # Grasp point mode: must have selected_grasp_point, retry if not available yet
             if self.selected_grasp_point is None:
+                self.grasp_wait_attempts += 1
                 # Differentiate between topic not publishing vs grasp point not in data
                 if self.latest_grasp_points is None:
-                    self.error_message = f"No data from grasp topic {self.grasp_points_topic}"
+                    msg = f"No data from grasp topic {self.grasp_points_topic}"
                 else:
-                    self.error_message = f"Grasp point {self.grasp_id} not found"
+                    msg = f"Grasp point {self.grasp_id} not found"
+                if self.grasp_wait_attempts < self.max_grasp_wait_attempts:
+                    self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{self.max_grasp_wait_attempts}), retrying...")
+                    return
+                self.error_message = msg
                 self.get_logger().error(self.error_message + " Cannot proceed in grasp point mode. Exiting.")
                 self.should_exit = True
                 return
