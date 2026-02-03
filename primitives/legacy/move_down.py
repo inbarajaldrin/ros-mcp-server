@@ -41,7 +41,14 @@ except ImportError:
 # =============================================================================
 # CONFIGURABLE PARAMETERS
 # =============================================================================
-GRIPPER_FORCE_THRESHOLD = 100.0  # Stop when gripper force exceeds this value (for sim mode)
+# Sim mode: F/T sensor via fixed gripper joint (WrenchStamped on /ft_sensor_sim)
+# Uses same force detection logic as real mode but with different thresholds
+# Simulated forces may have different scaling/characteristics than real sensor
+
+# Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
+# Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
+SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
+SIM_Z_FORCE_THRESHOLD = 10.0  # Z force threshold (positive = contact pushback in sim)
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
@@ -69,36 +76,33 @@ class MoveDown(Node):
         
         # Action client for trajectory control
         self.action_client = ActionClient(
-            self, 
-            FollowJointTrajectory, 
+            self,
+            FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
         
         # Target height (if None, will use current height - MOVE_DOWN_INCREMENT as default)
         self.target_height = target_height
         
-        # Force monitoring - different for sim vs real
-        if self.mode == 'sim':
-            # Sim mode: gripper force (single value)
-            self.current_gripper_force = 0.0
-        else:
-            # Real mode: force readings for all axes (forces and torques)
-            self.current_force_x = 0.0
-            self.current_force_y = 0.0
-            self.current_force_z = 0.0
-            self.current_torque_x = 0.0
-            self.current_torque_y = 0.0
-            self.current_torque_z = 0.0
-            # Store baseline force values (calibrated over 2 seconds, like perform_insert)
-            self.baseline_force_x = None
-            self.baseline_force_y = None
-            self.baseline_force_z = None
-            self.baseline_torque_x = None
-            self.baseline_torque_y = None
-            self.baseline_torque_z = None
-            # Grace period after movement starts before checking forces (avoid false positives from movement initiation)
-            self.movement_start_time = None
-            self.force_check_grace_period = 0.5  # Wait 0.5 seconds after movement starts
+        # Force monitoring - both sim and real use WrenchStamped (6-DOF F/T sensor)
+        # Sim: /ft_sensor_sim (from fixed gripper joint)
+        # Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor)
+        self.current_force_x = 0.0
+        self.current_force_y = 0.0
+        self.current_force_z = 0.0
+        self.current_torque_x = 0.0
+        self.current_torque_y = 0.0
+        self.current_torque_z = 0.0
+        # Store baseline force values (calibrated at movement start)
+        self.baseline_force_x = None
+        self.baseline_force_y = None
+        self.baseline_force_z = None
+        self.baseline_torque_x = None
+        self.baseline_torque_y = None
+        self.baseline_torque_z = None
+        # Grace period after movement starts before checking forces
+        self.movement_start_time = None
+        self.force_check_grace_period = 0.5  # Wait 0.5 seconds after movement starts
         self.force_threshold_reached = False
         self.error_message = None  # Track error for JSON output
 
@@ -124,13 +128,14 @@ class MoveDown(Node):
         self.current_joint_angles = None
         self.joint_angles_received = False
         
-        # Subscriber for force/torque data - use different topics and message types for sim vs real
+        # Subscriber for force/torque data - different message types for sim vs real
         if self.mode == 'sim':
-            # Simulation mode: use gripper force topic (Float64)
-            self.gripper_force_sub = self.create_subscription(
+            # Simulation mode: Fz from gripper joint via get_measured_joint_forces()
+            # Published as Float64 by Isaac Sim extension at physics rate (~60 Hz)
+            self.force_sub = self.create_subscription(
                 Float64,
-                '/gripper_force',
-                self.gripper_force_callback,
+                '/joint_force',
+                self.sim_force_callback,
                 10
             )
         else:
@@ -465,16 +470,6 @@ class MoveDown(Node):
         self.get_logger().error("SUGGESTION: Try running the same command again. The issue is often transient and succeeds on retry.")
         return None
 
-    def gripper_force_callback(self, msg: Float64):
-        """Callback for gripper force data (sim mode)"""
-        self.current_gripper_force = msg.data
-
-        # Check if force threshold is exceeded (contact detected - this is SUCCESS)
-        if self.current_gripper_force > GRIPPER_FORCE_THRESHOLD and not self.force_threshold_reached:
-            self.get_logger().info(f"Contact detected: Gripper force {self.current_gripper_force:.2f} exceeded threshold {GRIPPER_FORCE_THRESHOLD}")
-            self.force_threshold_reached = True
-            self.contact_detected_stop()
-    
     def force_callback(self, msg: WrenchStamped):
         """Callback for force/torque sensor data - monitors all axes (real mode)
         
@@ -489,25 +484,29 @@ class MoveDown(Node):
         self.current_torque_y = msg.wrench.torque.y
         self.current_torque_z = msg.wrench.torque.z
 
+    def sim_force_callback(self, msg: Float64):
+        """Callback for sim mode force data (Float64 with Fz value from gripper joint)."""
+        self.current_force_z = msg.data
+
     def start_force_monitoring(self):
         """Start monitoring force during trajectory execution (non-blocking)"""
         import time
-        if self.mode == 'real':
-            # NON-BLOCKING calibration: Use brief sleep like old code to get instant baseline
-            # This avoids blocking the ROS event loop which prevents goal_result from being called
-            time.sleep(0.1)  # Brief wait to ensure we have current readings
-            
-            # Use current values as baseline (same as old code)
-            self.baseline_force_x = self.current_force_x
-            self.baseline_force_y = self.current_force_y
-            self.baseline_force_z = self.current_force_z
-            self.baseline_torque_x = self.current_torque_x
-            self.baseline_torque_y = self.current_torque_y
-            self.baseline_torque_z = self.current_torque_z
-            
-            # Record movement start time for grace period
-            self.movement_start_time = time.time()
-            
+
+        # NON-BLOCKING calibration: Use brief sleep to get instant baseline
+        # This avoids blocking the ROS event loop which prevents goal_result from being called
+        time.sleep(0.1)  # Brief wait to ensure we have current readings
+
+        # Use current values as baseline (same approach for both sim and real)
+        self.baseline_force_x = self.current_force_x
+        self.baseline_force_y = self.current_force_y
+        self.baseline_force_z = self.current_force_z
+        self.baseline_torque_x = self.current_torque_x
+        self.baseline_torque_y = self.current_torque_y
+        self.baseline_torque_z = self.current_torque_z
+
+        # Record movement start time for grace period
+        self.movement_start_time = time.time()
+
         if self.force_monitor_timer is None:
             self.force_monitor_timer = self.create_timer(FORCE_CHECK_INTERVAL, self.check_force_during_execution)
 
@@ -532,79 +531,83 @@ class MoveDown(Node):
         self.next_movement_timer = self.create_timer(0.3, timer_callback)
 
     def check_force_during_execution(self):
-        """Check force during trajectory execution and cancel if threshold exceeded"""
+        """Check force during trajectory execution and cancel if threshold exceeded.
+
+        Both sim and real modes use the same WrenchStamped-based detection:
+        - Sim: /ft_sensor_sim (from fixed gripper joint) - uses SIM_* thresholds
+        - Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor) - uses real thresholds
+        """
         if not self.moving:
             return
-        
-        # Grace period: don't check forces immediately after movement starts (avoid false positives from movement initiation)
-        if self.mode == 'real' and self.movement_start_time is not None:
+
+        # Grace period: don't check forces immediately after movement starts
+        if self.movement_start_time is not None:
             import time
             elapsed_since_start = time.time() - self.movement_start_time
             if elapsed_since_start < self.force_check_grace_period:
                 return  # Skip force check during grace period
-        
+
+        # Check if we have baseline values set
+        if (self.baseline_force_x is None or
+            self.baseline_force_y is None or
+            self.baseline_force_z is None):
+            return  # Wait for baseline values to be set
+
+        # Select thresholds based on mode
         if self.mode == 'sim':
-            # Sim mode: check gripper force
-            if self.current_gripper_force > GRIPPER_FORCE_THRESHOLD:
-                self.get_logger().info(f"Contact detected: Gripper force {self.current_gripper_force:.2f} exceeded threshold {GRIPPER_FORCE_THRESHOLD}")
-                self.force_threshold_reached = True
-                self.contact_detected_stop()
-            else:
-                # Debug: log force values during movement
-                self.get_logger().debug(f"Force monitoring: Gripper force = {self.current_gripper_force:.2f} (threshold: {GRIPPER_FORCE_THRESHOLD})")
+            z_threshold = SIM_Z_FORCE_THRESHOLD
+            force_threshold = SIM_FORCE_THRESHOLD
         else:
-            # Real mode: check forces using baseline-subtracted detection for ALL axes
-            # Monitors all 6 axes: Fx, Fy, Fz, Tx, Ty, Tz
-            # Subtracts baseline (calibrated over 2 seconds) before checking thresholds
-            # Z force uses directional check (negative = upward resistance)
-            # Other axes use magnitude checks
-            
-            # Check if we have baseline values set
-            if (self.baseline_force_x is None or 
-                self.baseline_force_y is None or 
-                self.baseline_force_z is None):
-                return  # Wait for baseline values to be set
-            
-            # Calculate forces after baseline removal (like perform_insert)
-            f_x = self.current_force_x - self.baseline_force_x
-            f_y = self.current_force_y - self.baseline_force_y
-            f_z = self.current_force_z - self.baseline_force_z
-            t_x = self.current_torque_x - self.baseline_torque_x
-            t_y = self.current_torque_y - self.baseline_torque_y
-            t_z = self.current_torque_z - self.baseline_torque_z
-            
-            # Check Z force with directional threshold (negative = upward resistance)
-            if f_z <= Z_FORCE_THRESHOLD:
+            z_threshold = Z_FORCE_THRESHOLD
+            force_threshold = FORCE_THRESHOLD
+
+        # Calculate forces after baseline removal
+        f_x = self.current_force_x - self.baseline_force_x
+        f_y = self.current_force_y - self.baseline_force_y
+        f_z = self.current_force_z - self.baseline_force_z
+        t_x = self.current_torque_x - self.baseline_torque_x
+        t_y = self.current_torque_y - self.baseline_torque_y
+        t_z = self.current_torque_z - self.baseline_torque_z
+
+        # Check Z force with directional threshold
+        # Real mode: negative delta (upward resistance from F/T sensor)
+        # Sim mode: positive delta (contact pushback from joint forces)
+        if self.mode == 'sim':
+            z_triggered = f_z >= z_threshold  # Sim: positive delta on contact
+        else:
+            z_triggered = f_z <= z_threshold  # Real: negative delta on contact
+
+        if z_triggered:
+            self.get_logger().info(
+                f"Contact detected: Z force threshold reached. "
+                f"Z force (after baseline): {f_z:.2f}N (threshold: {z_threshold}N, "
+                f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)"
+            )
+            self.force_threshold_reached = True
+            self.contact_detected_stop()
+            return  # Exit immediately after contact detected
+
+        # Check other axes (Fx, Fy, Tx, Ty, Tz) with magnitude thresholds
+        axes = [
+            (abs(f_x), "Fx", f_x, self.current_force_x, self.baseline_force_x),
+            (abs(f_y), "Fy", f_y, self.current_force_y, self.baseline_force_y),
+            (abs(t_x), "Tx", t_x, self.current_torque_x, self.baseline_torque_x),
+            (abs(t_y), "Ty", t_y, self.current_torque_y, self.baseline_torque_y),
+            (abs(t_z), "Tz", t_z, self.current_torque_z, self.baseline_torque_z),
+        ]
+
+        # Check each axis
+        for magnitude, axis_name, force_value, current_value, baseline_value in axes:
+            if magnitude > force_threshold:
                 self.get_logger().info(
-                    f"Contact detected: Z force threshold reached. "
-                    f"Z force (after baseline): {f_z:.2f}N (threshold: {Z_FORCE_THRESHOLD}N, "
-                    f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)"
+                    f"Contact detected: {axis_name} force/torque threshold reached. "
+                    f"{axis_name} (after baseline): {force_value:.2f}N (magnitude: {magnitude:.2f}N, "
+                    f"current: {current_value:.2f}N, baseline: {baseline_value:.2f}N, "
+                    f"threshold: {force_threshold}N)"
                 )
                 self.force_threshold_reached = True
                 self.contact_detected_stop()
                 return  # Exit immediately after contact detected
-
-            # Check other axes (Fx, Fy, Tx, Ty, Tz) with magnitude thresholds
-            axes = [
-                (abs(f_x), "Fx", f_x, self.current_force_x, self.baseline_force_x),
-                (abs(f_y), "Fy", f_y, self.current_force_y, self.baseline_force_y),
-                (abs(t_x), "Tx", t_x, self.current_torque_x, self.baseline_torque_x),
-                (abs(t_y), "Ty", t_y, self.current_torque_y, self.baseline_torque_y),
-                (abs(t_z), "Tz", t_z, self.current_torque_z, self.baseline_torque_z),
-            ]
-
-            # Check each axis
-            for magnitude, axis_name, force_value, current_value, baseline_value in axes:
-                if magnitude > FORCE_THRESHOLD:
-                    self.get_logger().info(
-                        f"Contact detected: {axis_name} force/torque threshold reached. "
-                        f"{axis_name} (after baseline): {force_value:.2f}N (magnitude: {magnitude:.2f}N, "
-                        f"current: {current_value:.2f}N, baseline: {baseline_value:.2f}N, "
-                        f"threshold: {FORCE_THRESHOLD}N)"
-                    )
-                    self.force_threshold_reached = True
-                    self.contact_detected_stop()
-                    return  # Exit immediately after contact detected
 
     def contact_detected_stop(self):
         """Graceful stop when contact is detected - this is SUCCESS, not failure.
@@ -681,14 +684,13 @@ class MoveDown(Node):
     def move_down_continue(self):
         """Continue moving down using stored position (non-blocking, called from timer)"""
         # Reset baselines for next movement segment (will be recalibrated in start_force_monitoring)
-        if self.mode == 'real':
-            self.baseline_force_x = None
-            self.baseline_force_y = None
-            self.baseline_force_z = None
-            self.baseline_torque_x = None
-            self.baseline_torque_y = None
-            self.baseline_torque_z = None
-        
+        self.baseline_force_x = None
+        self.baseline_force_y = None
+        self.baseline_force_z = None
+        self.baseline_torque_x = None
+        self.baseline_torque_y = None
+        self.baseline_torque_z = None
+
         # Get orientation from callback data (needed for IK)
         if self.ee_quat is None:
             for _ in range(3):
@@ -714,14 +716,13 @@ class MoveDown(Node):
     def move_down(self):
         """Move down while maintaining current position and orientation"""
         # Reset baseline forces for new movement sequence (will be recalibrated in start_force_monitoring)
-        if self.mode == 'real':
-            self.baseline_force_x = None
-            self.baseline_force_y = None
-            self.baseline_force_z = None
-            self.baseline_torque_x = None
-            self.baseline_torque_y = None
-            self.baseline_torque_z = None
-        
+        self.baseline_force_x = None
+        self.baseline_force_y = None
+        self.baseline_force_z = None
+        self.baseline_torque_x = None
+        self.baseline_torque_y = None
+        self.baseline_torque_z = None
+
         # Initialize current Z position if not set
         if self.current_z_position is None:
             # Read current end-effector pose

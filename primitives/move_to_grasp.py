@@ -46,10 +46,18 @@ from primitives.utils.data_path_finder import get_symmetry_dir
 from visualization_msgs.msg import MarkerArray, Marker
 
 
-def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, dx=0.001):
+def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, dx=0.001, prefer_elbow_down=True):
     """IK solver with wrist_3 joint range extended to (-2pi, 2pi).
-    All other joints remain at (-pi, pi).
-    If current_joints is provided, it is used as the primary seed."""
+
+    Constrains the robot to maintain a consistent "elbow-down" picking configuration:
+    - shoulder_lift: negative (arm reaching forward/down)
+    - elbow: positive (elbow pointing down, not up)
+    - wrist_2: negative (wrist-down, gripper facing consistently)
+
+    Args:
+        prefer_elbow_down: If True, constrain joints to the standard picking configuration
+            to avoid unusual arm postures regardless of initial robot pose.
+    """
     from primitives.utils.unified_ik import IKSolverConfig, IKSolver
 
     original_position = np.array(position)
@@ -59,14 +67,9 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
     target_pose[:3, 3] = original_position
     target_pose[:3, :3] = target_rot_matrix
 
-    seed_configs = []
-
-    # Primary seed: current joint angles (closest solution preferred)
-    if current_joints is not None:
-        seed_configs.append(np.array(current_joints))
-
-    # Fallback seeds
-    seed_configs.extend([
+    # Fallback seeds first (all in the desired elbow-down, wrist-down configuration)
+    # These seeds have: shoulder_lift negative, elbow positive, wrist_2 = -90°
+    seed_configs = [
         np.radians([85, -80, 90, -90, -90, -(np.mod(rpy[2] + 180, 360) - 180)]),
         np.radians([90, -90, 90, -90, -90, rpy[2]]),
         np.radians([0, -90, 90, -90, -90, rpy[2]]),
@@ -77,18 +80,40 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
         np.radians([85, -80, 90, -90, -180, rpy[2]]),
         np.radians([85, -70, 80, -100, -90, rpy[2]]),
         np.radians([85, -90, 100, -100, -90, rpy[2]]),
-    ])
-
-    wrist3_extended_bounds = [
-        (-np.pi, np.pi),
-        (-np.pi, np.pi),
-        (-np.pi, np.pi),
-        (-np.pi, np.pi),
-        (-np.pi, np.pi),
-        (-2*np.pi, 2*np.pi)
     ]
 
-    solver = IKSolver(IKSolverConfig(joint_bounds=wrist3_extended_bounds))
+    # Add current joints as additional seed only if already in valid configuration
+    # This helps with smooth motion when already in a good pose
+    if current_joints is not None:
+        curr = np.array(current_joints)
+        # Check if current joints are already in the desired configuration:
+        # shoulder_lift < 0, elbow > 0, wrist_2 < 0
+        is_valid_config = (curr[1] < 0 and curr[2] > 0 and curr[4] < 0)
+        if is_valid_config:
+            # Current config is good - use it as primary seed for smooth motion
+            seed_configs.insert(0, curr)
+
+    # Constrain joints to the standard picking configuration when prefer_elbow_down is True
+    if prefer_elbow_down:
+        joint_bounds = [
+            (-np.pi, np.pi),     # shoulder_pan: full range
+            (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+            (0, np.pi),          # elbow: positive only (elbow down)
+            (-np.pi, np.pi),     # wrist_1: full range
+            (-np.pi, 0),         # wrist_2: negative only (wrist-down)
+            (-2*np.pi, 2*np.pi)  # wrist_3: extended range
+        ]
+    else:
+        joint_bounds = [
+            (-np.pi, np.pi),     # shoulder_pan
+            (-np.pi, np.pi),     # shoulder_lift
+            (-np.pi, np.pi),     # elbow
+            (-np.pi, np.pi),     # wrist_1
+            (-np.pi, np.pi),     # wrist_2
+            (-2*np.pi, 2*np.pi)  # wrist_3
+        ]
+
+    solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
     return solver.solve(
         seeds=seed_configs,
         target_pose=target_pose,
@@ -167,6 +192,17 @@ class DirectObjectMove(Node):
             self.step1_completed = False
             self.step1_z_position = None
         
+        # Minimum actual gripper center height above table surface (meters)
+        # The gripper has material both above and below the center point.
+        # For small objects near the table, the gripper center must be raised
+        # to prevent the lower finger material from hitting the table during closure.
+        self.min_gripper_center_z = 0.01  # 10mm - ensures clearance for gripper fingers below center
+
+        # Z calibration offset between the geometric model and the actual gripper center
+        # The actual gripper center z = model's offset_point z + this calibration value
+        # (Matches gripper_center_z_offset in get_current_gripper_center_pose.py)
+        self.gripper_center_z_calibration = 0.1229
+
         # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
         # This implements a spherical flexure joint concept (same as URSim TCP control):
         # - The offset point (gripper center) acts as a fixed point in space
@@ -999,7 +1035,18 @@ class DirectObjectMove(Node):
             # First calculate gripper center (offset point) - gripper center is BELOW the object
             offset_point = object_position.copy()
             offset_point[2] -= self.object_to_gripper_center_offset  # Gripper center is offset below object
-            
+
+            # Enforce minimum actual gripper center height to prevent table collision
+            # The actual gripper center z = offset_point[2] + gripper_center_z_calibration
+            # (the geometric model's offset_point is below the real gripper center by the calibration amount)
+            expected_gc_z = offset_point[2] + self.gripper_center_z_calibration
+            if expected_gc_z < self.min_gripper_center_z:
+                z_raise = self.min_gripper_center_z - expected_gc_z
+                offset_point[2] += z_raise
+                self.get_logger().info(
+                    f"Raising gripper center from {expected_gc_z*1000:.1f}mm to "
+                    f"{self.min_gripper_center_z*1000:.1f}mm (min clearance for table)")
+
             # Then calculate TCP position from offset point (simple vertical offset since gripper is face-down)
             target_ee_position = offset_point.copy()
             target_ee_position[2] += self.tcp_to_gripper_center_offset  # TCP is above gripper center
@@ -1054,8 +1101,8 @@ class DirectObjectMove(Node):
         yaw_alt = ((yaw_alt + 180) % 360) - 180
         target_rot_alt = [0, 180, yaw_alt]
 
-        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles)
-        sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles)
+        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=2)
+        sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=2)
 
         # Pick solution closest to current joints
         if self.current_joint_angles is not None:
@@ -1097,7 +1144,11 @@ class DirectObjectMove(Node):
         """Execute trajectory using ROS2 action"""
         try:
             if 'traj1' not in trajectory or not trajectory['traj1']:
-                self.get_logger().error("No trajectory found")
+                self.get_logger().error("No trajectory found (IK solver failed to find a solution)")
+                self.trajectory_in_progress = False
+                self.error_message = "IK solver failed to find a solution for the target pose"
+                self.movement_completed = True
+                self.should_exit = True
                 return
             
             point = trajectory['traj1'][0]
@@ -1451,6 +1502,9 @@ def main(args=None):
                 
         except subprocess.TimeoutExpired:
             print("[ERROR] Move to safe height timed out")
+            return
+        except KeyboardInterrupt:
+            print("\n[INFO] Move to safe height stopped by user")
             return
         except Exception as e:
             print(f"[ERROR] Failed to execute move to safe height: {e}")

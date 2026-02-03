@@ -381,43 +381,44 @@ class QuaternionOrientationController:
             List of quaternion arrays representing all symmetry transformations
         """
         base_rotations = QuaternionOrientationController.get_symmetry_rotations(fold_data)
-        
+
         if len(base_rotations) <= 1:
             return base_rotations
-        
-        # Generate group closure by repeatedly combining elements
-        group = set()
-        for q in base_rotations:
-            key = tuple(np.round(q, 6))
-            group.add(key)
-        
-        # Iterate to find closure (typically converges in 2-3 iterations)
+
+        # Generate group closure by repeatedly combining elements.
+        # Use quaternion distance for dedup instead of rounded keys to prevent
+        # floating-point near-duplicates from accumulating (6-fold symmetries
+        # involve irrational trig values that don't round-trip through multiply).
+        group = list(base_rotations)
+        dedup_threshold = 0.001  # ~0.1° — well below any real symmetry angle
+
+        def _is_duplicate(q, elements):
+            for existing in elements:
+                if QuaternionOrientationController.quaternion_distance(q, existing) < dedup_threshold:
+                    return True
+            return False
+
         changed = True
         max_iterations = 10
         iteration = 0
-        
+
         while changed and iteration < max_iterations:
             changed = False
             iteration += 1
-            new_elements = set()
-            
-            group_list = [np.array(k) for k in group]
-            for q1 in group_list:
-                for q2 in group_list:
-                    # Combine: q1 * q2
+            new_elements = []
+
+            for q1 in group:
+                for q2 in group:
                     q_combined = QuaternionOrientationController.quaternion_multiply(q1, q2)
                     q_combined = q_combined / np.linalg.norm(q_combined)
-                    
-                    key = tuple(np.round(q_combined, 6))
-                    neg_key = tuple(np.round(-q_combined, 6))
-                    
-                    if key not in group and neg_key not in group:
-                        new_elements.add(key)
+
+                    if not _is_duplicate(q_combined, group) and not _is_duplicate(q_combined, new_elements):
+                        new_elements.append(q_combined)
                         changed = True
-            
-            group.update(new_elements)
-        
-        return [np.array(k) for k in group]
+
+            group.extend(new_elements)
+
+        return group
     
     @staticmethod
     def find_equivalent_canonical_yaw(detected_quat, fold_data, threshold_degrees=15.0):

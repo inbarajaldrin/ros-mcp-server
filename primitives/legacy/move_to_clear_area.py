@@ -503,11 +503,71 @@ class MoveToClearArea(Node):
             self._send_goal_future.add_done_callback(self.goal_response)
             return  # Exit early for hover mode
         else:
-            # Move mode: Keep the current orientation (don't change it, just move to target position)
-            target_rotation = Rot.from_quat(current_quat)
-            target_quat = current_quat
-            target_rot_matrix = target_rotation.as_matrix()
-            
+            # Move mode: Check EE face direction and fix if needed
+            current_rotation = Rot.from_quat(current_quat)
+            current_rot_matrix = current_rotation.as_matrix()
+            tool_z = current_rot_matrix[:, 2]  # Tool Z-axis in world frame
+
+            # Snap to cardinal face direction while preserving roll.
+            # 1. Determine target face (face_right for horizontal, face_down for downward)
+            # 2. Choose the roll variant that best matches current roll
+            current_rpy = current_rotation.as_euler('xyz', degrees=True)
+            current_roll = current_rpy[0]
+
+            face_threshold = 0.707  # cos(45°)
+            is_face_down = tool_z[2] < -face_threshold
+
+            if is_face_down:
+                R_face = Rot.from_euler('yz', [180, 0], degrees=True)
+                face_name = 'face_down'
+            else:
+                R_face = Rot.from_euler('yz', [90, -90], degrees=True)
+                face_name = 'face_right'
+
+            # Find the roll variant that best preserves current roll
+            # Skip variants with pitch near ±90° (gimbal lock)
+            best_roll_variant = 0
+            best_roll_diff = float('inf')
+            best_target_rot = None
+            for roll in [0, 90, 180, 270]:
+                R_roll = Rot.from_euler('z', roll, degrees=True)
+                R_candidate = R_face * R_roll
+                candidate_rpy = R_candidate.as_euler('xyz', degrees=True)
+                candidate_roll = candidate_rpy[0]
+                candidate_pitch = candidate_rpy[1]
+
+                # Skip gimbal lock orientations (pitch near ±90°)
+                if abs(abs(candidate_pitch) - 90) < 5:
+                    continue
+
+                # Compare rolls (handle wrap-around)
+                roll_diff = abs(candidate_roll - current_roll)
+                if roll_diff > 180:
+                    roll_diff = 360 - roll_diff
+                if roll_diff < best_roll_diff:
+                    best_roll_diff = roll_diff
+                    best_roll_variant = roll
+                    best_target_rot = R_candidate
+
+            # Fallback if all variants are gimbal lock (shouldn't happen for face_right)
+            if best_target_rot is None:
+                self.get_logger().warn("All roll variants have gimbal lock, using roll90")
+                best_roll_variant = 90
+                R_roll = Rot.from_euler('z', 90, degrees=True)
+                best_target_rot = R_face * R_roll
+                best_roll_diff = 0
+
+            target_rot_matrix = best_target_rot.as_matrix()
+            target_rpy = best_target_rot.as_euler('xyz', degrees=True)
+
+            self.get_logger().info(
+                f"Snapping to {face_name}_roll{best_roll_variant} "
+                f"(current roll: {current_roll:.1f}° → target roll: {target_rpy[0]:.1f}°, diff: {best_roll_diff:.1f}°)"
+            )
+
+            # Only one target orientation now (the best roll-preserving one)
+            target_orientations = [(target_rpy[2], target_rot_matrix)]
+
             # Calculate TCP position from gripper center position
             # The gripper Z-axis points from TCP to gripper center
             # Apply offset only to X and Y, keep Z constant
@@ -552,53 +612,55 @@ class MoveToClearArea(Node):
                     joint_bounds=extended_bounds,
                 )
 
-                # Strategy 1: Position perturbations with current joint angles
-                # Build custom perturbed poses (positive AND negative x-shifts, y-shifts for later)
-                strategy1_tasks = []
-                for i in range(max_tries):
-                    perturbation_values = [i * dx, -i * dx] if i > 0 else [0]
-                    for perturbation in perturbation_values:
-                        perturbed_position = np.array(tcp_position).copy()
-                        perturbed_position[0] += perturbation
-                        if i > max_tries // 2:
-                            perturbed_position[1] += perturbation * 0.5
-                        pose = target_pose.copy()
-                        pose[:3, 3] = perturbed_position
-                        strategy1_tasks.append(pose)
+                # Strategy: Try all yaw orientations with position perturbations and seed variations
+                solver = IKSolver(config)
+                candidate_solutions = []
 
-                # Strategy 2: Different joint angle seeds (perturbations of current joints)
                 seed_perturbation_offsets = [
+                    [0, 0, 0, 0, 0, 0],  # No perturbation first
                     [0.1, 0, 0, 0, 0, 0],
                     [-0.1, 0, 0, 0, 0, 0],
                     [0, 0.1, 0, 0, 0, 0],
                     [0, -0.1, 0, 0, 0, 0],
-                    [0, 0, 0.1, 0, 0, 0],
-                    [0, 0, -0.1, 0, 0, 0],
                     [0.5, 0, 0, 0, 0, 0],
                     [-0.5, 0, 0, 0, 0, 0],
-                    [0, 0.5, 0, 0, 0, 0],
-                    [0, -0.5, 0, 0, 0, 0],
                     [np.pi, 0, 0, 0, 0, 0],
                     [-np.pi, 0, 0, 0, 0, 0],
-                    [0, np.pi/2, 0, 0, 0, 0],
-                    [0, -np.pi/2, 0, 0, 0, 0],
                 ]
-                strategy2_seeds = [q_guess + np.array(pert) for pert in seed_perturbation_offsets]
 
-                solver = IKSolver(config)
-                candidate_solutions = []
+                for yaw, rot_matrix in target_orientations:
+                    # Build pose for this yaw orientation
+                    # Recalculate TCP position for this orientation (Z offset may differ slightly)
+                    gripper_z = rot_matrix[:, 2]
+                    offset_vec = -self.tcp_to_gripper_center_offset * gripper_z
+                    tcp_pos = np.array(self.target_gripper_center_position) + offset_vec
+                    tcp_pos[2] = self.target_gripper_center_position[2]  # Keep Z constant
 
-                # Strategy 1: same seed, custom perturbed poses
-                for pose in strategy1_tasks:
-                    ik_result = solver._solve_single(q_guess, pose, collision_checker, None)
-                    if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
-                        candidate_solutions.append((ik_result.cost, ik_result.joint_angles))
+                    pose = np.eye(4)
+                    pose[:3, 3] = tcp_pos
+                    pose[:3, :3] = rot_matrix
 
-                # Strategy 2: different seeds, same target pose
-                for seed in strategy2_seeds:
-                    ik_result = solver._solve_single(seed, target_pose, collision_checker, None)
-                    if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
-                        candidate_solutions.append((ik_result.cost, ik_result.joint_angles))
+                    # Try with position perturbations
+                    for i in range(max_tries):
+                        perturbation_values = [i * dx, -i * dx] if i > 0 else [0]
+                        for perturbation in perturbation_values:
+                            perturbed_pos = tcp_pos.copy()
+                            perturbed_pos[0] += perturbation
+                            if i > max_tries // 2:
+                                perturbed_pos[1] += perturbation * 0.5
+                            perturbed_pose = pose.copy()
+                            perturbed_pose[:3, 3] = perturbed_pos
+
+                            ik_result = solver._solve_single(q_guess, perturbed_pose, collision_checker, None)
+                            if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
+                                candidate_solutions.append((ik_result.cost, ik_result.joint_angles, yaw))
+
+                    # Try with different seeds
+                    for pert in seed_perturbation_offsets:
+                        seed = q_guess + np.array(pert)
+                        ik_result = solver._solve_single(seed, pose, collision_checker, None)
+                        if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
+                            candidate_solutions.append((ik_result.cost, ik_result.joint_angles, yaw))
 
                 if not candidate_solutions:
                     self.error_message = "IK solver failed: no collision-free solution found for clear space move"
@@ -616,9 +678,9 @@ class MoveToClearArea(Node):
                 # Collect ALL collision-free trajectories, then pick shortest path
                 num_waypoints = 10
                 total_duration = 5.0
-                collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost)
+                collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
 
-                for cost, candidate_joints in candidate_solutions:
+                for cost, candidate_joints, yaw in candidate_solutions:
                     target_joints = np.array(candidate_joints).copy()
 
                     # Generate multiple joint wrapping variants for this solution
@@ -659,7 +721,7 @@ class MoveToClearArea(Node):
                         if not self.check_trajectory_collision(start_joints, variant, num_samples=20, z_threshold=-0.01):
                             # Calculate total joint travel distance (sum of absolute angle changes)
                             travel_distance = np.sum(np.abs(variant - start_joints))
-                            collision_free_trajectories.append((travel_distance, variant.copy(), cost))
+                            collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
 
                 if not collision_free_trajectories:
                     self.error_message = "IK solution rejected: all candidate trajectories would cause collision"
@@ -672,9 +734,9 @@ class MoveToClearArea(Node):
                 # Sort by travel distance (shortest path first)
                 collision_free_trajectories.sort(key=lambda x: x[0])
 
-                shortest_travel, target_joints, best_cost = collision_free_trajectories[0]
+                shortest_travel, target_joints, best_cost, best_yaw = collision_free_trajectories[0]
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
-                self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}")
+                self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
                 self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
 

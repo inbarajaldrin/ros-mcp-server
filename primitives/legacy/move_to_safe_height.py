@@ -198,7 +198,6 @@ class MoveToSafeHeight(Node):
 
         if pose_data is None:
             # error_message already set by read_current_ee_pose()
-            rclpy.shutdown()
             return
             
         current_pos = pose_data['position']
@@ -224,16 +223,23 @@ class MoveToSafeHeight(Node):
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
-                rclpy.shutdown()
                 return
 
             q_guess = self.current_joint_angles.copy()
+
+            # Generate additional seeds by perturbing the current joint angles
+            # This helps when the optimizer gets stuck in a local minimum
+            rng = np.random.default_rng(42)
+            seeds = [q_guess]
+            for _ in range(4):
+                perturbed = q_guess + rng.uniform(-0.3, 0.3, size=6)
+                seeds.append(perturbed)
 
             solver = IKSolver(IKSolverConfig(
                 joint_bounds=[(-2*np.pi, 2*np.pi)] * 6,
             ))
             joint_angles = solver.solve(
-                seeds=[q_guess],
+                seeds=seeds,
                 target_pose=target_pose,
                 perturbations=5,
                 dx=0.001,
@@ -242,7 +248,6 @@ class MoveToSafeHeight(Node):
             if joint_angles is None:
                 self.error_message = "IK solver failed: no valid solution to perform safe height move"
                 self.get_logger().error(self.error_message)
-                rclpy.shutdown()
                 return
             
             # Create trajectory point
@@ -268,7 +273,6 @@ class MoveToSafeHeight(Node):
         except Exception as e:
             self.error_message = f"Failed to compute IK: {e}"
             self.get_logger().error(self.error_message)
-            rclpy.shutdown()
 
     def goal_response(self, future):
         """Handle goal response"""
@@ -341,13 +345,18 @@ def main(args=None):
         node.get_logger().info(f"Using custom height: {known_args.height} meters")
 
     try:
-        rclpy.spin(node)
+        if node.error_message:
+            # Error occurred during __init__ (IK failure, missing data, etc.)
+            # Don't spin — just output the result and clean up.
+            pass
+        else:
+            rclpy.spin(node)
     finally:
         try:
             node.output_result_json(movement_type="move_to_safe_height")
             node.destroy_node()
             rclpy.shutdown()
-        except Exception as e:
+        except Exception:
             pass
 
 

@@ -129,19 +129,25 @@ class ExtendedCardinalOrientations:
         roll_angles = [0, 90, 180, 270]
         
         # Add primary cardinal directions with roll variations (4 × 4 = 16)
+        # Roll is applied around the tool's Z-axis (body-frame Z), not the fixed X-axis.
+        # This ensures all roll variants of a face direction preserve the tool Z direction.
         for face_name, (pitch, yaw) in primary_directions.items():
+            R_face = R.from_euler('yz', [pitch, yaw], degrees=True).as_matrix()
             for roll in roll_angles:
                 name = f"face_{face_name}_roll{roll}"
-                q = R.from_euler('xyz', [roll, pitch, yaw], degrees=True).as_quat()
+                R_tool_roll = R.from_euler('z', roll, degrees=True).as_matrix()
+                q = R.from_matrix(R_face @ R_tool_roll).as_quat()
                 cardinals[name] = q
-        
+
         # Add intermediary directions with 2 roll variations each (4 × 2 = 8)
         # Using only 0° and 180° rolls for intermediaries to keep total at 24
         intermediary_rolls = [0, 180]
         for face_name, (pitch, yaw) in intermediary_directions.items():
+            R_face = R.from_euler('yz', [pitch, yaw], degrees=True).as_matrix()
             for roll in intermediary_rolls:
                 name = f"face_{face_name}_roll{roll}"
-                q = R.from_euler('xyz', [roll, pitch, yaw], degrees=True).as_quat()
+                R_tool_roll = R.from_euler('z', roll, degrees=True).as_matrix()
+                q = R.from_matrix(R_face @ R_tool_roll).as_quat()
                 cardinals[name] = q
         
         return cardinals
@@ -191,13 +197,21 @@ class ExtendedCardinalOrientations:
 
     @staticmethod
     def get_cardinal_rpy(name):
+        """Extract (roll, pitch, yaw) from a cardinal name string.
+
+        Roll is around the tool's Z-axis (body-frame Z), not the fixed X-axis.
+        To reconstruct the rotation matrix, use:
+            R_face = R.from_euler('yz', [pitch, yaw], degrees=True).as_matrix()
+            R_tool_roll = R.from_euler('z', roll, degrees=True).as_matrix()
+            R_cardinal = R_face @ R_tool_roll
+        """
         parts = name.split('_')
         roll = int(parts[-1].replace('roll', ''))
-        
+
         # Reconstruct direction name (may have multiple parts like "forward_right")
         direction_parts = parts[1:-1]
         direction = '_'.join(direction_parts)
-        
+
         pitch_yaw = {
             # Primary cardinals
             'down': (180, 0), 'up': (0, 0), 'forward': (90, 0),
@@ -206,7 +220,7 @@ class ExtendedCardinalOrientations:
             'forward_right': (90, -45), 'forward_left': (90, 45),
             'backward_right': (90, -135), 'backward_left': (90, 135),
         }
-        
+
         pitch, yaw = pitch_yaw.get(direction, (0, 0))
         return (roll, pitch, yaw)
     
@@ -947,6 +961,33 @@ class ReorientForAssembly(Node):
             max_change = max(max_change, abs(diff))
         return max_change
 
+    def _min_link_clearance(self, joint_angles):
+        """Minimum clearance (meters) between well-separated link capsules.
+
+        Checks link pairs separated by 3+ links in the kinematic chain.
+        Pairs separated by exactly 2 (e.g., wrist_1-link vs EE-link) are
+        always structurally tight due to short wrist offsets and don't
+        indicate a poor configuration choice.
+
+        Returns the smallest (segment_distance - combined_radii).
+        Higher values indicate more spread-out configurations.
+        """
+        link_radii = [0.075, 0.065, 0.055, 0.045, 0.045, 0.040]
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+        num_links = len(joint_positions) - 1
+        min_clearance = float('inf')
+        for i in range(num_links):
+            for j in range(i + 3, num_links):
+                p1 = np.array(joint_positions[i])
+                p2 = np.array(joint_positions[i + 1])
+                p3 = np.array(joint_positions[j])
+                p4 = np.array(joint_positions[j + 1])
+                dist = self.segment_distance(p1, p2, p3, p4)
+                clearance = dist - (link_radii[i] + link_radii[j])
+                if clearance < min_clearance:
+                    min_clearance = clearance
+        return min_clearance
+
     _collision_log_count = 0  # Class-level counter for verbose logging
 
     def _check_collision(self, joint_angles):
@@ -1005,7 +1046,7 @@ class ReorientForAssembly(Node):
                 return result.x, cost
         return None, float('inf')
 
-    def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
+    def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001, try_yaw_flip=True):
         from primitives.utils.unified_ik import IKSolverConfig, IKSolver
 
         ReorientForAssembly._collision_log_count = 0  # Reset for each IK attempt
@@ -1014,6 +1055,16 @@ class ReorientForAssembly(Node):
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot
+
+        # For roll≈±90° targets (gripper sideways), yaw and yaw+180° are equivalent.
+        # Generate the 180°-flipped variant to try both.
+        yaw_flipped_quat = None
+        if try_yaw_flip:
+            target_rpy = R.from_quat(target_quat).as_euler('xyz')
+            target_roll_deg = np.degrees(target_rpy[0])
+            if 60 < abs(target_roll_deg) < 120:  # Roll close to ±90°
+                flipped_yaw = target_rpy[2] + np.pi if target_rpy[2] < 0 else target_rpy[2] - np.pi
+                yaw_flipped_quat = R.from_euler('xyz', [target_rpy[0], target_rpy[1], flipped_yaw]).as_quat()
 
         if self.current_joint_angles is None:
             return None
@@ -1096,7 +1147,28 @@ class ReorientForAssembly(Node):
                             1.0 - 2.0 * (target_quat[1]**2 + target_quat[2]**2))
         yaw_deg = np.degrees(yaw_rad)
 
+        # Get current upper arm joints to create "wrist-only motion" seeds
+        curr = self.current_joint_angles if self.current_joint_angles is not None else np.zeros(6)
+        curr_deg = np.degrees(curr)
+
+        # For roll≈±90° orientations, yaw and yaw+180° are equivalent (gripper points sideways)
+        # Try both yaw variants to find collision-free solutions
+        yaw_flip = yaw_deg + 180.0 if yaw_deg < 0 else yaw_deg - 180.0
+
         seeds = [
+            # "Wrist-only motion" seeds FIRST: keep upper arm fixed, vary wrist
+            # These help find solutions where shoulder/elbow stay put (preferred motion)
+            # Try both yaw and yaw+180° variants for roll≈±90° targets
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, 90, yaw_deg]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, 90, yaw_flip]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, 90, yaw_deg]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, 90, yaw_flip]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 30, 90, yaw_deg]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, -90, yaw_deg]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, -90, yaw_flip]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, -90, yaw_deg]),
+            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 30, -90, yaw_deg]),
+            # Standard fallback seeds
             np.radians([85, -80, 90, -90, -90, yaw_deg]),
             np.radians([90, -90, 90, -90, -90, yaw_deg]),
             np.radians([0, -90, 90, -90, -90, yaw_deg]),
@@ -1118,7 +1190,8 @@ class ReorientForAssembly(Node):
         # Stage 1: Probe each seed once (1 perturbation) with fail-fast.
         # If orientation is collision-blocked, bail after 15 consecutive failures (~2s).
         # If feasible, proceed to full perturbations.
-        fail_fast = 10 if (not all_solutions and collision_checker is not None) else 0
+        # Disable fail-fast to try all seeds (helps find wrist-only motion solutions)
+        fail_fast = 15 if (not all_solutions and collision_checker is not None) else 0
 
         probe_results = solver.solve_collect(
             seeds=seeds,
@@ -1149,7 +1222,7 @@ class ReorientForAssembly(Node):
         MAX_JOINT_CHANGE = np.radians(143)
 
         def _select_best(solutions):
-            """Score and sort solutions: normal arm first, then by wrist_1 quality (closer to 0deg)."""
+            """Score and sort solutions: wrist_1 quality, then link clearance, then normal arm."""
             if not solutions:
                 return None
             scored = []
@@ -1157,13 +1230,24 @@ class ReorientForAssembly(Node):
                 w1_quality = self._wrist1_quality(joints)
                 max_change = self._max_joint_change(joints)
                 normal_arm = max_change < MAX_JOINT_CHANGE
-                scored.append((joints, cost, w1_quality, max_change, normal_arm))
-            scored.sort(key=lambda s: (s[2], not s[4]))
+                min_clearance = self._min_link_clearance(joints)
+                scored.append((joints, cost, w1_quality, max_change, normal_arm, min_clearance))
+            # Primary: minimize wrist_1 change from current
+            # Secondary: maximize link clearance (prefer spread-out configs)
+            # Tertiary: prefer normal arm motions (max change < 143deg)
+            scored.sort(key=lambda s: (s[2], -s[5], not s[4]))
             return scored[0]
 
         best = _select_best(all_solutions)
 
         if best is None:
+            # If roll≈±90° target failed, try the 180°-flipped yaw variant (equivalent orientation)
+            if yaw_flipped_quat is not None:
+                flipped_rpy = R.from_quat(yaw_flipped_quat).as_euler('xyz', degrees=True)
+                self.get_logger().info(f"  → Trying yaw-flipped target: EE RPY=[{flipped_rpy[0]:.1f}, {flipped_rpy[1]:.1f}, {flipped_rpy[2]:.1f}]")
+                # Recursively try with flipped target (disable further flipping to avoid infinite recursion)
+                return self.compute_ik_with_current_seed(target_position, yaw_flipped_quat.tolist(), max_tries, dx, try_yaw_flip=False)
+
             if self.mode == 'sim':
                 if fail_fast > 0 and not all_solutions:
                     self.get_logger().error(f"IK failed: no collision-free solutions (fail-fast: {fail_fast} seed probes all collided, skipped full search)")
@@ -1176,12 +1260,13 @@ class ReorientForAssembly(Node):
         w1_deg = np.degrees(best[0][3])
         w1_qual_deg = np.degrees(best[2])
         max_change_deg = np.degrees(best[3])
+        clearance_mm = best[5] * 1000
 
         if len(all_solutions) > 1:
             self.get_logger().info(
                 f"  → IK: {len(all_solutions)} solutions found, selected wrist_1={w1_deg:.1f}° "
                 f"(quality={w1_qual_deg:.0f}° from current, max joint change={max_change_deg:.0f}°, "
-                f"normal_arm={best[4]})"
+                f"normal_arm={best[4]}, clearance={clearance_mm:.0f}mm)"
             )
 
         return best[0]
@@ -1210,35 +1295,10 @@ class ReorientForAssembly(Node):
             R_object_target_world, fold_data, None  # Don't log here
         )
         
-        # Find the equivalent target whose required EE orientation is closest to the
-        # CURRENT EE orientation AND is close to a cardinal.
-        # All equivalent targets are physically identical (symmetry), so the correct
-        # criterion is minimal EE motion — not minimal object distance.
-        best_target_R = None
-        min_ee_adjustment = float('inf')
-
-        for R_target_equiv in equivalent_targets:
-            # Calculate the EE required to achieve this target: R_EE = R_target @ R_grasp^T
-            R_EE_required = R_target_equiv @ R_grasp.T
-
-            # Check if this required EE is close to a cardinal
-            ee_cardinal_name, _, ee_dist = \
-                ExtendedCardinalOrientations.find_closest_cardinal(R_EE_required, CARDINAL_THRESHOLD)
-
-            if ee_cardinal_name is not None:
-                # This target can be achieved with a cardinal EE
-                # Calculate EE adjustment distance (how far the EE must move)
-                ee_adjustment = ExtendedCardinalOrientations.rotation_matrix_distance(
-                    R_EE_current, R_EE_required
-                )
-
-                if ee_adjustment < min_ee_adjustment:
-                    min_ee_adjustment = ee_adjustment
-                    best_target_R = R_target_equiv
-
-        if best_target_R is None:
-            # No equivalent target can be achieved with a cardinal EE within threshold
-            return (False, None, None, None, float('inf'))
+        # Skip this optimization and fall back to find_best_cardinal_for_assembly
+        # which has proper facing-away preference logic with ee_position.
+        # The optimization here only considers minimal EE adjustment, not facing-away.
+        return (False, None, None, None, float('inf'))
         
         # Log which equivalent target we're using
         target_rpy = R.from_matrix(best_target_R).as_euler('xyz', degrees=True)
@@ -1442,20 +1502,18 @@ class ReorientForAssembly(Node):
                 )
 
             # Check if this cardinal would result in EE facing the robot
-            facing_robot_penalty = 0.0
+            # Store angle_to_base for facing-away preference (larger = more away from robot)
+            angle_to_base = 90.0  # Default if no position
+            facing_robot = False
             if ee_position is not None:
                 facing_robot, angle_to_base = self.check_ee_facing_robot(
                     R_EE_cardinal, ee_position, threshold_deg=60.0
                 )
-                if facing_robot:
-                    # Heavy penalty: 180 - angle_to_base (closer to robot = higher penalty)
-                    # This makes facing-robot cardinals much less preferred
-                    facing_robot_penalty = 180.0 - angle_to_base
 
             candidates.append((
                 card_name, card_quat, R_object_result,
                 best_target_for_cardinal, min_error_for_cardinal, ee_rotation_distance,
-                facing_robot_penalty
+                facing_robot, angle_to_base
             ))
             
             if min_error_for_cardinal < best_object_error:
@@ -1465,23 +1523,41 @@ class ReorientForAssembly(Node):
                 best_resulting_object_R = R_object_result
                 best_matched_target_R = best_target_for_cardinal
         
-        # Sort candidates: penalize facing-robot, then by object error, then by EE rotation distance
-        # Use a tolerance of 5° - if two candidates have object errors within 5°, prefer the one with smaller EE rotation
-        error_tolerance = 5.0  # degrees
+        # Sort candidates: primarily by object error, then prefer facing-away as tiebreaker
+        # Facing-away is only a preference among cardinals with SIMILAR object error
+        # (within same 45° bucket), not a reason to pick high-error cardinals
+        error_tolerance = 45.0  # degrees - bucket size for "similar" errors
 
         def sort_key(candidate):
             obj_error = candidate[4]
             ee_rotation = candidate[5]
-            facing_penalty = candidate[6] if len(candidate) > 6 else 0.0
-            # Primary sort: facing-robot penalty (0 = not facing, >0 = facing)
-            # Secondary sort: object error (rounded to nearest tolerance)
-            # Tertiary sort: EE rotation distance
-            facing_bucket = 1 if facing_penalty > 0 else 0  # Binary: facing or not
-            error_bucket = round(obj_error / error_tolerance) * error_tolerance
-            return (facing_bucket, error_bucket, ee_rotation)
+            facing_robot = candidate[6] if len(candidate) > 6 else False
+            angle_to_base = candidate[7] if len(candidate) > 7 else 90.0
+
+            # Reject facing-robot cardinals entirely (sort to end)
+            if facing_robot:
+                return (3, 0, 0, 0)
+
+            # PRIMARY: Object error bucket (low error is best)
+            error_bucket = int(obj_error / error_tolerance)
+
+            # SECONDARY: Within same error bucket, prefer facing away (angle_to_base > 120°)
+            facing_away_bucket = 0 if angle_to_base > 120 else 1
+
+            # TERTIARY: Prefer larger angle_to_base, then smaller EE rotation
+            facing_away_score = -angle_to_base
+
+            return (error_bucket, facing_away_bucket, facing_away_score, ee_rotation)
 
         candidates.sort(key=sort_key)
-        
+
+        # Debug: log top 5 candidates after sorting
+        self.get_logger().info(f"  -> Top candidates after facing-away sort:")
+        for i, cand in enumerate(candidates[:5]):
+            c_name, _, _, _, c_err, c_ee_rot, c_facing, c_angle = cand
+            away_str = "AWAY" if c_angle > 120 else "near"
+            self.get_logger().info(f"     {i+1}. {c_name}: obj_err={c_err:.1f}°, angle_to_base={c_angle:.1f}° ({away_str}), ee_rot={c_ee_rot:.1f}°")
+
         # Update best selection if we have a better candidate (same error but smaller rotation)
         if len(candidates) > 0:
             best_candidate = candidates[0]
@@ -1490,26 +1566,9 @@ class ReorientForAssembly(Node):
             best_cardinal_quat = best_candidate[1]
             best_resulting_object_R = best_candidate[2]
             best_matched_target_R = best_candidate[3]
-            
-            # Log if we're choosing a different cardinal due to smaller rotation
-            if R_EE_current is not None and len(candidates) > 1:
-                # Check if there are other candidates with similar error
-                for i in range(1, min(5, len(candidates))):  # Check top 5 candidates
-                    other_candidate = candidates[i]
-                    if abs(other_candidate[4] - best_object_error) <= error_tolerance:
-                        if other_candidate[5] < best_candidate[5]:
-                            # Found a candidate with similar error but smaller rotation
-                            self.get_logger().info(
-                                f"  → Preferring {other_candidate[0]} over {best_candidate[0]} "
-                                f"(object error: {other_candidate[4]:.1f}° vs {best_candidate[4]:.1f}°, "
-                                f"EE rotation: {other_candidate[5]:.1f}° vs {best_candidate[5]:.1f}°)"
-                            )
-                            best_candidate = other_candidate
-                            best_cardinal_name = other_candidate[0]
-                            best_cardinal_quat = other_candidate[1]
-                            best_resulting_object_R = other_candidate[2]
-                            best_matched_target_R = other_candidate[3]
-                            break
+
+            # Note: The sort_key already handles facing-away preference, object error,
+            # and EE rotation in the correct priority order. No need for post-sort override.
         
         return (best_cardinal_name, best_cardinal_quat, best_resulting_object_R, 
                 best_matched_target_R, best_object_error, candidates)
@@ -1672,13 +1731,14 @@ class ReorientForAssembly(Node):
                     card_target_R_base_rel = cand[3]
                     card_error = cand[4]
                     ee_rot_dist = cand[5]
-                    facing_penalty = cand[6] if len(cand) > 6 else 0.0
+                    facing_robot = cand[6] if len(cand) > 6 else False
+                    angle_to_base = cand[7] if len(cand) > 7 else 90.0
                     R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
                     R_EE_cand_world = R_base @ R_EE_cand_base_rel
                     card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
                     card_obj_R_world = R_base @ card_obj_R_base_rel
                     card_target_R_world = R_base @ card_target_R_base_rel
-                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_penalty))
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, angle_to_base))
                 candidates = transformed_candidates
             
             cardinal_object_error = object_error
@@ -1785,6 +1845,9 @@ class ReorientForAssembly(Node):
                 return False
 
         # Try IK with best solution first (rotate about TCP, collision checks account for extended gripper)
+        # Debug: log target EE orientation
+        target_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
+        self.get_logger().info(f"  → IK target for {best_cardinal}: EE RPY=[{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}]")
         joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), best_quat.tolist())
 
         # If IK fails and we have no candidates (optimization succeeded but IK failed),
@@ -1806,19 +1869,27 @@ class ReorientForAssembly(Node):
                     card_target_R_base_rel = cand[3]
                     card_error = cand[4]
                     ee_rot_dist = cand[5]
-                    facing_penalty = cand[6] if len(cand) > 6 else 0.0
+                    facing_robot = cand[6] if len(cand) > 6 else False
+                    angle_to_base = cand[7] if len(cand) > 7 else 90.0
                     R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
                     R_EE_cand_world = R_base @ R_EE_cand_base_rel
                     card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
                     card_obj_R_world = R_base @ card_obj_R_base_rel
                     card_target_R_world = R_base @ card_target_R_base_rel
-                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_penalty))
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, angle_to_base))
                 candidates = transformed_candidates
 
         # If IK fails and we have alternative candidates, try them
+        # Only try facing-away candidates (angle_to_base > 120°)
         if joint_angles is None and candidates is not None:
             for i, cand in enumerate(candidates[1:], 1):  # Try all alternatives
                 card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
+                card_angle_to_base = cand[7] if len(cand) > 7 else 90.0
+
+                # Skip candidates that don't face away from robot
+                if card_angle_to_base <= 120.0:
+                    continue
+
                 # Snap to exact equivalent target
                 R_EE_card_exact = card_target_R @ R_grasp.T
                 card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
@@ -1844,15 +1915,129 @@ class ReorientForAssembly(Node):
                     matched_target_R = card_target_R
                     object_error = card_error
                     break
-        
+
+            # Fallback: if all facing-away candidates failed, try non-facing-away ones
+            if joint_angles is None:
+                self.get_logger().info("  → All facing-away cardinals failed IK, trying others as fallback")
+                for i, cand in enumerate(candidates[1:], 1):
+                    card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
+                    card_angle_to_base = cand[7] if len(cand) > 7 else 90.0
+
+                    # Only try non-facing-away candidates (already tried facing-away above)
+                    if card_angle_to_base > 120.0:
+                        continue
+
+                    R_EE_card_exact = card_target_R @ R_grasp.T
+                    card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
+                    R_object_card_exact = R_EE_card_exact @ R_grasp
+                    card_exact_error = ExtendedCardinalOrientations.rotation_matrix_distance(
+                        R_object_card_exact, card_target_R
+                    )
+                    if card_exact_error < 1.0:
+                        card_quat = card_quat_exact
+                        card_object_R = R_object_card_exact
+                        card_error = card_exact_error
+
+                    joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), card_quat.tolist())
+                    if joint_angles is not None:
+                        best_cardinal = card_name
+                        best_quat = card_quat
+                        resulting_object_R = card_object_R
+                        matched_target_R = card_target_R
+                        object_error = card_error
+                        break
+
+        # If IK succeeded but link clearance is poor, try alternative equivalent
+        # targets for a more spread-out configuration.
+        CLEARANCE_SEARCH_THRESHOLD = 0.04  # 40mm
+        if joint_angles is not None and self.mode == 'sim':
+            primary_clearance = self._min_link_clearance(joint_angles)
+            if primary_clearance < CLEARANCE_SEARCH_THRESHOLD:
+                self.get_logger().info(
+                    f"  → IK clearance={primary_clearance*1000:.0f}mm < "
+                    f"{CLEARANCE_SEARCH_THRESHOLD*1000:.0f}mm, searching for spread-out alternative"
+                )
+                # Generate candidates if we don't have them (optimization path was used)
+                if candidates is None:
+                    (_, _, _, _, _, candidates) = self.find_best_cardinal_for_assembly(
+                        R_object_target_base_relative, R_grasp, fold_data,
+                        R_object_current_base_relative, R_EE_current_base_relative,
+                        ee_position=ee_position
+                    )
+                    if candidates is not None:
+                        transformed = []
+                        for cand in candidates:
+                            cn, cq_br, co_br, ct_br, ce = cand[0], cand[1], cand[2], cand[3], cand[4]
+                            ed = cand[5]
+                            fp = cand[6] if len(cand) > 6 else False
+                            atb = cand[7] if len(cand) > 7 else 90.0  # angle_to_base
+                            R_cand_w = R_base @ R.from_quat(cq_br).as_matrix()
+                            transformed.append((
+                                cn, R.from_matrix(R_cand_w).as_quat(),
+                                R_base @ co_br, R_base @ ct_br, ce, ed, fp, atb
+                            ))
+                        candidates = transformed
+
+                # Try all candidates, pick the one with best clearance
+                # BUT only switch to candidates that face away from robot (angle_to_base > 120°)
+                if candidates is not None:
+                    best_clearance = primary_clearance
+                    for cand in candidates:
+                        card_name = cand[0]
+                        card_quat = cand[1]
+                        card_object_R = cand[2]
+                        card_target_R = cand[3]
+                        card_error = cand[4]
+                        card_angle_to_base = cand[7] if len(cand) > 7 else 90.0
+
+                        # Only consider facing-away candidates (angle_to_base > 120°)
+                        if card_angle_to_base <= 120.0:
+                            continue
+                        # Snap to exact equivalent target
+                        R_EE_card_exact = card_target_R @ R_grasp.T
+                        card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
+                        R_object_card_exact = R_EE_card_exact @ R_grasp
+                        card_exact_error = ExtendedCardinalOrientations.rotation_matrix_distance(
+                            R_object_card_exact, card_target_R
+                        )
+                        if card_exact_error < 1.0:
+                            card_quat = card_quat_exact
+                            card_object_R = R_object_card_exact
+                            card_error = card_exact_error
+
+                        alt_joints = self.compute_ik_with_current_seed(
+                            ee_position.tolist(), card_quat.tolist()
+                        )
+                        if alt_joints is not None:
+                            alt_clearance = self._min_link_clearance(alt_joints)
+                            if alt_clearance > best_clearance:
+                                self.get_logger().info(
+                                    f"  → Switching to {card_name}: clearance "
+                                    f"{alt_clearance*1000:.0f}mm > {best_clearance*1000:.0f}mm"
+                                )
+                                best_clearance = alt_clearance
+                                joint_angles = alt_joints
+                                best_cardinal = card_name
+                                best_quat = card_quat
+                                resulting_object_R = card_object_R
+                                matched_target_R = card_target_R
+                                object_error = card_error
+
         if joint_angles is None:
             self.error_message = "IK failed: couldn't find valid orientation for reorientation"
             self.get_logger().error(self.error_message)
             return False
 
-        # Log final EE orientation (before execution)
-        final_ee_rpy = R.from_quat(best_quat).as_euler('xyz', degrees=True)
+        # Log final EE orientation (from FK of actual joint angles, not from target quat)
+        T_final = forward_kinematics(dh_params, joint_angles)
+        R_final_ee = T_final[:3, :3]
+        final_ee_quat = R.from_matrix(R_final_ee).as_quat()
+        final_ee_rpy = R.from_quat(final_ee_quat).as_euler('xyz', degrees=True)
         self.get_logger().info(f"Final EE orientation (RPY, degrees): [{final_ee_rpy[0]:.1f}, {final_ee_rpy[1]:.1f}, {final_ee_rpy[2]:.1f}]")
+
+        # Also update the expected object orientation based on actual EE pose
+        resulting_object_R = R_final_ee @ R_grasp
+        best_quat = final_ee_quat  # Update for later use
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         trajectory = {"traj1": [{
@@ -2041,12 +2226,12 @@ def main(args=None):
         if args.use_default_base_orientation and args.target_base_orientation is not None:
             parser.error("Cannot use both --target-base-orientation and --use-default-base-orientation")
     
-    rclpy.init()
-    node = ReorientForAssembly(mode=args.mode)
-    node.action_client.wait_for_server()
-
+    node = None
     success = False
     try:
+        rclpy.init()
+        node = ReorientForAssembly(mode=args.mode)
+        node.action_client.wait_for_server()
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
 
@@ -2076,19 +2261,26 @@ def main(args=None):
             node.get_logger().error("Reorientation failed")
 
     except KeyboardInterrupt:
-        node.error_message = "Operation interrupted by user"
+        if node is not None:
+            node.error_message = "Operation interrupted by user"
+        else:
+            print("\n[INFO] Operation interrupted by user")
     except Exception as e:
-        node.error_message = f"Unexpected error: {e}"
+        if node is not None:
+            node.error_message = f"Unexpected error: {e}"
+        else:
+            print(f"[ERROR] Unexpected error: {e}")
     finally:
         try:
-            node.output_result_json(success)
-            # Explicitly destroy subscriptions and action client to avoid shutdown delays
-            if node.object_sub is not None:
-                node.destroy_subscription(node.object_sub)
-            node.destroy_subscription(node.ee_sub)
-            node.destroy_subscription(node.joint_state_sub)
-            node.action_client.destroy()
-            node.destroy_node()
+            if node is not None:
+                node.output_result_json(success)
+                # Explicitly destroy subscriptions and action client to avoid shutdown delays
+                if node.object_sub is not None:
+                    node.destroy_subscription(node.object_sub)
+                node.destroy_subscription(node.ee_sub)
+                node.destroy_subscription(node.joint_state_sub)
+                node.action_client.destroy()
+                node.destroy_node()
             rclpy.shutdown()
         except Exception:
             pass
