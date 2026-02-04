@@ -142,10 +142,10 @@ class TranslateForAssembly(Node):
             self.base_sub = None
             self.object_sub = None
 
-        # Configure QoS to match the publisher (TRANSIENT_LOCAL durability)
+        # Configure QoS to match the publisher (VOLATILE durability)
         ee_qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,  # Match UR driver publisher QoS
             depth=10
         )
 
@@ -1188,6 +1188,7 @@ def main(args=None):
 
         try:
             if node:
+                node.action_client.destroy()
                 node.destroy_node()
         except:
             pass

@@ -10,7 +10,7 @@ from msgs.geometry_msgs import Twist, PoseStamped
 from msgs.sensor_msgs import Image as RosImage, JointState
 import subprocess
 import sys
-from contextlib import asynccontextmanager
+import logging
 
 #camera
 import time
@@ -21,7 +21,6 @@ import numpy as np
 import cv2
 from PIL import Image as PILImage
 import threading
-import signal
 
 #ik
 import tempfile
@@ -31,6 +30,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import traceback
 import re
+
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("RosMCPServer")
 
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
@@ -59,97 +63,47 @@ else:
     SCREENSHOTS_DIR = "screenshots"
     PYTHON_EXECUTIONS_DIR = "python_executions"
 
-# Disable FastDDS shared memory to prevent /dev/shm exhaustion from subprocess accumulation.
-# Forces all DDS communication over UDPv4 instead of shared memory transport.
-_fastdds_profile = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fastdds_no_shm.xml")
-if os.path.exists(_fastdds_profile):
-    os.environ.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE", _fastdds_profile)
+# Use Cyclone DDS for faster discovery (3-7x faster than FastDDS UDP-only).
+# Shared memory disabled to prevent /dev/shm exhaustion from zombie processes.
+# Note: ROS_LOCALHOST_ONLY=1 still works but disables multicast (slightly slower).
+_cyclonedds_profile = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cyclonedds_local.xml")
+if os.path.exists(_cyclonedds_profile):
+    os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")
+    os.environ.setdefault("CYCLONEDDS_URI", f"file://{_cyclonedds_profile}")
 
-# Subprocess processes (started automatically on client connect)
-grasp_publisher_process = None
-rosbridge_process = None
+def _start_services():
+    """Start rosbridge and grasp publisher as detached processes."""
+    logger.info("RosMCP server starting up")
 
-
-def _cleanup_stale_processes():
-    """Kill any leftover rosbridge/grasp_publisher processes from previous sessions."""
-    import subprocess as sp
+    # Kill stale processes from previous sessions
     for pattern in ["rosbridge_websocket", "rosapi_node", "grasp_points_publisher.py"]:
-        try:
-            result = sp.run(["pkill", "-9", "-f", pattern], capture_output=True, timeout=5)
-            if result.returncode == 0:
-                print(f"Cleaned up stale {pattern} processes", file=sys.stderr)
-        except Exception:
-            pass
-    # Wait for processes to actually terminate before starting new ones
+        result = subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
+        if result.returncode == 0:
+            logger.info(f"Cleaned up stale {pattern} processes")
     time.sleep(1)
-    # Clean stale FastDDS shared memory segments
-    try:
-        sp.run(["fastdds", "shm", "clean"], capture_output=True, timeout=5)
-    except Exception:
-        pass
 
+    # Start rosbridge (start_new_session detaches from parent, DEVNULL fully disconnects)
+    rosbridge_process = subprocess.Popen(
+        ["ros2", "launch", "rosbridge_server", "rosbridge_websocket_launch.xml"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+    logger.info(f"Started rosbridge server (PID: {rosbridge_process.pid})")
 
-@asynccontextmanager
-async def lifespan(app):
-    """Lifespan context manager - starts managed subprocesses on client connect."""
-    global grasp_publisher_process, rosbridge_process
-
-    # Kill any leftover processes from previous sessions FIRST
-    _cleanup_stale_processes()
-
-    # Start rosbridge WebSocket server (start_new_session creates a new process group
-    # so we can kill the entire tree including child rosbridge_websocket processes)
-    try:
-        rosbridge_process = subprocess.Popen(
-            ["ros2", "launch", "rosbridge_server", "rosbridge_websocket_launch.xml"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        print(f"Started rosbridge server (PID: {rosbridge_process.pid})", file=sys.stderr)
-    except Exception as e:
-        print(f"Warning: Could not start rosbridge server: {e}", file=sys.stderr)
-
-    # Start grasp points publisher (same pattern - new process group)
+    # Start grasp publisher
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    grasp_publisher_path = os.path.join(script_dir, "primitives/utils/grasp_points_publisher.py")
+    grasp_publisher_process = subprocess.Popen(
+        ["/usr/bin/python3", f"{script_dir}/primitives/utils/grasp_points_publisher.py", "--mode", "default"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+    logger.info(f"Started grasp points publisher (PID: {grasp_publisher_process.pid})")
 
-    try:
-        grasp_publisher_process = subprocess.Popen(
-            ["/usr/bin/python3", grasp_publisher_path, "--mode", "default"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        print(f"Started grasp points publisher (PID: {grasp_publisher_process.pid})", file=sys.stderr)
-    except Exception as e:
-        print(f"Warning: Could not start grasp points publisher: {e}", file=sys.stderr)
+    time.sleep(2)
 
-    yield {}  # Server runs here
 
-    # Cleanup: kill entire process GROUPS (parent + all children)
-    for name, proc in [("rosbridge server", rosbridge_process), ("grasp points publisher", grasp_publisher_process)]:
-        if proc:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                proc.wait(timeout=5)
-                print(f"Stopped {name} (process group)", file=sys.stderr)
-            except ProcessLookupError:
-                pass  # Already exited
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-
-# Initialize MCP with lifespan to auto-start managed subprocesses
-mcp = FastMCP("ros-mcp-server", lifespan=lifespan)
+# Initialize MCP (no lifespan - services started in __main__ before mcp.run())
+mcp = FastMCP("ros-mcp-server")
 
 
 ## ############################################################################################## ##
@@ -1389,13 +1343,17 @@ def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
 #         }
 
 if __name__ == "__main__":
+    # Start services BEFORE MCP server runs (outside async context)
+    _start_services()
+
     try:
         mcp.run(transport="stdio")
     except KeyboardInterrupt:
-        print("Shutting down...")
+        logger.info("Shutting down...")
     finally:
-        # Clean up connections on exit
+        # Close WebSocket connection (rosbridge processes are left running intentionally)
         try:
             ws_manager.close()
         except:
             pass
+        logger.info("RosMCP server shut down")

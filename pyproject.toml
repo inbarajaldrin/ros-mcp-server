@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.6.0",
+    "mcp[cli]>=1.25.0",
     "opencv-python>=4.8.0",
     "websocket>=0.2.1",
     "websocket-client>=1.8.0",
@@ -16,6 +16,9 @@ dependencies = [
     "numpy<2",
     "clip",
     "python-box>=7.0.0",
+    "pymongo>=4.16.0",
+    "netifaces>=0.11.0",
+    "tornado>=6.5.4",
 ]
 
 [tool.uv.sources]

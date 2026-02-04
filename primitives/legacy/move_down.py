@@ -1074,6 +1074,8 @@ def main(args=None):
     finally:
         try:
             node.output_result_json()
+            node.action_client.destroy()
+            node.destroy_node()
             rclpy.shutdown()
         except RuntimeError:
             pass  # Context already shut down

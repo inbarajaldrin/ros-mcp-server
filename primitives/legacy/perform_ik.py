@@ -163,6 +163,7 @@ def main(args=None):
         node.get_logger().info("Trajectory execution interrupted by user")
         sys.exit(1)
     finally:
+        node.client.destroy()
         node.destroy_node()
         if not node.shutdown_called:
             rclpy.shutdown()

@@ -46,7 +46,7 @@ from primitives.utils.data_path_finder import get_symmetry_dir
 from visualization_msgs.msg import MarkerArray, Marker
 
 
-def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, dx=0.001, prefer_elbow_down=True):
+def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, dx=0.001, prefer_elbow_down=True):
     """IK solver with wrist_3 joint range extended to (-2pi, 2pi).
 
     Constrains the robot to maintain a consistent "elbow-down" picking configuration:
@@ -67,19 +67,13 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=5, 
     target_pose[:3, 3] = original_position
     target_pose[:3, :3] = target_rot_matrix
 
-    # Fallback seeds first (all in the desired elbow-down, wrist-down configuration)
+    # Fallback seeds (minimal set - most diverse configurations)
     # These seeds have: shoulder_lift negative, elbow positive, wrist_2 = -90°
     seed_configs = [
         np.radians([85, -80, 90, -90, -90, -(np.mod(rpy[2] + 180, 360) - 180)]),
         np.radians([90, -90, 90, -90, -90, rpy[2]]),
         np.radians([0, -90, 90, -90, -90, rpy[2]]),
-        np.radians([180, -90, 90, -90, -90, rpy[2]]),
         np.radians([85, -100, 120, -110, -90, rpy[2]]),
-        np.radians([85, -60, 60, -90, -90, rpy[2]]),
-        np.radians([85, -80, 90, -90, 0, rpy[2]]),
-        np.radians([85, -80, 90, -90, -180, rpy[2]]),
-        np.radians([85, -70, 80, -100, -90, rpy[2]]),
-        np.radians([85, -90, 100, -100, -90, rpy[2]]),
     ]
 
     # Add current joints as additional seed only if already in valid configuration
@@ -272,20 +266,20 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"Using REAL mode: subscribed to {self.topic_name} (TFMessage)")
         
         # Subscribe to end-effector pose topic
-
-        qos_profile = QoSProfile(
+        # Use VOLATILE to match publisher QoS (UR driver uses VOLATILE durability)
+        qos_volatile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE, 
+            durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
         self.ee_pose_sub = self.create_subscription(
             PoseStamped,
             '/tcp_pose_broadcaster/pose',
             self.ee_pose_callback,
-            qos_profile
+            qos_volatile
         )
         self.joint_state_sub = self.create_subscription(
-            JointState, '/joint_states', self.joint_state_callback, 10
+            JointState, '/joint_states', self.joint_state_callback, qos_volatile
         )
 
         # Subscribe to grasp points topic if grasp_id is provided
@@ -301,9 +295,9 @@ class DirectObjectMove(Node):
             self.grasp_points_sub = None
         
         # Add timer to control update frequency (same for both modes)
-        # Use shorter period for step 2 to get more frequent updates as robot gets closer
-        self.timer_period_step1 = 5.0
-        self.timer_period_step2 = 2.0  # More frequent updates for step 2
+        # Fast polling until data ready, then execute trajectory
+        self.timer_period_step1 = 0.5  # Fast polling for step 1
+        self.timer_period_step2 = 0.5  # Fast polling for step 2
         self.update_timer = self.create_timer(self.timer_period_step1, self.timer_callback)
         
         # Track last pose update time to ensure we use fresh data
@@ -701,11 +695,24 @@ class DirectObjectMove(Node):
             # Grasp point mode: must have selected_grasp_point, retry if not available yet
             if self.selected_grasp_point is None:
                 self.grasp_wait_attempts += 1
-                # Differentiate between topic not publishing vs grasp point not in data
+                # Differentiate between: topic not publishing, object not found, or grasp point not found
                 if self.latest_grasp_points is None:
                     msg = f"No data from grasp topic {self.grasp_points_topic}"
                 else:
-                    msg = f"Grasp point {self.grasp_id} not found"
+                    # Check if object exists at all in the grasp points data
+                    object_exists = any(
+                        marker.ns == self.object_name
+                        for marker in self.latest_grasp_points.markers
+                    )
+                    if not object_exists:
+                        msg = f"Object '{self.object_name}' not found in grasp topic"
+                    else:
+                        # Object exists but grasp_id not found - list available IDs
+                        available_ids = [
+                            marker.id for marker in self.latest_grasp_points.markers
+                            if marker.ns == self.object_name
+                        ]
+                        msg = f"Grasp point {self.grasp_id} not found for object '{self.object_name}'. Available grasp IDs: {sorted(available_ids)}"
                 if self.grasp_wait_attempts < self.max_grasp_wait_attempts:
                     self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{self.max_grasp_wait_attempts}), retrying...")
                     return
@@ -1101,8 +1108,19 @@ class DirectObjectMove(Node):
         yaw_alt = ((yaw_alt + 180) % 360) - 180
         target_rot_alt = [0, 180, yaw_alt]
 
-        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=2)
-        sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=2)
+        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1)
+
+        # Skip sol_b if sol_a is good enough (close to current joints)
+        # This saves ~8 scipy calls when sol_a succeeds
+        sol_b = None
+        if self.current_joint_angles is not None and sol_a is not None:
+            ref = np.array(self.current_joint_angles)
+            joint_dist_a = np.linalg.norm(np.array(sol_a) - ref)
+            # Only compute sol_b if sol_a requires large joint movement (> 1.5 rad total)
+            if joint_dist_a > 1.5:
+                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+        elif sol_a is None:
+            sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
 
         # Pick solution closest to current joints
         if self.current_joint_angles is not None:
@@ -1515,12 +1533,26 @@ def main(args=None):
         parser.error("Must specify --move-to-object to move to an object")
     
     rclpy.init(args=None)
-    node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name, 
+    node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height, movement_duration=args.movement_duration,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
                       offset=args.offset, mode=args.mode)
-    
+
+    # Wait for essential data before starting (like other primitives)
+    # This eliminates the 10-second startup delay from timer-based polling
+    while node.current_ee_pose is None and rclpy.ok():
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    # Wait for grasp points if using grasp_id mode
+    if args.grasp_id is not None:
+        while node.latest_grasp_points is None and rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+    # Wait for joint states
+    while node.current_joint_angles is None and rclpy.ok():
+        rclpy.spin_once(node, timeout_sec=0.1)
+
     try:
         while rclpy.ok() and not node.should_exit:
             rclpy.spin_once(node, timeout_sec=0.1)
@@ -1532,9 +1564,11 @@ def main(args=None):
         try:
             # Output result as JSON
             node.output_result_json(movement_type="move_to_object")
+            # Explicit cleanup for faster shutdown
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
-        except Exception as e:
+        except Exception:
             # Ignore shutdown errors
             pass
 

@@ -585,7 +585,7 @@ class MoveToClearArea(Node):
                 target_pose[:3, :3] = target_rot_matrix
                 
                 # Use quaternion-based IK directly - no RPY conversion at all!
-                max_tries = 10
+                max_tries = 5  # Reduced from 10 for efficiency
                 dx = 0.001
 
                 # Primary seed: use current joint angles from joint state subscription
@@ -620,12 +620,9 @@ class MoveToClearArea(Node):
                     [0, 0, 0, 0, 0, 0],  # No perturbation first
                     [0.1, 0, 0, 0, 0, 0],
                     [-0.1, 0, 0, 0, 0, 0],
-                    [0, 0.1, 0, 0, 0, 0],
-                    [0, -0.1, 0, 0, 0, 0],
                     [0.5, 0, 0, 0, 0, 0],
                     [-0.5, 0, 0, 0, 0, 0],
                     [np.pi, 0, 0, 0, 0, 0],
-                    [-np.pi, 0, 0, 0, 0, 0],
                 ]
 
                 for yaw, rot_matrix in target_orientations:
@@ -932,6 +929,7 @@ def main(args=None):
     finally:
         try:
             node.output_result_json()
+            node.action_client.destroy()
             node.destroy_node()
         except:
             pass

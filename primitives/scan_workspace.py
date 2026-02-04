@@ -135,7 +135,7 @@ class ScanWorkspace(Node):
         # Subscribe to current EE pose to get starting position
         ee_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,  # Match UR driver publisher QoS
             depth=10
         )
         self.ee_pose_sub = self.create_subscription(
@@ -379,6 +379,7 @@ def main(args=None):
     try:
         if not node.run():
             output_result_json_from_node(node)
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(1)
@@ -391,6 +392,7 @@ def main(args=None):
         if node.object_found:
             node.get_logger().info("Scan workspace: SUCCESS - Object located")
             output_result_json_from_node(node)
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(0)
@@ -398,6 +400,7 @@ def main(args=None):
             node.error_message = "Object not found after scanning workspace"
             node.get_logger().error("Scan workspace: FAILED - Object not found")
             output_result_json_from_node(node)
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
             sys.exit(1)
@@ -405,6 +408,7 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info("Interrupted by user")
         if rclpy.ok():
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
         sys.exit(1)
@@ -418,12 +422,14 @@ def main(args=None):
         except:
             pass
         if rclpy.ok():
+            node.action_client.destroy()
             node.destroy_node()
             rclpy.shutdown()
         sys.exit(1)
     finally:
         if rclpy.ok():
             try:
+                node.action_client.destroy()
                 node.destroy_node()
                 rclpy.shutdown()
             except:

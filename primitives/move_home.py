@@ -167,6 +167,7 @@ def main(args=None):
         success = node.success
 
         try:
+            node.action_client.destroy()
             node.destroy_node()
         except Exception:
             pass

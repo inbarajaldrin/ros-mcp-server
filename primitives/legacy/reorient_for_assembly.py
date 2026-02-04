@@ -1257,11 +1257,13 @@ def main(args=None):
             node.get_logger().error("Reorientation failed")
         
         time.sleep(0.5)
+        node.action_client.destroy()
         node.destroy_node()
         rclpy.shutdown()
         sys.exit(0 if success else 1)
-        
+
     except KeyboardInterrupt:
+        node.action_client.destroy()
         node.destroy_node()
         rclpy.shutdown()
         sys.exit(1)

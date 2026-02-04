@@ -208,10 +208,10 @@ class PerformInsertController(Node):
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
 
-        # Configure QoS to match the publisher (TRANSIENT_LOCAL durability)
+        # Configure QoS to match the publisher (VOLATILE durability)
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,  # Match UR driver publisher QoS
             depth=10
         )
 
@@ -733,28 +733,28 @@ class PerformInsertController(Node):
         target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
         target_rpy_deg = target_rpy_deg.tolist()
 
-        # Generate diverse seed configurations (same as translate_for_assembly_old)
+        # Generate diverse seed configurations (reduced set for efficiency)
         seed_configs = [
-            # Standard seeds
+            # Standard seeds (most common configurations)
             np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
             np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([180, -90, 90, -90, -90, target_rpy_deg[2]]),
-            # Elbow-up configurations
+            # Elbow-up configuration
             np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
-            np.radians([85, -60, 60, -90, -90, target_rpy_deg[2]]),
-            # Wrist variations
+            # Wrist variation
             np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
-            np.radians([85, -80, 90, -90, -180, target_rpy_deg[2]]),
-            # Additional variations for pitch
+            # Pitch variation
             np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
-            np.radians([85, -90, 100, -100, -90, target_rpy_deg[2]]),
         ]
 
         best_result = None
         best_cost = float('inf')
+        found_good_solution = False
 
         for seed_idx, q_guess_fallback in enumerate(seed_configs):
+            if found_good_solution:
+                break  # Early termination: already found a good solution
+
             for i in range(max_tries):
                 # Try small x-shift each iteration
                 perturbed_position = np.array(target_position).copy()
@@ -791,6 +791,10 @@ class PerformInsertController(Node):
                     if not has_collision and cost < best_cost:
                         best_cost = cost
                         best_result = result.x
+                        # Early termination: if cost < 0.05, good enough to stop searching
+                        if best_cost < 0.05:
+                            found_good_solution = True
+                            break
 
         # If we found any reasonable solution with fallback seeds (without collision), use it
         if best_result is not None and best_cost < 0.1:
@@ -1769,6 +1773,7 @@ Examples:
 
         try:
             if node:
+                node.traj_client.destroy()
                 node.destroy_node()
         except:
             pass

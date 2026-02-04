@@ -324,9 +324,9 @@ class VerifyAssembly(Node):
         """
         Get target orientation for object from assembly configuration (relative to base),
         using the quaternion stored in the JSON.
-        
+
         The JSON structure (per component) is:
-        
+
         "rotation": {
             "rpy": {
                 "x": ...,
@@ -340,7 +340,7 @@ class VerifyAssembly(Node):
                 "w": ...
             }
         }
-        
+
         We read the quaternion directly to avoid any RPY → quaternion conversions
         that could trigger gimbal lock.
         """
@@ -357,6 +357,50 @@ class VerifyAssembly(Node):
                     quat.get('w', 1.0),
                 ])
         return None
+
+    def get_peg_free_axis(self, object_name):
+        """
+        Check if component is a peg and get its free rotation axis.
+
+        Pegs are axisymmetric inserts where rotation around the insertion axis
+        doesn't matter for assembly verification.
+
+        Returns:
+            int or None: 0 (x), 1 (y), or 2 (z) for free rotation axis, None if not a peg
+        """
+        axis_map = {'x': 0, 'y': 1, 'z': 2}
+
+        for component in self.assembly_config.get('components', []):
+            comp_name = component.get('name', '')
+            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+                if component.get('type') == 'peg':
+                    axis_str = component.get('axis')
+                    return axis_map.get(axis_str)
+        return None
+
+    def compute_axis_alignment_error(self, R_current, R_target, axis_idx):
+        """
+        Compute the angular error between the specified axis of current and target orientations.
+
+        For pegs/fixtures, we only care that the insertion axis points the right way,
+        not about rotation around that axis.
+
+        Args:
+            R_current: Current rotation matrix (3x3)
+            R_target: Target rotation matrix (3x3)
+            axis_idx: Which axis to check (0=x, 1=y, 2=z)
+
+        Returns:
+            Angle in degrees between the two axis vectors
+        """
+        # Extract the axis vectors from both rotations
+        axis_current = R_current[:, axis_idx]
+        axis_target = R_target[:, axis_idx]
+
+        # Compute angle between vectors using dot product
+        dot = np.clip(np.dot(axis_current, axis_target), -1.0, 1.0)
+        angle_rad = np.arccos(dot)
+        return np.degrees(angle_rad)
     
     def verify_assembly_pose(self, object_name, base_name):
         """
@@ -430,42 +474,55 @@ class VerifyAssembly(Node):
         position_error_vector = object_relative_position - target_position_relative
         position_error = np.linalg.norm(position_error_vector)
 
-        # === Load fold symmetry and generate equivalent target orientations ===
-        fold_data = FoldSymmetry.load_symmetry_data(original_object_name, self.symmetry_dir)
-        if fold_data is None:
-            fold_data = FoldSymmetry.load_symmetry_data(f"{original_object_name}_scaled70", self.symmetry_dir)
+        # Check if this is a peg with free rotation axis
+        peg_free_axis = self.get_peg_free_axis(original_object_name)
 
         # Get target orientation as rotation matrix (from quaternion)
         target_quat = target_orientation_relative  # Already a quaternion [x, y, z, w]
         R_target_relative = R.from_quat(target_quat).as_matrix()
+        R_current_relative = object_relative_rotation.as_matrix()
         target_rpy_rad = R.from_quat(target_quat).as_euler('xyz')
         target_rpy_deg = np.degrees(target_rpy_rad)
 
-        # Generate all equivalent target orientations using fold symmetry
-        equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-            R_target_relative, fold_data, logger=self.get_logger() if fold_data else None
-        )
+        # === Handle orientation verification ===
+        if peg_free_axis is not None:
+            # For pegs: only check axis alignment, ignore rotation around insertion axis
+            orientation_error_deg = self.compute_axis_alignment_error(
+                R_current_relative, R_target_relative, peg_free_axis
+            )
+            orientation_error_rpy_deg = object_relative_rpy_deg - target_rpy_deg
+            axis_names = ['x', 'y', 'z']
+            self.get_logger().info(
+                f"Peg verification: {axis_names[peg_free_axis]}-axis alignment error = {orientation_error_deg:.2f}°"
+            )
+        else:
+            # For regular parts: use full orientation check with fold symmetry
+            fold_data = FoldSymmetry.load_symmetry_data(original_object_name, self.symmetry_dir)
+            if fold_data is None:
+                fold_data = FoldSymmetry.load_symmetry_data(f"{original_object_name}_scaled70", self.symmetry_dir)
 
-        # Check if current orientation matches ANY equivalent target
-        min_orientation_error_deg = float('inf')
-        best_match_idx = -1
-        best_match_error_rpy_deg = None
+            # Generate all equivalent target orientations using fold symmetry
+            equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
+                R_target_relative, fold_data, logger=self.get_logger() if fold_data else None
+            )
 
-        for i, R_equiv_target in enumerate(equivalent_targets):
-            R_equiv_rotation = R.from_matrix(R_equiv_target)
-            orientation_error_rad = (object_relative_rotation.inv() * R_equiv_rotation).magnitude()
-            orientation_error_deg = np.degrees(orientation_error_rad)
+            # Check if current orientation matches ANY equivalent target
+            min_orientation_error_deg = float('inf')
+            best_match_error_rpy_deg = None
 
-            if orientation_error_deg < min_orientation_error_deg:
-                min_orientation_error_deg = orientation_error_deg
-                best_match_idx = i
-                # Get the RPY error for the best match
-                equiv_rpy_rad = R_equiv_rotation.as_euler('xyz')
-                equiv_rpy_deg = np.degrees(equiv_rpy_rad)
-                best_match_error_rpy_deg = object_relative_rpy_deg - equiv_rpy_deg
+            for i, R_equiv_target in enumerate(equivalent_targets):
+                R_equiv_rotation = R.from_matrix(R_equiv_target)
+                orientation_error_rad = (object_relative_rotation.inv() * R_equiv_rotation).magnitude()
+                error_deg = np.degrees(orientation_error_rad)
 
-        orientation_error_deg = min_orientation_error_deg
-        orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else object_relative_rpy_deg - target_rpy_deg
+                if error_deg < min_orientation_error_deg:
+                    min_orientation_error_deg = error_deg
+                    equiv_rpy_rad = R_equiv_rotation.as_euler('xyz')
+                    equiv_rpy_deg = np.degrees(equiv_rpy_rad)
+                    best_match_error_rpy_deg = object_relative_rpy_deg - equiv_rpy_deg
+
+            orientation_error_deg = min_orientation_error_deg
+            orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else object_relative_rpy_deg - target_rpy_deg
 
         # Check if within tolerance
         position_ok = bool(position_error <= POSITION_TOLERANCE)
