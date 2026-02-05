@@ -37,7 +37,7 @@ import argparse
 import time
 import glob
 
-from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params, compute_ik
 from primitives.utils.data_path_finder import get_assembly_data_dir
 
 # Configuration (auto-discovered)
@@ -779,36 +779,24 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Step 1: Move to hover position using Cartesian waypoints to maintain orientation
-
-        # Create Cartesian path with multiple waypoints to maintain orientation throughout
-        num_waypoints = 10  # Number of intermediate waypoints
-        total_duration = duration  # Total movement duration in seconds
-
-        trajectory_points = []
+        # Create Cartesian path to maintain EE orientation throughout motion
+        num_waypoints = 10
+        total_duration = 5.0
         current_ee_position = ee_current_position
         target_position = hover_position
 
-        self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
-
-        # Add initial waypoint at t=0 with current joint angles to avoid velocity spikes
-        trajectory_points.append({
-            "positions": [float(x) for x in self.current_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=0, nanosec=0)
-        })
+        trajectory_points = []
+        prev_joint_angles = self.current_joint_angles.copy()
 
         for i in range(1, num_waypoints + 1):
-            # Linear interpolation in Cartesian space
             alpha = i / num_waypoints
             waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
 
-            # Compute IK for this waypoint (maintaining same orientation)
-            # Note: compute_ik_with_current_seed uses self.current_joint_angles as seed
+            # Use IK with collision checking
             waypoint_joint_angles = self.compute_ik_with_current_seed(
                 waypoint_position.tolist(),
                 ee_target_quat.tolist(),
-                max_tries=3,  # Fewer attempts for intermediate waypoints
+                max_tries=3,
                 dx=0.001
             )
 
@@ -817,12 +805,17 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-            # Update current_joint_angles for next waypoint's IK seed
+            # Unwrap joint angles to avoid configuration flips
+            for j in range(6):
+                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
+                if diff > np.pi:
+                    waypoint_joint_angles[j] -= 2 * np.pi
+                elif diff < -np.pi:
+                    waypoint_joint_angles[j] += 2 * np.pi
+
+            prev_joint_angles = waypoint_joint_angles.copy()
             self.current_joint_angles = waypoint_joint_angles.copy()
 
-            # Create trajectory point for this waypoint
-            # Only set zero velocities on the final waypoint (full stop).
-            # Intermediate points omit velocities so the controller interpolates smoothly.
             time_from_start = (i / num_waypoints) * total_duration
             point = {
                 "positions": [float(x) for x in waypoint_joint_angles],
@@ -832,15 +825,14 @@ class TranslateForAssembly(Node):
                 point["velocities"] = [0.0] * 6
             trajectory_points.append(point)
 
-        self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
+        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
-            # error_message already set by execute_trajectory
             return False
 
         return success
-    
+
     def translate_for_target_real(self, object_name, base_name, duration=20.0,
                             final_base_pos=None, final_base_orientation=None,
                             use_default_base=False):
@@ -976,36 +968,24 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Step 1: Move to hover position using Cartesian waypoints to maintain orientation
-
-        # Create Cartesian path with multiple waypoints to maintain orientation throughout
-        num_waypoints = 10  # Number of intermediate waypoints
-        total_duration = duration  # Total movement duration in seconds
-
-        trajectory_points = []
+        # Create Cartesian path to maintain EE orientation throughout motion
+        num_waypoints = 10
+        total_duration = 5.0
         current_ee_position = ee_current_position
         target_position = hover_position
 
-        self.get_logger().info(f"Creating Cartesian path with {num_waypoints} waypoints")
-
-        # Add initial waypoint at t=0 with current joint angles to avoid velocity spikes
-        trajectory_points.append({
-            "positions": [float(x) for x in self.current_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=0, nanosec=0)
-        })
+        trajectory_points = []
+        prev_joint_angles = self.current_joint_angles.copy()
 
         for i in range(1, num_waypoints + 1):
-            # Linear interpolation in Cartesian space
             alpha = i / num_waypoints
             waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
 
-            # Compute IK for this waypoint (maintaining same orientation)
-            # Note: compute_ik_with_current_seed uses self.current_joint_angles as seed
+            # Use IK with collision checking
             waypoint_joint_angles = self.compute_ik_with_current_seed(
                 waypoint_position.tolist(),
                 ee_target_quat.tolist(),
-                max_tries=3,  # Fewer attempts for intermediate waypoints
+                max_tries=3,
                 dx=0.001
             )
 
@@ -1014,12 +994,17 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-            # Update current_joint_angles for next waypoint's IK seed
+            # Unwrap joint angles to avoid configuration flips
+            for j in range(6):
+                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
+                if diff > np.pi:
+                    waypoint_joint_angles[j] -= 2 * np.pi
+                elif diff < -np.pi:
+                    waypoint_joint_angles[j] += 2 * np.pi
+
+            prev_joint_angles = waypoint_joint_angles.copy()
             self.current_joint_angles = waypoint_joint_angles.copy()
 
-            # Create trajectory point for this waypoint
-            # Only set zero velocities on the final waypoint (full stop).
-            # Intermediate points omit velocities so the controller interpolates smoothly.
             time_from_start = (i / num_waypoints) * total_duration
             point = {
                 "positions": [float(x) for x in waypoint_joint_angles],
@@ -1029,7 +1014,7 @@ class TranslateForAssembly(Node):
                 point["velocities"] = [0.0] * 6
             trajectory_points.append(point)
 
-        self.get_logger().info(f"Cartesian trajectory with {len(trajectory_points)} waypoints created")
+        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:

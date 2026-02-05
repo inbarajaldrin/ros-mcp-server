@@ -190,7 +190,7 @@ class DirectObjectMove(Node):
         # The gripper has material both above and below the center point.
         # For small objects near the table, the gripper center must be raised
         # to prevent the lower finger material from hitting the table during closure.
-        self.min_gripper_center_z = 0.01  # 10mm - ensures clearance for gripper fingers below center
+        self.min_gripper_center_z = 0.011  # 11mm - ensures clearance for gripper fingers below center
 
         # Z calibration offset between the geometric model and the actual gripper center
         # The actual gripper center z = model's offset_point z + this calibration value

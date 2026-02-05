@@ -1344,115 +1344,13 @@ class ReorientForAssembly(Node):
 
         return None, 0
 
-    def compute_cardinal_to_cardinal_adjustment(self, R_object_current, R_object_target_world, 
+    def compute_cardinal_to_cardinal_adjustment(self, R_object_current, R_object_target_world,
                                                  R_EE_current, R_grasp, fold_data):
         """
-        If both current and target object orientations are cardinals, compute
-        a targeted adjustment instead of searching all cardinals.
-        
-        Args:
-            R_object_current: Current object orientation (3x3 matrix)
-            R_object_target_world: Target object orientation (3x3 matrix)
-            R_EE_current: Current EE orientation (3x3 matrix)
-            R_grasp: Grasp relationship (3x3 matrix)
-            fold_data: Fold symmetry data
-            
-        Returns:
-            (success, best_quat, resulting_object_R, matched_target_R, object_error)
-            or (False, None, None, None, inf) if optimization not applicable
+        Disabled optimization - always falls back to find_best_cardinal_for_assembly
+        which has proper facing-away preference logic with ee_position.
         """
-        CARDINAL_THRESHOLD = 45.0  # degrees
-
-        # Generate equivalent targets first
-        equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-            R_object_target_world, fold_data, None  # Don't log here
-        )
-        
-        # Skip this optimization and fall back to find_best_cardinal_for_assembly
-        # which has proper facing-away preference logic with ee_position.
-        # The optimization here only considers minimal EE adjustment, not facing-away.
         return (False, None, None, None, float('inf'))
-        
-        # Log which equivalent target we're using
-        target_rpy = R.from_matrix(best_target_R).as_euler('xyz', degrees=True)
-        object_distance = ExtendedCardinalOrientations.rotation_matrix_distance(
-            R_object_current, best_target_R
-        )
-        self.get_logger().info(f"  → Using equivalent target RPY: [{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}] (EE adjustment: {min_ee_adjustment:.1f}°, object distance: {object_distance:.1f}°)")
-        
-        # Compute the rotation needed to go from current object to best target
-        # R_adjust_object = R_target @ R_current^T
-        R_adjust_object = best_target_R @ R_object_current.T
-        
-        # Apply this adjustment to the EE
-        # Since R_object = R_EE @ R_grasp, we have:
-        # R_EE_new @ R_grasp = R_adjust_object @ (R_EE_current @ R_grasp)
-        # R_EE_new @ R_grasp = R_adjust_object @ R_EE_current @ R_grasp
-        # R_EE_new = R_adjust_object @ R_EE_current
-        R_EE_new = R_adjust_object @ R_EE_current
-        
-        # Verify the result
-        R_object_result = R_EE_new @ R_grasp
-        object_error = ExtendedCardinalOrientations.rotation_matrix_distance(
-            R_object_result, best_target_R
-        )
-        
-        # Calculate the actual adjustment angle
-        adjustment_angle = ExtendedCardinalOrientations.rotation_matrix_distance(
-            R_object_current, best_target_R
-        )
-        
-        # Check if the target EE is nearly vertical (tool Z-axis close to [0,0,±1]).
-        # When the tool points straight down/up, the "yaw" (spin around vertical) is
-        # continuous and cannot be captured by discrete cardinal orientations.
-        # In this case, use the exact computed EE orientation instead of snapping.
-        tool_z_axis = R_EE_new[:, 2]
-        tool_z_xy_norm = np.linalg.norm(tool_z_axis[:2])
-
-        if tool_z_xy_norm < 0.1 and object_error < 1.0:
-            # Nearly vertical tool — skip cardinal snap, use exact orientation
-            self.get_logger().info(
-                f"  → EE nearly vertical (tool Z XY norm={tool_z_xy_norm:.4f}), "
-                f"using exact orientation (object error={object_error:.2f}°)"
-            )
-            best_quat = R.from_matrix(R_EE_new).as_quat()
-            return (True, best_quat, R_object_result, best_target_R, object_error)
-
-        # Find nearest cardinal EE orientation - snap to a cardinal for non-vertical orientations
-        EE_SNAP_THRESHOLD = 45.0  # degrees - if computed EE is > 45° from all cardinals, reject
-        EE_cardinal_name, EE_cardinal_quat, EE_cardinal_dist = \
-            ExtendedCardinalOrientations.find_closest_cardinal(R_EE_new, threshold_deg=EE_SNAP_THRESHOLD)
-
-        if EE_cardinal_name is None:
-            # Computed EE is too far from any cardinal - reject and let full search handle it
-            self.get_logger().info(f"  → Computed EE is {EE_cardinal_dist:.1f}° from nearest cardinal (> {EE_SNAP_THRESHOLD}°), falling back to full search")
-            return (False, None, None, None, float('inf'))
-
-        # Use the cardinal EE orientation (snap to cardinal)
-        R_EE_cardinal = R.from_quat(EE_cardinal_quat).as_matrix()
-        R_object_from_cardinal = R_EE_cardinal @ R_grasp
-
-        # Find the closest equivalent target to the object orientation from cardinal EE
-        cardinal_object_error = float('inf')
-        best_cardinal_target_R = None
-        for R_target_equiv in equivalent_targets:
-            error = ExtendedCardinalOrientations.rotation_matrix_distance(
-                R_object_from_cardinal, R_target_equiv
-            )
-            if error < cardinal_object_error:
-                cardinal_object_error = error
-                best_cardinal_target_R = R_target_equiv
-
-        # Use the snapped cardinal EE
-        R_EE_new = R_EE_cardinal
-        R_object_result = R_object_from_cardinal
-        object_error = cardinal_object_error
-        best_target_R = best_cardinal_target_R
-
-        # Convert to quaternion
-        best_quat = R.from_matrix(R_EE_new).as_quat()
-
-        return (True, best_quat, R_object_result, best_target_R, object_error)
     
     def find_best_cardinal_for_assembly(self, R_object_target_world, R_grasp, fold_data, R_object_current=None, R_EE_current=None, ee_position=None, R_base=None):
         """
@@ -1461,17 +1359,12 @@ class ReorientForAssembly(Node):
 
         Algorithm:
         1. Generate all equivalent target orientations using fold symmetry
-        2. If current object is already close to canonical, prefer minimal adjustments:
-           - Find closest equivalent target to current object
-           - Calculate EE orientation that would achieve that target
-           - Find closest cardinal to that EE orientation
-        3. Otherwise, for each of 24 extended cardinal EE orientations:
+        2. For each relevant cardinal EE orientation:
            - Calculate resulting object orientation: R_object = R_EE × R_grasp
            - Find minimum distance to ANY equivalent target
            - Calculate rotation distance from current EE to this cardinal
            - Check if EE would face the robot (penalize heavily)
-        4. Return cardinal with best object alignment error, preferring smaller EE rotations
-           when object errors are similar (within 5° tolerance), avoiding facing-robot configs
+        3. Return sorted candidates list for IK to try, with best alignment first
 
         Args:
             R_base: If provided, used to transform cardinals to world frame for facing-robot check
@@ -1495,62 +1388,8 @@ class ReorientForAssembly(Node):
         best_resulting_object_R = None
         best_matched_target_R = None
         best_object_error = float('inf')
-        
-        # If current object orientation is provided, check if it's already close to canonical
-        if R_object_current is not None:
-            # Find closest equivalent target to current object
-            min_distance_to_current = float('inf')
-            closest_target_to_current = None
-            for R_target_equiv in equivalent_targets:
-                distance = ExtendedCardinalOrientations.rotation_matrix_distance(
-                    R_object_current, R_target_equiv
-                )
-                if distance < min_distance_to_current:
-                    min_distance_to_current = distance
-                    closest_target_to_current = R_target_equiv
-            
-            # If current object is already close to canonical (within 45°), prefer minimal adjustment
-            # This threshold should match CARDINAL_THRESHOLD to ensure consistency
-            if min_distance_to_current < 45.0:
-                
-                # Calculate current EE orientation from current object and grasp
-                # R_object_current = R_EE_current @ R_grasp
-                # So: R_EE_current = R_object_current @ R_grasp^T
-                R_EE_current = R_object_current @ R_grasp.T
-                
-                # Calculate the minimal adjustment needed for the object: R_adjust_object = R_target @ R_current^T
-                R_adjust_object = closest_target_to_current @ R_object_current.T
-                
-                # Apply this adjustment to the EE: R_EE_new = R_adjust_object @ R_EE_current
-                R_EE_desired = R_adjust_object @ R_EE_current
-                
-                # Find closest cardinal to this desired EE orientation
-                EE_cardinal_name, EE_cardinal_quat, EE_cardinal_dist = \
-                    ExtendedCardinalOrientations.find_closest_cardinal(R_EE_desired, threshold_deg=180.0)
-                
-                if EE_cardinal_name is not None:
-                    # Check if this cardinal gives acceptable object error
-                    R_EE_cardinal = R.from_quat(EE_cardinal_quat).as_matrix()
-                    R_object_from_cardinal = R_EE_cardinal @ R_grasp
-                    
-                    # Find closest equivalent target to this result
-                    min_error_for_cardinal = float('inf')
-                    best_target_for_cardinal = None
-                    for R_target_equiv in equivalent_targets:
-                        error = ExtendedCardinalOrientations.rotation_matrix_distance(
-                            R_object_from_cardinal, R_target_equiv
-                        )
-                        if error < min_error_for_cardinal:
-                            min_error_for_cardinal = error
-                            best_target_for_cardinal = R_target_equiv
-                    
-                    # If this gives reasonable error, use it
-                    if min_error_for_cardinal < 30.0:  # Reasonable threshold
-                        return (EE_cardinal_name, EE_cardinal_quat, R_object_from_cardinal,
-                                best_target_for_cardinal, min_error_for_cardinal, None)
-        
-        
-        # Collect all candidates with their errors and EE rotation distances
+
+        # Collect all candidates for IK to try (ensures fallback options if first choice fails)
         candidates = []
         
         for card_name, card_quat in cardinals.items():
