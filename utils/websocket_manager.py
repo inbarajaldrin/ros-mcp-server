@@ -1,4 +1,5 @@
 import socket
+import select
 import json
 import websocket
 import base64
@@ -12,7 +13,14 @@ class WebSocketManager:
         self.ws = None
 
     def connect(self):
-        if self.ws is None or not self.ws.connected:
+        if self.ws is None or not self.check_health():
+            # Close stale socket before reconnecting
+            if self.ws is not None:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+                self.ws = None
             sock = socket.create_connection((self.ip, self.port), source_address=(self.local_ip, 0))
             ws = websocket.WebSocket()
             ws.sock = sock
@@ -127,3 +135,58 @@ class WebSocketManager:
                 print(f"[WebSocket] Close error: {e}")
             finally:
                 self.ws = None
+
+    def check_health(self) -> bool:
+        """Check if the WebSocket connection is truly alive (not half-open).
+
+        Uses a 3-method approach adapted from Isaac Sim's MCP extension:
+        1. getpeername() — detects disconnected sockets
+        2. select() — detects socket error state
+        3. recv(MSG_PEEK) non-blocking — detects remote closure
+        """
+        if self.ws is None or not self.ws.connected:
+            return False
+
+        sock = self.ws.sock
+        if sock is None:
+            return False
+
+        # Method 1: getpeername() — fails if socket is disconnected
+        try:
+            sock.getpeername()
+        except (OSError, socket.error):
+            print("[WebSocket] Health check failed: getpeername()")
+            return False
+
+        # Method 2: select() — check for error condition on socket
+        try:
+            _, _, err = select.select([], [], [sock], 0)
+            if err:
+                print("[WebSocket] Health check failed: select() error state")
+                return False
+        except (OSError, socket.error, ValueError):
+            print("[WebSocket] Health check failed: select() exception")
+            return False
+
+        # Method 3: non-blocking recv with MSG_PEEK — detects remote closure
+        try:
+            sock.setblocking(False)
+            try:
+                data = sock.recv(1, socket.MSG_PEEK)
+                # If recv returns empty bytes, the remote side closed
+                if data == b'':
+                    print("[WebSocket] Health check failed: remote closed (empty recv)")
+                    return False
+            except BlockingIOError:
+                # No data available — socket is alive, just nothing to read
+                pass
+            except (OSError, socket.error):
+                print("[WebSocket] Health check failed: recv(MSG_PEEK) error")
+                return False
+            finally:
+                sock.setblocking(True)
+        except Exception:
+            # If we can't even set blocking mode, socket is broken
+            return False
+
+        return True

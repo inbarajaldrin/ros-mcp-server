@@ -52,6 +52,10 @@ ROSBRIDGE_PORT = int(os.getenv("ROSBRIDGE_PORT", "9090"))  # Default: rosbridge 
 # This is Global WebSocket manager - don't close it after every operation
 ws_manager = WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, LOCAL_IP)
 
+# Process handles for health monitoring (set by _start_services, checked by _ensure_services_healthy)
+_rosbridge_process = None
+_grasp_publisher_process = None
+
 # Output directories - use MCP_CLIENT_OUTPUT_DIR if set, otherwise use relative paths
 # Directories are created lazily when needed by tools
 BASE_OUTPUT_DIR = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
@@ -71,6 +75,7 @@ if os.path.exists(_cyclonedds_profile):
 
 def _start_services():
     """Start rosbridge and grasp publisher as detached processes."""
+    global _rosbridge_process, _grasp_publisher_process
     logger.info("RosMCP server starting up")
 
     # Kill stale processes from previous sessions
@@ -81,23 +86,113 @@ def _start_services():
     time.sleep(1)
 
     # Start rosbridge (start_new_session detaches from parent, DEVNULL fully disconnects)
-    rosbridge_process = subprocess.Popen(
+    _rosbridge_process = subprocess.Popen(
         ["ros2", "launch", "rosbridge_server", "rosbridge_websocket_launch.xml"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True
     )
-    logger.info(f"Started rosbridge server (PID: {rosbridge_process.pid})")
+    logger.info(f"Started rosbridge server (PID: {_rosbridge_process.pid})")
 
     # Start grasp publisher
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    grasp_publisher_process = subprocess.Popen(
+    _grasp_publisher_process = subprocess.Popen(
         ["/usr/bin/python3", f"{script_dir}/primitives/utils/grasp_points_publisher.py", "--mode", "default"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True
     )
-    logger.info(f"Started grasp points publisher (PID: {grasp_publisher_process.pid})")
+    logger.info(f"Started grasp points publisher (PID: {_grasp_publisher_process.pid})")
 
     time.sleep(2)
+
+
+def _ensure_services_healthy():
+    """Check if rosbridge and grasp publisher are alive; restart if dead.
+
+    Uses process.poll() which is non-blocking — no overhead when processes are healthy.
+    """
+    global _rosbridge_process, _grasp_publisher_process
+
+    # Check rosbridge
+    if _rosbridge_process is not None and _rosbridge_process.poll() is not None:
+        exit_code = _rosbridge_process.returncode
+        logger.warning(f"rosbridge died (exit code {exit_code}), restarting...")
+
+        # Kill any orphaned child processes
+        for pattern in ["rosbridge_websocket", "rosapi_node"]:
+            subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
+
+        # Restart rosbridge
+        _rosbridge_process = subprocess.Popen(
+            ["ros2", "launch", "rosbridge_server", "rosbridge_websocket_launch.xml"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        logger.info(f"Restarted rosbridge server (PID: {_rosbridge_process.pid})")
+
+        # Force ws_manager to reconnect on next use
+        ws_manager.close()
+        time.sleep(2)
+
+    # Check grasp publisher
+    if _grasp_publisher_process is not None and _grasp_publisher_process.poll() is not None:
+        exit_code = _grasp_publisher_process.returncode
+        logger.warning(f"grasp_points_publisher died (exit code {exit_code}), restarting...")
+
+        subprocess.run(["pkill", "-9", "-f", "grasp_points_publisher.py"], capture_output=True)
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        _grasp_publisher_process = subprocess.Popen(
+            ["/usr/bin/python3", f"{script_dir}/primitives/utils/grasp_points_publisher.py", "--mode", "default"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        logger.info(f"Restarted grasp points publisher (PID: {_grasp_publisher_process.pid})")
+        time.sleep(1)
+
+
+# Patterns that indicate infrastructure failures (retry-able), not application errors
+_CONNECTION_ERROR_PATTERNS = [
+    "connection refused", "connection reset", "broken pipe",
+    "timed out", "failed to discover", "could not contact",
+]
+
+
+def _is_connection_error(result: dict) -> bool:
+    """Check if a tool result indicates a connection/infrastructure failure."""
+    for field in ("output", "error"):
+        value = result.get(field, "")
+        if isinstance(value, str):
+            lower = value.lower()
+            if any(p in lower for p in _CONNECTION_ERROR_PATTERNS):
+                return True
+    return False
+
+
+def _run_with_retry(func, *args, **kwargs) -> Dict[str, Any]:
+    """Run a tool function with pre-flight health check and one retry on connection errors.
+
+    1. Runs _ensure_services_healthy() before every call (lightweight poll()).
+    2. Executes the tool function.
+    3. If result matches a connection error pattern on the first attempt:
+       restart services, close ws, sleep 2s, retry once.
+    4. On success or application error: return immediately.
+    """
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        _ensure_services_healthy()
+        result = func(*args, **kwargs)
+
+        if attempt < max_attempts and isinstance(result, dict) and _is_connection_error(result):
+            logger.warning(f"Connection error detected (attempt {attempt}), restarting services and retrying...")
+            # Force full restart
+            _start_services()
+            ws_manager.close()
+            time.sleep(2)
+            continue
+
+        return result
+
+    return result  # Should not reach here, but return last result as fallback
 
 
 # Initialize MCP (no lifespan - services started in __main__ before mcp.run())
@@ -112,9 +207,10 @@ mcp = FastMCP("ros-mcp-server")
 
 @mcp.tool()
 def get_topics():
+    _ensure_services_healthy()
     topic_info = ws_manager.get_topics()
     # Don't close the connection here - keep it alive for other operations
-    
+
     if topic_info:
         topics, types = zip(*topic_info)
         return {
@@ -667,7 +763,7 @@ def get_scene_info(mode: Mode = "sim") -> Dict[str, Any]:
             "another_object": []
         }
     """
-    return _run_query("get_scene_info.py", f"--mode {mode}", timeout=10, error_prefix="Get scene info")
+    return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode}", timeout=10, error_prefix="Get scene info")
 
 @mcp.tool()
 def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
@@ -688,7 +784,7 @@ def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim")
         JSON output containing the target object pose in world frame (position and orientation)
     """
     cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
-    return _run_query("get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
+    return _run_with_retry(_run_query, "get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
 
 @mcp.tool()
 def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim", all: bool = False) -> Dict[str, Any]:
@@ -708,7 +804,7 @@ def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim
         cmd = f"--object-name \"{object_name}\" --mode {mode}"
     else:
         return {"output": "Error: Either object_name or all=True must be provided"}
-    return _run_query("get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
+    return _run_with_retry(_run_query, "get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
 
 @mcp.tool()
 def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
@@ -724,7 +820,7 @@ def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
     Returns:
         Dictionary with result (success or failure)
     """
-    return _run_query("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+    return _run_with_retry(_run_query, "verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
 
 @mcp.tool()
 def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
@@ -753,9 +849,9 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
         - "unassembled_objects": List of objects that are NOT assembled
     """
     if check_all:
-        return _run_query("verify_assembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify assembly")
+        return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify assembly")
     elif object_name:
-        return _run_query("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+        return _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
@@ -787,9 +883,9 @@ def verify_disassembly(base_name: str, object_name: str = None, check_all: bool 
         - "still_assembled_objects": List of objects still in assembly position
     """
     if check_all:
-        return _run_query("verify_disassembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify disassembly")
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify disassembly")
     elif object_name:
-        return _run_query("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
@@ -802,7 +898,7 @@ def verify_disassembly(base_name: str, object_name: str = None, check_all: bool 
 @mcp.tool()
 def move_home() -> Dict[str, Any]:
     """Move robot to home position."""
-    return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
+    return _run_with_retry(_run_primitive, "move_home.py", timeout=45, error_prefix="Move home")
 
 @mcp.tool()
 def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[str, Any]:
@@ -812,7 +908,7 @@ def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[s
         command: Gripper action or numeric width 0-110 mm
         mode: Robot mode
     """
-    return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
+    return _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 @mcp.tool()
 def scan_workspace(object_name: str) -> Dict[str, Any]:
@@ -832,7 +928,7 @@ def scan_workspace(object_name: str) -> Dict[str, Any]:
         - "object_name": Name of the object that was scanned for
         - "error": Error message (only present if result is "failure")
     """
-    return _run_primitive("scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
+    return _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
 @mcp.tool()
 def move_to_grasp(object_name: str, grasp_id: int, action: MoveToGraspAction, mode: Mode = "sim") -> Dict[str, Any]:
@@ -863,7 +959,7 @@ def move_to_grasp(object_name: str, grasp_id: int, action: MoveToGraspAction, mo
     """
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     cmd += f" --{action.replace('_', '-')}"
-    return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
+    return _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
 @mcp.tool()
 def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str, Any]:
@@ -894,7 +990,7 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
         - "error": Error message (only present if result is "failure")
     """
     cmd = f"--mode {mode} --{action.replace('_', '-')}"
-    return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
+    return _run_with_retry(_run_primitive, "move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
 def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Optional[str] = None, object_name: Optional[str] = None, use_default_base_position: bool = False) -> Dict[str, Any]:
@@ -953,7 +1049,7 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
     else:
         timeout = 90
 
-    return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+    return _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
 @mcp.tool()
 def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
@@ -996,7 +1092,7 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
     elif target_base_orientation is not None:
         # Format numbers to avoid scientific notation which can confuse argument parser
         cmd += f" --target-base-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in target_base_orientation)}"
-    return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
+    return _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 ## ############################################################################################## ##
 ##
