@@ -2093,57 +2093,61 @@ class ReorientForAssembly(Node):
 
         if success:
             # Add orientation data on success
-            if self.initial_object_orientation_quat is not None:
+            if self.initial_object_orientation_quat is not None and self.initial_object_orientation_rpy_deg is not None:
                 result["initial_object_orientation"] = {
-                    "x": round(float(self.initial_object_orientation_quat[0]), 6),
-                    "y": round(float(self.initial_object_orientation_quat[1]), 6),
-                    "z": round(float(self.initial_object_orientation_quat[2]), 6),
-                    "w": round(float(self.initial_object_orientation_quat[3]), 6)
+                    "quat": {
+                        "x": round(float(self.initial_object_orientation_quat[0]), 6),
+                        "y": round(float(self.initial_object_orientation_quat[1]), 6),
+                        "z": round(float(self.initial_object_orientation_quat[2]), 6),
+                        "w": round(float(self.initial_object_orientation_quat[3]), 6)
+                    },
+                    "rpy": {
+                        "roll": round(float(self.initial_object_orientation_rpy_deg[0]), 4),
+                        "pitch": round(float(self.initial_object_orientation_rpy_deg[1]), 4),
+                        "yaw": round(float(self.initial_object_orientation_rpy_deg[2]), 4)
+                    }
                 }
-            if self.initial_object_orientation_rpy_deg is not None:
-                result["initial_object_orientation_rpy_deg"] = {
-                    "roll": round(float(self.initial_object_orientation_rpy_deg[0]), 4),
-                    "pitch": round(float(self.initial_object_orientation_rpy_deg[1]), 4),
-                    "yaw": round(float(self.initial_object_orientation_rpy_deg[2]), 4)
-                }
-            if self.final_object_orientation_quat is not None:
+            if self.final_object_orientation_quat is not None and self.final_object_orientation_rpy_deg is not None:
                 result["final_object_orientation"] = {
-                    "x": round(float(self.final_object_orientation_quat[0]), 6),
-                    "y": round(float(self.final_object_orientation_quat[1]), 6),
-                    "z": round(float(self.final_object_orientation_quat[2]), 6),
-                    "w": round(float(self.final_object_orientation_quat[3]), 6)
+                    "quat": {
+                        "x": round(float(self.final_object_orientation_quat[0]), 6),
+                        "y": round(float(self.final_object_orientation_quat[1]), 6),
+                        "z": round(float(self.final_object_orientation_quat[2]), 6),
+                        "w": round(float(self.final_object_orientation_quat[3]), 6)
+                    },
+                    "rpy": {
+                        "roll": round(float(self.final_object_orientation_rpy_deg[0]), 4),
+                        "pitch": round(float(self.final_object_orientation_rpy_deg[1]), 4),
+                        "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
+                    }
                 }
-            if self.final_object_orientation_rpy_deg is not None:
-                result["final_object_orientation_rpy_deg"] = {
-                    "roll": round(float(self.final_object_orientation_rpy_deg[0]), 4),
-                    "pitch": round(float(self.final_object_orientation_rpy_deg[1]), 4),
-                    "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
-                }
-            if self.initial_ee_orientation_quat is not None:
+            if self.initial_ee_orientation_quat is not None and self.initial_ee_orientation_rpy_deg is not None:
                 result["initial_end_effector_orientation"] = {
-                    "x": round(float(self.initial_ee_orientation_quat[0]), 6),
-                    "y": round(float(self.initial_ee_orientation_quat[1]), 6),
-                    "z": round(float(self.initial_ee_orientation_quat[2]), 6),
-                    "w": round(float(self.initial_ee_orientation_quat[3]), 6)
+                    "quat": {
+                        "x": round(float(self.initial_ee_orientation_quat[0]), 6),
+                        "y": round(float(self.initial_ee_orientation_quat[1]), 6),
+                        "z": round(float(self.initial_ee_orientation_quat[2]), 6),
+                        "w": round(float(self.initial_ee_orientation_quat[3]), 6)
+                    },
+                    "rpy": {
+                        "roll": round(float(self.initial_ee_orientation_rpy_deg[0]), 4),
+                        "pitch": round(float(self.initial_ee_orientation_rpy_deg[1]), 4),
+                        "yaw": round(float(self.initial_ee_orientation_rpy_deg[2]), 4)
+                    }
                 }
-            if self.initial_ee_orientation_rpy_deg is not None:
-                result["initial_end_effector_orientation_rpy_deg"] = {
-                    "roll": round(float(self.initial_ee_orientation_rpy_deg[0]), 4),
-                    "pitch": round(float(self.initial_ee_orientation_rpy_deg[1]), 4),
-                    "yaw": round(float(self.initial_ee_orientation_rpy_deg[2]), 4)
-                }
-            if self.final_ee_orientation_quat is not None:
+            if self.final_ee_orientation_quat is not None and self.final_ee_orientation_rpy_deg is not None:
                 result["final_end_effector_orientation"] = {
-                    "x": round(float(self.final_ee_orientation_quat[0]), 6),
-                    "y": round(float(self.final_ee_orientation_quat[1]), 6),
-                    "z": round(float(self.final_ee_orientation_quat[2]), 6),
-                    "w": round(float(self.final_ee_orientation_quat[3]), 6)
-                }
-            if self.final_ee_orientation_rpy_deg is not None:
-                result["final_end_effector_orientation_rpy_deg"] = {
-                    "roll": round(float(self.final_ee_orientation_rpy_deg[0]), 4),
-                    "pitch": round(float(self.final_ee_orientation_rpy_deg[1]), 4),
-                    "yaw": round(float(self.final_ee_orientation_rpy_deg[2]), 4)
+                    "quat": {
+                        "x": round(float(self.final_ee_orientation_quat[0]), 6),
+                        "y": round(float(self.final_ee_orientation_quat[1]), 6),
+                        "z": round(float(self.final_ee_orientation_quat[2]), 6),
+                        "w": round(float(self.final_ee_orientation_quat[3]), 6)
+                    },
+                    "rpy": {
+                        "roll": round(float(self.final_ee_orientation_rpy_deg[0]), 4),
+                        "pitch": round(float(self.final_ee_orientation_rpy_deg[1]), 4),
+                        "yaw": round(float(self.final_ee_orientation_rpy_deg[2]), 4)
+                    }
                 }
         else:
             # Add error message on failure

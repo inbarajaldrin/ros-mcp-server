@@ -57,10 +57,8 @@ ws_manager = WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, LOCAL_IP)
 BASE_OUTPUT_DIR = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
 import sys
 if BASE_OUTPUT_DIR:
-    SCREENSHOTS_DIR = os.path.join(BASE_OUTPUT_DIR, "screenshots")
     PYTHON_EXECUTIONS_DIR = os.path.join(BASE_OUTPUT_DIR, "python_executions")
 else:
-    SCREENSHOTS_DIR = "screenshots"
     PYTHON_EXECUTIONS_DIR = "python_executions"
 
 # Use Cyclone DDS for faster discovery (3-7x faster than FastDDS UDP-only).
@@ -138,177 +136,6 @@ def _np_to_mcp_image(arr_rgb):
     
     # Return MCP Image
     return Image(data=img_byte_arr, format="jpeg")
-
-class TimeoutError(Exception):
-    pass
-
-def timeout_handler(signum, frame):
-    raise TimeoutError("Operation timed out")
-
-# @mcp.tool(description="Capture camera image from any topic and return it so the agent can see and analyze it.")
-# def capture_camera_image(topic_name: str, timeout: int = 10):
-#     """
-#     Capture camera image using any camera topic.
-#     Returns a list with status info and the image that the agent can see.
-#
-#     Args:
-#         topic_name: The ROS topic to subscribe to
-#         timeout: Timeout in seconds for image capture
-#     """
-#     result_json = {
-#         "timestamp": datetime.now().isoformat(),
-#         "topic": topic_name,
-#         "status": "attempting"
-#     }
-#
-#     try:
-#         # Set up timeout
-#         signal.signal(signal.SIGALRM, timeout_handler)
-#         signal.alarm(timeout)
-#
-#         # First, unsubscribe from the topic to clear any buffered/stale messages
-#         # This ensures we get a fresh image on the next subscription
-#         try:
-#             unsubscribe_msg = {
-#                 "op": "unsubscribe",
-#                 "topic": topic_name
-#             }
-#             ws_manager.send(unsubscribe_msg)
-#             # Small delay to ensure unsubscribe is processed
-#             time.sleep(0.1)
-#
-#             # Flush any pending messages from the WebSocket buffer
-#             # This ensures we don't get stale messages from previous subscriptions
-#             ws_manager.flush_pending_messages(timeout=0.1)
-#         except Exception as e:
-#             # If unsubscribe fails, continue anyway - might not be subscribed
-#             pass
-#
-#         # Create dynamic image subscriber for the specified topic
-#         image_subscriber = RosImage(ws_manager, topic=topic_name)
-#
-#         # Subscribe and get image data with timeout
-#         msg = image_subscriber.subscribe(timeout=timeout)
-#
-#         # Cancel timeout
-#         signal.alarm(0)
-#
-#         # Unsubscribe after getting the image to prevent message buffering
-#         try:
-#             unsubscribe_msg = {
-#                 "op": "unsubscribe",
-#                 "topic": topic_name
-#             }
-#             ws_manager.send(unsubscribe_msg)
-#         except Exception as e:
-#             # If unsubscribe fails, continue anyway
-#             pass
-#
-#         result_json["status"] = "success"
-#
-#         if msg is not None and 'data' in msg:
-#             image_data = msg['data']
-#
-#             # Convert the image data to numpy array (RGB format)
-#             # Handle different data types and formats
-#             if isinstance(image_data, np.ndarray):
-#                 # Ensure proper format for RGB conversion
-#                 if len(image_data.shape) == 3:
-#                     if image_data.shape[2] == 3:
-#                         # Already RGB or BGR - assume RGB
-#                         arr_rgb = image_data.astype(np.uint8)
-#                     elif image_data.shape[2] == 4:
-#                         # RGBA to RGB
-#                         arr_rgb = image_data[:, :, :3].astype(np.uint8)
-#                     else:
-#                         raise Exception(f"Unsupported number of channels: {image_data.shape[2]}")
-#                 elif len(image_data.shape) == 2:
-#                     # Grayscale - convert to RGB
-#                     gray = image_data.astype(np.uint8)
-#                     arr_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-#                 else:
-#                     raise Exception(f"Unsupported image shape: {image_data.shape}")
-#             else:
-#                 raise Exception(f"Unexpected data type: {type(image_data)}. Expected numpy array.")
-#
-#             # Use the working conversion function
-#             mcp_image = _np_to_mcp_image(arr_rgb)
-#
-#             # Save backup screenshot with topic-specific naming
-#             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-#             # Clean topic name for filename
-#             topic_clean = topic_name.replace("/", "_").replace(":", "_")
-#             os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-#             filename = os.path.join(SCREENSHOTS_DIR, f"{timestamp}_{topic_clean}.jpg")
-#             bgr_image = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
-#             cv2.imwrite(filename, bgr_image)
-#
-#             result_json["message"] = f"Image captured from {topic_name}"
-#             result_json["saved_to"] = filename
-#
-#             # Add metadata from the message if available
-#             if 'metadata' in msg:
-#                 result_json["image_metadata"] = msg['metadata']
-#
-#             # Return in robot_MCP pattern: [json, image]
-#             return [result_json, mcp_image]
-#
-#         else:
-#             # No live data, try to use latest screenshot
-#             result_json["status"] = "fallback"
-#             result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
-#
-#             try:
-#                 if os.path.exists(SCREENSHOTS_DIR):
-#                     files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-#                     if files:
-#                         latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-#                         with open(latest_file, 'rb') as f:
-#                             raw_data = f.read()
-#                         mcp_image = Image(data=raw_data, format="jpeg")
-#                         result_json["used_screenshot"] = files[-1]
-#                         return [result_json, mcp_image]
-#             except Exception as e:
-#                 result_json["screenshot_error"] = str(e)
-#
-#             raise Exception(f"No image data received from {topic_name} and no screenshots available")
-#
-#     except TimeoutError:
-#         signal.alarm(0)  # Cancel alarm
-#         error_result = {
-#             "timestamp": datetime.now().isoformat(),
-#             "topic": topic_name,
-#             "status": "timeout",
-#             "error": f"Image capture timed out after {timeout} seconds"
-#         }
-#
-#         # Try fallback to screenshot
-#         try:
-#             if os.path.exists(SCREENSHOTS_DIR):
-#                 files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-#                 if files:
-#                     latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-#                     with open(latest_file, 'rb') as f:
-#                         raw_data = f.read()
-#                     mcp_image = Image(data=raw_data, format="jpeg")
-#                     error_result["status"] = "timeout_fallback"
-#                     error_result["message"] = "Timed out, using latest screenshot"
-#                     error_result["used_screenshot"] = files[-1]
-#                     return [error_result, mcp_image]
-#         except:
-#             pass
-#
-#         return [error_result]
-#
-#     except Exception as e:
-#         signal.alarm(0)  # Cancel alarm
-#         error_result = {
-#             "timestamp": datetime.now().isoformat(),
-#             "topic": topic_name,
-#             "status": "error",
-#             "error": str(e)
-#         }
-#         return [error_result]
 
 @mcp.tool()
 def read_topic(topic_name: str, timeout: int = 5):
@@ -749,40 +576,11 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}", "returncode": None}
 
-def _parse_verify_result(primitive_result: Dict[str, Any]) -> str:
-    """Parse verification result from primitive output.
-    
-    Args:
-        primitive_result: Dictionary returned from _run_primitive with "output" and "returncode" keys
-    
-    Returns:
-        "SUCCESS" or "FAILURE" based on return code and output parsing
-    """
-    returncode = primitive_result.get("returncode")
-    output = primitive_result.get("output", "").upper()
-    
-    # Primary method: check return code
-    # 0 = success, non-zero = failure
-    if returncode == 0:
-        return "SUCCESS"
-    elif returncode is not None and returncode != 0:
-        return "FAILURE"
-    
-    # Fallback: parse output for keywords if returncode is ambiguous
-    # Check for explicit success/failure messages
-    if "SUCCESS" in output and "VERIFICATION" in output:
-        return "SUCCESS"
-    elif "FAILED" in output or "FAILURE" in output:
-        return "FAILURE"
-    
-    # Default to FAILURE if we can't determine
-    return "FAILURE"
-
 def _run_query(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Query") -> Dict[str, Any]:
     """Helper function to run query scripts and return raw output.
     
     Args:
-        script_name: Name of the query script (e.g., "get_available_objects.py", "get_available_grasp_ids.py")
+        script_name: Name of the query script (e.g., "get_scene_info.py", "get_current_grasp_points_pose.py")
         command_args: Optional command-line arguments to pass to the script
         timeout: Timeout for the subprocess (default: 10 seconds)
         error_prefix: Prefix for error messages (default: "Query")
@@ -851,43 +649,25 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ## ############################################################################################## ##
 
 @mcp.tool()
-def get_available_objects(mode: Mode = "sim") -> Dict[str, Any]:
-    """Get list of available object names from ROS topic.
+def get_scene_info(mode: Mode = "sim") -> Dict[str, Any]:
+    """Get scene information with objects and their available grasp points.
+
+    All objects are included; those without grasp points have an empty array.
 
     Args:
         mode: Robot mode
 
     Returns:
-        JSON output containing list of available object names
+        JSON with format:
+        {
+            "object_name": [
+                {"id": 0, "gripper_states": ["open", "half-open"]},
+                {"id": 1, "gripper_states": ["open"]}
+            ],
+            "another_object": []
+        }
     """
-    return _run_query("get_available_objects.py", f"--mode {mode}", timeout=10, error_prefix="Get available objects")
-
-@mcp.tool()
-def get_available_grasp_ids(mode: Mode = "sim") -> Dict[str, Any]:
-    """Get available grasp IDs per object from ROS topic.
-
-    Args:
-        mode: Robot mode
-
-    Returns:
-        JSON output containing available grasp IDs per object
-    """
-    return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
-
-@mcp.tool()
-def get_current_grasp_points_pose(mode: Mode = "sim") -> Dict[str, Any]:
-    """Get current grasp point positions from ROS topic.
-
-    Reads grasp point positions from the grasp points topic.
-
-    Args:
-        mode: Robot mode
-
-    Returns:
-        JSON output containing grasp point poses (id and position) per object,
-        sorted by z value (highest first)
-    """
-    return _run_query("get_current_grasp_points_pose.py", f"--mode {mode}", timeout=10, error_prefix="Get current grasp points pose")
+    return _run_query("get_scene_info.py", f"--mode {mode}", timeout=10, error_prefix="Get scene info")
 
 @mcp.tool()
 def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
@@ -929,6 +709,89 @@ def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim
     else:
         return {"output": "Error: Either object_name or all=True must be provided"}
     return _run_query("get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
+
+@mcp.tool()
+def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
+    """Verify if object is within grasp radius from gripper center.
+
+    Checks if object position is within 6cm radius from gripper center.
+    Only call this tool after moving to safe height.
+
+    Args:
+        object_name: Name of the object to verify
+        mode: Robot mode
+
+    Returns:
+        Dictionary with result (success or failure)
+    """
+    return _run_query("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+
+@mcp.tool()
+def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+    """Verify if object(s) are in correct assembly pose relative to base.
+
+    Args:
+        base_name: Name of the base object
+        object_name: Name of the object to verify (optional if check_all is True)
+        check_all: If True, check all objects in the assembly instead of a specific one
+
+    Returns:
+        When check_all=False (single object):
+        - "result": "success" or "failure" for the verified object
+        - "object_name": Name of the verified object
+        - "base_name": Name of the base object
+        - "position_error_m": Position error metrics (x, y, z)
+        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
+        - "within_tolerance": Boolean indicating if within tolerance
+        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled
+
+        When check_all=True:
+        - "result": "success" if all assembled, "failure" otherwise
+        - "base_name": Name of the base object
+        - "all_assembled": Boolean indicating if all objects are assembled
+        - "assembled_objects": List of objects that are correctly assembled
+        - "unassembled_objects": List of objects that are NOT assembled
+    """
+    if check_all:
+        return _run_query("verify_assembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify assembly")
+    elif object_name:
+        return _run_query("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+    else:
+        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
+
+@mcp.tool()
+def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+    """Verify if object(s) are NOT in assembly position relative to base.
+
+    This tool checks if object(s) have been successfully disassembled by verifying they are NOT in the
+    target assembly position. Returns success if the object(s) are away from the assembly position.
+
+    Args:
+        base_name: Name of the base object
+        object_name: Name of the object to verify (optional if check_all is True)
+        check_all: If True, check all objects in the assembly instead of a specific one
+
+    Returns:
+        When check_all=False (single object):
+        - "result": "success" or "failure" for the verified object
+        - "object_name": Name of the verified object
+        - "base_name": Name of the base object
+        - "position_error_m": Position error metrics (x, y, z)
+        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
+
+        When check_all=True:
+        - "result": "success" if all disassembled, "failure" otherwise
+        - "base_name": Name of the base object
+        - "all_disassembled": Boolean indicating if all objects are disassembled
+        - "disassembled_objects": List of objects that are disassembled
+        - "still_assembled_objects": List of objects still in assembly position
+    """
+    if check_all:
+        return _run_query("verify_disassembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify disassembly")
+    elif object_name:
+        return _run_query("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+    else:
+        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
 ## ############################################################################################## ##
 ##
@@ -1134,103 +997,6 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
         # Format numbers to avoid scientific notation which can confuse argument parser
         cmd += f" --target-base-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in target_base_orientation)}"
     return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
-
-## ############################################################################################## ##
-##
-##                      VERIFICATION TOOLS
-##
-## ############################################################################################## ##
-
-
-@mcp.tool()
-def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
-    """Verify if object is within grasp radius from gripper center.
-
-    Checks if object position is within 6cm radius from gripper center.
-    Only call this tool after moving to safe height.
-
-    Args:
-        object_name: Name of the object to verify
-        mode: Robot mode
-
-    Returns:
-        Dictionary with result (success or failure)
-    """
-    primitive_result = _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
-
-    # If primitive returned structured JSON (has "result" field), return it directly
-    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
-        return primitive_result
-
-    # Old format: parse and add result field
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
-
-@mcp.tool()
-def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Verify if object is in correct assembly pose relative to base.
-
-    Args:
-        object_name: Name of the object
-        base_name: Name of the base object
-
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure" for the verified object
-        - "object_name": Name of the verified object
-        - "base_name": Name of the base object
-        - "position_error_m": Position error metrics (x, y, z)
-        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
-        - "within_tolerance": Boolean indicating if within tolerance
-        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled
-    """
-    primitive_result = _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
-
-    # If primitive returned structured JSON (has "result" field), return it directly
-    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
-        return primitive_result
-
-    # Old format: parse and add result field
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
-
-@mcp.tool()
-def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    """Verify if object is NOT in assembly position relative to base.
-    
-    This tool checks if an object has been successfully disassembled by verifying it is NOT in the 
-    target assembly position. Returns success if the object is away from the assembly position.
-    
-    Args:
-        object_name: Name of the object to verify
-        base_name: Name of the base object
-    
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure" for the verified object
-        - "object_name": Name of the verified object
-        - "base_name": Name of the base object
-        - "position_error_m": Position error metrics (x, y, z)
-        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
-    """
-    primitive_result = _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
-
-    # If primitive returned structured JSON (has "result" field), return it directly
-    if "result" in primitive_result and primitive_result["result"] in ["success", "failure"]:
-        return primitive_result
-
-    # Old format: parse and add result field
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
 
 ## ############################################################################################## ##
 ##

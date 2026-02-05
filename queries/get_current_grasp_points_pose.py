@@ -28,11 +28,28 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import time
 
 
-def output_result(result):
+def output_result(result, pretty=False):
     """Output JSON result with markers"""
-    print("__RESULT_JSON__")
-    print(json.dumps(result))
-    print("__END_RESULT_JSON__")
+    if pretty:
+        # Compact pretty print: one line per grasp, grouped by object
+        print("{")
+        objects = list(result.items())
+        for i, (obj_name, grasps) in enumerate(objects):
+            comma = "," if i < len(objects) - 1 else ""
+            if not grasps:
+                print(f'  "{obj_name}": []{comma}')
+            else:
+                print(f'  "{obj_name}": [')
+                for j, g in enumerate(grasps):
+                    g_comma = "," if j < len(grasps) - 1 else ""
+                    pos = g["position"]
+                    print(f'    {{"id": {g["id"]}, "position": {{"x": {pos["x"]}, "y": {pos["y"]}, "z": {pos["z"]}}}}}{g_comma}')
+                print(f'  ]{comma}')
+        print("}")
+    else:
+        print("__RESULT_JSON__")
+        print(json.dumps(result))
+        print("__END_RESULT_JSON__")
 
 
 class GraspPointsPoseReader(Node):
@@ -105,6 +122,8 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='Get Current Grasp Points Pose')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
                        help='Mode: sim (reads from /grasp_points_sim) or real (reads from /grasp_points_real)')
+    parser.add_argument('--pretty', action='store_true',
+                       help='Pretty print output for terminal readability')
 
     args = parser.parse_args()
 
@@ -129,12 +148,8 @@ def main(args=None):
         print(f"Error: Could not read grasp point poses from ROS topic ({e}).")
         sys.exit(1)
 
-    # Output grasp point poses as JSON
-    result = {
-        "grasp_points_poses": grasp_points_poses
-    }
-
-    output_result(result)
+    # Output grasp point poses as JSON (no wrapper, object names at top level)
+    output_result(grasp_points_poses, pretty=args.pretty)
     sys.exit(0)
 
 

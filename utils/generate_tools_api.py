@@ -193,7 +193,7 @@ def generate_api_from_server():
     # Also manually check for known tools by looking at server module
     known_tools = [
         'get_topics', 'capture_camera_image', 'read_topic',
-        'get_available_objects', 'get_available_grasp_ids',
+        'get_scene_info',
         'move_home', 'control_gripper', 'scan_workspace',
         'move_to_grasp', 'move_to_regrasp', 'translate_object', 'rotate_object',
         'verify_grasp', 'verify_assembly', 'verify_disassembly'

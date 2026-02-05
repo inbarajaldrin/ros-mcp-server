@@ -42,9 +42,14 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     else:
         env['PYTHONPATH'] = SCRIPT_DIR
     
+    # Use sys.executable to ensure we use the same Python interpreter as the MCP server
+    # This preserves conda/virtualenv environment and ROS2 DDS configuration
+    import sys
+    python_executable = sys.executable
+
     cmd_parts = [
         f"cd {SCRIPT_DIR}/primitives",
-        f"timeout {timeout} /usr/bin/python3 -u {script_name} {command_args}".strip()
+        f"timeout {timeout} {python_executable} -u {script_name} {command_args}".strip()
     ]
     
     cmd = "\n".join(cmd_parts)
@@ -121,20 +126,40 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         with output_lock:
             output = "".join(output_lines)
         
+        # Check if output contains JSON markers (parse even on timeout)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result = json.loads(json_str)
+                return result
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to old format handling
+                pass
+
         # If process was killed by timeout command (exit code 124), add timeout message
         if returncode == 124:
             if output:
                 return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
             else:
                 return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
-        
+
         # If process was killed by us (returncode -9 or None), it timed out
         if returncode is None or returncode == -9:
             if output:
                 return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
             else:
                 return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
-        
+
+        # Old format (backward compatible)
         return {"output": output if output else "", "returncode": returncode}
         
     except subprocess.TimeoutExpired as e:
@@ -156,7 +181,7 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
     """Helper function to run query scripts and return raw output.
     
     Args:
-        script_name: Name of the query script (e.g., "get_available_objects.py", "get_available_grasp_ids.py")
+        script_name: Name of the query script (e.g., "get_scene_info.py", "get_current_grasp_points_pose.py")
         command_args: Optional command-line arguments to pass to the script
         timeout: Timeout for the subprocess (default: 10 seconds)
         error_prefix: Prefix for error messages (default: "Query")
@@ -183,56 +208,42 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
             text=True,
             timeout=timeout + 5  # Add buffer for subprocess timeout
         )
-        
-        # Return combined stdout and stderr (query handles its own output formatting)
+
+        # Return combined stdout and stderr
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
-        
+
+        # Check if output contains JSON markers (parse JSON if present)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result_json = json.loads(json_str)
+                return result_json
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to returning raw output
+                pass
+
+        # Fallback: return raw output if no JSON markers or parsing failed
         return {"output": output}
-        
+
     except subprocess.TimeoutExpired:
         return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
 
 
-def _parse_verify_result(primitive_result: Dict[str, Any]) -> str:
-    """Parse verification result from primitive output.
-    
-    Args:
-        primitive_result: Dictionary returned from _run_primitive with "output" and "returncode" keys
-    
-    Returns:
-        "SUCCESS" or "FAILURE" based on return code and output parsing
-    """
-    returncode = primitive_result.get("returncode")
-    output = primitive_result.get("output", "").upper()
-    
-    # Primary method: check return code
-    # 0 = success, non-zero = failure
-    if returncode == 0:
-        return "SUCCESS"
-    elif returncode is not None and returncode != 0:
-        return "FAILURE"
-    
-    # Fallback: parse output for keywords if returncode is ambiguous
-    # Check for explicit success/failure messages
-    if "SUCCESS" in output and "VERIFICATION" in output:
-        return "SUCCESS"
-    elif "FAILED" in output or "FAILURE" in output:
-        return "FAILURE"
-    
-    # Default to FAILURE if we can't determine
-    return "FAILURE"
-
-
-def get_available_grasp_ids(mode: str = "sim") -> Dict[str, Any]:
-    return _run_query("get_available_grasp_ids.py", f"--mode {mode}", timeout=10, error_prefix="Get available grasp IDs")
-
-
-def get_available_objects(mode: str = "sim") -> Dict[str, Any]:
-    return _run_query("get_available_objects.py", f"--mode {mode}", timeout=10, error_prefix="Get available objects")
+def get_scene_info(mode: Literal = "sim") -> Dict[str, Any]:
+    return _run_query("get_scene_info.py", f"--mode {mode}", timeout=10, error_prefix="Get scene info")
 
 
 def get_topics() -> Dict[str, Any]:
@@ -249,164 +260,7 @@ def get_topics() -> Dict[str, Any]:
         return "No topics found"
 
 
-def capture_camera_image(topic_name: str, timeout: int = 10) -> Dict[str, Any]:
-    result_json = {
-        "timestamp": datetime.now().isoformat(),
-        "topic": topic_name,
-        "status": "attempting"
-    }
-    
-    try:
-        # Set up timeout
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout)
-        
-        # First, unsubscribe from the topic to clear any buffered/stale messages
-        # This ensures we get a fresh image on the next subscription
-        try:
-            unsubscribe_msg = {
-                "op": "unsubscribe",
-                "topic": topic_name
-            }
-            ws_manager.send(unsubscribe_msg)
-            # Small delay to ensure unsubscribe is processed
-            time.sleep(0.1)
-            
-            # Flush any pending messages from the WebSocket buffer
-            # This ensures we don't get stale messages from previous subscriptions
-            ws_manager.flush_pending_messages(timeout=0.1)
-        except Exception as e:
-            # If unsubscribe fails, continue anyway - might not be subscribed
-            pass
-        
-        # Create dynamic image subscriber for the specified topic
-        image_subscriber = RosImage(ws_manager, topic=topic_name)
-        
-        # Subscribe and get image data with timeout
-        msg = image_subscriber.subscribe(timeout=timeout)
-        
-        # Cancel timeout
-        signal.alarm(0)
-        
-        # Unsubscribe after getting the image to prevent message buffering
-        try:
-            unsubscribe_msg = {
-                "op": "unsubscribe",
-                "topic": topic_name
-            }
-            ws_manager.send(unsubscribe_msg)
-        except Exception as e:
-            # If unsubscribe fails, continue anyway
-            pass
-        
-        result_json["status"] = "success"
-        
-        if msg is not None and 'data' in msg:
-            image_data = msg['data']
-            
-            # Convert the image data to numpy array (RGB format)
-            # Handle different data types and formats
-            if isinstance(image_data, np.ndarray):
-                # Ensure proper format for RGB conversion
-                if len(image_data.shape) == 3:
-                    if image_data.shape[2] == 3:
-                        # Already RGB or BGR - assume RGB
-                        arr_rgb = image_data.astype(np.uint8)
-                    elif image_data.shape[2] == 4:
-                        # RGBA to RGB
-                        arr_rgb = image_data[:, :, :3].astype(np.uint8)
-                    else:
-                        raise Exception(f"Unsupported number of channels: {image_data.shape[2]}")
-                elif len(image_data.shape) == 2:
-                    # Grayscale - convert to RGB
-                    gray = image_data.astype(np.uint8)
-                    arr_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-                else:
-                    raise Exception(f"Unsupported image shape: {image_data.shape}")
-            else:
-                raise Exception(f"Unexpected data type: {type(image_data)}. Expected numpy array.")
-            
-            # Use the working conversion function
-            mcp_image = _np_to_mcp_image(arr_rgb)
-            
-            # Save backup screenshot with topic-specific naming
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Clean topic name for filename
-            topic_clean = topic_name.replace("/", "_").replace(":", "_")
-            os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-            filename = os.path.join(SCREENSHOTS_DIR, f"{timestamp}_{topic_clean}.jpg")
-            bgr_image = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(filename, bgr_image)
-            
-            result_json["message"] = f"Image captured from {topic_name}"
-            result_json["saved_to"] = filename
-            
-            # Add metadata from the message if available
-            if 'metadata' in msg:
-                result_json["image_metadata"] = msg['metadata']
-            
-            # Return in robot_MCP pattern: [json, image]
-            return [result_json, mcp_image]
-            
-        else:
-            # No live data, try to use latest screenshot
-            result_json["status"] = "fallback"
-            result_json["message"] = f"No live data from {topic_name}, using latest screenshot"
-            
-            try:
-                if os.path.exists(SCREENSHOTS_DIR):
-                    files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-                    if files:
-                        latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-                        with open(latest_file, 'rb') as f:
-                            raw_data = f.read()
-                        mcp_image = Image(data=raw_data, format="jpeg")
-                        result_json["used_screenshot"] = files[-1]
-                        return [result_json, mcp_image]
-            except Exception as e:
-                result_json["screenshot_error"] = str(e)
-            
-            raise Exception(f"No image data received from {topic_name} and no screenshots available")
-            
-    except TimeoutError:
-        signal.alarm(0)  # Cancel alarm
-        error_result = {
-            "timestamp": datetime.now().isoformat(),
-            "topic": topic_name,
-            "status": "timeout",
-            "error": f"Image capture timed out after {timeout} seconds"
-        }
-        
-        # Try fallback to screenshot
-        try:
-            if os.path.exists(SCREENSHOTS_DIR):
-                files = sorted([f for f in os.listdir(SCREENSHOTS_DIR) if f.endswith('.jpg') or f.endswith('.png')])
-                if files:
-                    latest_file = os.path.join(SCREENSHOTS_DIR, files[-1])
-                    with open(latest_file, 'rb') as f:
-                        raw_data = f.read()
-                    mcp_image = Image(data=raw_data, format="jpeg")
-                    error_result["status"] = "timeout_fallback"
-                    error_result["message"] = "Timed out, using latest screenshot"
-                    error_result["used_screenshot"] = files[-1]
-                    return [error_result, mcp_image]
-        except:
-            pass
-            
-        return [error_result]
-        
-    except Exception as e:
-        signal.alarm(0)  # Cancel alarm
-        error_result = {
-            "timestamp": datetime.now().isoformat(),
-            "topic": topic_name,
-            "status": "error",
-            "error": str(e)
-        }
-        return [error_result]
-
-
-def control_gripper(command: str, mode: str = "sim") -> Dict[str, Any]:
+def control_gripper(command: Union, mode: Literal = "sim") -> Dict[str, Any]:
     return _run_primitive("control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 
@@ -414,38 +268,14 @@ def move_home() -> Dict[str, Any]:
     return _run_primitive("move_home.py", timeout=45, error_prefix="Move home")
 
 
-def move_to_grasp(object_name: str, grasp_id: int, mode: str = "sim", move_to_object: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
-    # Validate that at least one flag is set
-    if not (move_to_object or move_to_safe_height):
-        return {"output": "Error: At least one of move_to_object or move_to_safe_height must be set to True"}
-    
+def move_to_grasp(object_name: str, grasp_id: int, action: Literal, mode: Literal = "sim") -> Dict[str, Any]:
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
-    if move_to_object:
-        cmd += " --move-to-object"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
-    
+    cmd += f" --{action.replace('_', '-')}"
     return _run_primitive("move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
 
-def move_to_regrasp(mode: str, move_to_clear_space: bool = False, move_down: bool = False, move_to_safe_height: bool = False) -> Dict[str, Any]:
-    # Count how many flags are set
-    flags_set = sum([move_to_clear_space, move_down, move_to_safe_height])
-    
-    # Validate that exactly one flag is set
-    if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_clear_space, move_down, or move_to_safe_height must be set to True"}
-    elif flags_set > 1:
-        return {"output": "Error: Only one flag can be set at a time. Set exactly one of move_to_clear_space, move_down, or move_to_safe_height to True"}
-    
-    cmd = f"--mode {mode}"
-    if move_to_clear_space:
-        cmd += " --move-to-clear-space"
-    if move_down:
-        cmd += " --move-down"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
-    
+def move_to_regrasp(action: Literal, mode: Literal = "sim") -> Dict[str, Any]:
+    cmd = f"--mode {mode} --{action.replace('_', '-')}"
     return _run_primitive("move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 
@@ -505,14 +335,16 @@ def read_topic(topic_name: str, timeout: int = 5) -> Dict[str, Any]:
         return result
 
 
-def rotate_object(object_name: str, base_name: str, mode: str = "sim", current_object_orientation: Optional = None, target_base_orientation: Optional = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
+def rotate_object(object_name: str, base_name: str, mode: Literal = "sim", current_object_orientation: Optional = None, target_base_orientation: Optional = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
-        cmd += f" --current-object-orientation {' '.join(str(x) for x in current_object_orientation)}"
+        # Format numbers to avoid scientific notation which can confuse argument parser
+        cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
     if use_default_base_orientation:
         cmd += " --use-default-base-orientation"
     elif target_base_orientation is not None:
-        cmd += f" --target-base-orientation {' '.join(str(x) for x in target_base_orientation)}"
+        # Format numbers to avoid scientific notation which can confuse argument parser
+        cmd += f" --target-base-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in target_base_orientation)}"
     return _run_primitive("rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 
@@ -520,68 +352,52 @@ def scan_workspace(object_name: str) -> Dict[str, Any]:
     return _run_primitive("scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
 
-def translate_object(mode: str, base_name: Optional = None, object_name: Optional = None, move_to_base: bool = False, move_down: bool = False, move_to_safe_height: bool = False, use_default_base_position: bool = False) -> Dict[str, Any]:
-    # Validate that exactly one flag is set
-    flags_set = sum([move_to_base, move_down, move_to_safe_height])
-    if flags_set == 0:
-        return {"output": "Error: Exactly one of move_to_base, move_down, or move_to_safe_height must be set to True"}
-    elif flags_set > 1:
-        return {"output": "Error: move_to_base, move_down, and move_to_safe_height are mutually exclusive. Set exactly one to True"}
-    
-    if mode == "sim" and object_name is None:
-        return {"output": "Error: object_name is required in sim mode"}
-    
+def translate_object(action: Literal, mode: Literal = "sim", base_name: Optional = None, object_name: Optional = None, use_default_base_position: bool = False) -> Dict[str, Any]:
+    # Validate sim mode requirements for certain actions
+    if mode == "sim" and action in ["move_to_base", "perform_insert"]:
+        if object_name is None:
+            return {"output": "Error: object_name is required in sim mode for this action"}
+        if base_name is None:
+            return {"output": "Error: base_name is required in sim mode for this action"}
+
     cmd = f"--mode {mode}"
     if object_name is not None:
         cmd += f" --object-name \"{object_name}\""
     if base_name is not None:
         cmd += f" --base-name \"{base_name}\""
-    if move_to_base:
-        cmd += " --move-to-base"
-    if move_down:
-        cmd += " --move-down"
-    if move_to_safe_height:
-        cmd += " --move-to-safe-height"
+    cmd += f" --{action.replace('_', '-')}"
     if use_default_base_position:
         cmd += " --use-default-base-position"
-    
-    # Adjust timeout based on operation
-    # For move_down (perform_insert), use a long timeout to let it complete naturally
-    # The alignment_stop_timeout (10s) in perform_insert will handle stopping the alignment phase
-    # 900s (15 min) allows for: search phase + alignment phase (max 10s) + any delays
-    if move_down:
-        timeout = 300  
-    elif move_to_safe_height:
-        timeout = 40  # Safe height movement is quick
+
+    # Adjust timeout based on action
+    if action == "perform_insert":
+        timeout = 300
+    elif action in ["move_to_safe_height", "move_away_from_base"]:
+        timeout = 60
     else:
         timeout = 90
-    
+
     return _run_primitive("translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
 
-def verify_assembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    primitive_result = _run_primitive("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
+def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+    if check_all:
+        return _run_query("verify_assembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify assembly")
+    elif object_name:
+        return _run_query("verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+    else:
+        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
 
-def verify_disassembly(object_name: str, base_name: str) -> Dict[str, Any]:
-    primitive_result = _run_primitive("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
+def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+    if check_all:
+        return _run_query("verify_disassembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify disassembly")
+    elif object_name:
+        return _run_query("verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+    else:
+        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
 
-def verify_grasp(object_name: str, mode: str = "sim") -> Dict[str, Any]:
-    primitive_result = _run_primitive("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
-    result = _parse_verify_result(primitive_result)
-    return {
-        "output": primitive_result.get("output", ""),
-        "result": result
-    }
+def verify_grasp(object_name: str, mode: Literal = "sim") -> Dict[str, Any]:
+    return _run_query("verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
 

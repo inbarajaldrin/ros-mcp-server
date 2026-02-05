@@ -611,9 +611,15 @@ class VerifyAssembly(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Verify Assembly - Check if object is in correct position')
-    parser.add_argument('--object-name', type=str, required=True, help='Name of the object to verify')
+    parser.add_argument('--object-name', type=str, help='Name of the object to verify (optional if --check-all is used)')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
+    parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are assembled')
+    parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
+
+    # Validate arguments
+    if not args.check_all and not args.object_name:
+        parser.error("Either --object-name or --check-all must be specified")
 
     rclpy.init()
     node = VerifyAssembly(base_name=args.base_name)
@@ -622,10 +628,14 @@ def main(args=None):
     error_data = {}
     error_msg = None
     unassembled_objects = []
+    assembled_objects = []
 
     try:
         # Wait for pose data (wait indefinitely until received)
-        node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
+        if args.check_all:
+            node.get_logger().info(f"Waiting for pose data to verify all objects for base: {args.base_name}")
+        else:
+            node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
         start_time = time.time()
         last_log_time = start_time
 
@@ -643,32 +653,64 @@ def main(args=None):
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
 
-        # Verify assembly pose for the specified object
-        success, error_data = node.verify_assembly_pose(
-            args.object_name,
-            args.base_name
-        )
+        if args.check_all:
+            # Check all objects in the assembly
+            components = node.assembly_config.get('components', [])
+            base_name_base = args.base_name.replace('_scaled70', '')
 
-        if success:
-            node.get_logger().info("Assembly pose verification: SUCCESS")
-        else:
-            node.get_logger().error("Assembly pose verification: FAILED - Placement failed")
+            for component in components:
+                comp_name = component.get('name', '')
+                comp_name_base = comp_name.replace('_scaled70', '')
 
-        # Check other objects in the same assembly
-        try:
-            unassembled_objects = node.get_unassembled_objects(args.base_name, args.object_name)
+                # Skip the base itself
+                if comp_name_base == base_name_base:
+                    continue
 
-            # If the object being verified itself failed assembly, include it in the list
-            if not success:
-                unassembled_objects.append(args.object_name)
+                # Verify this component
+                try:
+                    is_assembled, _ = node.verify_assembly_pose(comp_name_base, args.base_name)
+                    if is_assembled:
+                        assembled_objects.append(comp_name_base)
+                    else:
+                        unassembled_objects.append(comp_name_base)
+                except Exception as e:
+                    node.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
+                    unassembled_objects.append(comp_name_base)
 
-            if unassembled_objects:
-                node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+            # Success if all objects are assembled
+            success = len(unassembled_objects) == 0
+
+            if success:
+                node.get_logger().info(f"All {len(assembled_objects)} objects are assembled")
             else:
-                node.get_logger().info("All other objects in assembly are assembled")
-        except Exception as e:
-            node.get_logger().warn(f"Could not check other objects: {e}")
-            unassembled_objects = []
+                node.get_logger().error(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+        else:
+            # Verify assembly pose for the specified object
+            success, error_data = node.verify_assembly_pose(
+                args.object_name,
+                args.base_name
+            )
+
+            if success:
+                node.get_logger().info("Assembly pose verification: SUCCESS")
+            else:
+                node.get_logger().error("Assembly pose verification: FAILED - Placement failed")
+
+            # Check other objects in the same assembly
+            try:
+                unassembled_objects = node.get_unassembled_objects(args.base_name, args.object_name)
+
+                # If the object being verified itself failed assembly, include it in the list
+                if not success:
+                    unassembled_objects.append(args.object_name)
+
+                if unassembled_objects:
+                    node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+                else:
+                    node.get_logger().info("All other objects in assembly are assembled")
+            except Exception as e:
+                node.get_logger().warn(f"Could not check other objects: {e}")
+                unassembled_objects = []
 
     except KeyboardInterrupt:
         node.get_logger().info("Interrupted by user")
@@ -682,27 +724,39 @@ def main(args=None):
         rclpy.shutdown()
 
         # Build result dictionary
-        result = {
-            "result": "success" if success else "failure",
-            "object_name": args.object_name,
-            "base_name": args.base_name,
-        }
+        if args.check_all:
+            result = {
+                "result": "success" if success else "failure",
+                "base_name": args.base_name,
+                "all_assembled": success,
+                "assembled_objects": assembled_objects,
+                "unassembled_objects": unassembled_objects,
+            }
+        else:
+            result = {
+                "result": "success" if success else "failure",
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+            }
 
-        # Add error data if available (contains metrics for the verified object)
-        if error_data:
-            result.update(error_data)
+            # Add error data if available (contains metrics for the verified object)
+            if error_data:
+                result.update(error_data)
 
-        # Add unassembled objects list
-        result["unassembled_objects"] = unassembled_objects
+            # Add unassembled objects list
+            result["unassembled_objects"] = unassembled_objects
 
         # Add error message if present
         if error_msg:
             result["error"] = error_msg
 
-        # Output JSON markers
-        print("__RESULT_JSON__")
-        print(json.dumps(result))
-        print("__END_RESULT_JSON__")
+        # Output JSON
+        if args.pretty:
+            print(json.dumps(result, indent=2))
+        else:
+            print("__RESULT_JSON__")
+            print(json.dumps(result))
+            print("__END_RESULT_JSON__")
 
         # Exit with appropriate code
         sys.exit(0 if success else 1)

@@ -29,11 +29,33 @@ from scipy.spatial.transform import Rotation as R
 import time
 
 
-def output_result(result):
+def output_result(result, pretty=False):
     """Output JSON result with markers"""
-    print("__RESULT_JSON__")
-    print(json.dumps(result))
-    print("__END_RESULT_JSON__")
+    if pretty:
+        # Check if this is multi-object (--all) or single object
+        if "object_poses" in result:
+            # Multi-object: compact format with one object per block
+            print("{")
+            objects = list(result["object_poses"].items())
+            for i, (obj_name, pose) in enumerate(objects):
+                comma = "," if i < len(objects) - 1 else ""
+                pos = pose["position"]
+                ori = pose["orientation"]
+                print(f'  "{obj_name}": {{')
+                print(f'    "position": {{"x": {pos["x"]}, "y": {pos["y"]}, "z": {pos["z"]}}},')
+                print(f'    "orientation": {{')
+                print(f'      "quat": {{"x": {ori["quat"]["x"]}, "y": {ori["quat"]["y"]}, "z": {ori["quat"]["z"]}, "w": {ori["quat"]["w"]}}},')
+                print(f'      "rpy": {{"roll": {ori["rpy"]["roll"]}, "pitch": {ori["rpy"]["pitch"]}, "yaw": {ori["rpy"]["yaw"]}}}')
+                print(f'    }}')
+                print(f'  }}{comma}')
+            print("}")
+        else:
+            # Single object
+            print(json.dumps(result, indent=2))
+    else:
+        print("__RESULT_JSON__")
+        print(json.dumps(result))
+        print("__END_RESULT_JSON__")
 
 
 class ObjectPoseReader(Node):
@@ -121,6 +143,7 @@ def main(args=None):
     parser.add_argument('--all', action='store_true', help='Get poses for all objects (mutually exclusive with --object-name)')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
                        help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
+    parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
 
     args = parser.parse_args()
     
@@ -165,13 +188,17 @@ def main(args=None):
                         "z": round(float(pose_data['position'][2]), 4)
                     },
                     "orientation": {
-                        "x": round(float(pose_data['orientation'][0]), 6),
-                        "y": round(float(pose_data['orientation'][1]), 6),
-                        "z": round(float(pose_data['orientation'][2]), 6),
-                        "w": round(float(pose_data['orientation'][3]), 6),
-                        "roll": round(float(rpy[0]), 4),
-                        "pitch": round(float(rpy[1]), 4),
-                        "yaw": round(float(rpy[2]), 4)
+                        "quat": {
+                            "x": round(float(pose_data['orientation'][0]), 6),
+                            "y": round(float(pose_data['orientation'][1]), 6),
+                            "z": round(float(pose_data['orientation'][2]), 6),
+                            "w": round(float(pose_data['orientation'][3]), 6)
+                        },
+                        "rpy": {
+                            "roll": round(float(rpy[0]), 4),
+                            "pitch": round(float(rpy[1]), 4),
+                            "yaw": round(float(rpy[2]), 4)
+                        }
                     }
                 }
         else:
@@ -195,13 +222,17 @@ def main(args=None):
                         "z": round(float(object_position[2]), 4)
                     },
                     "orientation": {
-                        "x": round(float(object_quaternion[0]), 6),
-                        "y": round(float(object_quaternion[1]), 6),
-                        "z": round(float(object_quaternion[2]), 6),
-                        "w": round(float(object_quaternion[3]), 6),
-                        "roll": round(float(rpy[0]), 4),
-                        "pitch": round(float(rpy[1]), 4),
-                        "yaw": round(float(rpy[2]), 4)
+                        "quat": {
+                            "x": round(float(object_quaternion[0]), 6),
+                            "y": round(float(object_quaternion[1]), 6),
+                            "z": round(float(object_quaternion[2]), 6),
+                            "w": round(float(object_quaternion[3]), 6)
+                        },
+                        "rpy": {
+                            "roll": round(float(rpy[0]), 4),
+                            "pitch": round(float(rpy[1]), 4),
+                            "yaw": round(float(rpy[2]), 4)
+                        }
                     }
                 }
             }
@@ -209,7 +240,7 @@ def main(args=None):
         print(f"Error: Could not read object pose from ROS topic ({e}).")
         sys.exit(1)
 
-    output_result(result)
+    output_result(result, pretty=args.pretty)
     sys.exit(0)
 
 

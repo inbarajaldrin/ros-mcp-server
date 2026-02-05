@@ -475,9 +475,15 @@ class VerifyDisassembly(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Verify Disassembly - Check if object is NOT in assembly position')
-    parser.add_argument('--object-name', type=str, required=True, help='Name of the object to verify')
+    parser.add_argument('--object-name', type=str, help='Name of the object to verify (optional if --check-all is used)')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
+    parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are disassembled')
+    parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
+
+    # Validate arguments
+    if not args.check_all and not args.object_name:
+        parser.error("Either --object-name or --check-all must be specified")
 
     rclpy.init()
     node = VerifyDisassembly(base_name=args.base_name)
@@ -485,10 +491,15 @@ def main(args=None):
     success = False
     error_data = {}
     error_msg = None
+    disassembled_objects = []
+    still_assembled_objects = []
 
     try:
         # Wait for pose data (wait indefinitely until received)
-        node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
+        if args.check_all:
+            node.get_logger().info(f"Waiting for pose data to verify all objects are disassembled for base: {args.base_name}")
+        else:
+            node.get_logger().info(f"Waiting for pose data for object: {args.object_name} and base: {args.base_name}")
         start_time = time.time()
         last_log_time = start_time
 
@@ -506,16 +517,49 @@ def main(args=None):
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
 
-        # Verify disassembly (opposite of assembly verification)
-        success, error_data = node.verify_disassembly(
-            args.object_name,
-            args.base_name
-        )
+        if args.check_all:
+            # Check all objects in the assembly
+            components = node.assembly_config.get('components', [])
+            base_name_base = args.base_name.replace('_scaled70', '')
 
-        if success:
-            node.get_logger().info("Disassembly verification: SUCCESS - Object is not in assembly position")
+            for component in components:
+                comp_name = component.get('name', '')
+                comp_name_base = comp_name.replace('_scaled70', '')
+
+                # Skip the base itself
+                if comp_name_base == base_name_base:
+                    continue
+
+                # Verify this component is disassembled
+                try:
+                    is_disassembled, _ = node.verify_disassembly(comp_name_base, args.base_name)
+                    if is_disassembled:
+                        disassembled_objects.append(comp_name_base)
+                    else:
+                        still_assembled_objects.append(comp_name_base)
+                except Exception as e:
+                    node.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
+                    # If we can't verify, assume it's still assembled (conservative)
+                    still_assembled_objects.append(comp_name_base)
+
+            # Success if all objects are disassembled
+            success = len(still_assembled_objects) == 0
+
+            if success:
+                node.get_logger().info(f"All {len(disassembled_objects)} objects are disassembled")
+            else:
+                node.get_logger().error(f"Found {len(still_assembled_objects)} objects still assembled: {still_assembled_objects}")
         else:
-            node.get_logger().error("Disassembly verification: FAILED - Object is still in assembly position")
+            # Verify disassembly (opposite of assembly verification)
+            success, error_data = node.verify_disassembly(
+                args.object_name,
+                args.base_name
+            )
+
+            if success:
+                node.get_logger().info("Disassembly verification: SUCCESS - Object is not in assembly position")
+            else:
+                node.get_logger().error("Disassembly verification: FAILED - Object is still in assembly position")
 
     except KeyboardInterrupt:
         node.get_logger().info("Interrupted by user")
@@ -529,24 +573,36 @@ def main(args=None):
         rclpy.shutdown()
 
         # Build result dictionary
-        result = {
-            "result": "success" if success else "failure",
-            "object_name": args.object_name,
-            "base_name": args.base_name,
-        }
+        if args.check_all:
+            result = {
+                "result": "success" if success else "failure",
+                "base_name": args.base_name,
+                "all_disassembled": success,
+                "disassembled_objects": disassembled_objects,
+                "still_assembled_objects": still_assembled_objects,
+            }
+        else:
+            result = {
+                "result": "success" if success else "failure",
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+            }
 
-        # Add error data if available
-        if error_data:
-            result.update(error_data)
+            # Add error data if available
+            if error_data:
+                result.update(error_data)
 
         # Add error message if present
         if error_msg:
             result["error"] = error_msg
 
-        # Output JSON markers
-        print("__RESULT_JSON__")
-        print(json.dumps(result))
-        print("__END_RESULT_JSON__")
+        # Output JSON
+        if args.pretty:
+            print(json.dumps(result, indent=2))
+        else:
+            print("__RESULT_JSON__")
+            print(json.dumps(result))
+            print("__END_RESULT_JSON__")
 
         # Exit with appropriate code
         sys.exit(0 if success else 1)

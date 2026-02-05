@@ -24,10 +24,10 @@ class EEPoseReader:
         self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
         self.received_message = False
         
-        # Configure QoS to match the publisher (TRANSIENT_LOCAL durability)
+        # Configure QoS to match the publisher (VOLATILE durability)
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
         

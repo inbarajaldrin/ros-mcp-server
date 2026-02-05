@@ -377,13 +377,17 @@ def main(args=None):
                 "z": round(float(target_object_position_abs[2]), 4)
             },
             "orientation": {
-                "x": round(float(target_object_orientation_abs[0]), 6),
-                "y": round(float(target_object_orientation_abs[1]), 6),
-                "z": round(float(target_object_orientation_abs[2]), 6),
-                "w": round(float(target_object_orientation_abs[3]), 6),
-                "roll": round(float(rpy[0]), 4),
-                "pitch": round(float(rpy[1]), 4),
-                "yaw": round(float(rpy[2]), 4)
+                "quat": {
+                    "x": round(float(target_object_orientation_abs[0]), 6),
+                    "y": round(float(target_object_orientation_abs[1]), 6),
+                    "z": round(float(target_object_orientation_abs[2]), 6),
+                    "w": round(float(target_object_orientation_abs[3]), 6)
+                },
+                "rpy": {
+                    "roll": round(float(rpy[0]), 4),
+                    "pitch": round(float(rpy[1]), 4),
+                    "yaw": round(float(rpy[2]), 4)
+                }
             }
         }
     }
