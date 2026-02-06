@@ -811,19 +811,17 @@ class PerformInsertController(Node):
         try:
             if 'traj1' not in trajectory or not trajectory['traj1']:
                 return False
-            
-            point = trajectory['traj1'][0]
-            positions = point['positions']
-            duration = point['time_from_start'].sec
-            
+
             traj_msg = JointTrajectory()
             traj_msg.joint_names = self.joint_names
-            
-            traj_point = JointTrajectoryPoint()
-            traj_point.positions = positions
-            traj_point.velocities = [0.0] * 6
-            traj_point.time_from_start = Duration(sec=duration)
-            traj_msg.points.append(traj_point)
+
+            for point in trajectory['traj1']:
+                traj_point = JointTrajectoryPoint()
+                traj_point.positions = point['positions']
+                if 'velocities' in point:
+                    traj_point.velocities = point['velocities']
+                traj_point.time_from_start = point['time_from_start']
+                traj_msg.points.append(traj_point)
             
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
@@ -939,36 +937,62 @@ class PerformInsertController(Node):
             if self.joints is None:
                 self.get_logger().error("Could not read current joint angles")
                 return False
-        
-        # Compute IK for final position
-        final_computed_joint_angles = self.compute_ik_with_current_seed(
-            ee_target_position.tolist(),
-            ee_target_quat.tolist(),
-            max_tries=5,
-            dx=0.001
-        )
-        
-        if final_computed_joint_angles is None:
-            self.error_message = "IK solver failed: no valid solution to perform insert"
-            self.get_logger().error(self.error_message)
-            return False
-        
-        # Create final trajectory
-        final_trajectory = [{
-            "positions": [float(x) for x in final_computed_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(duration))
-        }]
-        
-        success = self.execute_trajectory_sim({"traj1": final_trajectory})
-        
+
+        # Create Cartesian path to maintain EE orientation throughout motion
+        num_waypoints = 10
+        total_duration = 5.0
+        current_ee_position = ee_current_position
+        target_position = ee_target_position
+
+        trajectory_points = []
+        prev_joint_angles = self.joints.copy()
+
+        for i in range(1, num_waypoints + 1):
+            alpha = i / num_waypoints
+            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+
+            waypoint_joint_angles = self.compute_ik_with_current_seed(
+                waypoint_position.tolist(),
+                ee_target_quat.tolist(),
+                max_tries=3,
+                dx=0.001
+            )
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            # Unwrap joint angles to avoid configuration flips
+            for j in range(6):
+                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
+                if diff > np.pi:
+                    waypoint_joint_angles[j] -= 2 * np.pi
+                elif diff < -np.pi:
+                    waypoint_joint_angles[j] += 2 * np.pi
+
+            prev_joint_angles = waypoint_joint_angles.copy()
+            self.joints = waypoint_joint_angles.copy()
+
+            time_from_start = (i / num_waypoints) * total_duration
+            point = {
+                "positions": [float(x) for x in waypoint_joint_angles],
+                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start - int(time_from_start)) * 1e9))
+            }
+            if i == num_waypoints:
+                point["velocities"] = [0.0] * 6
+            trajectory_points.append(point)
+
+        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
+
+        success = self.execute_trajectory_sim({"traj1": trajectory_points})
+
         if success:
-            # Wait for poses to update (same as old code)
             time.sleep(0.5)
             self.get_logger().info("Movement completed successfully")
         else:
             self.get_logger().error("Failed to reach final position")
-        
+
         return success
     
     def _create_subscriptions(self):
@@ -1238,28 +1262,38 @@ class PerformInsertController(Node):
         
         current_z = start_z
         q_guess = self.joints.copy()  # Use current joint angles as seed
-        
+        prev_joint_angles = self.joints.copy()
+
         for i in range(num_waypoints):
             # Calculate next Z position
             current_z = start_z - (i + 1) * dz_per_waypoint
             if current_z < target_z:
                 current_z = target_z
-            
+
             # X and Y stay fixed at starting position
             waypoint = [self.start_x, self.start_y, current_z]
             waypoints.append(waypoint)
-            
+
             # Compute IK for this waypoint
             target_rpy = list(self.fixed_rpy)
             joint_angles = compute_ik(waypoint, target_rpy, q_guess=q_guess)
-            
+
             if joint_angles is None:
                 self.get_logger().warn(f"IK failed at waypoint {i}, truncating trajectory at waypoint {i-1}")
                 break
-            
+
+            # Unwrap joint angles to avoid configuration flips
+            for j in range(6):
+                diff = joint_angles[j] - prev_joint_angles[j]
+                if diff > np.pi:
+                    joint_angles[j] -= 2 * np.pi
+                elif diff < -np.pi:
+                    joint_angles[j] += 2 * np.pi
+
+            prev_joint_angles = joint_angles.copy()
             joint_trajectory.append(joint_angles)
             q_guess = joint_angles  # Use this solution as seed for next waypoint
-            
+
             # Stop if we've reached target Z
             if current_z <= target_z + 0.001:
                 break

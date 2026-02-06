@@ -41,7 +41,7 @@ except ImportError:
 # =============================================================================
 # CONFIGURABLE PARAMETERS
 # =============================================================================
-# Sim mode: F/T sensor via fixed gripper joint (WrenchStamped on /ft_sensor_sim)
+# Sim mode: F/T sensor via /ur5e_wrist_force (Float64 Fz from gripper joint)
 # Uses same force detection logic as real mode but with different thresholds
 # Simulated forces may have different scaling/characteristics than real sensor
 
@@ -85,7 +85,7 @@ class MoveDown(Node):
         self.target_height = target_height
         
         # Force monitoring - both sim and real use WrenchStamped (6-DOF F/T sensor)
-        # Sim: /ft_sensor_sim (from fixed gripper joint)
+        # Sim: /ur5e_wrist_force (Float64 Fz from gripper joint)
         # Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor)
         self.current_force_x = 0.0
         self.current_force_y = 0.0
@@ -134,7 +134,7 @@ class MoveDown(Node):
             # Published as Float64 by Isaac Sim extension at physics rate (~60 Hz)
             self.force_sub = self.create_subscription(
                 Float64,
-                '/joint_force',
+                '/ur5e_wrist_force',
                 self.sim_force_callback,
                 10
             )
@@ -534,7 +534,7 @@ class MoveDown(Node):
         """Check force during trajectory execution and cancel if threshold exceeded.
 
         Both sim and real modes use the same WrenchStamped-based detection:
-        - Sim: /ft_sensor_sim (from fixed gripper joint) - uses SIM_* thresholds
+        - Sim: /ur5e_wrist_force (Float64 Fz from gripper joint) - uses SIM_* thresholds
         - Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor) - uses real thresholds
         """
         if not self.moving:

@@ -1442,10 +1442,13 @@ class ReorientForAssembly(Node):
         # (within same 5° bucket), not a reason to pick high-error cardinals
         error_tolerance = 5.0  # degrees - bucket size for "similar" errors
 
-        # Detect yaw-only rotation: check if the rotation from current to target
-        # is primarily around the Z-axis (vertical). This avoids gimbal lock issues
-        # with Euler angle comparison at pitch near ±90°.
-        is_yaw_only_rotation = False
+        # Detect when facing-away preference should be skipped in favor of
+        # minimizing EE rotation. Two cases:
+        # 1. Yaw-only rotation (axis aligned with Z) - avoids gimbal lock issues
+        # 2. Small rotation (< 10°) on any axis - the current face direction can
+        #    always accommodate it (cardinal error threshold is 45°), so changing
+        #    face direction would be an unnecessary large movement.
+        prefer_minimal_ee_rotation = False
         if R_object_current is not None:
             # Find the closest equivalent target to current object
             closest_target = None
@@ -1471,17 +1474,15 @@ class ReorientForAssembly(Node):
                     axis = rotvec / angle_rad  # Normalized rotation axis
 
                     # Check if rotation axis is close to Z-axis [0, 0, ±1]
-                    # A yaw-only rotation has axis aligned with Z
-                    z_alignment = abs(axis[2])  # |cos(angle between axis and Z)|
+                    z_alignment = abs(axis[2])
 
-                    # If axis is within 15° of Z-axis, consider it yaw-only
-                    # cos(15°) ≈ 0.966
-                    YAW_AXIS_THRESHOLD = 0.966
-                    if z_alignment > YAW_AXIS_THRESHOLD:
-                        is_yaw_only_rotation = True
+                    YAW_AXIS_THRESHOLD = 0.966  # cos(15°)
+                    SMALL_ROTATION_THRESHOLD = np.radians(10)
+                    if z_alignment > YAW_AXIS_THRESHOLD or angle_rad < SMALL_ROTATION_THRESHOLD:
+                        prefer_minimal_ee_rotation = True
                 else:
-                    # Very small rotation needed - treat as yaw-only (no preference needed)
-                    is_yaw_only_rotation = True
+                    # Very small rotation needed - no face change needed
+                    prefer_minimal_ee_rotation = True
 
         def sort_key(candidate):
             obj_error = candidate[4]
@@ -1497,9 +1498,9 @@ class ReorientForAssembly(Node):
             # Round to 1 decimal to avoid floating point boundary issues (e.g., 44.999° vs 45.001°)
             error_bucket = int(round(obj_error, 1) / error_tolerance)
 
-            # For yaw-only rotations, skip facing-away preference and minimize EE rotation
-            if is_yaw_only_rotation:
-                # Just sort by object error, then EE rotation (no facing-away preference)
+            # For small or yaw-only rotations, skip facing-away preference
+            # and minimize EE rotation to avoid unnecessary face changes
+            if prefer_minimal_ee_rotation:
                 return (error_bucket, 0, 0, ee_rotation)
 
             # SECONDARY: Within same error bucket, prefer facing away (angle_to_base > 120°)
