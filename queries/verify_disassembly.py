@@ -520,14 +520,13 @@ def main(args=None):
         if args.check_all:
             # Check all objects in the assembly
             components = node.assembly_config.get('components', [])
-            base_name_base = args.base_name.replace('_scaled70', '')
 
             for component in components:
                 comp_name = component.get('name', '')
                 comp_name_base = comp_name.replace('_scaled70', '')
 
-                # Skip the base itself
-                if comp_name_base == base_name_base:
+                # Skip the board
+                if component.get('type') == 'board':
                     continue
 
                 # Verify this component is disassembled

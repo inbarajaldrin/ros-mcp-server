@@ -373,7 +373,7 @@ class VerifyAssembly(Node):
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
             if comp_name == object_name or comp_name == f"{object_name}_scaled70":
-                if component.get('type') == 'peg':
+                if component.get('subtype') == 'peg':
                     axis_str = component.get('axis')
                     return axis_map.get(axis_str)
         return None
@@ -582,8 +582,8 @@ class VerifyAssembly(Node):
             if comp_name_base == exclude_name_base:
                 continue
             
-            # Skip the base itself
-            if comp_name_base == base_name.replace('_scaled70', ''):
+            # Skip the board
+            if component.get('type') == 'board':
                 continue
             
             # Check if this component is assembled
@@ -656,14 +656,13 @@ def main(args=None):
         if args.check_all:
             # Check all objects in the assembly
             components = node.assembly_config.get('components', [])
-            base_name_base = args.base_name.replace('_scaled70', '')
 
             for component in components:
                 comp_name = component.get('name', '')
                 comp_name_base = comp_name.replace('_scaled70', '')
 
-                # Skip the base itself
-                if comp_name_base == base_name_base:
+                # Skip the board
+                if component.get('type') == 'board':
                     continue
 
                 # Verify this component
