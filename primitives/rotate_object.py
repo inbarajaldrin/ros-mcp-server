@@ -40,6 +40,7 @@ import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from primitives.utils.workspace_config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET
 
 
 def output_result(result):
@@ -442,9 +443,8 @@ class ReorientForAssembly(Node):
         self.current_cardinal_error_threshold = self.cardinal_error_threshold_initial
 
         # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
-        # This matches the offset used in move_to_grasp.py
-        # When rotating, we keep the gripper center (where the object is) fixed, not the TCP
-        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm (distance from TCP to gripper center)
+        self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
+        self.rotate_about_gripper_center = ROTATE_ABOUT_GRIPPER_CENTER
 
         # JSON output tracking
         self.error_message = None
@@ -627,14 +627,13 @@ class ReorientForAssembly(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
         Args:
             joint_angles: Array of 6 joint angles
             z_threshold: Minimum allowed Z position (meters).
-                        Default -0.01 means 1cm below table is still allowed.
             verbose: If True, log which joint caused collision
 
         Returns:
@@ -834,54 +833,37 @@ class ReorientForAssembly(Node):
 
         return False  # Configuration OK
 
-    def check_ee_facing_robot(self, R_EE, ee_position, threshold_deg=60.0):
+    def check_ee_facing_robot(self, R_EE, y_threshold=0.5):
         """
-        Check if the EE tool face is pointing towards the robot base.
-
-        The tool Z-axis (third column of rotation matrix) indicates where the tool is pointing.
-        If this direction points towards the robot base (0, 0, 0), that's problematic
-        because subsequent operations may be blocked.
+        Check if the tool Z-axis points toward +Y in world frame (toward the robot).
 
         Args:
-            R_EE: 3x3 rotation matrix of EE orientation
-            ee_position: [x, y, z] position of EE
-            threshold_deg: Angle threshold - if tool direction is within this angle
-                          of pointing at robot base (in XY plane), it's considered facing
+            R_EE: 3x3 rotation matrix of EE orientation (in world frame)
+            y_threshold: Reject if tool_Z[1] > this value (default 0.5 ≈ 60°)
 
         Returns:
-            (facing_robot, angle_to_base):
-                facing_robot: True if tool is facing the robot
-                angle_to_base: Angle in degrees between tool XY direction and base direction
+            (facing_robot, tool_z_y): True if tool points toward +Y world
         """
-        # Tool Z-axis (where the tool is pointing)
-        tool_z_axis = R_EE[:, 2]
+        tool_z = R_EE[:, 2]
+        return tool_z[1] > y_threshold, tool_z[1]
 
-        # Vector from EE to robot base (in XY plane only - horizontal direction)
-        ee_pos = np.array(ee_position)
-        vector_to_base_xy = np.array([-ee_pos[0], -ee_pos[1], 0])
-        norm_xy = np.linalg.norm(vector_to_base_xy)
-        if norm_xy < 1e-6:
-            # EE is directly above base, can't determine facing direction
-            return False, 90.0
-        vector_to_base_xy_norm = vector_to_base_xy / norm_xy
+    def check_camera_direction(self, R_EE, x_threshold=-0.5):
+        """
+        Check if the camera body extends toward -X in world frame.
 
-        # Project tool Z-axis to XY plane
-        tool_z_xy = np.array([tool_z_axis[0], tool_z_axis[1], 0])
-        norm_tool_xy = np.linalg.norm(tool_z_xy)
-        if norm_tool_xy < 0.1:
-            # Tool is pointing nearly straight up or down (within ~5.7° of vertical).
-            # The horizontal facing direction is ill-defined, so don't flag as facing robot.
-            return False, 90.0
-        tool_z_xy_norm = tool_z_xy / norm_tool_xy
+        The camera is mounted along the tool Z-axis. If tool Z has a large
+        negative X-component in world frame, the camera body extends toward
+        -X world, which is problematic regardless of EE position.
 
-        # Angle between tool direction (XY) and vector to base (XY)
-        dot_product = np.dot(tool_z_xy_norm, vector_to_base_xy_norm)
-        angle_to_base = np.degrees(np.arccos(np.clip(dot_product, -1.0, 1.0)))
+        Args:
+            R_EE: 3x3 rotation matrix of EE orientation (in world frame)
+            x_threshold: Reject if tool_Z[0] < this value (default -0.5 ≈ 60°)
 
-        # If angle < threshold, the tool is pointing towards the base
-        facing_robot = angle_to_base < threshold_deg
-
-        return facing_robot, angle_to_base
+        Returns:
+            (camera_bad, tool_z_x): True if camera direction is problematic
+        """
+        tool_z = R_EE[:, 2]
+        return tool_z[0] < x_threshold, tool_z[0]
 
     def check_extended_gripper_collision(self, joint_angles, verbose=False):
         """
@@ -905,7 +887,7 @@ class ReorientForAssembly(Node):
 
         # Compute gripper tip position (24cm along gripper Z-axis from TCP)
         gripper_z_axis = R_ee[:, 2]  # Third column is Z-axis
-        gripper_tip = ee_pos + self.tcp_to_gripper_center_offset * gripper_z_axis
+        gripper_tip = ee_pos + R_ee @ self.tcp_to_gripper_center_offset
 
         # Minimum safe distance from robot body (gripper radius + small margin)
         gripper_radius = 0.04  # 4cm approximate gripper radius
@@ -913,7 +895,7 @@ class ReorientForAssembly(Node):
         min_safe_distance = gripper_radius + safety_margin
 
         # Check 1: Gripper tip below table level (definite collision)
-        if gripper_tip[2] < 0.0:
+        if gripper_tip[2] < TABLE_HEIGHT:
             if verbose:
                 self.get_logger().warn(
                     f"Extended gripper collision: tip below table "
@@ -1027,7 +1009,7 @@ class ReorientForAssembly(Node):
         # Short-circuit: check cheapest tests first, return on first collision
         # 1. Table collision (cheap: iterate positions, check Z)
         for pos in joint_positions:
-            if pos[2] < -0.01:
+            if pos[2] < TABLE_HEIGHT:
                 return True
 
         # 2. EE below base (cheap: single Z check)
@@ -1042,10 +1024,15 @@ class ReorientForAssembly(Node):
         if xy_dist < 0.20:
             return True
 
-        # 4. EE facing robot (moderate: vector math)
+        # 4. EE facing robot (+Y world direction)
         R_ee = T_ee[:3, :3]
-        has_ee_facing, _ = self.check_ee_facing_robot(R_ee, ee_pos, threshold_deg=60.0)
+        has_ee_facing, _ = self.check_ee_facing_robot(R_ee)
         if has_ee_facing:
+            return True
+
+        # 4b. Camera body extending toward -X world
+        has_camera_bad, _ = self.check_camera_direction(R_ee)
+        if has_camera_bad:
             return True
 
         # 5. Self collision (expensive: O(n^2) segment distances)
@@ -1075,7 +1062,11 @@ class ReorientForAssembly(Node):
 
         target_rot = R.from_quat(target_quat).as_matrix()
         target_pose = np.eye(4)
-        target_pose[:3, 3] = target_position
+        # Convert gripper center target to flange target when rotating about gripper center
+        if self.rotate_about_gripper_center:
+            target_pose[:3, 3] = target_position - target_rot @ GRIPPER_CENTER_TOOL_OFFSET
+        else:
+            target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot
 
         # For roll≈±90° targets (gripper sideways), yaw and yaw+180° are equivalent.
@@ -1093,10 +1084,18 @@ class ReorientForAssembly(Node):
 
         q_guess = self.current_joint_angles.copy()
 
-        solver = IKSolver(IKSolverConfig(early_termination=False))
+        joint_bounds = [
+            (-np.pi, np.pi),     # shoulder_pan: full range
+            (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+            (0, np.pi),          # elbow: positive only (elbow down)
+            (-np.pi, 0),         # wrist_1: negative only
+            (-np.pi, np.pi),     # wrist_2: full range
+            (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
+        ]
+        solver = IKSolver(IKSolverConfig(early_termination=True, joint_bounds=joint_bounds))
         collision_checker = self._check_collision
 
-        # Collect ALL valid solutions, then pick the best one
+        # Collect valid solutions across phases, then pick the best one
         all_solutions = []  # list of (joints, cost)
 
         def _dedupe_record(solutions):
@@ -1164,57 +1163,22 @@ class ReorientForAssembly(Node):
         )
         _dedupe_record(phase1_results)
 
-        # Phase 2: Fallback seeds
+        # Phase 2: Wrist-only fallback seed
+        # Data from 45 test runs shows this single seed (w1=-30, w2=90) wins
+        # 100% of Phase 2a victories. It keeps the upper arm fixed and only
+        # moves wrist joints — essential for face-change transitions (down->forward)
+        # where Phase 1 perturbations can't reach the target.
         yaw_rad = np.arctan2(2.0 * (target_quat[3] * target_quat[2] + target_quat[0] * target_quat[1]),
                             1.0 - 2.0 * (target_quat[1]**2 + target_quat[2]**2))
         yaw_deg = np.degrees(yaw_rad)
 
-        # Get current upper arm joints to create "wrist-only motion" seeds
         curr = self.current_joint_angles if self.current_joint_angles is not None else np.zeros(6)
         curr_deg = np.degrees(curr)
 
-        # Only use yaw_flip seeds when roll is actually near ±90° (gripper sideways)
-        # For other orientations, yaw and yaw+180° are NOT equivalent
-        target_rpy_for_flip = R.from_quat(target_quat).as_euler('xyz')
-        target_roll_deg = np.degrees(target_rpy_for_flip[0])
-        use_yaw_flip = 60 < abs(target_roll_deg) < 120
-        yaw_flip = yaw_deg + 180.0 if yaw_deg < 0 else yaw_deg - 180.0
-
-        # "Wrist-only motion" seeds: keep upper arm fixed, vary wrist
-        # These help find solutions where shoulder/elbow stay put (preferred motion)
         seeds = [
             np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, 90, yaw_deg]),
-            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, 90, yaw_deg]),
-            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 30, 90, yaw_deg]),
             np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, -90, yaw_deg]),
-            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, -90, yaw_deg]),
-            np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 30, -90, yaw_deg]),
         ]
-        # Add yaw_flip variants only when roll≈±90° (gripper sideways)
-        if use_yaw_flip:
-            seeds.extend([
-                np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, 90, yaw_flip]),
-                np.radians([curr_deg[0], curr_deg[1], curr_deg[2], 0, 90, yaw_flip]),
-                np.radians([curr_deg[0], curr_deg[1], curr_deg[2], -30, -90, yaw_flip]),
-            ])
-        # Standard fallback seeds (reduced set - removed redundant similar configurations)
-        seeds.extend([
-            np.radians([85, -80, 90, -90, -90, yaw_deg]),
-            np.radians([90, -90, 90, -90, -90, yaw_deg]),
-            np.radians([0, -90, 90, -90, -90, yaw_deg]),
-            np.radians([180, -90, 90, -90, -90, yaw_deg]),
-            np.radians([85, -80, 90, -90, 90, yaw_deg]),
-            np.radians([90, -90, 90, -90, 90, yaw_deg]),
-            np.radians([85, -108, 106, 2, 76, yaw_deg]),
-            np.radians([85, -80, 90, 90, -90, yaw_deg]),
-        ])
-
-        # Phase 2: Two-stage progressive search
-        # Stage 1: Probe each seed once (1 perturbation) with fail-fast.
-        # If orientation is collision-blocked, bail after 15 consecutive failures (~2s).
-        # If feasible, proceed to full perturbations.
-        # Disable fail-fast to try all seeds (helps find wrist-only motion solutions)
-        fail_fast = 15 if (not all_solutions and collision_checker is not None) else 0
 
         probe_results = solver.solve_collect(
             seeds=seeds,
@@ -1222,24 +1186,8 @@ class ReorientForAssembly(Node):
             collision_checker=collision_checker,
             perturbations=1,
             dx=dx,
-            max_consecutive_collisions=fail_fast,
         )
         _dedupe_record(probe_results)
-
-        # Stage 2: Full perturbations (skip perturbation=0, already probed)
-        # TEMPORARILY SKIPPED: Phase 2b costs ~60 scipy calls (~8-9s).
-        # Probe results from Phase 2a are usually sufficient.
-        # Revert: change "if False and" back to "if"
-        if False and all_solutions and max_tries > 1:
-            deep_results = solver.solve_collect(
-                seeds=seeds,
-                target_pose=target_pose,
-                collision_checker=collision_checker,
-                perturbations=max_tries,
-                dx=dx,
-                perturbation_start=1,
-            )
-            _dedupe_record(deep_results)
 
         # === Select best solution ===
         MAX_JOINT_CHANGE = np.radians(143)
@@ -1304,10 +1252,7 @@ class ReorientForAssembly(Node):
             return self.compute_ik_with_current_seed(target_position, yaw_flipped_quat.tolist(), max_tries, dx, try_yaw_flip=False)
 
         if self.mode == 'sim':
-            if fail_fast > 0 and not all_solutions:
-                self.get_logger().error(f"IK failed: no collision-free solutions (fail-fast: {fail_fast} seed probes all collided, skipped full search)")
-            else:
-                self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
+            self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
         else:
             self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
         return None
@@ -1415,19 +1360,14 @@ class ReorientForAssembly(Node):
                     R_EE_current, R_EE_cardinal
                 )
 
-            # Check if this cardinal would result in EE facing the robot
-            # Store angle_to_base for facing-away preference (larger = more away from robot)
-            angle_to_base = 90.0  # Default if no position
-            facing_robot = False
-            if ee_position is not None:
-                facing_robot, angle_to_base = self.check_ee_facing_robot(
-                    R_EE_cardinal, ee_position, threshold_deg=60.0
-                )
+            # Check world-frame direction constraints
+            facing_robot, _ = self.check_ee_facing_robot(R_EE_cardinal)
+            camera_bad, _ = self.check_camera_direction(R_EE_cardinal)
 
             candidates.append((
                 card_name, card_quat, R_object_result,
                 best_target_for_cardinal, min_error_for_cardinal, ee_rotation_distance,
-                facing_robot, angle_to_base
+                facing_robot, camera_bad
             ))
             
             if min_error_for_cardinal < best_object_error:
@@ -1488,28 +1428,18 @@ class ReorientForAssembly(Node):
             obj_error = candidate[4]
             ee_rotation = candidate[5]
             facing_robot = candidate[6] if len(candidate) > 6 else False
-            angle_to_base = candidate[7] if len(candidate) > 7 else 90.0
+            camera_bad = candidate[7] if len(candidate) > 7 else False
 
-            # Reject facing-robot cardinals entirely (sort to end)
-            if facing_robot:
-                return (3, 0, 0, 0)
+            # Reject cardinals with bad world-frame directions (sort to end)
+            if facing_robot or camera_bad:
+                return (2, 0, ee_rotation)
 
             # PRIMARY: Object error bucket (low error is best)
             # Round to 1 decimal to avoid floating point boundary issues (e.g., 44.999° vs 45.001°)
             error_bucket = int(round(obj_error, 1) / error_tolerance)
 
-            # For small or yaw-only rotations, skip facing-away preference
-            # and minimize EE rotation to avoid unnecessary face changes
-            if prefer_minimal_ee_rotation:
-                return (error_bucket, 0, 0, ee_rotation)
-
-            # SECONDARY: Within same error bucket, prefer facing away (angle_to_base > 120°)
-            facing_away_bucket = 0 if angle_to_base > 120 else 1
-
-            # TERTIARY: Prefer larger angle_to_base, then smaller EE rotation
-            facing_away_score = -angle_to_base
-
-            return (error_bucket, facing_away_bucket, facing_away_score, ee_rotation)
+            # SECONDARY: Minimize EE rotation (prefer smallest joint motion)
+            return (error_bucket, 0, ee_rotation)
 
         candidates.sort(key=sort_key)
 
@@ -1528,6 +1458,30 @@ class ReorientForAssembly(Node):
         return (best_cardinal_name, best_cardinal_quat, best_resulting_object_R, 
                 best_matched_target_R, best_object_error, candidates)
     
+    def check_grasp(self, object_name, radius=0.06):
+        """Check if object is within grasp radius of gripper center (sim mode only).
+
+        Returns:
+            (True, distance) if grasped, (False, distance) if not
+        """
+        obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
+        if obj_key not in self.current_poses:
+            return False, float('inf')
+
+        transform = self.current_poses[obj_key].transform
+        object_pos = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
+
+        tcp_pos = np.array([self.current_ee_pose.pose.position.x,
+                            self.current_ee_pose.pose.position.y,
+                            self.current_ee_pose.pose.position.z])
+        tcp_quat = np.array([self.current_ee_pose.pose.orientation.x,
+                             self.current_ee_pose.pose.orientation.y,
+                             self.current_ee_pose.pose.orientation.z,
+                             self.current_ee_pose.pose.orientation.w])
+        gripper_center = tcp_pos + R.from_quat(tcp_quat).as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+        distance = np.linalg.norm(object_pos - gripper_center)
+        return distance <= radius, distance
+
     def reorient_for_target(self, object_name, base_name, duration=5.0,
                             current_object_orientation=None, target_base_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
@@ -1553,11 +1507,27 @@ class ReorientForAssembly(Node):
             return False
         ee_position, R_EE_current = self.get_pose_from_msg(self.current_ee_pose)
 
+        # Compute IK target position: gripper center or flange depending on config
+        if self.rotate_about_gripper_center:
+            gc_offset = R_EE_current @ GRIPPER_CENTER_TOOL_OFFSET
+            ik_target_position = ee_position + gc_offset
+        else:
+            ik_target_position = ee_position
+
         # Store initial EE orientation for JSON output
         initial_ee_quat = R.from_matrix(R_EE_current).as_quat()
         self.initial_ee_orientation_quat = initial_ee_quat
         initial_ee_rpy = R.from_quat(initial_ee_quat).as_euler('xyz', degrees=True)
         self.initial_ee_orientation_rpy_deg = self.canonicalize_euler(initial_ee_rpy)
+
+        # === Verify grasp in sim mode ===
+        if self.mode == 'sim':
+            grasped, dist = self.check_grasp(object_name)
+            if not grasped:
+                self.error_message = f"Grasp check failed: {object_name} is {dist*1000:.1f}mm from gripper center."
+                self.get_logger().error(self.error_message)
+                return False
+            self.get_logger().info(f"Grasp verified: {object_name} is {dist*1000:.1f}mm from gripper center")
 
         # === Get current object orientation ===
         if current_object_orientation is not None:
@@ -1686,16 +1656,17 @@ class ReorientForAssembly(Node):
                     card_target_R_base_rel = cand[3]
                     card_error = cand[4]
                     ee_rot_dist = cand[5]
-                    facing_robot = cand[6] if len(cand) > 6 else False
-                    angle_to_base = cand[7] if len(cand) > 7 else 90.0
                     R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
                     R_EE_cand_world = R_base @ R_EE_cand_base_rel
                     card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
                     card_obj_R_world = R_base @ card_obj_R_base_rel
                     card_target_R_world = R_base @ card_target_R_base_rel
-                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, angle_to_base))
+                    # Recompute direction checks in world frame
+                    facing_robot, _ = self.check_ee_facing_robot(R_EE_cand_world)
+                    camera_bad, _ = self.check_camera_direction(R_EE_cand_world)
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, camera_bad))
                 candidates = transformed_candidates
-            
+
             cardinal_object_error = object_error
         
         # === Try cardinals with threshold increment (ALWAYS use canonical) ===
@@ -1824,14 +1795,14 @@ class ReorientForAssembly(Node):
                     card_target_R_base_rel = cand[3]
                     card_error = cand[4]
                     ee_rot_dist = cand[5]
-                    facing_robot = cand[6] if len(cand) > 6 else False
-                    angle_to_base = cand[7] if len(cand) > 7 else 90.0
                     R_EE_cand_base_rel = R.from_quat(card_quat_base_rel).as_matrix()
                     R_EE_cand_world = R_base @ R_EE_cand_base_rel
                     card_quat_world = R.from_matrix(R_EE_cand_world).as_quat()
                     card_obj_R_world = R_base @ card_obj_R_base_rel
                     card_target_R_world = R_base @ card_target_R_base_rel
-                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, angle_to_base))
+                    facing_robot, _ = self.check_ee_facing_robot(R_EE_cand_world)
+                    camera_bad, _ = self.check_camera_direction(R_EE_cand_world)
+                    transformed_candidates.append((card_name, card_quat_world, card_obj_R_world, card_target_R_world, card_error, ee_rot_dist, facing_robot, camera_bad))
                 candidates = transformed_candidates
 
         # Helper to prepare a candidate for IK (snap to exact equivalent target)
@@ -1871,7 +1842,7 @@ class ReorientForAssembly(Node):
                         target_rpy = R.from_quat(card_quat).as_euler('xyz', degrees=True)
                         self.get_logger().info(f"  → IK target for {card_name}: EE RPY=[{target_rpy[0]:.1f}, {target_rpy[1]:.1f}, {target_rpy[2]:.1f}]")
 
-                    joint_angles = self.compute_ik_with_current_seed(ee_position.tolist(), card_quat.tolist())
+                    joint_angles = self.compute_ik_with_current_seed(ik_target_position.tolist(), card_quat.tolist())
 
                     if joint_angles is not None:
                         best_cardinal = card_name
@@ -1887,7 +1858,7 @@ class ReorientForAssembly(Node):
                     for cand in batch:
                         card_name, card_quat, card_object_R, card_target_R, card_error = prepare_candidate(cand)
 
-                        joint_angles, y_offset_used = self.compute_ik_with_y_search(ee_position.tolist(), card_quat.tolist())
+                        joint_angles, y_offset_used = self.compute_ik_with_y_search(ik_target_position.tolist(), card_quat.tolist())
 
                         if joint_angles is not None:
                             best_cardinal = card_name
@@ -1923,17 +1894,17 @@ class ReorientForAssembly(Node):
                         for cand in candidates:
                             cn, cq_br, co_br, ct_br, ce = cand[0], cand[1], cand[2], cand[3], cand[4]
                             ed = cand[5]
-                            fp = cand[6] if len(cand) > 6 else False
-                            atb = cand[7] if len(cand) > 7 else 90.0  # angle_to_base
                             R_cand_w = R_base @ R.from_quat(cq_br).as_matrix()
+                            fr, _ = self.check_ee_facing_robot(R_cand_w)
+                            cb, _ = self.check_camera_direction(R_cand_w)
                             transformed.append((
                                 cn, R.from_matrix(R_cand_w).as_quat(),
-                                R_base @ co_br, R_base @ ct_br, ce, ed, fp, atb
+                                R_base @ co_br, R_base @ ct_br, ce, ed, fr, cb
                             ))
                         candidates = transformed
 
                 # Try all candidates, pick the one with best clearance
-                # BUT only switch to candidates that face away from robot (angle_to_base > 120°)
+                # Only consider candidates with safe world-frame directions
                 if candidates is not None:
                     best_clearance = primary_clearance
                     for cand in candidates:
@@ -1942,10 +1913,11 @@ class ReorientForAssembly(Node):
                         card_object_R = cand[2]
                         card_target_R = cand[3]
                         card_error = cand[4]
-                        card_angle_to_base = cand[7] if len(cand) > 7 else 90.0
+                        card_facing_robot = cand[6] if len(cand) > 6 else False
+                        card_camera_bad = cand[7] if len(cand) > 7 else False
 
-                        # Only consider facing-away candidates (angle_to_base > 120°)
-                        if card_angle_to_base <= 120.0:
+                        # Skip candidates with bad world-frame directions
+                        if card_facing_robot or card_camera_bad:
                             continue
                         # Snap to exact equivalent target
                         R_EE_card_exact = card_target_R @ R_grasp.T
@@ -1960,7 +1932,7 @@ class ReorientForAssembly(Node):
                             card_error = card_exact_error
 
                         alt_joints = self.compute_ik_with_current_seed(
-                            ee_position.tolist(), card_quat.tolist()
+                            ik_target_position.tolist(), card_quat.tolist()
                         )
                         if alt_joints is not None:
                             alt_clearance = self._min_link_clearance(alt_joints)

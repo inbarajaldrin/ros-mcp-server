@@ -32,6 +32,8 @@ import argparse
 import threading
 import time
 
+from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN, GRIPPER_CENTER_TOOL_OFFSET
+
 try:
     from primitives.utils.action_libraries import move_robust
 except ImportError:
@@ -57,10 +59,10 @@ SIM_Z_FORCE_THRESHOLD = 10.0  # Z force threshold (positive = contact pushback i
 FORCE_THRESHOLD = 20.0  # Stop when force/torque changes by this amount from baseline (Newtons)
 Z_FORCE_THRESHOLD = -5.0  # Z force threshold in N (negative = upward force/resistance)
 
-MOVEMENT_DURATION = 10.0  # Duration for smooth movement in seconds
+MOVEMENT_DURATION = 5.0  # Duration for smooth movement in seconds
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
 MOVE_DOWN_INCREMENT = 0.6  # Distance to move down per increment in meters
-MIN_WORKSPACE_Z = 0.0  # Minimum Z position (workspace limit, below base is unreachable)
+MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
 # =============================================================================
 
 class MoveDown(Node):
@@ -271,14 +273,13 @@ class MoveDown(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
         Args:
             joint_angles: Array of 6 joint angles
             z_threshold: Minimum allowed Z position (meters).
-                        Default -0.01 means 1cm below table is still allowed.
             verbose: If True, log which joint caused collision
 
         Returns:
@@ -765,15 +766,25 @@ class MoveDown(Node):
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
+        # Compute dynamic minimum flange Z based on current gripper orientation.
+        # The gripper center is GRIPPER_CENTER_TOOL_OFFSET along the tool Z-axis from the flange.
+        # The vertical component depends on how much the tool Z-axis projects onto world Z.
+        #   face-down (z_tool_z=-1): TABLE_HEIGHT + MARGIN + 0.23
+        #   sideways  (z_tool_z= 0): TABLE_HEIGHT + MARGIN
+        #   face-up   (z_tool_z=+1): TABLE_HEIGHT + MARGIN - 0.23
+        z_tool_z = target_rot_matrix[2, 2]  # Z-component of tool Z-axis in world frame
+        min_flange_z = TABLE_HEIGHT + TABLE_COLLISION_MARGIN - GRIPPER_CENTER_TOOL_OFFSET[2] * z_tool_z
+        self._min_flange_z = min_flange_z  # Store for convergence check
+
         target_position = list(current_pos)
-        
+
         if self.target_height is not None:
             target_position[2] = self.target_height
         else:
-            # Move to base workspace height (MIN_WORKSPACE_Z)
-            target_position[2] = MIN_WORKSPACE_Z
+            # Move to minimum flange Z (gripper center at table surface)
+            target_position[2] = min_flange_z
             self.current_z_position = target_position[2]  # Update for next movement
-        
+
         # Check if we're already at the target (or very close)
         current_z = current_pos[2]
         distance_to_target = abs(current_z - target_position[2])
@@ -792,10 +803,10 @@ class MoveDown(Node):
             shutdown_timer.daemon = True
             shutdown_timer.start()
             return
-        
+
         # Check workspace limit (safety check)
-        if target_position[2] < MIN_WORKSPACE_Z:
-            self.error_message = f"Target Z position ({target_position[2]:.3f}m) is below workspace limit ({MIN_WORKSPACE_Z}m). Cannot proceed."
+        if target_position[2] < min_flange_z:
+            self.error_message = f"Target Z position ({target_position[2]:.3f}m) is below workspace limit ({min_flange_z:.3f}m for current orientation). Cannot proceed."
             self.get_logger().error(self.error_message)
             rclpy.shutdown()
             return
@@ -815,116 +826,113 @@ class MoveDown(Node):
                 rclpy.shutdown()
                 return
 
-            # Normalize joint angles to [-pi, pi] to avoid issues with joints outside bounds
-            q_guess = np.array([np.arctan2(np.sin(a), np.cos(a)) for a in self.current_joint_angles])
+            q_guess = self.current_joint_angles.copy()
 
             # Collision checker for sim mode
             def collision_checker(joint_angles_candidate):
                 if self.mode != 'sim':
                     return False
-                return (self.check_collision_with_table(joint_angles_candidate, z_threshold=-0.01)
+                return (self.check_collision_with_table(joint_angles_candidate)
                         or self.check_self_collision(joint_angles_candidate))
 
-            solver = IKSolver(IKSolverConfig())
+            # Single-point trajectory with frozen w2+w3 for smooth motion.
+            # For typical move_down distances (<100mm), XY arc is <3mm with 0° orientation error.
+            # w1 is free to compensate for lift+elbow changes, preserving orientation.
+            wrist_2_val = q_guess[4]
+            wrist_3_val = q_guess[5]
+            joint_bounds_frozen = [
+                (-np.pi, np.pi),     # shoulder_pan
+                (-np.pi, 0),         # shoulder_lift: elbow-down
+                (0, np.pi),          # elbow: elbow-down
+                (-np.pi, 0),         # wrist_1: elbow-down
+                (wrist_2_val, wrist_2_val),  # wrist_2: frozen
+                (wrist_3_val, wrist_3_val),  # wrist_3: frozen
+            ]
+            joint_bounds_free = [
+                (-np.pi, np.pi),     # shoulder_pan
+                (-np.pi, 0),         # shoulder_lift: elbow-down
+                (0, np.pi),          # elbow: elbow-down
+                (-np.pi, 0),         # wrist_1: elbow-down
+                (-np.pi, np.pi),     # wrist_2
+                (-2*np.pi, 2*np.pi)  # wrist_3: extended range
+            ]
 
-            # Stage 1: Position perturbations at target Z
+            # Solve with frozen wrists + perturbed seeds
+            rng = np.random.default_rng()
+            seeds = [q_guess.copy()]
+            for _ in range(30):
+                perturbed = q_guess + rng.normal(0, 0.1, 6)
+                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
+                seeds.append(perturbed)
+
+            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen))
             joint_angles = solver.solve(
-                seeds=[q_guess],
+                seeds=seeds,
                 target_pose=target_pose,
                 collision_checker=collision_checker,
-                perturbations=5,
+                perturbations=1,
                 dx=0.001,
             )
 
             if joint_angles is None and solver._best_result is not None:
-                self.get_logger().info(f"Using best IK solution with cost={solver._best_result.cost:.6f}")
+                self.get_logger().info(f"Using best frozen IK solution with cost={solver._best_result.cost:.6f}")
                 joint_angles = solver._best_result.joint_angles
-                T_result = forward_kinematics(dh_params, joint_angles)
-                orientation_error = np.linalg.norm(T_result[:3, :3] - target_rot_matrix)
-                self.get_logger().info(f"Orientation error: {orientation_error:.6f}")
+
+            # Fallback: free wrist constraints
+            if joint_angles is None:
+                self.get_logger().info("Frozen wrist IK failed, falling back to free wrist bounds")
+                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_free))
+                seeds_free = [q_guess.copy()]
+                for _ in range(30):
+                    perturbed = q_guess + rng.normal(0, 0.1, 6)
+                    perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_free], [b[1] for b in joint_bounds_free])
+                    seeds_free.append(perturbed)
+                joint_angles = solver.solve(
+                    seeds=seeds_free,
+                    target_pose=target_pose,
+                    collision_checker=collision_checker,
+                    perturbations=1,
+                    dx=0.001,
+                )
+
+                if joint_angles is None and solver._best_result is not None:
+                    self.get_logger().info(f"Using best IK solution with cost={solver._best_result.cost:.6f}")
+                    joint_angles = solver._best_result.joint_angles
 
             # Stage 2: If IK failed at target Z, try incrementally higher Z values
             if joint_angles is None:
                 self.get_logger().warn(f"IK failed at target Z={target_position[2]:.3f}m. Trying higher Z values...")
-                z_increment = 0.05
-                max_z_attempts = 10
-
-                # Try each Z level sequentially, lowest first (early exit on first success)
-                solver2 = IKSolver(IKSolverConfig())
-                for z_attempt in range(1, max_z_attempts + 1):
-                    test_z = target_position[2] + z_attempt * z_increment
-                    self.get_logger().info(f"Trying IK at Z={test_z:.3f}m (attempt {z_attempt}/{max_z_attempts})")
-
+                solver2 = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_free))
+                for z_attempt in range(1, 11):
+                    test_z = target_position[2] + z_attempt * 0.05
+                    self.get_logger().info(f"Trying IK at Z={test_z:.3f}m (attempt {z_attempt}/10)")
                     test_pose = target_pose.copy()
                     test_pose[2, 3] = test_z
-
-                    ik_result = solver2._solve_single(q_guess, test_pose, collision_checker, None)
+                    ik_result = solver2._solve_single(q_guess, test_pose, collision_checker)
                     if (ik_result is not None and not ik_result.has_collision
-                            and ik_result.cost < solver2.config.cost_threshold):
+                            and ik_result.cost < 0.01):
                         joint_angles = ik_result.joint_angles
                         target_position[2] = test_z
-                        self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m (cost={ik_result.cost:.6f})")
-                        self.get_logger().info(f"Updated target Z to {test_z:.3f}m (lowest reachable height)")
+                        self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m")
                         break
 
                 if joint_angles is None:
-                    if self.mode == 'sim':
-                        self.error_message = "IK solver failed: no valid solution to perform collision-free move down"
-                    else:
-                        self.error_message = "IK solver failed: no valid solution to perform move down"
+                    self.error_message = "IK solver failed: no valid solution to perform move down"
                     self.get_logger().error(self.error_message)
                     rclpy.shutdown()
                     return
 
             self.get_logger().info(f"Computed joint angles: {joint_angles}")
 
-            # Create joint-space interpolated trajectory (smoother, prevents swinging)
-            num_waypoints = 10
             total_duration = MOVEMENT_DURATION
 
-            # Use RAW current joint angles as start (where robot actually is)
-            start_joints = self.current_joint_angles.copy()
-            # Normalize target joints first
-            target_joints = np.array([np.arctan2(np.sin(a), np.cos(a)) for a in joint_angles])
-
-            # Wrap target to be within π of the RAW start (shortest path from actual position)
-            for i in range(6):
-                # Keep adding/subtracting 2π until target is within π of start
-                while target_joints[i] - start_joints[i] > np.pi:
-                    target_joints[i] -= 2 * np.pi
-                while target_joints[i] - start_joints[i] < -np.pi:
-                    target_joints[i] += 2 * np.pi
-
-            self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
-
-            trajectory_points = []
-
-            # Add starting point at t=0 (zero velocity - starting from rest)
-            trajectory_points.append(JointTrajectoryPoint(
-                positions=[float(x) for x in start_joints],
-                velocities=[0.0] * 6,
-                time_from_start=Duration(sec=0, nanosec=0)
-            ))
-
-            # Add intermediate waypoints (no velocity specified - controller computes smooth velocities)
-            for i in range(1, num_waypoints):
-                alpha = i / num_waypoints
-                interpolated_joints = start_joints + alpha * (target_joints - start_joints)
-                time_from_start = (i / num_waypoints) * total_duration
-
-                trajectory_points.append(JointTrajectoryPoint(
-                    positions=[float(x) for x in interpolated_joints],
-                    time_from_start=Duration(sec=int(time_from_start),
-                                            nanosec=int((time_from_start % 1) * 1e9))
-                ))
-
-            # Add final point (zero velocity - stop at end)
-            trajectory_points.append(JointTrajectoryPoint(
-                positions=[float(x) for x in target_joints],
+            # Single endpoint — UR controller handles smooth S-curve
+            trajectory_points = [JointTrajectoryPoint(
+                positions=[float(x) for x in joint_angles],
                 velocities=[0.0] * 6,
                 time_from_start=Duration(sec=int(total_duration),
                                         nanosec=int((total_duration % 1) * 1e9))
-            ))
+            )]
 
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
@@ -941,7 +949,7 @@ class MoveDown(Node):
             self._send_goal_future = None
             self._get_result_future = None
             
-            self.get_logger().info(f"Joint-space trajectory with {len(trajectory_points)} waypoints sent")
+            self.get_logger().info("Trajectory sent and accepted")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
@@ -1004,7 +1012,7 @@ class MoveDown(Node):
                 # Check if we're already at the target before continuing
                 if self.ee_position is not None:
                     current_z = self.ee_position[2]
-                    target_z = MIN_WORKSPACE_Z if self.target_height is None else self.target_height
+                    target_z = getattr(self, '_min_flange_z', MIN_WORKSPACE_Z) if self.target_height is None else self.target_height
                     distance_to_target = abs(current_z - target_z)
                     
                     if distance_to_target < 0.001:  # Already at target (within 1mm)

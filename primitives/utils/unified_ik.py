@@ -15,18 +15,19 @@ from scipy.spatial.transform import Rotation as Rot
 from primitives.utils.ik_solver import forward_kinematics, dh_params, ik_objective_quaternion
 
 
-def _make_cached_quaternion_objective(target_pose: np.ndarray) -> Callable:
+def _make_cached_quaternion_objective(target_pose: np.ndarray, dh: list = None) -> Callable:
     """Create a cached version of ik_objective_quaternion for a specific target pose.
 
     Pre-computes R_target once instead of calling R.from_matrix() on every
     objective evaluation (~1800 calls per minimize). Benchmarked at 1.43x
     faster per minimize call.
     """
+    fk_dh = dh if dh is not None else dh_params
     target_pos = target_pose[:3, 3]
     R_target = Rot.from_matrix(target_pose[:3, :3])
 
     def objective(q, _target_pose):
-        T_fk = forward_kinematics(dh_params, q)
+        T_fk = forward_kinematics(fk_dh, q)
         pos_error = np.linalg.norm(T_fk[:3, 3] - target_pos)
         R_fk = Rot.from_matrix(T_fk[:3, :3])
         R_error = R_target * R_fk.inv()
@@ -48,11 +49,10 @@ class IKSolverConfig:
     cost_threshold: float = 0.01        # Immediate return threshold (tight tolerance)
     acceptable_cost: float = 0.1        # Fallback acceptance threshold
     early_termination: bool = True      # Stop on good solution
-    track_joint_distance: bool = False  # Track joint space distance for smooth motion
-    joint_distance_immediate: float = 0.5  # Return immediately if joint distance < this
     objective_fn: Optional[Callable] = None  # Custom objective; defaults to ik_objective_quaternion
     joint_bounds: Optional[list] = None      # Custom joint bounds; defaults to [(-pi, pi)] * 6
     solver_options: Optional[Dict] = None    # L-BFGS-B options; defaults to relaxed tolerances
+    dh_params: Optional[list] = None         # Custom DH params; defaults to standard dh_params
 
 
 @dataclass
@@ -61,7 +61,6 @@ class IKResult:
     joint_angles: np.ndarray
     cost: float
     has_collision: bool
-    joint_distance: float = float('inf')  # Distance from current config
 
 
 class IKSolver:
@@ -79,6 +78,7 @@ class IKSolver:
         self._objective_fn = self.config.objective_fn or ik_objective_quaternion
         self._joint_bounds = self.config.joint_bounds or [(-np.pi, np.pi)] * 6
         self._solver_options = self.config.solver_options if self.config.solver_options is not None else _DEFAULT_SOLVER_OPTIONS
+        self._dh_params = self.config.dh_params or dh_params
         self._use_cached_objective = self._objective_fn is ik_objective_quaternion
 
     def _solve_single(
@@ -86,7 +86,6 @@ class IKSolver:
         seed: np.ndarray,
         target_pose: np.ndarray,
         collision_checker: Optional[Callable] = None,
-        current_joints: Optional[np.ndarray] = None,
     ) -> Optional[IKResult]:
         """
         Solve IK for a single seed.
@@ -96,14 +95,13 @@ class IKSolver:
             target_pose: 4x4 homogeneous target pose.
             collision_checker: Optional callback(joint_angles) -> bool.
                 Returns True if collision detected.
-            current_joints: Current joint angles for distance tracking.
 
         Returns:
             IKResult if optimization succeeded, None otherwise.
         """
         # Use cached objective when possible (avoids re-creating R_target on every call)
         if self._use_cached_objective:
-            obj_fn = _make_cached_quaternion_objective(target_pose)
+            obj_fn = _make_cached_quaternion_objective(target_pose, self._dh_params)
         else:
             obj_fn = self._objective_fn
 
@@ -123,15 +121,10 @@ class IKSolver:
         if collision_checker is not None:
             has_collision = collision_checker(result.x)
 
-        joint_distance = float('inf')
-        if current_joints is not None:
-            joint_distance = float(np.linalg.norm(result.x - current_joints))
-
         return IKResult(
             joint_angles=result.x.copy(),
             cost=cost,
             has_collision=has_collision,
-            joint_distance=joint_distance,
         )
 
     def _update_best(self, ik_result: IKResult) -> bool:
@@ -145,27 +138,17 @@ class IKSolver:
         if ik_result.cost >= self.config.acceptable_cost:
             return False
 
-        if self.config.track_joint_distance:
-            is_better = (
-                self._best_result is None
-                or ik_result.joint_distance < self._best_result.joint_distance
-            )
-        else:
-            is_better = (
-                self._best_result is None
-                or ik_result.cost < self._best_result.cost
-            )
+        is_better = (
+            self._best_result is None
+            or ik_result.cost < self._best_result.cost
+        )
 
         if is_better:
             self._best_result = ik_result
 
         # Check for early termination
         if self.config.early_termination and ik_result.cost < self.config.cost_threshold:
-            if self.config.track_joint_distance:
-                if ik_result.joint_distance < self.config.joint_distance_immediate:
-                    return True
-            else:
-                return True
+            return True
 
         return False
 
@@ -174,7 +157,6 @@ class IKSolver:
         seeds: List[np.ndarray],
         target_pose: np.ndarray,
         collision_checker: Optional[Callable] = None,
-        current_joints: Optional[np.ndarray] = None,
         perturbations: int = 1,
         dx: float = 0.001,
     ) -> Optional[np.ndarray]:
@@ -185,7 +167,6 @@ class IKSolver:
             seeds: List of initial joint angle guesses.
             target_pose: 4x4 homogeneous target pose.
             collision_checker: Optional callback(joint_angles) -> bool.
-            current_joints: Current joint angles (for distance tracking).
             perturbations: Number of x-axis perturbations per seed.
             dx: Position perturbation step size.
 
@@ -199,7 +180,7 @@ class IKSolver:
                 perturbed_pose = target_pose.copy()
                 perturbed_pose[0, 3] += p * dx
 
-                ik_result = self._solve_single(seed, perturbed_pose, collision_checker, current_joints)
+                ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
                 if ik_result is not None:
                     terminated = self._update_best(ik_result)
                     if terminated:
@@ -214,7 +195,6 @@ class IKSolver:
         seeds: List[np.ndarray],
         target_pose: np.ndarray,
         collision_checker: Optional[Callable] = None,
-        current_joints: Optional[np.ndarray] = None,
         perturbations: int = 1,
         dx: float = 0.001,
         max_consecutive_collisions: int = 0,
@@ -230,7 +210,6 @@ class IKSolver:
             seeds: List of initial joint angle guesses.
             target_pose: 4x4 homogeneous target pose.
             collision_checker: Optional callback(joint_angles) -> bool.
-            current_joints: Current joint angles (unused, for API consistency).
             perturbations: Number of x-axis perturbations per seed.
             dx: Position perturbation step size.
             max_consecutive_collisions: If > 0 and no solutions found yet,
@@ -251,7 +230,7 @@ class IKSolver:
                 perturbed_pose = target_pose.copy()
                 perturbed_pose[0, 3] += p * dx
 
-                ik_result = self._solve_single(seed, perturbed_pose, collision_checker, current_joints)
+                ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
                 if ik_result is not None and not ik_result.has_collision and ik_result.cost < self.config.acceptable_cost:
                     results.append((ik_result.joint_angles, ik_result.cost))
                     consecutive_failures = 0

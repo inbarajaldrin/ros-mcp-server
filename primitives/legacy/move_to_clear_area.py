@@ -18,9 +18,12 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
+
+from primitives.utils.workspace_config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN
 
 class MoveToClearArea(Node):
     def __init__(self, mode='move'):
@@ -39,9 +42,9 @@ class MoveToClearArea(Node):
         )
 
         # Target position for clear space (gripper center position, not TCP)
-        self.target_gripper_center_position = [-0.320, -0.5, 0.30]  # [x, y, z] - gripper center position (matches safe_height)
+        self.target_gripper_center_position = [-0.320, -0.5, SAFE_HEIGHT]  # [x, y, z] - gripper center position
         # TCP to gripper center offset (24cm along gripper Z-axis, from TCP to gripper center)
-        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm
+        self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
 
         # EE pose data storage
         self.ee_pose_received = False
@@ -186,14 +189,13 @@ class MoveToClearArea(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
         Args:
             joint_angles: Array of 6 joint angles
             z_threshold: Minimum allowed Z position (meters).
-                        Default -0.01 means 1cm below table is still allowed.
             verbose: If True, log which joint caused collision
 
         Returns:
@@ -329,7 +331,7 @@ class MoveToClearArea(Node):
 
         return False  # No collision
 
-    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=-0.01):
+    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN):
         """
         Check if any point along the interpolated trajectory has a collision.
 
@@ -409,96 +411,120 @@ class MoveToClearArea(Node):
         
         # Determine target orientation based on mode
         if self.mode == 'hover':
-            # Check if EE is already above 0.15m - if so, skip step 1
+            from scipy.spatial.transform import Rotation as Rot
+            from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
+            if self.current_joint_angles is None:
+                self.error_message = "Current joint angles not available for hover IK"
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
+
+            trajectory_points = []
             current_height = current_pos[2]
-            if current_height >= 0.15:
-                self.get_logger().info(f"EE already at height {current_height:.3f}m (>= 0.15m), skipping step 1")
-            else:
-                # Step 1: First move to intermediate height (0.15m) to normalize joint positions
-                # This prevents joint limit issues when transitioning to hover position
-                self.get_logger().info(f"Step 1: Moving to intermediate height (0.15m) from {current_height:.3f}m...")
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                safe_height_cmd = f"timeout 30 /usr/bin/python3 {script_dir}/move_to_safe_height.py --height 0.15"
 
-                step1_success = False
-                step1_error = None
+            # Waypoint 1: Lift to intermediate height (if needed)
+            if current_height < 0.15:
+                self.get_logger().info(f"Computing lift to 0.15m from {current_height:.3f}m...")
+                target_rot_matrix = Rot.from_quat(current_quat).as_matrix()
+                lift_target = current_pos.copy()
+                lift_target[2] = 0.15
 
-                try:
-                    result = subprocess.run(
-                        safe_height_cmd,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        cwd=script_dir
-                    )
+                lift_pose = np.eye(4)
+                lift_pose[:3, 3] = lift_target
+                lift_pose[:3, :3] = target_rot_matrix
 
-                    # Parse JSON result to check actual success/failure
-                    if result.stdout and "__RESULT_JSON__" in result.stdout and "__END_RESULT_JSON__" in result.stdout:
-                        start_idx = result.stdout.rfind("__RESULT_JSON__") + len("__RESULT_JSON__")
-                        end_idx = result.stdout.rfind("__END_RESULT_JSON__")
-                        json_str = result.stdout[start_idx:end_idx].strip()
-                        try:
-                            import json
-                            step1_result = json.loads(json_str)
-                            if step1_result.get("result") == "success":
-                                step1_success = True
-                            else:
-                                step1_error = step1_result.get("error", "unknown error")
-                        except json.JSONDecodeError:
-                            step1_error = "Failed to parse JSON result"
+                lift_bounds = [
+                    (-np.pi, np.pi),     # shoulder_pan
+                    (-np.pi, np.pi),     # shoulder_lift
+                    (-np.pi, np.pi),     # elbow
+                    (-np.pi, np.pi),     # wrist_1
+                    (-np.pi, np.pi),     # wrist_2
+                    (-2*np.pi, 2*np.pi)  # wrist_3
+                ]
+                lift_solver = IKSolver(IKSolverConfig(joint_bounds=lift_bounds))
+                lift_joints = lift_solver.solve(
+                    seeds=[self.current_joint_angles.copy()],
+                    target_pose=lift_pose,
+                    perturbations=5,
+                    dx=0.001,
+                )
 
-                    # Check return code
-                    if result.returncode == 124:
-                        step1_error = "Timed out after 30s"
-                    elif result.returncode != 0 and not step1_error:
-                        step1_error = f"Return code {result.returncode}"
-
-                except subprocess.TimeoutExpired:
-                    step1_error = "Subprocess timed out"
-                except Exception as e:
-                    step1_error = str(e)
-
-                if step1_success:
-                    self.get_logger().info("Step 1 completed successfully")
-                else:
-                    self.error_message = f"Step 1 failed: {step1_error or 'move_to_safe_height did not complete'}"
+                if lift_joints is None:
+                    self.error_message = "IK failed for intermediate lift position"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
                     rclpy.shutdown()
                     return
 
-            # Step 2: Now do the actual hover movement
-            self.get_logger().info("Step 2: Moving to hover position...")
+                self.get_logger().info(f"Lift IK solved: cost={lift_solver._best_result.cost:.6f}")
+                trajectory_points.append(JointTrajectoryPoint(
+                    positions=[float(x) for x in lift_joints],
+                    velocities=[0.0] * 6,
+                    time_from_start=Duration(sec=3)
+                ))
+            else:
+                self.get_logger().info(f"EE already at height {current_height:.3f}m (>= 0.15m), skipping lift")
 
-            # Hover mode: Use fixed joint angles for top-down hover position
-            # Pre-computed joint angles for RPY [0, 180, 0]
-            joint_angles = [
-                0.775002,   # shoulder_pan_joint
-                -1.272476,  # shoulder_lift_joint
-                1.718332,   # elbow_joint
-                -2.016652,  # wrist_1_joint
-                -1.570796,  # wrist_2_joint
-                -0.795794,  # wrist_3_joint
+            # Waypoint 2: Hover position (face-down at clear area)
+            self.get_logger().info("Computing hover position IK...")
+            hover_target = np.array(self.target_gripper_center_position)
+            hover_rot = Rot.from_euler('xyz', [0, 180, 0], degrees=True).as_matrix()
+
+            hover_pose = np.eye(4)
+            hover_pose[:3, 3] = hover_target
+            hover_pose[:3, :3] = hover_rot
+
+            hover_bounds = [
+                (-np.pi, np.pi),     # shoulder_pan
+                (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+                (0, np.pi),          # elbow: positive only (elbow down)
+                (-np.pi, np.pi),     # wrist_1
+                (-np.pi, 0),         # wrist_2: negative only (wrist-down)
+                (-2*np.pi, 2*np.pi)  # wrist_3: extended range
             ]
-
-            # Create trajectory point - same duration as move_home (5 seconds)
-            point = JointTrajectoryPoint(
-                positions=[float(x) for x in joint_angles],
-                velocities=[0.0] * 6,
-                time_from_start=Duration(sec=5)  # 5 seconds movement (same as HOME_MOVEMENT_DURATION)
+            hover_solver = IKSolver(IKSolverConfig(joint_bounds=hover_bounds))
+            hover_joints = hover_solver.solve(
+                seeds=[
+                    np.radians([85, -80, 90, -90, -90, 0]),
+                    np.radians([90, -90, 90, -90, -90, 0]),
+                    np.radians([0, -90, 90, -90, -90, 0]),
+                ],
+                target_pose=hover_pose,
+                perturbations=5,
+                dx=0.001,
             )
 
-            # Create and send trajectory
+            if hover_joints is None:
+                self.error_message = "IK failed for hover position"
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
+
+            self.get_logger().info(f"Hover IK solved: cost={hover_solver._best_result.cost:.6f}")
+            lift_duration = 3 if trajectory_points else 0
+            trajectory_points.append(JointTrajectoryPoint(
+                positions=[float(x) for x in hover_joints],
+                velocities=[0.0] * 6,
+                time_from_start=Duration(sec=lift_duration + 5)
+            ))
+
+            # Send single merged trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
-            traj.points = [point]
+            traj.points = trajectory_points
 
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)
 
-            self.get_logger().info("Trajectory sent and accepted")
+            num_waypoints = len(trajectory_points)
+            self.get_logger().info(f"Sending hover trajectory ({num_waypoints} waypoint{'s' if num_waypoints > 1 else ''})")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             return  # Exit early for hover mode
@@ -572,7 +598,7 @@ class MoveToClearArea(Node):
             # The gripper Z-axis points from TCP to gripper center
             # Apply offset only to X and Y, keep Z constant
             gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
-            offset_vector = -self.tcp_to_gripper_center_offset * gripper_z_axis
+            offset_vector = -target_rot_matrix @ self.tcp_to_gripper_center_offset
             tcp_position = np.array(self.target_gripper_center_position) + offset_vector
             tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
             
@@ -603,61 +629,125 @@ class MoveToClearArea(Node):
                 start_joints = self.current_joint_angles.copy()
 
                 def collision_checker(joint_angles):
-                    return (self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+                    return (self.check_collision_with_table(joint_angles)
                             or self.check_self_collision(joint_angles))
 
-                extended_bounds = [(-2*np.pi, 2*np.pi)] * 6
-                config = IKSolverConfig(
-                    early_termination=False,
-                    joint_bounds=extended_bounds,
-                )
-
-                # Strategy: Try all yaw orientations with position perturbations and seed variations
-                solver = IKSolver(config)
-                candidate_solutions = []
-
-                seed_perturbation_offsets = [
-                    [0, 0, 0, 0, 0, 0],  # No perturbation first
-                    [0.1, 0, 0, 0, 0, 0],
-                    [-0.1, 0, 0, 0, 0, 0],
-                    [0.5, 0, 0, 0, 0, 0],
-                    [-0.5, 0, 0, 0, 0, 0],
-                    [np.pi, 0, 0, 0, 0, 0],
+                joint_bounds_base = [
+                    (-np.pi, np.pi),     # shoulder_pan
+                    (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+                    (0, np.pi),          # elbow: positive only (elbow down)
+                    (-np.pi, 0),         # wrist_1: negative only
+                    (-np.pi, np.pi),     # wrist_2
+                    (-2*np.pi, 2*np.pi)  # wrist_3: extended range
                 ]
 
+                # Cardinal wrist configurations differ by face direction:
+                #   face_right: pan ≈ w2, w3 ≈ 0 (freeze w3, couple pan=w2)
+                #   face_down:  w2 ≈ -π/2, lift+elbow+w1 ≈ -π/2 (freeze w2, seed kinematic constraint)
+                w3_val = q_guess[5]
+                w2_val = q_guess[4]
+                joint_bounds_cardinal = list(joint_bounds_base)
+
+                def make_seeds_free(joint_bounds):
+                    seeds = [q_guess.copy()]
+                    for sp in [q_guess[0], 0, np.pi/2, -np.pi/2, np.pi]:
+                        s = q_guess.copy()
+                        s[0] = sp
+                        seeds.append(s)
+                    rng = np.random.default_rng()
+                    for _ in range(20):
+                        perturbed = q_guess + rng.normal(0, 0.1, 6)
+                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds], [b[1] for b in joint_bounds])
+                        seeds.append(perturbed)
+                    return seeds
+
+                if is_face_down:
+                    # face_down cardinal: w2 ≈ -π/2, lift+elbow+w1 ≈ -π/2
+                    joint_bounds_cardinal[4] = (-np.pi/2, -np.pi/2)  # freeze w2 at -π/2
+                    seeds_cardinal = [q_guess.copy()]
+                    # Generate seeds satisfying lift+elbow+w1 ≈ -π/2 constraint
+                    rng = np.random.default_rng()
+                    for sp in [q_guess[0], 0, np.pi/2, -np.pi/2, np.pi]:
+                        for lift in [-1.9, -1.5, -1.3, -1.0]:
+                            for elbow in [1.2, 1.5, 1.8, 2.0]:
+                                w1 = -np.pi/2 - lift - elbow  # satisfy constraint
+                                if -np.pi <= w1 <= 0:  # within bounds
+                                    s = q_guess.copy()
+                                    s[0] = sp
+                                    s[1] = lift
+                                    s[2] = elbow
+                                    s[3] = w1
+                                    s[4] = -np.pi/2
+                                    seeds_cardinal.append(s)
+                    # Add random perturbations around current config
+                    for _ in range(20):
+                        perturbed = q_guess + rng.normal(0, 0.1, 6)
+                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_cardinal], [b[1] for b in joint_bounds_cardinal])
+                        seeds_cardinal.append(perturbed)
+                else:
+                    # face_right cardinal: pan ≈ w2, w3 ≈ 0
+                    joint_bounds_cardinal[5] = (w3_val, w3_val)  # freeze wrist_3
+                    seeds_cardinal = [q_guess.copy()]
+                    for sp in [q_guess[0], 0, np.pi/2, -np.pi/2, np.pi]:
+                        s = q_guess.copy()
+                        s[0] = sp
+                        s[4] = sp  # w2 = pan
+                        seeds_cardinal.append(s)
+                    rng = np.random.default_rng()
+                    for _ in range(20):
+                        perturbed = q_guess + rng.normal(0, 0.1, 6)
+                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_cardinal], [b[1] for b in joint_bounds_cardinal])
+                        perturbed[4] = perturbed[0]  # enforce pan=w2
+                        seeds_cardinal.append(perturbed)
+
+                candidate_solutions = []
+
+                # First pass: face-specific cardinal wrist constraints
+                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_cardinal))
                 for yaw, rot_matrix in target_orientations:
-                    # Build pose for this yaw orientation
-                    # Recalculate TCP position for this orientation (Z offset may differ slightly)
                     gripper_z = rot_matrix[:, 2]
-                    offset_vec = -self.tcp_to_gripper_center_offset * gripper_z
+                    offset_vec = -rot_matrix @ self.tcp_to_gripper_center_offset
                     tcp_pos = np.array(self.target_gripper_center_position) + offset_vec
-                    tcp_pos[2] = self.target_gripper_center_position[2]  # Keep Z constant
+                    tcp_pos[2] = self.target_gripper_center_position[2]
 
                     pose = np.eye(4)
                     pose[:3, 3] = tcp_pos
                     pose[:3, :3] = rot_matrix
 
-                    # Try with position perturbations
-                    for i in range(max_tries):
-                        perturbation_values = [i * dx, -i * dx] if i > 0 else [0]
-                        for perturbation in perturbation_values:
-                            perturbed_pos = tcp_pos.copy()
-                            perturbed_pos[0] += perturbation
-                            if i > max_tries // 2:
-                                perturbed_pos[1] += perturbation * 0.5
-                            perturbed_pose = pose.copy()
-                            perturbed_pose[:3, 3] = perturbed_pos
+                    joint_angles = solver.solve(
+                        seeds=seeds_cardinal,
+                        target_pose=pose,
+                        collision_checker=collision_checker,
+                        perturbations=max_tries,
+                        dx=dx,
+                    )
+                    if joint_angles is not None:
+                        candidate_solutions.append((solver._best_result.cost, joint_angles, yaw))
 
-                            ik_result = solver._solve_single(q_guess, perturbed_pose, collision_checker, None)
-                            if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
-                                candidate_solutions.append((ik_result.cost, ik_result.joint_angles, yaw))
+                # Fallback: free wrist constraints if cardinal solve failed
+                if not candidate_solutions:
+                    self.get_logger().info("Cardinal wrist IK failed, falling back to free wrist bounds")
+                    solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_base))
+                    seeds_free = make_seeds_free(joint_bounds_base)
+                    for yaw, rot_matrix in target_orientations:
+                        gripper_z = rot_matrix[:, 2]
+                        offset_vec = -rot_matrix @ self.tcp_to_gripper_center_offset
+                        tcp_pos = np.array(self.target_gripper_center_position) + offset_vec
+                        tcp_pos[2] = self.target_gripper_center_position[2]
 
-                    # Try with different seeds
-                    for pert in seed_perturbation_offsets:
-                        seed = q_guess + np.array(pert)
-                        ik_result = solver._solve_single(seed, pose, collision_checker, None)
-                        if ik_result is not None and not ik_result.has_collision and ik_result.cost < config.acceptable_cost:
-                            candidate_solutions.append((ik_result.cost, ik_result.joint_angles, yaw))
+                        pose = np.eye(4)
+                        pose[:3, 3] = tcp_pos
+                        pose[:3, :3] = rot_matrix
+
+                        joint_angles = solver.solve(
+                            seeds=seeds_free,
+                            target_pose=pose,
+                            collision_checker=collision_checker,
+                            perturbations=max_tries,
+                            dx=dx,
+                        )
+                        if joint_angles is not None:
+                            candidate_solutions.append((solver._best_result.cost, joint_angles, yaw))
 
                 if not candidate_solutions:
                     self.error_message = "IK solver failed: no collision-free solution found for clear space move"
@@ -679,44 +769,33 @@ class MoveToClearArea(Node):
 
                 for cost, candidate_joints, yaw in candidate_solutions:
                     target_joints = np.array(candidate_joints).copy()
+                    joints_str = ' '.join(f'{v:.6f}' for v in target_joints)
+                    self.get_logger().info(f"Candidate IK (cost={cost:.4f}): {joints_str}")
 
-                    # Generate multiple joint wrapping variants for this solution
-                    # Try different combinations of ±2π on joints that have large differences
+                    # Generate wrapping variants (±2π) for joints 1-5 only (skip wrist_3/joint 6)
                     wrapping_variants = [target_joints.copy()]
-
-                    for joint_idx in range(6):
+                    for joint_idx in range(5):  # joints 0-4 only
                         diff = target_joints[joint_idx] - start_joints[joint_idx]
                         new_variants = []
-
                         for variant in wrapping_variants:
-                            # Keep original
                             new_variants.append(variant.copy())
-
-                            # Try +2π if diff is negative and large
                             if diff < -np.pi/2:
                                 v = variant.copy()
                                 v[joint_idx] += 2 * np.pi
                                 new_variants.append(v)
-
-                            # Try -2π if diff is positive and large
                             if diff > np.pi/2:
                                 v = variant.copy()
                                 v[joint_idx] -= 2 * np.pi
                                 new_variants.append(v)
-
                         wrapping_variants = new_variants
 
-                    # Test each wrapping variant for collision-free trajectory
                     for variant in wrapping_variants:
-                        # Also check that wrapped solution is still collision-free
-                        if self.check_collision_with_table(variant, z_threshold=-0.01):
+                        if self.check_collision_with_table(variant):
                             continue
                         if self.check_self_collision(variant):
                             continue
 
-                        # Check trajectory collision
-                        if not self.check_trajectory_collision(start_joints, variant, num_samples=20, z_threshold=-0.01):
-                            # Calculate total joint travel distance (sum of absolute angle changes)
+                        if not self.check_trajectory_collision(start_joints, variant, num_samples=20):
                             travel_distance = np.sum(np.abs(variant - start_joints))
                             collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
 
@@ -735,36 +814,13 @@ class MoveToClearArea(Node):
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
-                self.get_logger().info(f"Creating joint-space trajectory with {num_waypoints} waypoints")
-
-                trajectory_points = []
-
-                # Add starting point at t=0
-                trajectory_points.append(JointTrajectoryPoint(
-                    positions=[float(x) for x in start_joints],
-                    velocities=[0.0] * 6,
-                    time_from_start=Duration(sec=0, nanosec=0)
-                ))
-
-                # Add intermediate waypoints (no velocity specified - controller computes smooth velocities)
-                for i in range(1, num_waypoints):
-                    alpha = i / num_waypoints
-                    interpolated_joints = start_joints + alpha * (target_joints - start_joints)
-                    time_from_start = (i / num_waypoints) * total_duration
-
-                    trajectory_points.append(JointTrajectoryPoint(
-                        positions=[float(x) for x in interpolated_joints],
-                        time_from_start=Duration(sec=int(time_from_start),
-                                                nanosec=int((time_from_start % 1) * 1e9))
-                    ))
-
-                # Add final point (zero velocity - stop at end)
-                trajectory_points.append(JointTrajectoryPoint(
+                # Single endpoint trajectory — let the UR controller handle smooth acceleration/deceleration
+                trajectory_points = [JointTrajectoryPoint(
                     positions=[float(x) for x in target_joints],
                     velocities=[0.0] * 6,
                     time_from_start=Duration(sec=int(total_duration),
                                             nanosec=int((total_duration % 1) * 1e9))
-                ))
+                )]
 
                 # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
@@ -775,7 +831,7 @@ class MoveToClearArea(Node):
                 goal.trajectory = traj
                 goal.goal_time_tolerance = Duration(sec=1)
 
-                self.get_logger().info(f"Joint-space trajectory with {len(trajectory_points)} waypoints sent")
+                self.get_logger().info("Trajectory sent and accepted")
                 self._send_goal_future = self.action_client.send_goal_async(
                     goal,
                     feedback_callback=self.feedback_callback

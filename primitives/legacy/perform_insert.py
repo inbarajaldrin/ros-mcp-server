@@ -22,7 +22,7 @@ import sys
 import os
 
 # Add project root to path so primitives package can be imported when running directly
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
@@ -40,13 +40,14 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import time
 import argparse
-from primitives.utils.ik_solver import compute_ik, ik_objective_quaternion
+from primitives.utils.ik_solver import compute_ik, ik_objective_quaternion, dh_params
 from scipy.optimize import minimize
 from tf2_msgs.msg import TFMessage
 import json
 import os
 import glob
 from primitives.utils.data_path_finder import get_assembly_data_dir
+from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 
 
 # Configuration (auto-discovered)
@@ -464,14 +465,13 @@ class PerformInsertController(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
         Args:
             joint_angles: Array of 6 joint angles
             z_threshold: Minimum allowed Z position (meters).
-                        Default -0.01 means 1cm below table is still allowed.
             verbose: If True, log which joint caused collision
 
         Returns:
@@ -641,6 +641,36 @@ class PerformInsertController(Node):
 
         return False  # No violation
 
+    def check_compact_configuration(self, joint_angles, min_wrist_shoulder_xy=0.20, verbose=False):
+        """
+        Check if the robot configuration is too compact (wrist too close to shoulder).
+
+        Args:
+            joint_angles: Array of 6 joint angles
+            min_wrist_shoulder_xy: Minimum allowed XY distance (meters) between
+                                   wrist2 and shoulder.
+            verbose: If True, log details
+
+        Returns:
+            True if configuration is too compact (should be rejected), False otherwise
+        """
+        joint_positions = self.compute_all_joint_positions(joint_angles)
+
+        shoulder_pos = np.array(joint_positions[1])
+        wrist2_pos = np.array(joint_positions[5])
+
+        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
+
+        if xy_dist < min_wrist_shoulder_xy:
+            if verbose:
+                self.get_logger().warn(
+                    f"Compact configuration detected: wrist-shoulder XY distance="
+                    f"{xy_dist*1000:.1f}mm < threshold={min_wrist_shoulder_xy*1000:.1f}mm"
+                )
+            return True  # Too compact
+
+        return False  # Configuration OK
+
     def read_current_joint_angles(self):
         """Read current joint angles using ROS2 subscriber"""
         timeout_count = 0
@@ -652,7 +682,8 @@ class PerformInsertController(Node):
     
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
         """
-        Compute IK using current joint angles as seed (exactly like translate_for_assembly_old step 2)
+        Compute IK using current joint angles as seed.
+        Uses unified IK solver with joint-distance tracking for smooth motion.
 
         Args:
             target_position: [x, y, z] target position
@@ -663,142 +694,76 @@ class PerformInsertController(Node):
         Returns:
             Joint angles if successful, None otherwise
         """
-        # Convert quaternion to rotation matrix
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+
         target_rotation = R.from_quat(target_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
-        # Create target pose
         target_pose = np.eye(4)
         target_pose[:3, 3] = target_position
         target_pose[:3, :3] = target_rot_matrix
 
-        # Use current joint angles as seed
         if self.joints is None:
             self.get_logger().error("Current joint angles not available! Cannot compute IK.")
             return None
 
         q_guess = self.joints.copy()
 
-        # Try IK with current joint angles and position perturbations
-        solution_found = False
-        best_result = None
-        best_cost = float('inf')
+        # Collision checker for sim mode
+        def collision_checker(joint_angles):
+            if self.mode != 'sim':
+                return False
+            return (self.check_collision_with_table(joint_angles)
+                    or self.check_self_collision(joint_angles)
+                    or self.check_ee_below_base(joint_angles, z_threshold=0.05))
 
-        for i in range(max_tries):
-            if solution_found:
-                break
+        joint_bounds = [
+            (-np.pi, np.pi),     # shoulder_pan
+            (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+            (0, np.pi),          # elbow: positive only (elbow down)
+            (-np.pi, np.pi),     # wrist_1
+            (-np.pi, 0),         # wrist_2: negative only (wrist-down)
+            (-2*np.pi, 2*np.pi)  # wrist_3: extended range
+        ]
+        config = IKSolverConfig(
+            joint_bounds=joint_bounds,
+        )
+        solver = IKSolver(config)
 
-            # Try small x-shift each iteration (helps with workspace boundaries)
-            perturbed_position = np.array(target_position).copy()
-            perturbed_position[0] += i * dx
+        # Phase 1: Current joint angles as seed with perturbations
+        result = solver.solve(
+            seeds=[q_guess],
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
-            perturbed_pose = target_pose.copy()
-            perturbed_pose[:3, 3] = perturbed_position
+        # Phase 2: Fallback predefined seeds
+        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True).tolist()
 
-            joint_bounds = [(-np.pi, np.pi)] * 6
-
-            # Use quaternion-based objective
-            result = minimize(ik_objective_quaternion, q_guess, args=(perturbed_pose,),
-                            method='L-BFGS-B', bounds=joint_bounds)
-
-            if result.success:
-                cost = ik_objective_quaternion(result.x, perturbed_pose)
-
-                # Check for collisions (sim mode only)
-                has_collision = False
-                if self.mode == 'sim':
-                    # Check table collision
-                    has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                    # Check self-collision
-                    has_self_collision = self.check_self_collision(result.x)
-                    # Check EE below robot base (lower threshold for insertion operations)
-                    has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
-                    has_collision = has_table_collision or has_self_collision or has_ee_below_base
-
-                # Check if this is a good solution (low cost and no collision)
-                if cost < 0.01 and not has_collision:
-                    return result.x
-
-                # Keep track of best solution (only if no collision)
-                if not has_collision and cost < best_cost:
-                    best_cost = cost
-                    best_result = result.x
-
-        # If we found any reasonable solution (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
-
-        # Fallback: Try multiple predefined seeds if current seed failed
-        # Convert target quaternion to RPY for seed generation
-        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True)
-        target_rpy_deg = target_rpy_deg.tolist()
-
-        # Generate diverse seed configurations (reduced set for efficiency)
         seed_configs = [
-            # Standard seeds (most common configurations)
             np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
             np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
             np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
-            # Elbow-up configuration
             np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
-            # Wrist variation
             np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
-            # Pitch variation
             np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
         ]
 
-        best_result = None
-        best_cost = float('inf')
-        found_good_solution = False
-
-        for seed_idx, q_guess_fallback in enumerate(seed_configs):
-            if found_good_solution:
-                break  # Early termination: already found a good solution
-
-            for i in range(max_tries):
-                # Try small x-shift each iteration
-                perturbed_position = np.array(target_position).copy()
-                perturbed_position[0] += i * dx
-
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[:3, 3] = perturbed_position
-
-                joint_bounds = [(-np.pi, np.pi)] * 6
-
-                # Use quaternion-based objective
-                result = minimize(ik_objective_quaternion, q_guess_fallback, args=(perturbed_pose,),
-                                method='L-BFGS-B', bounds=joint_bounds)
-
-                if result.success:
-                    cost = ik_objective_quaternion(result.x, perturbed_pose)
-
-                    # Check for collisions (sim mode only)
-                    has_collision = False
-                    if self.mode == 'sim':
-                        # Check table collision
-                        has_table_collision = self.check_collision_with_table(result.x, z_threshold=-0.01)
-                        # Check self-collision
-                        has_self_collision = self.check_self_collision(result.x)
-                        # Check EE below robot base (lower threshold for insertion operations)
-                        has_ee_below_base = self.check_ee_below_base(result.x, z_threshold=0.05)
-                        has_collision = has_table_collision or has_self_collision or has_ee_below_base
-
-                    # Check if this is a good solution (low cost and no collision)
-                    if cost < 0.01 and not has_collision:
-                        return result.x
-
-                    # Keep track of best solution (only if no collision)
-                    if not has_collision and cost < best_cost:
-                        best_cost = cost
-                        best_result = result.x
-                        # Early termination: if cost < 0.05, good enough to stop searching
-                        if best_cost < 0.05:
-                            found_good_solution = True
-                            break
-
-        # If we found any reasonable solution with fallback seeds (without collision), use it
-        if best_result is not None and best_cost < 0.1:
-            return best_result
+        # Reset solver state for fallback phase
+        solver = IKSolver(config)
+        result = solver.solve(
+            seeds=seed_configs,
+            target_pose=target_pose,
+            collision_checker=collision_checker,
+            perturbations=max_tries,
+            dx=dx,
+        )
+        if result is not None:
+            return result
 
         if self.mode == 'sim':
             self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
@@ -850,6 +815,23 @@ class PerformInsertController(Node):
             self.get_logger().error(f"Trajectory execution error: {e}")
             return False
     
+    def check_grasp(self, object_name, radius=0.06):
+        """Check if object is within grasp radius of gripper center.
+
+        Returns:
+            (True, distance) if grasped, (False, distance) if not
+        """
+        obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
+        if obj_key not in self.current_poses:
+            return False, float('inf')
+
+        transform = self.current_poses[obj_key].transform
+        object_pos = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
+
+        gripper_center = self.pos + R.from_quat(self.quat).as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+        distance = np.linalg.norm(object_pos - gripper_center)
+        return distance <= radius, distance
+
     def move_down_sim(self, duration=10.0):
         """Sim mode: Move down to final position (step 2 from translate_for_assembly)"""
         # Wait for pose data
@@ -876,6 +858,14 @@ class PerformInsertController(Node):
             self.get_logger().error(self.error_message)
             return False
         
+        # Verify grasp before executing insertion
+        grasped, dist = self.check_grasp(self.object_name)
+        if not grasped:
+            self.error_message = f"Grasp check failed: {self.object_name} is {dist*1000:.1f}mm from gripper center."
+            self.get_logger().error(self.error_message)
+            return False
+        self.get_logger().info(f"Grasp verified: {self.object_name} is {dist*1000:.1f}mm from gripper center")
+
         # Get current EE pose as PoseStamped-like structure
         # Use actual current EE orientation from topic (maintain current orientation like old code)
         if self.quat is None:
@@ -938,52 +928,165 @@ class PerformInsertController(Node):
                 self.get_logger().error("Could not read current joint angles")
                 return False
 
-        # Create Cartesian path to maintain EE orientation throughout motion
+        # Multi-waypoint Cartesian interpolation with frozen w2+w3.
+        # Frozen wrists preserve orientation with 0° error while
+        # multi-waypoint ensures straight-line Cartesian path.
         num_waypoints = 10
         total_duration = 5.0
         current_ee_position = ee_current_position
         target_position = ee_target_position
 
-        trajectory_points = []
-        prev_joint_angles = self.joints.copy()
+        wrist_2_val = self.joints[4]
+        wrist_3_val = self.joints[5]
+        joint_bounds_frozen = [
+            (-np.pi, np.pi),     # shoulder_pan
+            (-np.pi, 0),         # shoulder_lift: elbow-down
+            (0, np.pi),          # elbow: elbow-down
+            (-np.pi, np.pi),     # wrist_1
+            (wrist_2_val, wrist_2_val),  # wrist_2: frozen
+            (wrist_3_val, wrist_3_val),  # wrist_3: frozen
+        ]
+
+        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+        solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
+
+        # First pass: solve IK for all waypoints
+        # Start with current joints as waypoint 0 (t=0, vel=0) for smooth ramp-up
+        start_joints = np.array([float(x) for x in self.joints])
+        all_joint_angles = [start_joints]
 
         for i in range(1, num_waypoints + 1):
             alpha = i / num_waypoints
             waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
 
-            waypoint_joint_angles = self.compute_ik_with_current_seed(
-                waypoint_position.tolist(),
-                ee_target_quat.tolist(),
-                max_tries=3,
-                dx=0.001
+            waypoint_pose = np.eye(4)
+            waypoint_pose[:3, 3] = waypoint_position
+            waypoint_pose[:3, :3] = ee_target_rot_matrix
+
+            rng = np.random.default_rng(seed=i)
+            seeds = [self.joints.copy()]
+            for _ in range(10):
+                perturbed = self.joints + rng.normal(0, 0.1, 6)
+                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
+                seeds.append(perturbed)
+
+            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
+            waypoint_joint_angles = solver.solve(
+                seeds=seeds,
+                target_pose=waypoint_pose,
+                perturbations=1,
             )
 
+            if waypoint_joint_angles is None and solver._best_result is not None:
+                waypoint_joint_angles = solver._best_result.joint_angles
+
             if waypoint_joint_angles is None:
-                self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
-                self.get_logger().error(self.error_message)
-                return False
+                fallback = self.compute_ik_with_current_seed(
+                    waypoint_position.tolist(), ee_target_quat.tolist(),
+                    max_tries=3, dx=0.001
+                )
+                if fallback is None:
+                    self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
+                    self.get_logger().error(self.error_message)
+                    return False
+                waypoint_joint_angles = fallback
 
-            # Unwrap joint angles to avoid configuration flips
-            for j in range(6):
-                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
-                if diff > np.pi:
-                    waypoint_joint_angles[j] -= 2 * np.pi
-                elif diff < -np.pi:
-                    waypoint_joint_angles[j] += 2 * np.pi
-
-            prev_joint_angles = waypoint_joint_angles.copy()
             self.joints = waypoint_joint_angles.copy()
+            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
 
-            time_from_start = (i / num_waypoints) * total_duration
+        # Second pass: trapezoidal velocity profile for smooth accel/cruise/decel.
+        # 1) Compute cumulative arc length in joint space
+        n_total = len(all_joint_angles)
+        segment_dists = []
+        for i in range(1, n_total):
+            dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+            segment_dists.append(max(dist, 1e-6))
+        cumulative_s = [0.0]
+        for d in segment_dists:
+            cumulative_s.append(cumulative_s[-1] + d)
+        total_s = cumulative_s[-1]
+
+        # 2) Trapezoidal profile: accel phase, cruise phase, decel phase
+        # Use 20% of total duration for accel, 20% for decel, 60% cruise
+        accel_frac = 0.2
+        decel_frac = 0.2
+        t_accel = accel_frac * total_duration
+        t_decel = decel_frac * total_duration
+        t_cruise = total_duration - t_accel - t_decel
+
+        # v_max from: total_s = 0.5*v_max*t_accel + v_max*t_cruise + 0.5*v_max*t_decel
+        # total_s = v_max * (0.5*t_accel + t_cruise + 0.5*t_decel)
+        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+        a_accel = v_max / t_accel
+        a_decel = v_max / t_decel
+
+        def trapez_s_and_v(t_query):
+            """Return (arc_length, velocity) at time t_query along trapezoidal profile."""
+            if t_query <= t_accel:
+                # Acceleration phase: s = 0.5 * a * t^2
+                s = 0.5 * a_accel * t_query ** 2
+                v = a_accel * t_query
+            elif t_query <= t_accel + t_cruise:
+                # Cruise phase
+                s_accel = 0.5 * v_max * t_accel
+                s = s_accel + v_max * (t_query - t_accel)
+                v = v_max
+            else:
+                # Deceleration phase
+                s_accel = 0.5 * v_max * t_accel
+                s_cruise = v_max * t_cruise
+                t_in_decel = t_query - t_accel - t_cruise
+                s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
+                v = v_max - a_decel * t_in_decel
+            return s, max(v, 0.0)
+
+        # 3) Map each waypoint's arc length to a time on the trapezoidal profile
+        # Invert: given s_i, find t such that trapez_s(t) = s_i
+        def find_time_for_s(target_s):
+            """Binary search for time that achieves target arc length."""
+            lo, hi = 0.0, total_duration
+            for _ in range(50):  # converges in ~50 iterations
+                mid = (lo + hi) / 2
+                s_mid, _ = trapez_s_and_v(mid)
+                if s_mid < target_s:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+
+        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+        waypoint_times[0] = 0.0
+        waypoint_times[-1] = total_duration
+
+        # 4) Compute joint velocities: scale the trapezoidal speed by the joint-space direction
+        trajectory_points = []
+        for i in range(n_total):
+            t_i = waypoint_times[i]
+            _, speed_scalar = trapez_s_and_v(t_i)  # scalar speed along path
+
+            if i == 0 or i == n_total - 1:
+                velocities = [0.0] * 6
+            else:
+                # Direction: central difference normalized
+                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                delta_norm = np.linalg.norm(delta)
+                if delta_norm > 1e-8:
+                    direction = delta / delta_norm
+                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                else:
+                    velocities = [0.0] * 6
+
             point = {
-                "positions": [float(x) for x in waypoint_joint_angles],
-                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start - int(time_from_start)) * 1e9))
+                "positions": [float(x) for x in all_joint_angles[i]],
+                "velocities": velocities,
+                "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
             }
-            if i == num_waypoints:
-                point["velocities"] = [0.0] * 6
             trajectory_points.append(point)
 
-        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
+        self.get_logger().info(
+            f"Trajectory created with {len(trajectory_points)} waypoints "
+            f"(trapezoidal profile, v_max={np.degrees(v_max):.1f}°/s)"
+        )
 
         success = self.execute_trajectory_sim({"traj1": trajectory_points})
 
@@ -1243,7 +1346,7 @@ class PerformInsertController(Node):
         
         # Calculate how far we want to move down
         start_z = self.pos[2]
-        target_z = 0.0  # Workspace base (or until contact)
+        target_z = TABLE_HEIGHT  # Table surface (or until contact)
         distance_to_move = start_z - target_z
         
         if distance_to_move <= 0.001:

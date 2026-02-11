@@ -13,6 +13,15 @@ from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import json
+import sys
+import os
+
+# Add project root so primitives can be imported when run as python3 queries/get_current_gripper_center_pose.py
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
 
 
 def output_result(result):
@@ -27,12 +36,7 @@ class GripperCenterPoseReader:
         self.node = rclpy.create_node('gripper_center_pose_reader')
         
         # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
-        # This matches the offset used in move_to_grasp.py
-        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm (distance from TCP to gripper center)
-        
-        # Z-offset to match object height (calibration offset)
-        # Object z: 150.43 mm, TCP z: 27.50 mm, difference: 122.93 mm = 0.1229 m
-        self.gripper_center_z_offset = 0.1229  # Offset to match object height (in meters)
+        self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
         
         # Default values (gripper center pose)
         self.gripper_center_position = np.array([-0.144, -0.435, 0.202])
@@ -69,7 +73,7 @@ class GripperCenterPoseReader:
         """
         # Offset vector in tool frame (gripper frame): [0, 0, offset_distance]
         # In tool frame, Z-axis points from TCP to gripper center (downward)
-        offset_vector_tool_frame = np.array([0.0, 0.0, self.tcp_to_gripper_center_offset])
+        offset_vector_tool_frame = self.tcp_to_gripper_center_offset
         
         # Transform offset vector from tool frame to world frame using quaternion
         # The quaternion represents the rotation from tool frame to world frame
@@ -79,10 +83,7 @@ class GripperCenterPoseReader:
         # Compute gripper center: TCP + offset_vector_world
         # (going forward from TCP to gripper center along the tool Z-axis)
         gripper_center_position = np.array(tcp_position) + offset_vector_world
-        
-        # Apply z-offset to match object height
-        gripper_center_position[2] += self.gripper_center_z_offset
-        
+
         return gripper_center_position
         
     def gripper_center_pose_callback(self, msg: PoseStamped):

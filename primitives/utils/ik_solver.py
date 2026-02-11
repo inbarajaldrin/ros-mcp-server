@@ -2,15 +2,17 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R
 
+
 # UR5e DH parameters
 dh_params = [
-    (0,  0.1625,  0,     np.pi/2),  
-    (0,  0,      -0.425,  0),       
-    (0,  0,      -0.3922, 0),       
-    (0,  0.1333,  0,     np.pi/2),  
-    (0,  0.0997,  0,    -np.pi/2),  
+    (0,  0.1625,  0,     np.pi/2),
+    (0,  0,      -0.425,  0),
+    (0,  0,      -0.3922, 0),
+    (0,  0.1333,  0,     np.pi/2),
+    (0,  0.0997,  0,    -np.pi/2),
     (0,  0.0996,  0,     0)
 ]
+
 
 def rpy_to_matrix(rpy):
     return R.from_euler('xyz', rpy, degrees=True).as_matrix()

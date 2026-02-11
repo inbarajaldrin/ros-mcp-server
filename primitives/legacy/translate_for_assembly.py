@@ -39,13 +39,14 @@ import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params, compute_ik
 from primitives.utils.data_path_finder import get_assembly_data_dir
+from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
-HOVER_HEIGHT = 0.25  # Height to hover above base before descending
+HOVER_HEIGHT = 0.40  # Height to hover above base before descending
 
 
 def output_result(result):
@@ -386,14 +387,13 @@ class TranslateForAssembly(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=-0.01, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
         Args:
             joint_angles: Array of 6 joint angles
             z_threshold: Minimum allowed Z position (meters).
-                        Default -0.01 means 1cm below table is still allowed.
             verbose: If True, log which joint caused collision
 
         Returns:
@@ -626,62 +626,35 @@ class TranslateForAssembly(Node):
         def collision_checker(joint_angles):
             if self.mode != 'sim':
                 return False
-            return (self.check_collision_with_table(joint_angles, z_threshold=-0.01)
+            return (self.check_collision_with_table(joint_angles)
                     or self.check_self_collision(joint_angles)
                     or self.check_ee_below_base(joint_angles)
                     or self.check_compact_configuration(joint_angles))
 
+        joint_bounds = [
+            (-np.pi, np.pi),     # shoulder_pan
+            (-np.pi, np.pi),     # shoulder_lift
+            (-np.pi, np.pi),     # elbow
+            (-np.pi, np.pi),     # wrist_1
+            (-np.pi, np.pi),     # wrist_2
+            (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
+        ]
         config = IKSolverConfig(
-            track_joint_distance=True,
-            joint_distance_immediate=0.5,
+            joint_bounds=joint_bounds,
         )
         solver = IKSolver(config)
 
-        # Phase 1: Current joint angles as seed with perturbations
         result = solver.solve(
             seeds=[q_guess],
             target_pose=target_pose,
             collision_checker=collision_checker,
-            current_joints=self.current_joint_angles,
             perturbations=max_tries,
             dx=dx,
         )
         if result is not None:
             return result
 
-        # Phase 2: Fallback predefined seeds
-        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True).tolist()
-
-        seed_configs = [
-            np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
-            np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([180, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
-            np.radians([85, -60, 60, -90, -90, target_rpy_deg[2]]),
-            np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
-            np.radians([85, -80, 90, -90, -180, target_rpy_deg[2]]),
-            np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
-            np.radians([85, -90, 100, -100, -90, target_rpy_deg[2]]),
-        ]
-
-        # Reset solver state for fallback phase
-        solver = IKSolver(config)
-        result = solver.solve(
-            seeds=seed_configs,
-            target_pose=target_pose,
-            collision_checker=collision_checker,
-            current_joints=self.current_joint_angles,
-            perturbations=max_tries,
-            dx=dx,
-        )
-        if result is not None:
-            return result
-
-        if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base + compact config) even with multiple seeds")
-        else:
-            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+        self.get_logger().error("IK failed: couldn't find solution for translate")
         return None
     
     def translate_for_target_sim(self, object_name, base_name, duration=20.0):
@@ -727,11 +700,29 @@ class TranslateForAssembly(Node):
             self.get_logger().error(self.error_message)
             return False
         
+        # Verify grasp before executing translation
+        tcp_pos = np.array([self.current_ee_pose.pose.position.x,
+                            self.current_ee_pose.pose.position.y,
+                            self.current_ee_pose.pose.position.z])
+        tcp_quat = np.array([self.current_ee_pose.pose.orientation.x,
+                             self.current_ee_pose.pose.orientation.y,
+                             self.current_ee_pose.pose.orientation.z,
+                             self.current_ee_pose.pose.orientation.w])
+        gripper_center = tcp_pos + R.from_quat(tcp_quat).as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+        obj_transform = self.current_poses[obj_key].transform
+        object_pos = np.array([obj_transform.translation.x, obj_transform.translation.y, obj_transform.translation.z])
+        grasp_distance = np.linalg.norm(object_pos - gripper_center)
+        if grasp_distance > 0.06:
+            self.error_message = f"Grasp check failed: {object_name} is {grasp_distance*1000:.1f}mm from gripper center."
+            self.get_logger().error(self.error_message)
+            return False
+        self.get_logger().info(f"Grasp verified: {object_name} is {grasp_distance*1000:.1f}mm from gripper center")
+
         # Convert poses to matrices
         T_EE_current = self.pose_to_matrix(self.current_ee_pose.pose)
         T_object_current = self.transform_to_matrix(self.current_poses[obj_key].transform)
         T_base_current = self.transform_to_matrix(self.current_poses[base_key].transform)
-        
+
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
         
@@ -779,53 +770,27 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Create Cartesian path to maintain EE orientation throughout motion
-        num_waypoints = 10
+        # Compute IK for the final hover position
         total_duration = 5.0
-        current_ee_position = ee_current_position
-        target_position = hover_position
+        target_joint_angles = self.compute_ik_with_current_seed(
+            hover_position.tolist(),
+            ee_target_quat.tolist(),
+            max_tries=5,
+            dx=0.001
+        )
 
-        trajectory_points = []
-        prev_joint_angles = self.current_joint_angles.copy()
+        if target_joint_angles is None:
+            self.error_message = "IK failed for hover position"
+            self.get_logger().error(self.error_message)
+            return False
 
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+        self.current_joint_angles = target_joint_angles.copy()
 
-            # Use IK with collision checking
-            waypoint_joint_angles = self.compute_ik_with_current_seed(
-                waypoint_position.tolist(),
-                ee_target_quat.tolist(),
-                max_tries=3,
-                dx=0.001
-            )
-
-            if waypoint_joint_angles is None:
-                self.error_message = f"IK solver failed at waypoint {i}/{num_waypoints}"
-                self.get_logger().error(self.error_message)
-                return False
-
-            # Unwrap joint angles to avoid configuration flips
-            for j in range(6):
-                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
-                if diff > np.pi:
-                    waypoint_joint_angles[j] -= 2 * np.pi
-                elif diff < -np.pi:
-                    waypoint_joint_angles[j] += 2 * np.pi
-
-            prev_joint_angles = waypoint_joint_angles.copy()
-            self.current_joint_angles = waypoint_joint_angles.copy()
-
-            time_from_start = (i / num_waypoints) * total_duration
-            point = {
-                "positions": [float(x) for x in waypoint_joint_angles],
-                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
-            }
-            if i == num_waypoints:
-                point["velocities"] = [0.0] * 6
-            trajectory_points.append(point)
-
-        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
+        trajectory_points = [{
+            "positions": [float(x) for x in target_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=int(total_duration), nanosec=0)
+        }]
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
@@ -936,19 +901,11 @@ class TranslateForAssembly(Node):
         ee_target_quat = R.from_matrix(T_EE_current[:3, :3]).as_quat()
         self.get_logger().info("Keeping current EE orientation unchanged (from reorient step)")
         
-        # Calculate EE position directly from target object position
-        # Using same offsets as move_to_grasp: object_to_gripper_center_offset and tcp_to_gripper_center_offset
-        # Since gripper is face-down, offsets are vertical in world Z-axis
-        object_to_gripper_center_offset = 0.123  # 12.3cm - object is above gripper center
-        tcp_to_gripper_center_offset = 0.24  # 24cm - TCP is above gripper center
-        
-        # Calculate gripper center position (below object)
-        gripper_center_position = target_object_position_abs.copy()
-        gripper_center_position[2] -= object_to_gripper_center_offset
-        
-        # Calculate TCP position (above gripper center)
-        ee_target_position = gripper_center_position.copy()
-        ee_target_position[2] += tcp_to_gripper_center_offset
+        # Calculate EE (flange) position from target object position
+        # Since gripper is face-down, the flange is directly above the gripper center
+        R_ee = T_EE_current[:3, :3]
+        ee_target_position = target_object_position_abs.copy()
+        ee_target_position -= R_ee @ GRIPPER_CENTER_TOOL_OFFSET
         
         # Apply height offset - add HOVER_HEIGHT above base (step 1: hover position only)
         hover_position = ee_target_position.copy()
@@ -956,8 +913,7 @@ class TranslateForAssembly(Node):
         
         self.get_logger().info(f"Calculated EE position from target object position:")
         self.get_logger().info(f"  Target object: {target_object_position_abs}")
-        self.get_logger().info(f"  Gripper center: {gripper_center_position}")
-        self.get_logger().info(f"  EE (TCP) position: {ee_target_position}")
+        self.get_logger().info(f"  EE (flange) position: {ee_target_position}")
         self.get_logger().info(f"  Hover position (with {HOVER_HEIGHT}m height offset): {hover_position}")
 
         # Read current joint angles before computing IK
@@ -968,53 +924,27 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Create Cartesian path to maintain EE orientation throughout motion
-        num_waypoints = 10
+        # Compute IK for the final hover position
         total_duration = 5.0
-        current_ee_position = ee_current_position
-        target_position = hover_position
+        target_joint_angles = self.compute_ik_with_current_seed(
+            hover_position.tolist(),
+            ee_target_quat.tolist(),
+            max_tries=5,
+            dx=0.001
+        )
 
-        trajectory_points = []
-        prev_joint_angles = self.current_joint_angles.copy()
+        if target_joint_angles is None:
+            self.error_message = "IK failed for hover position"
+            self.get_logger().error(self.error_message)
+            return False
 
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+        self.current_joint_angles = target_joint_angles.copy()
 
-            # Use IK with collision checking
-            waypoint_joint_angles = self.compute_ik_with_current_seed(
-                waypoint_position.tolist(),
-                ee_target_quat.tolist(),
-                max_tries=3,
-                dx=0.001
-            )
-
-            if waypoint_joint_angles is None:
-                self.error_message = f"IK solver failed at waypoint {i}/{num_waypoints}"
-                self.get_logger().error(self.error_message)
-                return False
-
-            # Unwrap joint angles to avoid configuration flips
-            for j in range(6):
-                diff = waypoint_joint_angles[j] - prev_joint_angles[j]
-                if diff > np.pi:
-                    waypoint_joint_angles[j] -= 2 * np.pi
-                elif diff < -np.pi:
-                    waypoint_joint_angles[j] += 2 * np.pi
-
-            prev_joint_angles = waypoint_joint_angles.copy()
-            self.current_joint_angles = waypoint_joint_angles.copy()
-
-            time_from_start = (i / num_waypoints) * total_duration
-            point = {
-                "positions": [float(x) for x in waypoint_joint_angles],
-                "time_from_start": Duration(sec=int(time_from_start), nanosec=int((time_from_start % 1) * 1e9))
-            }
-            if i == num_waypoints:
-                point["velocities"] = [0.0] * 6
-            trajectory_points.append(point)
-
-        self.get_logger().info(f"Trajectory created with {len(trajectory_points)} waypoints")
+        trajectory_points = [{
+            "positions": [float(x) for x in target_joint_angles],
+            "velocities": [0.0] * 6,
+            "time_from_start": Duration(sec=int(total_duration), nanosec=0)
+        }]
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:

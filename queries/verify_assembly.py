@@ -33,8 +33,8 @@ from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetr
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
-BASE_TOPIC = "/objects_poses_sim"
-OBJECT_TOPIC = "/objects_poses_sim"
+OBJECT_TOPIC_SIM = "/objects_poses_sim"
+OBJECT_TOPIC_REAL = "/objects_poses_real"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Tolerance thresholds
@@ -196,9 +196,15 @@ class FoldSymmetry:
 
 
 class VerifyAssembly(Node):
-    def __init__(self, base_name=None, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
+    def __init__(self, base_name=None, mode='sim', base_topic=None, object_topic=None, ee_topic=EE_TOPIC):
         super().__init__('verify_assembly')
-        
+
+        # Determine topic based on mode
+        if object_topic is None:
+            object_topic = OBJECT_TOPIC_REAL if mode == 'real' else OBJECT_TOPIC_SIM
+        if base_topic is None:
+            base_topic = object_topic
+
         # Store base name and find assembly JSON file
         self.base_name = base_name
         self.assembly_json_file = None
@@ -545,14 +551,14 @@ class VerifyAssembly(Node):
         }
 
         if within_tolerance:
-            self.get_logger().info("Verification successful: Object is in correct assembly pose")
+            self.get_logger().info(f"[{original_object_name}] Verification successful: in correct assembly pose")
             return True, error_data
         else:
-            self.get_logger().error("Verification failed: Object is NOT in correct assembly pose")
+            self.get_logger().error(f"[{original_object_name}] Verification failed: NOT in correct assembly pose")
             if not position_ok:
-                self.get_logger().error(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m)")
+                self.get_logger().error(f"[{original_object_name}] Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m)")
             if not orientation_ok:
-                self.get_logger().error(f"Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
+                self.get_logger().error(f"[{original_object_name}] Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
             return False, error_data
     
     def get_unassembled_objects(self, base_name, exclude_object_name):
@@ -613,6 +619,8 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='Verify Assembly - Check if object is in correct position')
     parser.add_argument('--object-name', type=str, help='Name of the object to verify (optional if --check-all is used)')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
+    parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
+                       help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
     parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are assembled')
     parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
@@ -622,7 +630,7 @@ def main(args=None):
         parser.error("Either --object-name or --check-all must be specified")
 
     rclpy.init()
-    node = VerifyAssembly(base_name=args.base_name)
+    node = VerifyAssembly(base_name=args.base_name, mode=args.mode)
 
     success = False
     error_data = {}

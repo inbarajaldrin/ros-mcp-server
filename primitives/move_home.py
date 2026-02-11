@@ -10,6 +10,7 @@ if _project_root not in sys.path:
 import rclpy
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
+from controller_manager_msgs.srv import ListControllers
 from rclpy.action import ActionClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
@@ -89,6 +90,30 @@ class HomeRunner(Node):
                 self.get_logger().error("Goal not accepted after max retries. Exiting.")
                 self.shutdown()
 
+    def diagnose_rejection(self):
+        """Query controller_manager to determine why the goal was rejected."""
+        cli = self.create_client(ListControllers, '/controller_manager/list_controllers')
+        if not cli.wait_for_service(timeout_sec=2.0):
+            return "Trajectory goal rejected (controller_manager unavailable for diagnostics)"
+
+        future = cli.call_async(ListControllers.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if not future.done() or future.result() is None:
+            return "Trajectory goal rejected (could not query controller state)"
+
+        for c in future.result().controller:
+            if c.name == 'scaled_joint_trajectory_controller':
+                if c.state == 'inactive':
+                    return "scaled_joint_trajectory_controller is not active"
+                elif c.state == 'unconfigured':
+                    return "scaled_joint_trajectory_controller is unconfigured"
+                elif c.state == 'active':
+                    return "External control program stopped or robot in protective stop"
+                else:
+                    return f"scaled_joint_trajectory_controller in unexpected state: {c.state}"
+
+        return "scaled_joint_trajectory_controller not found"
+
     def goal_response(self, future):
         goal_handle = future.result()
         if self.acceptance_timer:
@@ -97,8 +122,8 @@ class HomeRunner(Node):
 
         if not goal_handle.accepted:
             self.goal_rejected = True
-            self.error = "External control program stopped or robot in protective stop"
-            self.get_logger().error("Trajectory goal rejected")
+            self.error = self.diagnose_rejection()
+            self.get_logger().error(f"Trajectory goal rejected: {self.error}")
             self.shutdown()
             return
 

@@ -823,13 +823,14 @@ def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
     return _run_with_retry(_run_query, "verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
 
 @mcp.tool()
-def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
     """Verify if object(s) are in correct assembly pose relative to base.
 
     Args:
         base_name: Name of the base object
         object_name: Name of the object to verify (optional if check_all is True)
         check_all: If True, check all objects in the assembly instead of a specific one
+        mode: Robot mode
 
     Returns:
         When check_all=False (single object):
@@ -849,9 +850,9 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
         - "unassembled_objects": List of objects that are NOT assembled
     """
     if check_all:
-        return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify assembly")
+        return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
     elif object_name:
-        return _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify assembly")
+        return _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify assembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 

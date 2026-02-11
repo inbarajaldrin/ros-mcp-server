@@ -25,6 +25,7 @@ from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
+from controller_manager_msgs.srv import ListControllers
 import math
 import argparse
 import numpy as np
@@ -41,6 +42,7 @@ from primitives.utils.quaternion_orientation_controller import QuaternionOrienta
 
 # Import path finder for auto-discovering aruco-grasp-annotator data directory
 from primitives.utils.data_path_finder import get_symmetry_dir
+from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
@@ -63,8 +65,11 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
     original_position = np.array(position)
     target_rot_matrix = R.from_euler('xyz', rpy, degrees=True).as_matrix()
 
+    # Convert gripper center target to flange target
+    flange_position = original_position - target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+
     target_pose = np.eye(4)
-    target_pose[:3, 3] = original_position
+    target_pose[:3, 3] = flange_position
     target_pose[:3, :3] = target_rot_matrix
 
     # Fallback seeds (minimal set - most diverse configurations)
@@ -126,14 +131,18 @@ def output_result(result):
 class DirectObjectMove(Node):
     def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, movement_duration=5.0, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
         super().__init__('direct_object_move')
-        
+
         # Mode must be explicitly specified - no default
         if mode is None:
             raise ValueError("Mode must be explicitly specified. Use 'sim' or 'real'.")
         if mode not in ['sim', 'real']:
             raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
-        
+
         self.mode = mode  # 'sim' or 'real'
+
+        # Movement parameters (configurable)
+        self.hover_height_offset = 0.075  # Hover height above grasp point in step 1 (meters)
+        self.table_clearance = 0.01  # Minimum clearance above table for gripper fingers (meters)
         
         # Set default topic based on mode if not provided
         if topic_name is None:
@@ -163,56 +172,20 @@ class DirectObjectMove(Node):
         self.position_threshold = 0.005  # 5mm
         self.angle_threshold = 2.0       # 2 degrees
         
-        # Calibration offset to correct systematic detection bias (only for real mode)
-        if self.mode == 'real':
-            # First step offsets (initial movement)
-            self.calibration_offset_x = 0.0  # X-axis correction
-            self.calibration_offset_y = +0.0  # Y-axis correction
-            self.calibration_offset_z = 0.05  # Z-axis correction (height)
-            # Second step offsets (fine adjustment)
-            self.fine_offset_x = 0.00  # Fine X-axis correction
-            self.fine_offset_y = -0.00  # Fine Y-axis correction
-            self.fine_offset_z = -0.048  # Fine Z-axis correction (height)
-            # State tracking for two-step movement
-            self.step1_completed = False  # Track if first step is done
-            self.step1_z_position = None  # Store Z position from step 1
-        else:
-            self.calibration_offset_x = 0.000
-            self.calibration_offset_y = 0.000
-            self.calibration_offset_z = 0.000
-            self.fine_offset_x = 0.000
-            self.fine_offset_y = 0.000
-            self.fine_offset_z = 0.000
-            self.step1_completed = False
-            self.step1_z_position = None
+        # State tracking for two-step movement
+        self.step1_completed = False  # Track if first step is done
+        self.step1_z_position = None  # Store Z position from step 1
         
         # Minimum actual gripper center height above table surface (meters)
         # The gripper has material both above and below the center point.
         # For small objects near the table, the gripper center must be raised
         # to prevent the lower finger material from hitting the table during closure.
-        self.min_gripper_center_z = 0.011  # 11mm - ensures clearance for gripper fingers below center
+        self.min_gripper_center_z = TABLE_HEIGHT + self.table_clearance  # Ensures clearance for gripper fingers below center
 
-        # Z calibration offset between the geometric model and the actual gripper center
-        # The actual gripper center z = model's offset_point z + this calibration value
-        # (Matches gripper_center_z_offset in get_current_gripper_center_pose.py)
-        self.gripper_center_z_calibration = 0.1229
-
-        # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
-        # This implements a spherical flexure joint concept (same as URSim TCP control):
-        # - The offset point (gripper center) acts as a fixed point in space
-        # - When rotating the gripper, TCP moves to keep the offset point fixed
-        # - offset_point = tcp_position + tcp_to_gripper_center_offset * z_axis_gripper
-        # - tcp_position = offset_point - tcp_to_gripper_center_offset * z_axis_gripper
-        self.tcp_to_gripper_center_offset = 0.24  # 0.24m = 24cm (distance from TCP to gripper center)
-        
-        # Offset from target object to gripper center (grasp candidate position to gripper center)
-        # This is the distance from object/grasp point to gripper center
-        # Gripper center = object_position - offset (below object)
-        # TCP = gripper center + 0.24 (above gripper center)
-        # So: TCP = object - offset + 0.24 = object + (0.24 - offset)
-        # Example: offset=0.123 -> gripper_center = object - 0.123, TCP = object - 0.123 + 0.24 = object + 0.117
-        # When offset increases, gripper center moves further down, TCP moves down
-        self.object_to_gripper_center_offset = offset if offset is not None else 0.123  # Default: 0.123m = 12.3cm
+        # Vertical offset below the grasp point for the gripper center (meters).
+        # IK targets are converted from gripper center to flange using GRIPPER_CENTER_TOOL_OFFSET.
+        # Default 0: gripper center placed at the grasp point.
+        self.offset = offset if offset is not None else 0
         
         # Initialize Quaternion Orientation Controller for gimbal-lock-free gripper control
         # This ensures stable gripper orientation at pitch=180° (face down) for any yaw angle
@@ -389,64 +362,6 @@ class DirectObjectMove(Node):
         
         return [roll, pitch, yaw]
     
-    def compute_offset_point(self, tcp_position, quaternion):
-        """Compute the offset point from TCP position using spherical flexure joint concept
-        (Same as URSim TCP control)
-        
-        The offset vector is defined in the tool frame (gripper frame) and then
-        transformed to world frame using the tool orientation quaternion.
-        
-        Args:
-            tcp_position: TCP position in world frame [x, y, z]
-            quaternion: TCP/tool orientation quaternion [x, y, z, w] (tool frame to world frame)
-        
-        Returns:
-            offset_point: Position of the offset point (gripper center) in world frame [x, y, z]
-        """
-        # Offset vector in tool frame (gripper frame): [0, 0, offset_distance]
-        # In tool frame, Z-axis points from TCP to gripper center (downward)
-        offset_vector_tool_frame = np.array([0.0, 0.0, self.tcp_to_gripper_center_offset])
-        
-        # Transform offset vector from tool frame to world frame using quaternion
-        # The quaternion represents the rotation from tool frame to world frame
-        r = R.from_quat(quaternion)
-        offset_vector_world = r.apply(offset_vector_tool_frame)
-        
-        # Compute offset point: TCP + offset_vector_world
-        # (going forward from TCP to gripper center along the tool Z-axis)
-        offset_point = np.array(tcp_position) + offset_vector_world
-        
-        return offset_point.tolist()
-    
-    def compute_tcp_from_offset_point(self, offset_point, quaternion):
-        """Compute TCP position from offset point using the gripper orientation
-        
-        The offset is computed along the gripper Z-axis in world frame.
-        The gripper Z-axis is obtained from the quaternion orientation.
-        
-        Args:
-            offset_point: Position of the gripper center (offset point) in world frame [x, y, z]
-            quaternion: Gripper orientation quaternion [x, y, z, w] (gripper frame to world frame)
-                       The quaternion's Z-axis points from TCP to gripper center.
-        
-        Returns:
-            tcp_position: TCP position in world frame [x, y, z]
-        """
-        # Get gripper Z-axis direction in world frame
-        r = R.from_quat(quaternion)
-        gripper_z_axis = r.apply(np.array([0.0, 0.0, 1.0]))  # Gripper Z-axis in world frame
-        gripper_z_axis = gripper_z_axis / np.linalg.norm(gripper_z_axis)  # Normalize
-        
-        # Compute offset vector in world frame
-        # The offset goes from gripper center to TCP, opposite to gripper Z-axis
-        offset_vector_world = -self.tcp_to_gripper_center_offset * gripper_z_axis
-        
-        # Compute TCP position: offset_point + offset_vector_world
-        # (going from gripper center towards TCP, opposite to gripper Z-axis)
-        tcp_position = np.array(offset_point) + offset_vector_world
-        
-        return tcp_position.tolist()
-    
     def poses_are_similar(self, position, quaternion):
         """Check if pose is similar to last target (QUATERNION-BASED, no RPY)"""
         if self.last_target_pose is None:
@@ -591,7 +506,7 @@ class DirectObjectMove(Node):
 
     def timer_callback(self):
         """Process pose and perform movement to object"""
-        if self.movement_completed:
+        if self.movement_completed or self.should_exit:
             return
         
         # Handle canonical pose retry mode - adjust threshold instead of moving robot
@@ -662,18 +577,6 @@ class DirectObjectMove(Node):
             # Use provided target position and orientation
             object_position = np.array(self.target_xyz[:3])  # Take first 3 elements
             
-            # Apply calibration offset to correct systematic detection bias (only for real mode)
-            if self.mode == 'real':
-                if not self.step1_completed:
-                    # Step 1: Apply first calibration offsets
-                    object_position[0] += self.calibration_offset_x  # Correct X offset
-                    object_position[1] += self.calibration_offset_y  # Correct Y offset
-                    object_position[2] += self.calibration_offset_z  # Correct Z offset
-                else:
-                    # Step 2: Apply ONLY fine offsets to X, Y, and Z (not first offsets)
-                    object_position[0] += self.fine_offset_x  # Fine X offset only
-                    object_position[1] += self.fine_offset_y  # Fine Y offset only
-                    object_position[2] += self.fine_offset_z  # Fine Z offset only
             
             # Use provided target quaternion and apply fold symmetry matching
             provided_quat = np.array(self.target_xyzw)
@@ -705,7 +608,10 @@ class DirectObjectMove(Node):
                         for marker in self.latest_grasp_points.markers
                     )
                     if not object_exists:
-                        msg = f"Object '{self.object_name}' not found in grasp topic"
+                        if self.latest_pose is None:
+                            msg = f"Object '{self.object_name}' not detected on pose topic {self.topic_name} (object may be out of view)"
+                        else:
+                            msg = f"Object '{self.object_name}' detected on pose topic but not in grasp topic. Make sure grasp publisher is running"
                     else:
                         # Object exists but grasp_id not found - list available IDs
                         available_ids = [
@@ -756,19 +662,6 @@ class DirectObjectMove(Node):
             if using_stale_grasp_point:
                 self.get_logger().debug(f"Using stale grasp point {self.grasp_id} (topic is empty)")
             
-            # Apply calibration offset to correct systematic detection bias (only for real mode)
-            if self.mode == 'real':
-                if not self.step1_completed:
-                    # Step 1: Apply first calibration offsets
-                    grasp_point_position[0] += self.calibration_offset_x  # Correct X offset
-                    grasp_point_position[1] += self.calibration_offset_y  # Correct Y offset
-                    grasp_point_position[2] += self.calibration_offset_z  # Correct Z offset
-                else:
-                    # Step 2: Apply ONLY fine offsets to X, Y, and Z (not first offsets)
-                    # Use regular fine offsets (same for both stale and fresh grasp points)
-                    grasp_point_position[0] += self.fine_offset_x  # Fine X offset only
-                    grasp_point_position[1] += self.fine_offset_y  # Fine Y offset only
-                    grasp_point_position[2] += self.fine_offset_z  # Fine Z offset only
             
             # Set object position to grasp point position for distance calculation
             object_position = grasp_point_position
@@ -893,18 +786,6 @@ class DirectObjectMove(Node):
             # Extract yaw from returned quaternion (canonical match or fallback)
             object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
             
-            # Apply calibration offset to correct systematic detection bias (only for real mode)
-            if self.mode == 'real':
-                if not self.step1_completed:
-                    # Step 1: Apply first calibration offsets
-                    object_position[0] += self.calibration_offset_x  # Correct X offset
-                    object_position[1] += self.calibration_offset_y  # Correct Y offset
-                    object_position[2] += self.calibration_offset_z  # Correct Z offset
-                else:
-                    # Step 2: Apply ONLY fine offsets to X, Y, and Z (not first offsets)
-                    object_position[0] += self.fine_offset_x  # Fine X offset only
-                    object_position[1] += self.fine_offset_y  # Fine Y offset only
-                    object_position[2] += self.fine_offset_z  # Fine Z offset only
             
             # Smooth Z position after recovery to prevent height jumps
             if self.mode == 'real' and was_tracking_lost:
@@ -952,7 +833,7 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"EE orientation (quaternion-based, no gimbal lock):\n"
                                  f"   q=[{target_quaternion[0]:.6f}, {target_quaternion[1]:.6f}, "
                                  f"{target_quaternion[2]:.6f}, {target_quaternion[3]:.6f}]\n"
-                                 f"   Aligned with object yaw: {object_yaw:.1f}° (extracted from {yaw_source})")
+                                 f"   Aligned with object yaw: {object_yaw:.1f}°")
         else:
             # No target provided and no object detected
             if self.mode == 'real' and self.last_known_object_position is not None:
@@ -1022,51 +903,41 @@ class DirectObjectMove(Node):
             return
         
         
-        # Calculate target end-effector position using simple vertical offsets
-        # Since gripper is always face-down (pitch=180°), all offsets are vertical in world Z-axis
-        
+        # Calculate target gripper center position.
+        # IK converts this to flange position using GRIPPER_CENTER_TOOL_OFFSET.
+
         if self.height is not None:
-            # If height is explicitly specified, use that exact height (ignore offset)
-            target_ee_position = np.array([
-                object_position[0],
-                object_position[1],
-                self.height
-            ])
+            target_ee_position = np.array([object_position[0], object_position[1], self.height])
         else:
-            # Calculate positions: Object -> Gripper Center -> TCP
-            # 1. Subtract offset from object Z to get gripper center (offset point) - gripper center is BELOW object
-            # 2. Add TCP offset to gripper center to get TCP position (vertical offset, since gripper is face-down)
-            # Formula: gripper_center = object - object_to_gripper_center_offset
-            #          TCP = gripper_center + tcp_to_gripper_center_offset = object - object_to_gripper_center_offset + tcp_to_gripper_center_offset
-            
-            # First calculate gripper center (offset point) - gripper center is BELOW the object
-            offset_point = object_position.copy()
-            offset_point[2] -= self.object_to_gripper_center_offset  # Gripper center is offset below object
+            target_ee_position = object_position.copy()
+            if self.offset is not None and self.offset != 0:
+                target_ee_position[2] -= self.offset
 
-            # Enforce minimum actual gripper center height to prevent table collision
-            # The actual gripper center z = offset_point[2] + gripper_center_z_calibration
-            # (the geometric model's offset_point is below the real gripper center by the calibration amount)
-            expected_gc_z = offset_point[2] + self.gripper_center_z_calibration
-            if expected_gc_z < self.min_gripper_center_z:
-                z_raise = self.min_gripper_center_z - expected_gc_z
-                offset_point[2] += z_raise
+            # Enforce minimum gripper center height to prevent table collision
+            if target_ee_position[2] < self.min_gripper_center_z:
                 self.get_logger().info(
-                    f"Raising gripper center from {expected_gc_z*1000:.1f}mm to "
+                    f"Raising gripper center from {target_ee_position[2]*1000:.1f}mm to "
                     f"{self.min_gripper_center_z*1000:.1f}mm (min clearance for table)")
+                target_ee_position[2] = self.min_gripper_center_z
 
-            # Then calculate TCP position from offset point (simple vertical offset since gripper is face-down)
-            target_ee_position = offset_point.copy()
-            target_ee_position[2] += self.tcp_to_gripper_center_offset  # TCP is above gripper center
-        
-        # For sim mode step 1: add z offset of 0.05
-        if self.mode == 'sim' and not self.step1_completed:
-            target_ee_position[2] += 0.05  # Add 0.05m z offset for step 1
-        
-        self.get_logger().info(f"Target TCP: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
+        # Step 1: add hover height offset (both sim and real modes)
+        if not self.step1_completed:
+            target_ee_position[2] += self.hover_height_offset  # Add hover offset for step 1
+
+        self.get_logger().info(f"Target gripper center: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
         
         # Check convergence in step 2: if robot is close enough to target, count stable readings and exit
+        # current_ee_position is the flange from the broadcaster; convert to gripper center
         if self.step1_completed:
-            distance_to_target = np.linalg.norm(current_ee_position - target_ee_position)
+            current_ee_quat = [
+                self.current_ee_pose.pose.orientation.x,
+                self.current_ee_pose.pose.orientation.y,
+                self.current_ee_pose.pose.orientation.z,
+                self.current_ee_pose.pose.orientation.w,
+            ]
+            R_ee = R.from_quat(current_ee_quat).as_matrix()
+            current_gc_position = current_ee_position + R_ee @ GRIPPER_CENTER_TOOL_OFFSET
+            distance_to_target = np.linalg.norm(current_gc_position - target_ee_position)
             
             if distance_to_target <= self.convergence_distance_threshold:
                 self.convergence_stable_count += 1
@@ -1108,36 +979,95 @@ class DirectObjectMove(Node):
         yaw_alt = ((yaw_alt + 180) % 360) - 180
         target_rot_alt = [0, 180, yaw_alt]
 
-        sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1)
+        joint_angles = None
+        chosen_yaw = None
 
-        # Skip sol_b if sol_a is good enough (close to current joints)
-        # This saves ~8 scipy calls when sol_a succeeds
-        sol_b = None
-        if self.current_joint_angles is not None and sol_a is not None:
-            ref = np.array(self.current_joint_angles)
-            joint_dist_a = np.linalg.norm(np.array(sol_a) - ref)
-            # Only compute sol_b if sol_a requires large joint movement (> 1.5 rad total)
-            if joint_dist_a > 1.5:
-                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
-        elif sol_a is None:
-            sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+        if self.step1_completed:
+            # Step 2: solve with current_joints + joint perturbations (no fallback seeds).
+            # The arm only descends ~5cm from hover, so current_joints neighborhood always
+            # contains a valid solution. Fallback seeds risk early-terminating with a
+            # different wrist_3 branch, causing a 180° flip. Joint perturbations escape
+            # local minima that cause ~2-3° orientation error from a single-seed solve.
+            from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+            curr = np.array(self.current_joint_angles)
+            joint_bounds = [
+                (-np.pi, np.pi), (-np.pi, 0), (0, np.pi),
+                (-np.pi, np.pi), (-np.pi, 0), (-2*np.pi, 2*np.pi),
+            ]
 
-        # Pick solution closest to current joints
-        if self.current_joint_angles is not None:
-            ref = np.array(self.current_joint_angles)
+            # Generate perturbed seeds around current joints
+            n_perturbations = 30
+            perturbation_sigma = 0.1  # radians (~5.7°)
+            rng = np.random.default_rng()
+            seeds = [curr]
+            for _ in range(n_perturbations):
+                perturbed = curr + rng.normal(0, perturbation_sigma, 6)
+                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds], [b[1] for b in joint_bounds])
+                seeds.append(perturbed)
+
+            solver = IKSolver(IKSolverConfig(
+                cost_threshold=0.01, joint_bounds=joint_bounds,
+            ))
+            # Try both yaw variants with perturbed seeds
+            # Convert gripper center targets to flange targets
+            gc_pos = np.array(ik_position)
+            target_rot_matrix_a = R.from_euler('xyz', target_rot, degrees=True).as_matrix()
+            pose_a = np.eye(4)
+            pose_a[:3, 3] = gc_pos - target_rot_matrix_a @ GRIPPER_CENTER_TOOL_OFFSET
+            pose_a[:3, :3] = target_rot_matrix_a
+
+            target_rot_matrix_b = R.from_euler('xyz', target_rot_alt, degrees=True).as_matrix()
+            pose_b = np.eye(4)
+            pose_b[:3, 3] = gc_pos - target_rot_matrix_b @ GRIPPER_CENTER_TOOL_OFFSET
+            pose_b[:3, :3] = target_rot_matrix_b
+
+            cj_sol_a = solver.solve(seeds=seeds, target_pose=pose_a, perturbations=1)
+            solver._best_result = None  # Reset for second solve
+            cj_sol_b = solver.solve(seeds=seeds, target_pose=pose_b, perturbations=1)
+
             candidates = []
-            if sol_a is not None:
-                candidates.append(sol_a)
-            if sol_b is not None:
-                candidates.append(sol_b)
+            if cj_sol_a is not None:
+                candidates.append((cj_sol_a, yaw_degrees))
+            if cj_sol_b is not None:
+                candidates.append((cj_sol_b, yaw_alt))
             if candidates:
-                joint_angles = min(candidates, key=lambda s: np.linalg.norm(np.array(s) - ref))
-                chosen_yaw = yaw_degrees if (sol_a is not None and np.array_equal(joint_angles, sol_a)) else yaw_alt
-                self.get_logger().info(f"Chose yaw={chosen_yaw:.1f}° (joint distance: {np.linalg.norm(np.array(joint_angles) - ref):.3f} rad)")
+                best = min(candidates, key=lambda s: np.linalg.norm(np.array(s[0]) - curr))
+                joint_angles, chosen_yaw = best
+                self.get_logger().info(
+                    f"Step 2: current_joints solved (yaw={chosen_yaw:.1f}°, "
+                    f"jdist={np.linalg.norm(np.array(joint_angles) - curr):.3f} rad)")
             else:
-                joint_angles = None
+                self.get_logger().warn("Step 2: current_joints failed both yaw variants — IK failed")
         else:
-            joint_angles = sol_a if sol_a is not None else sol_b
+            # Step 1: full multi-seed search
+            sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1)
+
+            # Skip sol_b if sol_a is good enough (close to current joints)
+            sol_b = None
+            if self.current_joint_angles is not None and sol_a is not None:
+                ref = np.array(self.current_joint_angles)
+                joint_dist_a = np.linalg.norm(np.array(sol_a) - ref)
+                if joint_dist_a > 1.5:
+                    sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+            elif sol_a is None:
+                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+
+            # Pick solution closest to current joints
+            if self.current_joint_angles is not None:
+                ref = np.array(self.current_joint_angles)
+                candidates = []
+                if sol_a is not None:
+                    candidates.append(sol_a)
+                if sol_b is not None:
+                    candidates.append(sol_b)
+                if candidates:
+                    joint_angles = min(candidates, key=lambda s: np.linalg.norm(np.array(s) - ref))
+                    chosen_yaw = yaw_degrees if (sol_a is not None and np.array_equal(joint_angles, sol_a)) else yaw_alt
+                    self.get_logger().info(f"Chose yaw={chosen_yaw:.1f}° (joint distance: {np.linalg.norm(np.array(joint_angles) - ref):.3f} rad)")
+                else:
+                    joint_angles = None
+            else:
+                joint_angles = sol_a if sol_a is not None else sol_b
 
         if joint_angles is not None:
             traj_point = make_point(joint_angles, movement_duration)
@@ -1203,12 +1133,36 @@ class DirectObjectMove(Node):
             self.movement_completed = True
             self.should_exit = True
 
+    def diagnose_rejection(self):
+        """Query controller_manager to determine why the goal was rejected."""
+        cli = self.create_client(ListControllers, '/controller_manager/list_controllers')
+        if not cli.wait_for_service(timeout_sec=2.0):
+            return "Trajectory goal rejected (controller_manager unavailable for diagnostics)"
+
+        future = cli.call_async(ListControllers.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if not future.done() or future.result() is None:
+            return "Trajectory goal rejected (could not query controller state)"
+
+        for c in future.result().controller:
+            if c.name == 'scaled_joint_trajectory_controller':
+                if c.state == 'inactive':
+                    return "scaled_joint_trajectory_controller is not active"
+                elif c.state == 'unconfigured':
+                    return "scaled_joint_trajectory_controller is unconfigured"
+                elif c.state == 'active':
+                    return "External control program stopped or robot in protective stop"
+                else:
+                    return f"scaled_joint_trajectory_controller in unexpected state: {c.state}"
+
+        return "scaled_joint_trajectory_controller not found"
+
     def goal_response(self, future):
         """Handle goal response"""
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.error_message = "External control program stopped or robot in protective stop"
-            self.get_logger().error("Trajectory goal rejected")
+            self.error_message = self.diagnose_rejection()
+            self.get_logger().error(f"Trajectory goal rejected: {self.error_message}")
             # Set exit flags if goal is rejected
             self.trajectory_in_progress = False
             self.movement_completed = True
@@ -1349,7 +1303,7 @@ class DirectObjectMove(Node):
 
     def output_result_json(self, movement_type="move_to_object"):
         """Output movement result as JSON"""
-        if self.movement_completed and self.final_position is not None and self.final_orientation_quat is not None:
+        if self.movement_completed and not self.error_message and self.final_position is not None and self.final_orientation_quat is not None:
             # Success
             result = {
                 "result": "success",
@@ -1422,21 +1376,34 @@ class DirectObjectMove(Node):
                 self.get_logger().info("Step 1 completed. Starting Step 2: fine positioning")
                 # Don't exit - let timer callback trigger step 2 with latest pose
                 return
-        else:
-            result_msg = result.result
-            if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
-                self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
-            else:
-                self.error_message = f"Trajectory failed with status code {result.status}"
-            self.get_logger().error(self.error_message)
+            # Step 2 succeeded
+            self._print_final_object_pose()
+            self.movement_completed = True
+            self.should_exit = True
+            self.get_logger().info("Movement completed successfully")
+            return
 
-        # Print final object pose before exiting
+        # Trajectory failed - map error codes to user-friendly messages
+        result_msg = result.result
+        error_messages = {
+            FollowJointTrajectory.Result.INVALID_GOAL: "Trajectory rejected: invalid goal (may indicate velocity/acceleration limits exceeded or joint limits violated)",
+            FollowJointTrajectory.Result.INVALID_JOINTS: "Invalid joints: joint names don't match",
+            FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP: "Old header timestamp: trajectory is too old",
+            FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED: "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this.",
+            FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED: "Goal tolerance violated: did not reach target position",
+        }
+        error_msg = error_messages.get(result_msg.error_code, None)
+        if error_msg is None:
+            if result.status == 6:  # ABORTED
+                error_msg = "Trajectory ABORTED: likely protective stop or velocity/acceleration limits exceeded. Click 'Continue' in URSim/URcap to clear the error, then retry."
+            else:
+                error_msg = f"Trajectory failed with status code {result.status}"
+        self.error_message = error_msg
+        self.get_logger().error(self.error_message)
+
         self._print_final_object_pose()
-        
-        # Set exit flags after trajectory completes (or if step 2 completed)
         self.movement_completed = True
         self.should_exit = True
-        self.get_logger().info("Movement completed successfully")
     
 
 
@@ -1448,7 +1415,7 @@ def main(args=None):
     parser.add_argument('--object-name', type=str, default="fork_orange_scaled70",
                        help='Name of the object to move to (e.g., blue_dot_0, red_dot_0)')
     parser.add_argument('--height', type=float, default=None,
-                       help='Hover height in meters (if not specified, will use 5.5cm offset from object/grasp point)')
+                       help='Exact gripper center height in meters (if not specified, uses grasp point Z minus offset)')
     parser.add_argument('--movement-duration', type=float, default=5.0,
                        help='Duration for the movement in seconds (default: 5.0)')
     parser.add_argument('--target-xyz', type=float, nargs=3, default=None,
@@ -1460,7 +1427,7 @@ def main(args=None):
     parser.add_argument('--grasp-id', type=int, required=True,
                        help='Specific grasp point ID to use (required - will use grasp point instead of object center)')
     parser.add_argument('--offset', type=float, default=None,
-                       help='Distance offset from object/grasp point in meters (default: 0.123m = 12.3cm)')
+                       help='Vertical offset below grasp point for gripper center in meters (default: 0 = gripper center at grasp point)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
                        help='Mode: "sim" for simulation (uses /objects_poses_sim with TFMessage), "real" for real robot (uses /objects_poses_real with TFMessage). REQUIRED - no default.')
     parser.add_argument('--move-to-object', action='store_true',
@@ -1543,16 +1510,16 @@ def main(args=None):
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling
-    while node.current_ee_pose is None and rclpy.ok():
+    while node.current_ee_pose is None and rclpy.ok() and not node.should_exit:
         rclpy.spin_once(node, timeout_sec=0.1)
 
     # Wait for grasp points if using grasp_id mode
     if args.grasp_id is not None:
-        while node.latest_grasp_points is None and rclpy.ok():
+        while node.latest_grasp_points is None and rclpy.ok() and not node.should_exit:
             rclpy.spin_once(node, timeout_sec=0.1)
 
     # Wait for joint states
-    while node.current_joint_angles is None and rclpy.ok():
+    while node.current_joint_angles is None and rclpy.ok() and not node.should_exit:
         rclpy.spin_once(node, timeout_sec=0.1)
 
     try:
@@ -1561,7 +1528,12 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info("Direct movement stopped by user")
     except Exception as e:
-        node.get_logger().error(f"Direct movement error: {e}")
+        error_str = str(e)
+        if "Unable to convert function return value" in error_str or "context is invalid" in error_str:
+            node.error_message = "Robot likely in protective stop. Click 'Continue' in URSim/URcap to clear the error, then retry."
+        else:
+            node.error_message = f"Direct movement error: {error_str}"
+        node.get_logger().error(node.error_message)
     finally:
         try:
             # Output result as JSON

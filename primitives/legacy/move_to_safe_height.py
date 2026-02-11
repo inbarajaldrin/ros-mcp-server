@@ -18,6 +18,8 @@ from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
 import re
+
+from primitives.utils.workspace_config import SAFE_HEIGHT
 import json
 import yaml
 
@@ -39,7 +41,7 @@ class MoveToSafeHeight(Node):
         )
 
         # Safe height target (default 0.3, can be overridden)
-        self.safe_height = height if height is not None else 0.3
+        self.safe_height = height if height is not None else SAFE_HEIGHT
         
         # EE pose data storage
         self.ee_pose_received = False
@@ -227,19 +229,17 @@ class MoveToSafeHeight(Node):
 
             q_guess = self.current_joint_angles.copy()
 
-            # Generate additional seeds by perturbing the current joint angles
-            # This helps when the optimizer gets stuck in a local minimum
-            rng = np.random.default_rng(42)
-            seeds = [q_guess]
-            for _ in range(4):
-                perturbed = q_guess + rng.uniform(-0.3, 0.3, size=6)
-                seeds.append(perturbed)
-
-            solver = IKSolver(IKSolverConfig(
-                joint_bounds=[(-2*np.pi, 2*np.pi)] * 6,
-            ))
+            joint_bounds = [
+                (-np.pi, np.pi),     # shoulder_pan
+                (-np.pi, np.pi),     # shoulder_lift
+                (-np.pi, np.pi),     # elbow
+                (-np.pi, np.pi),     # wrist_1
+                (-np.pi, np.pi),     # wrist_2
+                (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
+            ]
+            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
             joint_angles = solver.solve(
-                seeds=seeds,
+                seeds=[q_guess],
                 target_pose=target_pose,
                 perturbations=5,
                 dx=0.001,

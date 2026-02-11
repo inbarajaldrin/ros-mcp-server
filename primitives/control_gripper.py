@@ -58,14 +58,14 @@ class GripperController(Node):
             )
             self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim")
         else:
-            # Real mode: use gripper width (Float32)
+            # Real mode: use gripper width with fingertip offset (Float32)
             self.width_sub = self.create_subscription(
                 Float32,
-                '/gripper_width',
+                '/gripper_width_offset',
                 self.width_callback,
                 10
             )
-            self.get_logger().info("Using REAL mode: monitoring /gripper_width")
+            self.get_logger().info("Using REAL mode: monitoring /gripper_width_offset")
         
         # Determine target state
         if command.lower() == "open":
