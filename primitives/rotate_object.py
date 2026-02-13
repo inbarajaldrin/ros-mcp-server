@@ -40,7 +40,7 @@ import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.workspace_config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
 
 
 def output_result(result):
@@ -55,8 +55,7 @@ ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
-# Default base orientation (used if --use-default-base-orientation is set)
-DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
+# DEFAULT_BASE_ORIENTATION is imported from workspace_config
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
@@ -1808,6 +1807,11 @@ class ReorientForAssembly(Node):
         # Helper to prepare a candidate for IK (snap to exact equivalent target)
         def prepare_candidate(cand):
             card_name, card_quat, card_object_R, card_target_R, card_error = cand[0], cand[1], cand[2], cand[3], cand[4]
+            # In real mode, use the clean cardinal quaternion directly.
+            # The prepare_candidate exact-snap (card_target_R @ R_grasp.T) would
+            # re-introduce noise from the detected object orientation into the EE target.
+            if self.mode == 'real':
+                return card_name, card_quat, card_object_R, card_target_R, card_error
             R_EE_card_exact = card_target_R @ R_grasp.T
             card_quat_exact = R.from_matrix(R_EE_card_exact).as_quat()
             R_object_card_exact = R_EE_card_exact @ R_grasp

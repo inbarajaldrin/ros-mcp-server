@@ -38,8 +38,9 @@ import time
 import glob
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params, compute_ik
-from primitives.utils.data_path_finder import get_assembly_data_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
+from primitives.rotate_object import FoldSymmetry, ExtendedCardinalOrientations
+from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -55,9 +56,7 @@ def output_result(result):
     print(json.dumps(result))
     print("__END_RESULT_JSON__")
 
-# Default base position and orientation (used if not provided via command line)
-DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
-DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
+# DEFAULT_BASE_POSITION and DEFAULT_BASE_ORIENTATION imported from workspace_config
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
@@ -102,6 +101,42 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     
     if logger:
         logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
+    return None
+
+
+def load_grasp_point_position(object_name, grasp_id, logger=None):
+    """
+    Load grasp point position from grasp points JSON file.
+
+    Args:
+        object_name: Object name (e.g., 'fork_orange')
+        grasp_id: Integer grasp point ID
+        logger: Optional logger
+
+    Returns:
+        np.array([x, y, z]) position relative to object CAD center, or None if not found
+    """
+    data_dir = get_aruco_data_dir() / "grasp_points"
+    # Try object_name and object_name_scaled70 variants
+    for name_variant in [object_name, f"{object_name}_scaled70"]:
+        json_path = data_dir / f"{name_variant}_grasp_points.json"
+        if json_path.exists():
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                for gp in data.get('grasp_points', []):
+                    if gp['id'] == grasp_id:
+                        pos = gp['position']
+                        if logger:
+                            logger.info(f"Loaded grasp point {grasp_id} for {name_variant}: [{pos['x']:.4f}, {pos['y']:.4f}, {pos['z']:.4f}]")
+                        return np.array([pos['x'], pos['y'], pos['z']])
+                if logger:
+                    logger.warn(f"Grasp ID {grasp_id} not found in {json_path.name}")
+            except (json.JSONDecodeError, IOError, KeyError) as e:
+                if logger:
+                    logger.error(f"Error reading {json_path}: {e}")
+    if logger:
+        logger.error(f"No grasp points file found for '{object_name}'")
     return None
 
 
@@ -770,27 +805,105 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Compute IK for the final hover position
+        # Cartesian-interpolated waypoints with trapezoidal velocity profile
         total_duration = 5.0
-        target_joint_angles = self.compute_ik_with_current_seed(
-            hover_position.tolist(),
-            ee_target_quat.tolist(),
-            max_tries=5,
-            dx=0.001
-        )
+        start_pos = np.array([self.current_ee_pose.pose.position.x,
+                              self.current_ee_pose.pose.position.y,
+                              self.current_ee_pose.pose.position.z])
+        target_pos = hover_position
 
-        if target_joint_angles is None:
-            self.error_message = "IK failed for hover position"
-            self.get_logger().error(self.error_message)
-            return False
+        dist = np.linalg.norm(target_pos - start_pos)
+        num_waypoints = max(2, int(dist / 0.02))  # one waypoint every 20mm
 
-        self.current_joint_angles = target_joint_angles.copy()
+        all_joint_angles = [self.current_joint_angles.copy()]
 
-        trajectory_points = [{
-            "positions": [float(x) for x in target_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(total_duration), nanosec=0)
-        }]
+        for i in range(1, num_waypoints + 1):
+            alpha = i / num_waypoints
+            waypoint_pos = start_pos + alpha * (target_pos - start_pos)
+
+            waypoint_joint_angles = self.compute_ik_with_current_seed(
+                waypoint_pos.tolist(),
+                ee_target_quat.tolist(),
+                max_tries=5,
+                dx=0.001
+            )
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            self.current_joint_angles = waypoint_joint_angles.copy()
+            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
+
+        # Trapezoidal velocity profile
+        n_total = len(all_joint_angles)
+        segment_dists = []
+        for i in range(1, n_total):
+            d = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+            segment_dists.append(max(d, 1e-6))
+        cumulative_s = [0.0]
+        for d in segment_dists:
+            cumulative_s.append(cumulative_s[-1] + d)
+        total_s = cumulative_s[-1]
+
+        accel_frac, decel_frac = 0.2, 0.2
+        t_accel = accel_frac * total_duration
+        t_decel = decel_frac * total_duration
+        t_cruise = total_duration - t_accel - t_decel
+        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+        a_accel = v_max / t_accel
+        a_decel = v_max / t_decel
+
+        def trapez_s_and_v(t_query):
+            if t_query <= t_accel:
+                return 0.5 * a_accel * t_query ** 2, a_accel * t_query
+            elif t_query <= t_accel + t_cruise:
+                s_a = 0.5 * v_max * t_accel
+                return s_a + v_max * (t_query - t_accel), v_max
+            else:
+                s_a = 0.5 * v_max * t_accel
+                s_c = v_max * t_cruise
+                t_d = t_query - t_accel - t_cruise
+                return s_a + s_c + v_max * t_d - 0.5 * a_decel * t_d ** 2, max(v_max - a_decel * t_d, 0.0)
+
+        def find_time_for_s(target_s):
+            lo, hi = 0.0, total_duration
+            for _ in range(50):
+                mid = (lo + hi) / 2
+                if trapez_s_and_v(mid)[0] < target_s:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+
+        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+        waypoint_times[0] = 0.0
+        waypoint_times[-1] = total_duration
+
+        trajectory_points = []
+        for i in range(n_total):
+            t_i = waypoint_times[i]
+            _, speed_scalar = trapez_s_and_v(t_i)
+
+            if i == 0 or i == n_total - 1:
+                velocities = [0.0] * 6
+            else:
+                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                delta_norm = np.linalg.norm(delta)
+                if delta_norm > 1e-8:
+                    direction = delta / delta_norm
+                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                else:
+                    velocities = [0.0] * 6
+
+            trajectory_points.append({
+                "positions": [float(x) for x in all_joint_angles[i]],
+                "velocities": velocities,
+                "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+            })
+
+        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with trapezoidal velocity profile")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
@@ -800,7 +913,8 @@ class TranslateForAssembly(Node):
 
     def translate_for_target_real(self, object_name, base_name, duration=20.0,
                             final_base_pos=None, final_base_orientation=None,
-                            use_default_base=False):
+                            use_default_base=False, grasp_id=None,
+                            object_orientation=None):
         """
         Real mode: Calculate and execute EE translation to hover position (step 1 only).
         Uses provided base position/orientation (no topics).
@@ -902,9 +1016,49 @@ class TranslateForAssembly(Node):
         self.get_logger().info("Keeping current EE orientation unchanged (from reorient step)")
         
         # Calculate EE (flange) position from target object position
-        # Since gripper is face-down, the flange is directly above the gripper center
+        # If grasp_id is provided, offset by the grasp point position (rotated into world frame)
         R_ee = T_EE_current[:3, :3]
         ee_target_position = target_object_position_abs.copy()
+
+        if grasp_id is not None:
+            grasp_offset = load_grasp_point_position(object_name, grasp_id, logger=self.get_logger())
+            if grasp_offset is None:
+                self.error_message = f"Could not load grasp point {grasp_id} for '{object_name}'"
+                self.get_logger().error(self.error_message)
+                return None
+
+            # Determine rotation to apply to grasp offset
+            if object_orientation is not None:
+                # Use fold symmetry to snap current object orientation to closest equivalent
+                R_object_current = R.from_quat(object_orientation).as_matrix()
+                symmetry_dir = str(get_symmetry_dir())
+                fold_data = FoldSymmetry.load_symmetry_data(object_name, symmetry_dir)
+
+                if fold_data is not None:
+                    equivalents = FoldSymmetry.generate_equivalent_target_orientations(
+                        R_target_abs, fold_data, logger=self.get_logger()
+                    )
+                    # Find closest equivalent to current object orientation
+                    best_dist = float('inf')
+                    R_grasp_rotation = R_target_abs  # fallback
+                    for R_eq in equivalents:
+                        dist = ExtendedCardinalOrientations.rotation_matrix_distance(R_object_current, R_eq)
+                        if dist < best_dist:
+                            best_dist = dist
+                            R_grasp_rotation = R_eq
+                    self.get_logger().info(f"Snapped object orientation to closest equivalent (error: {np.degrees(best_dist):.1f}°)")
+                else:
+                    self.get_logger().info("No symmetry data found, using current object orientation directly")
+                    R_grasp_rotation = R_object_current
+            else:
+                # No object orientation provided, use assembly target rotation
+                R_grasp_rotation = R_target_abs
+
+            grasp_world_offset = R_grasp_rotation @ grasp_offset
+            ee_target_position += grasp_world_offset
+            self.get_logger().info(f"Grasp point {grasp_id} offset (CAD frame): {grasp_offset}")
+            self.get_logger().info(f"Grasp point offset (world frame): {grasp_world_offset}")
+
         ee_target_position -= R_ee @ GRIPPER_CENTER_TOOL_OFFSET
         
         # Apply height offset - add HOVER_HEIGHT above base (step 1: hover position only)
@@ -924,27 +1078,105 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Compute IK for the final hover position
+        # Cartesian-interpolated waypoints with trapezoidal velocity profile
         total_duration = 5.0
-        target_joint_angles = self.compute_ik_with_current_seed(
-            hover_position.tolist(),
-            ee_target_quat.tolist(),
-            max_tries=5,
-            dx=0.001
-        )
+        start_pos = np.array([self.current_ee_pose.pose.position.x,
+                              self.current_ee_pose.pose.position.y,
+                              self.current_ee_pose.pose.position.z])
+        target_pos = hover_position
 
-        if target_joint_angles is None:
-            self.error_message = "IK failed for hover position"
-            self.get_logger().error(self.error_message)
-            return False
+        dist = np.linalg.norm(target_pos - start_pos)
+        num_waypoints = max(2, int(dist / 0.02))
 
-        self.current_joint_angles = target_joint_angles.copy()
+        all_joint_angles = [self.current_joint_angles.copy()]
 
-        trajectory_points = [{
-            "positions": [float(x) for x in target_joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(total_duration), nanosec=0)
-        }]
+        for i in range(1, num_waypoints + 1):
+            alpha = i / num_waypoints
+            waypoint_pos = start_pos + alpha * (target_pos - start_pos)
+
+            waypoint_joint_angles = self.compute_ik_with_current_seed(
+                waypoint_pos.tolist(),
+                ee_target_quat.tolist(),
+                max_tries=5,
+                dx=0.001
+            )
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            self.current_joint_angles = waypoint_joint_angles.copy()
+            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
+
+        # Trapezoidal velocity profile
+        n_total = len(all_joint_angles)
+        segment_dists = []
+        for i in range(1, n_total):
+            d = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+            segment_dists.append(max(d, 1e-6))
+        cumulative_s = [0.0]
+        for d in segment_dists:
+            cumulative_s.append(cumulative_s[-1] + d)
+        total_s = cumulative_s[-1]
+
+        accel_frac, decel_frac = 0.2, 0.2
+        t_accel = accel_frac * total_duration
+        t_decel = decel_frac * total_duration
+        t_cruise = total_duration - t_accel - t_decel
+        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+        a_accel = v_max / t_accel
+        a_decel = v_max / t_decel
+
+        def trapez_s_and_v(t_query):
+            if t_query <= t_accel:
+                return 0.5 * a_accel * t_query ** 2, a_accel * t_query
+            elif t_query <= t_accel + t_cruise:
+                s_a = 0.5 * v_max * t_accel
+                return s_a + v_max * (t_query - t_accel), v_max
+            else:
+                s_a = 0.5 * v_max * t_accel
+                s_c = v_max * t_cruise
+                t_d = t_query - t_accel - t_cruise
+                return s_a + s_c + v_max * t_d - 0.5 * a_decel * t_d ** 2, max(v_max - a_decel * t_d, 0.0)
+
+        def find_time_for_s(target_s):
+            lo, hi = 0.0, total_duration
+            for _ in range(50):
+                mid = (lo + hi) / 2
+                if trapez_s_and_v(mid)[0] < target_s:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+
+        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+        waypoint_times[0] = 0.0
+        waypoint_times[-1] = total_duration
+
+        trajectory_points = []
+        for i in range(n_total):
+            t_i = waypoint_times[i]
+            _, speed_scalar = trapez_s_and_v(t_i)
+
+            if i == 0 or i == n_total - 1:
+                velocities = [0.0] * 6
+            else:
+                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                delta_norm = np.linalg.norm(delta)
+                if delta_norm > 1e-8:
+                    direction = delta / delta_norm
+                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                else:
+                    velocities = [0.0] * 6
+
+            trajectory_points.append({
+                "positions": [float(x) for x in all_joint_angles[i]],
+                "velocities": velocities,
+                "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+            })
+
+        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with trapezoidal velocity profile")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
@@ -1022,7 +1254,11 @@ def main(args=None):
                        help='Final base orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--use-default-base', action='store_true',
                        help=f'Use default base position ({DEFAULT_BASE_POSITION}) and orientation ({DEFAULT_BASE_ORIENTATION})')
-    
+    parser.add_argument('--grasp-id', type=int, default=None,
+                       help='Grasp point ID to use for positioning (real mode only, offsets EE by grasp point position)')
+    parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
+                       help='Current object orientation quaternion [x, y, z, w] (real mode only, used with grasp-id for fold symmetry)')
+
     args = parser.parse_args()
     
     # Validate arguments based on mode
@@ -1068,7 +1304,9 @@ def main(args=None):
                 duration=duration,
                 final_base_pos=args.final_base_pos,
                 final_base_orientation=args.final_base_orientation,
-                use_default_base=args.use_default_base
+                use_default_base=args.use_default_base,
+                grasp_id=args.grasp_id,
+                object_orientation=args.current_object_orientation
             )
 
         if success:

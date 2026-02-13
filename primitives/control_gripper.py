@@ -3,7 +3,7 @@
 Gripper Control with Verification
 
 Controls gripper and verifies movement using gripper width readings (both sim and real).
-Supports "open", "close", "half-open" (30mm), or numeric values 0-110 (width in mm).
+Supports "open", "close", "half-open" (35mm), or numeric values 0-110 (width in mm).
 
 Usage:
     python3 control_gripper.py open [--mode sim|real]
@@ -25,6 +25,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 # Gripper range: 0.0 - 110.0mm
 GRIPPER_MIN_WIDTH = 0.0
 GRIPPER_MAX_WIDTH = 110.0
+GRIPPER_HALF_OPEN_WIDTH = 35.0  # mm
 
 MAX_RETRIES = 3
 RETRY_DELAY = 0.5  # Seconds to wait between retries
@@ -77,9 +78,9 @@ class GripperController(Node):
             self.ros_command = "close"
             self.numeric_value = 0
         elif command.lower() == "half-open":
-            # Half-open: hardcoded to 30mm
+            # Half-open: uses GRIPPER_HALF_OPEN_WIDTH
             self.target_state = "numeric"
-            self.numeric_value = int(30.0 * 10)  # Convert 30mm to 300 (0-1100 range)
+            self.numeric_value = int(GRIPPER_HALF_OPEN_WIDTH * 10)  # Convert mm to 0-1100 range
             self.ros_command = str(self.numeric_value)
         else:
             # Numeric value 0-110 (convert to 0-1100 for ROS)
@@ -147,7 +148,7 @@ class GripperController(Node):
             return False
         return abs(current_width - initial_width) > movement_threshold
     
-    def is_at_target_state(self, width, tolerance=2.0, close_tolerance=10.0):
+    def is_at_target_state(self, width, tolerance=3.0, close_tolerance=10.0):
         """Check if gripper is already at target state"""
         if width is None:
             return False
@@ -249,12 +250,12 @@ class GripperController(Node):
                                             self.get_logger().warn(f"✗ Gripper moved in wrong direction for 'close': {check_value:.2f}mm → {current_value:.2f}mm (change: {actual_change:+.2f}mm). Expected negative change.")
                                             return False
                                     else:  # numeric target
-                                        # Check if we moved toward the target
+                                        # Check if we reached the target or moved toward it
                                         target_width = self.numeric_value / 10.0
                                         initial_distance = abs(check_value - target_width)
                                         final_distance = abs(current_value - target_width)
 
-                                        if final_distance >= initial_distance:
+                                        if not self.is_at_target_state(current_value) and final_distance >= initial_distance:
                                             self.get_logger().warn(f"✗ Gripper moved away from target {target_width:.1f}mm: {check_value:.2f}mm → {current_value:.2f}mm")
                                             return False
 
@@ -301,6 +302,12 @@ class GripperController(Node):
                 self.verification_complete = False
                 self.verification_result = None
 
+            # Update initial_value to current width for retries
+            if attempt > 1:
+                current = self.get_current_width(timeout=0.5)
+                if current is not None:
+                    initial_value = current
+
             # Start monitoring thread before sending command (parallel execution)
             monitoring_thread = threading.Thread(
                 target=self.verify_gripper_state_threaded,
@@ -338,7 +345,7 @@ def output_result(result):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Control gripper with verification')
-    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (30mm), or 0-110 (width in mm)')
+    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (35mm), or 0-110 (width in mm)')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
 

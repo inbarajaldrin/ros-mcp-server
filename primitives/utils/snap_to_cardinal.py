@@ -34,7 +34,7 @@ from sensor_msgs.msg import JointState
 from primitives.rotate_object import ExtendedCardinalOrientations
 from primitives.utils.unified_ik import IKSolver, IKSolverConfig
 from primitives.utils.ik_solver import forward_kinematics, dh_params
-from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN
+from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
 
 
 class SnapToCardinal(Node):
@@ -126,8 +126,8 @@ class SnapToCardinal(Node):
             positions.append(T[:3, 3].copy())
         return positions
 
-    def check_table_collision(self, joint_angles):
-        z_threshold = TABLE_HEIGHT - TABLE_COLLISION_MARGIN
+    def check_table_collision(self, joint_angles, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
+        z_threshold = TABLE_HEIGHT - margin
         for pos in self.compute_all_joint_positions(joint_angles):
             if pos[2] < z_threshold:
                 return True
@@ -168,16 +168,16 @@ class SnapToCardinal(Node):
                     return True
         return False
 
-    def check_trajectory_collision(self, start, target, num_samples=20):
+    def check_trajectory_collision(self, start, target, num_samples=20, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
         for i in range(num_samples + 1):
             alpha = i / num_samples
             interp = start + alpha * (target - start)
-            if self.check_table_collision(interp) or self.check_self_collision(interp):
+            if self.check_table_collision(interp, margin=margin) or self.check_self_collision(interp):
                 return True
         return False
 
-    def collision_checker(self, joint_angles):
-        return self.check_table_collision(joint_angles) or self.check_self_collision(joint_angles)
+    def collision_checker(self, joint_angles, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
+        return self.check_table_collision(joint_angles, margin=margin) or self.check_self_collision(joint_angles)
 
     # --- World-frame direction checks ---
 
@@ -225,6 +225,7 @@ class SnapToCardinal(Node):
         # Solve IK for each face direction's best roll variant
         results = []
         for face, (card_name, rot_dist, R_card) in face_groups.items():
+            margin = TABLE_COLLISION_MARGIN_FACEDOWN if face == 'face_down' else TABLE_COLLISION_MARGIN_SIDEWAYS
             target_pose = np.eye(4)
             target_pose[:3, 3] = ee_pos
             target_pose[:3, :3] = R_card
@@ -241,7 +242,7 @@ class SnapToCardinal(Node):
             solution = solver.solve(
                 seeds=[seed_joints.copy()],
                 target_pose=target_pose,
-                collision_checker=self.collision_checker,
+                collision_checker=lambda ja, m=margin: self.collision_checker(ja, margin=m),
                 perturbations=3,
                 dx=0.001,
             )
@@ -257,7 +258,7 @@ class SnapToCardinal(Node):
             ik_cost = solver._best_result.cost
             camera_bad = self.check_camera_direction(solution)
             ee_bad = self.check_ee_facing_robot(solution)
-            traj_collision = self.check_trajectory_collision(seed_joints, solution)
+            traj_collision = self.check_trajectory_collision(seed_joints, solution, margin=margin)
 
             if camera_bad:
                 status = 'REJECTED (tool Z toward -X world)'

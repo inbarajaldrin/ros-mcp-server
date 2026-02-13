@@ -32,7 +32,7 @@ import argparse
 import threading
 import time
 
-from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN, GRIPPER_CENTER_TOOL_OFFSET
 
 try:
     from primitives.utils.action_libraries import move_robust
@@ -273,7 +273,7 @@ class MoveDown(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
@@ -773,7 +773,8 @@ class MoveDown(Node):
         #   sideways  (z_tool_z= 0): TABLE_HEIGHT + MARGIN
         #   face-up   (z_tool_z=+1): TABLE_HEIGHT + MARGIN - 0.23
         z_tool_z = target_rot_matrix[2, 2]  # Z-component of tool Z-axis in world frame
-        min_flange_z = TABLE_HEIGHT + TABLE_COLLISION_MARGIN - GRIPPER_CENTER_TOOL_OFFSET[2] * z_tool_z
+        margin = TABLE_COLLISION_MARGIN_FACEDOWN if z_tool_z < -0.5 else TABLE_COLLISION_MARGIN_SIDEWAYS
+        min_flange_z = TABLE_HEIGHT + margin - GRIPPER_CENTER_TOOL_OFFSET[2] * z_tool_z
         self._min_flange_z = min_flange_z  # Store for convergence check
 
         target_position = list(current_pos)

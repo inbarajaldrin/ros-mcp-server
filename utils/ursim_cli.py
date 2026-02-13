@@ -295,7 +295,7 @@ def print_result(result: dict):
             if key not in ['success', 'message', 'answer']:
                 print(f"    {key}: {val}")
     else:
-        print(f"  ✗ {result.get('error', 'Unknown error')}")
+        print(f"  ✗ {result.get('error') or result.get('message') or result.get('answer') or 'Unknown error'}")
 
 
 def main():

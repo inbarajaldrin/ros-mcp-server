@@ -213,21 +213,15 @@ class MoveToSafeHeight(Node):
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
-        # Create target position with safe height (same x,y but z=0.3)
+        # Create target position with safe height (same x,y but z=safe_height)
         target_position = current_pos.copy()
-        target_position[2] = self.safe_height  # Set z to safe height
+        target_position[2] = self.safe_height
 
         try:
-            target_pose = np.eye(4)
-            target_pose[:3, 3] = target_position
-            target_pose[:3, :3] = target_rot_matrix
-
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
                 return
-
-            q_guess = self.current_joint_angles.copy()
 
             joint_bounds = [
                 (-np.pi, np.pi),     # shoulder_pan
@@ -237,31 +231,121 @@ class MoveToSafeHeight(Node):
                 (-np.pi, np.pi),     # wrist_2
                 (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
             ]
-            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
-            joint_angles = solver.solve(
-                seeds=[q_guess],
-                target_pose=target_pose,
-                perturbations=5,
-                dx=0.001,
-            )
 
-            if joint_angles is None:
-                self.error_message = "IK solver failed: no valid solution to perform safe height move"
-                self.get_logger().error(self.error_message)
-                return
-            
-            # Create trajectory point
-            point = JointTrajectoryPoint(
-                positions=[float(x) for x in joint_angles],
-                velocities=[0.0] * 6,
-                time_from_start=Duration(sec=5)  # 5 seconds movement
-            )
-            
+            # Cartesian-interpolated waypoints to prevent x,y drift
+            dz = abs(target_position[2] - current_pos[2])
+            num_waypoints = max(2, int(dz / 0.02))  # one waypoint every 20mm
+            total_duration = 5.0
+
+            prev_joints = self.current_joint_angles.copy()
+            all_joint_angles = [prev_joints.copy()]
+
+            for i in range(1, num_waypoints + 1):
+                alpha = i / num_waypoints
+                waypoint_pos = current_pos.copy()
+                waypoint_pos[2] = current_pos[2] + alpha * (target_position[2] - current_pos[2])
+
+                waypoint_pose = np.eye(4)
+                waypoint_pose[:3, 3] = waypoint_pos
+                waypoint_pose[:3, :3] = target_rot_matrix
+
+                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
+                joint_angles = solver.solve(
+                    seeds=[prev_joints.copy()],
+                    target_pose=waypoint_pose,
+                    perturbations=5,
+                    dx=0.001,
+                )
+
+                if joint_angles is None:
+                    self.error_message = f"IK failed at waypoint {i}/{num_waypoints} (z={waypoint_pos[2]*1000:.0f}mm)"
+                    self.get_logger().error(self.error_message)
+                    return
+
+                all_joint_angles.append(np.array([float(x) for x in joint_angles]))
+                prev_joints = np.array(joint_angles)
+
+            # Trapezoidal velocity profile (same as perform_insert)
+            n_total = len(all_joint_angles)
+            segment_dists = []
+            for i in range(1, n_total):
+                dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+                segment_dists.append(max(dist, 1e-6))
+            cumulative_s = [0.0]
+            for d in segment_dists:
+                cumulative_s.append(cumulative_s[-1] + d)
+            total_s = cumulative_s[-1]
+
+            accel_frac = 0.2
+            decel_frac = 0.2
+            t_accel = accel_frac * total_duration
+            t_decel = decel_frac * total_duration
+            t_cruise = total_duration - t_accel - t_decel
+            v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+            a_accel = v_max / t_accel
+            a_decel = v_max / t_decel
+
+            def trapez_s_and_v(t_query):
+                if t_query <= t_accel:
+                    s = 0.5 * a_accel * t_query ** 2
+                    v = a_accel * t_query
+                elif t_query <= t_accel + t_cruise:
+                    s_accel = 0.5 * v_max * t_accel
+                    s = s_accel + v_max * (t_query - t_accel)
+                    v = v_max
+                else:
+                    s_accel = 0.5 * v_max * t_accel
+                    s_cruise = v_max * t_cruise
+                    t_in_decel = t_query - t_accel - t_cruise
+                    s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
+                    v = v_max - a_decel * t_in_decel
+                return s, max(v, 0.0)
+
+            def find_time_for_s(target_s):
+                lo, hi = 0.0, total_duration
+                for _ in range(50):
+                    mid = (lo + hi) / 2
+                    s_mid, _ = trapez_s_and_v(mid)
+                    if s_mid < target_s:
+                        lo = mid
+                    else:
+                        hi = mid
+                return (lo + hi) / 2
+
+            waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+            waypoint_times[0] = 0.0
+            waypoint_times[-1] = total_duration
+
+            traj_points = []
+            for i in range(n_total):
+                t_i = waypoint_times[i]
+                _, speed_scalar = trapez_s_and_v(t_i)
+
+                if i == 0 or i == n_total - 1:
+                    velocities = [0.0] * 6
+                else:
+                    delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                    delta_norm = np.linalg.norm(delta)
+                    if delta_norm > 1e-8:
+                        direction = delta / delta_norm
+                        velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                    else:
+                        velocities = [0.0] * 6
+
+                point = JointTrajectoryPoint(
+                    positions=[float(x) for x in all_joint_angles[i]],
+                    velocities=velocities,
+                    time_from_start=Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+                )
+                traj_points.append(point)
+
+            self.get_logger().info(f"Generated {len(traj_points)} Cartesian waypoints with trapezoidal velocity profile")
+
             # Create and send trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
-            traj.points = [point]
+            traj.points = traj_points
             
             goal.trajectory = traj
             goal.goal_time_tolerance = Duration(sec=1)

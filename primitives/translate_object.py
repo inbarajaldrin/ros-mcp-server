@@ -4,18 +4,20 @@ Translate Object Primitive - Combines translate_for_assembly and perform_insert
 
 This primitive combines functionality from translate_for_assembly and perform_insert:
 - --move-to-base: Calls translate_for_assembly to move to safe height
-- --move-down: Calls perform_insert to move down to final position
+- --perform-insert: Calls perform_insert to move down to final position (force compliance in real mode)
 - --move-to-safe-height: Moves to safe height (after closing gripper)
 - --move-away-from-base: Calls move_to_clear_area to move object away from base to a clear area
 
-Note: --move-to-base, --move-down, --move-to-safe-height, and --move-away-from-base are mutually exclusive (cannot be used together).
+In real mode, --perform-insert receives --grasp-id, --object-name, and --base-name when provided (for grasp-adjusted insert target).
+
+Note: --move-to-base, --perform-insert, --move-to-safe-height, and --move-away-from-base are mutually exclusive (cannot be used together).
 
 Usage:
     # Sim mode - safe height only
     python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-to-base
 
-    # Sim mode - move down only
-    python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-down
+    # Sim mode - perform insert only
+    python3 translate_object.py --mode sim --object-name fork_orange --base-name base --perform-insert
 
     # Sim mode - move to safe height only
     python3 translate_object.py --mode sim --move-to-safe-height
@@ -23,8 +25,8 @@ Usage:
     # Real mode - safe height only
     python3 translate_object.py --mode real --base-name base --move-to-base --final-base-pos 0.5 -0.37 0.1882 --final-base-orientation 0.0 0.0 0.0 1.0
 
-    # Real mode - move down only with force compliance
-    python3 translate_object.py --mode real --move-down --speed 0.01 --gain 2.0
+    # Real mode - perform insert with force compliance (optional: pass object/base/grasp-id for grasp-adjusted target)
+    python3 translate_object.py --mode real --perform-insert --object-name u_orange --base-name base1 --grasp-id 1 --speed 0.01 --gain 2.0
 
     # Real mode - move to safe height only
     python3 translate_object.py --mode real --move-to-safe-height
@@ -101,6 +103,10 @@ def run_translate_for_assembly(args):
             cmd.extend(['--final-base-orientation'] + [str(x) for x in args.final_base_orientation])
         if args.use_default_base_position:
             cmd.append('--use-default-base')
+        if args.grasp_id is not None:
+            cmd.extend(['--grasp-id', str(args.grasp_id)])
+        if args.current_object_orientation is not None:
+            cmd.extend(['--current-object-orientation'] + [str(x) for x in args.current_object_orientation])
 
     logger.info(f"Translating {args.object_name} relative to {args.base_name}")
 
@@ -170,6 +176,12 @@ def run_perform_insert(args):
             cmd.append('--reverse')
         cmd.extend(['--z-threshold', str(args.z_threshold)])
         cmd.extend(['--xy-threshold', str(args.xy_threshold)])
+        if args.grasp_id is not None:
+            cmd.extend(['--grasp-id', str(args.grasp_id)])
+        if args.object_name:
+            cmd.extend(['--object-name', args.object_name])
+        if args.base_name:
+            cmd.extend(['--base-name', args.base_name])
 
     if args.mode == 'sim':
         logger.info(f"Moving down {args.object_name} to {args.base_name}")
@@ -333,6 +345,10 @@ Examples:
     parser.add_argument('--use-default-base-position', action='store_true',
                        dest='use_default_base_position',
                        help='Use default base position and orientation (for translate_for_assembly in real mode)')
+    parser.add_argument('--grasp-id', type=int, default=None,
+                       help='Grasp point ID for positioning (real mode only, offsets EE by grasp point position)')
+    parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
+                       help='Current object orientation quaternion [x, y, z, w] (real mode only, used with grasp-id for fold symmetry)')
 
     # Real mode force compliance parameters (for perform_insert)
     parser.add_argument('--speed', type=float, default=0.005,

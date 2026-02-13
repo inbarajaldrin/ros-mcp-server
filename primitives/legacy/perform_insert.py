@@ -46,8 +46,10 @@ from tf2_msgs.msg import TFMessage
 import json
 import os
 import glob
-from primitives.utils.data_path_finder import get_assembly_data_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
+from primitives.legacy.translate_for_assembly import load_grasp_point_position
+from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
+from primitives.utils.unified_ik import IKSolverConfig, IKSolver
 
 
 # Configuration (auto-discovered)
@@ -116,7 +118,7 @@ class PerformInsertController(Node):
     Z-direction moves down regardless of force.
     """
     
-    def __init__(self, mode=None, speed=0.005, gain=1.67, deadband=1.0, max_vel=15.0, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0, object_name=None, base_name=None):
+    def __init__(self, mode=None, speed=0.005, gain=1.67, deadband=1.0, max_vel=15.0, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0, object_name=None, base_name=None, grasp_id=None):
         super().__init__('perform_insert_controller')
         
         # Mode must be explicitly specified
@@ -298,6 +300,36 @@ class PerformInsertController(Node):
             # Default orientation: face down with yaw = 0.01°
             self.fixed_rpy = np.array([0.0, 180.0, 0.01])
         
+        # Store grasp_id for real mode target adjustment
+        self.grasp_id = grasp_id
+
+        # Compute grasp-adjusted insert target offset (assembly position + rotated grasp offset)
+        self.insert_target_offset = np.array([0.0, 0.0, 0.0])  # default: no offset
+        if self.mode == 'real' and grasp_id is not None and object_name is not None and base_name is not None:
+            grasp_offset = load_grasp_point_position(object_name, grasp_id, logger=self.get_logger())
+            if grasp_offset is not None:
+                assembly_json = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+                if assembly_json:
+                    with open(assembly_json, 'r') as f:
+                        config = json.load(f)
+                    target_quat = None
+                    target_pos = None
+                    for comp in config.get('components', []):
+                        if comp['name'] in [object_name, f"{object_name}_scaled70"]:
+                            rot = comp.get('rotation', {}).get('quaternion', {})
+                            target_quat = [rot.get('x', 0), rot.get('y', 0), rot.get('z', 0), rot.get('w', 1)]
+                            pos = comp.get('position', {})
+                            target_pos = np.array([pos.get('x', 0), pos.get('y', 0), pos.get('z', 0)])
+                            break
+                    if target_quat is not None and target_pos is not None:
+                        R_base = R.from_quat(DEFAULT_BASE_ORIENTATION).as_matrix()
+                        R_assembly = R.from_quat(target_quat).as_matrix()
+                        R_target = R_base @ R_assembly
+                        grasp_world_offset = R_target @ grasp_offset
+                        # Full 3D offset: assembly position relative to base + rotated grasp point
+                        self.insert_target_offset = target_pos + grasp_world_offset
+                        self.get_logger().info(f"Grasp insert offset: assembly_pos={target_pos*1000} mm, grasp_world={grasp_world_offset*1000} mm, total={self.insert_target_offset*1000} mm")
+
         # Store starting X and Y position (will be maintained during search phase)
         if self.pos is not None:
             self.start_x = self.pos[0]
@@ -694,8 +726,6 @@ class PerformInsertController(Node):
         Returns:
             Joint angles if successful, None otherwise
         """
-        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
-
         target_rotation = R.from_quat(target_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
@@ -947,7 +977,6 @@ class PerformInsertController(Node):
             (wrist_3_val, wrist_3_val),  # wrist_3: frozen
         ]
 
-        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
         solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
 
         # First pass: solve IK for all waypoints
@@ -1335,98 +1364,167 @@ class PerformInsertController(Node):
     
     def run_search_phase(self):
         """
-        Search phase: Pre-compute all waypoints (Z moving down, X/Y fixed) and send as single trajectory.
+        Search phase: Cartesian interpolation with frozen wrists (same approach as sim mode).
+        Pre-computes multi-waypoint trajectory with trapezoidal velocity profile.
         Monitors force during execution and cancels if contact is detected.
         Returns True if completed, False if interrupted.
         """
-        
+
         if self.pos is None or self.joints is None:
             self.get_logger().error("Position or joint angles not available!")
             return False
-        
-        # Calculate how far we want to move down
+
+        # Target flange Z: base position + assembly/grasp Z offset + gripper center offset
+        target_flange_z = DEFAULT_BASE_POSITION[2] + self.insert_target_offset[2] + GRIPPER_CENTER_TOOL_OFFSET[2]
         start_z = self.pos[2]
-        target_z = TABLE_HEIGHT  # Table surface (or until contact)
-        distance_to_move = start_z - target_z
-        
+        distance_to_move = start_z - target_flange_z
+
         if distance_to_move <= 0.001:
             self.get_logger().info(f"Already at or below target Z position ({start_z:.3f}m). Exiting.")
             return True
-        
-        # Calculate number of waypoints based on speed and trajectory duration
-        dt = 0.6  # Duration per waypoint (matches time_from_start)
-        dz_per_waypoint = self.speed * dt  # Distance moved per waypoint
-        num_waypoints = max(10, int(distance_to_move / dz_per_waypoint))
-        
-        self.get_logger().info(f"Moving from Z={start_z:.3f}m to Z={target_z:.3f}m")
-        # Pre-compute all waypoints
-        waypoints = []
-        joint_trajectory = []
-        
-        current_z = start_z
-        q_guess = self.joints.copy()  # Use current joint angles as seed
-        prev_joint_angles = self.joints.copy()
 
-        for i in range(num_waypoints):
-            # Calculate next Z position
-            current_z = start_z - (i + 1) * dz_per_waypoint
-            if current_z < target_z:
-                current_z = target_z
+        self.get_logger().info(f"Moving from Z={start_z*1000:.1f}mm to Z={target_flange_z*1000:.1f}mm (base={DEFAULT_BASE_POSITION[2]*1000:.1f}mm + offset={self.insert_target_offset[2]*1000:.1f}mm + gripper={GRIPPER_CENTER_TOOL_OFFSET[2]*1000:.1f}mm)")
 
-            # X and Y stay fixed at starting position
-            waypoint = [self.start_x, self.start_y, current_z]
-            waypoints.append(waypoint)
+        # Use current quaternion for orientation target
+        current_quat = self.quat if self.quat is not None else np.array([0.0, -1.0, 0.0, 0.0])
+        target_rot_matrix = R.from_quat(current_quat).as_matrix()
 
-            # Compute IK for this waypoint
-            target_rpy = list(self.fixed_rpy)
-            joint_angles = compute_ik(waypoint, target_rpy, q_guess=q_guess)
+        # Frozen wrist IK bounds (same as sim mode)
+        wrist_2_val = self.joints[4]
+        wrist_3_val = self.joints[5]
+        joint_bounds_frozen = [
+            (-np.pi, np.pi),     # shoulder_pan
+            (-np.pi, 0),         # shoulder_lift: elbow-down
+            (0, np.pi),          # elbow: elbow-down
+            (-np.pi, np.pi),     # wrist_1
+            (wrist_2_val, wrist_2_val),  # wrist_2: frozen
+            (wrist_3_val, wrist_3_val),  # wrist_3: frozen
+        ]
 
-            if joint_angles is None:
-                self.get_logger().warn(f"IK failed at waypoint {i}, truncating trajectory at waypoint {i-1}")
-                break
+        # Multi-waypoint Cartesian interpolation
+        num_waypoints = 10
+        total_duration = 5.0
+        current_ee_position = self.pos.copy()
+        # X/Y already positioned correctly by translate_for_assembly (includes grasp offset)
+        # Perform insert only moves Z down
+        target_position = np.array([self.start_x, self.start_y, target_flange_z])
 
-            # Unwrap joint angles to avoid configuration flips
-            for j in range(6):
-                diff = joint_angles[j] - prev_joint_angles[j]
-                if diff > np.pi:
-                    joint_angles[j] -= 2 * np.pi
-                elif diff < -np.pi:
-                    joint_angles[j] += 2 * np.pi
+        start_joints = np.array([float(x) for x in self.joints])
+        all_joint_angles = [start_joints]
 
-            prev_joint_angles = joint_angles.copy()
-            joint_trajectory.append(joint_angles)
-            q_guess = joint_angles  # Use this solution as seed for next waypoint
+        for i in range(1, num_waypoints + 1):
+            alpha = i / num_waypoints
+            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
 
-            # Stop if we've reached target Z
-            if current_z <= target_z + 0.001:
-                break
-        
-        if len(joint_trajectory) == 0:
-            self.error_message = "IK solver failed: no valid solution to perform insert trajectory"
-            self.get_logger().error(self.error_message)
-            return False
-        
-        
-        # Calculate total trajectory duration
-        trajectory_duration = len(joint_trajectory) * dt
-        self.get_logger().info(f"Trajectory duration: {trajectory_duration:.1f}s")
-        
-        # Create trajectory message with all waypoints
+            waypoint_pose = np.eye(4)
+            waypoint_pose[:3, 3] = waypoint_position
+            waypoint_pose[:3, :3] = target_rot_matrix
+
+            rng = np.random.default_rng(seed=i)
+            seeds = [self.joints.copy()]
+            for _ in range(10):
+                perturbed = self.joints + rng.normal(0, 0.1, 6)
+                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
+                seeds.append(perturbed)
+
+            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
+            waypoint_joint_angles = solver.solve(
+                seeds=seeds,
+                target_pose=waypoint_pose,
+                perturbations=1,
+            )
+
+            if waypoint_joint_angles is None and solver._best_result is not None:
+                waypoint_joint_angles = solver._best_result.joint_angles
+
+            if waypoint_joint_angles is None:
+                self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            self.joints = waypoint_joint_angles.copy()
+            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
+
+        # Trapezoidal velocity profile (same as sim mode)
+        n_total = len(all_joint_angles)
+        segment_dists = []
+        for i in range(1, n_total):
+            dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+            segment_dists.append(max(dist, 1e-6))
+        cumulative_s = [0.0]
+        for d in segment_dists:
+            cumulative_s.append(cumulative_s[-1] + d)
+        total_s = cumulative_s[-1]
+
+        accel_frac = 0.2
+        decel_frac = 0.2
+        t_accel = accel_frac * total_duration
+        t_decel = decel_frac * total_duration
+        t_cruise = total_duration - t_accel - t_decel
+        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+        a_accel = v_max / t_accel
+        a_decel = v_max / t_decel
+
+        def trapez_s_and_v(t_query):
+            if t_query <= t_accel:
+                s = 0.5 * a_accel * t_query ** 2
+                v = a_accel * t_query
+            elif t_query <= t_accel + t_cruise:
+                s_accel = 0.5 * v_max * t_accel
+                s = s_accel + v_max * (t_query - t_accel)
+                v = v_max
+            else:
+                s_accel = 0.5 * v_max * t_accel
+                s_cruise = v_max * t_cruise
+                t_in_decel = t_query - t_accel - t_cruise
+                s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
+                v = v_max - a_decel * t_in_decel
+            return s, max(v, 0.0)
+
+        def find_time_for_s(target_s):
+            lo, hi = 0.0, total_duration
+            for _ in range(50):
+                mid = (lo + hi) / 2
+                s_mid, _ = trapez_s_and_v(mid)
+                if s_mid < target_s:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+
+        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+        waypoint_times[0] = 0.0
+        waypoint_times[-1] = total_duration
+
+        # Build trajectory with velocities
         trajectory = JointTrajectory()
         trajectory.joint_names = self.joint_names
-        
-        for i, joint_angles in enumerate(joint_trajectory):
+
+        for i in range(n_total):
+            t_i = waypoint_times[i]
+            _, speed_scalar = trapez_s_and_v(t_i)
+
+            if i == 0 or i == n_total - 1:
+                velocities = [0.0] * 6
+            else:
+                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                delta_norm = np.linalg.norm(delta)
+                if delta_norm > 1e-8:
+                    direction = delta / delta_norm
+                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                else:
+                    velocities = [0.0] * 6
+
             point = JointTrajectoryPoint()
-            point.positions = [float(j) for j in joint_angles]
-            point.velocities = [0.0] * 6
-            
-            # Distribute time evenly across waypoints
-            t = (i + 1) * dt
-            point.time_from_start = Duration(
-                sec=int(t),
-                nanosec=int((t - int(t)) * 1e9)
-            )
+            point.positions = [float(x) for x in all_joint_angles[i]]
+            point.velocities = velocities
+            point.time_from_start = Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
             trajectory.points.append(point)
+
+        self.get_logger().info(
+            f"Trajectory: {len(trajectory.points)} waypoints, "
+            f"trapezoidal profile, v_max={np.degrees(v_max):.1f} deg/s"
+        )
         
         # Send trajectory
         goal = FollowJointTrajectory.Goal()
@@ -1586,7 +1684,7 @@ class PerformInsertController(Node):
                 return True
             
             # Check if trajectory completed (check position)
-            if self.pos is not None and self.pos[2] <= target_z + 0.005:
+            if self.pos is not None and self.pos[2] <= target_flange_z + 0.005:
                 self.get_logger().info(f"Reached target Z position ({self.pos[2]:.3f}m) without contact.")
                 return True
             
@@ -1812,6 +1910,8 @@ Examples:
                         help='Z force threshold in N to detect contact (default: -10.0 N, negative = upward resistance, real mode only)')
     parser.add_argument('--xy-threshold', type=float, default=1.0,
                         help='Minimum X/Y force magnitude required to enter alignment mode (default: 1.0 N, real mode only)')
+    parser.add_argument('--grasp-id', type=int, default=None,
+                        help='Grasp point ID for target position offset (real mode only)')
     args = parser.parse_args()
     
     # Validate arguments based on mode
@@ -1841,7 +1941,10 @@ Examples:
                 max_vel=args.max_vel,
                 reverse=args.reverse,
                 z_threshold=args.z_threshold,
-                xy_force_threshold=args.xy_threshold
+                xy_force_threshold=args.xy_threshold,
+                object_name=args.object_name,
+                base_name=args.base_name,
+                grasp_id=args.grasp_id
             )
 
         # Give system time to stabilize

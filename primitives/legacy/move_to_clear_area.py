@@ -23,7 +23,7 @@ from primitives.utils.workspace_config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_O
 import argparse
 
 from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN
+from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
 
 class MoveToClearArea(Node):
     def __init__(self, mode='move'):
@@ -189,7 +189,7 @@ class MoveToClearArea(Node):
 
         return joint_positions
 
-    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN, verbose=False):
+    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, verbose=False):
         """
         Check if any part of the robot (all joints) goes below the table.
 
@@ -331,7 +331,7 @@ class MoveToClearArea(Node):
 
         return False  # No collision
 
-    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN):
+    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS):
         """
         Check if any point along the interpolated trajectory has a collision.
 
