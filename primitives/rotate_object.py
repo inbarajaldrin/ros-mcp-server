@@ -1519,15 +1519,6 @@ class ReorientForAssembly(Node):
         initial_ee_rpy = R.from_quat(initial_ee_quat).as_euler('xyz', degrees=True)
         self.initial_ee_orientation_rpy_deg = self.canonicalize_euler(initial_ee_rpy)
 
-        # === Verify grasp in sim mode ===
-        if self.mode == 'sim':
-            grasped, dist = self.check_grasp(object_name)
-            if not grasped:
-                self.error_message = f"Grasp check failed: {object_name} is {dist*1000:.1f}mm from gripper center."
-                self.get_logger().error(self.error_message)
-                return False
-            self.get_logger().info(f"Grasp verified: {object_name} is {dist*1000:.1f}mm from gripper center")
-
         # === Get current object orientation ===
         if current_object_orientation is not None:
             R_object_current = self.get_rotation_from_quat(current_object_orientation)
@@ -2098,40 +2089,109 @@ class ReorientForAssembly(Node):
                         "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
                     }
                 }
-            if self.initial_ee_orientation_quat is not None and self.initial_ee_orientation_rpy_deg is not None:
-                result["initial_end_effector_orientation"] = {
-                    "quat": {
-                        "x": round(float(self.initial_ee_orientation_quat[0]), 6),
-                        "y": round(float(self.initial_ee_orientation_quat[1]), 6),
-                        "z": round(float(self.initial_ee_orientation_quat[2]), 6),
-                        "w": round(float(self.initial_ee_orientation_quat[3]), 6)
-                    },
-                    "rpy": {
-                        "roll": round(float(self.initial_ee_orientation_rpy_deg[0]), 4),
-                        "pitch": round(float(self.initial_ee_orientation_rpy_deg[1]), 4),
-                        "yaw": round(float(self.initial_ee_orientation_rpy_deg[2]), 4)
-                    }
-                }
-            if self.final_ee_orientation_quat is not None and self.final_ee_orientation_rpy_deg is not None:
-                result["final_end_effector_orientation"] = {
-                    "quat": {
-                        "x": round(float(self.final_ee_orientation_quat[0]), 6),
-                        "y": round(float(self.final_ee_orientation_quat[1]), 6),
-                        "z": round(float(self.final_ee_orientation_quat[2]), 6),
-                        "w": round(float(self.final_ee_orientation_quat[3]), 6)
-                    },
-                    "rpy": {
-                        "roll": round(float(self.final_ee_orientation_rpy_deg[0]), 4),
-                        "pitch": round(float(self.final_ee_orientation_rpy_deg[1]), 4),
-                        "yaw": round(float(self.final_ee_orientation_rpy_deg[2]), 4)
-                    }
-                }
+            # if self.initial_ee_orientation_quat is not None and self.initial_ee_orientation_rpy_deg is not None:
+            #     result["initial_end_effector_orientation"] = {
+            #         "quat": {
+            #             "x": round(float(self.initial_ee_orientation_quat[0]), 6),
+            #             "y": round(float(self.initial_ee_orientation_quat[1]), 6),
+            #             "z": round(float(self.initial_ee_orientation_quat[2]), 6),
+            #             "w": round(float(self.initial_ee_orientation_quat[3]), 6)
+            #         },
+            #         "rpy": {
+            #             "roll": round(float(self.initial_ee_orientation_rpy_deg[0]), 4),
+            #             "pitch": round(float(self.initial_ee_orientation_rpy_deg[1]), 4),
+            #             "yaw": round(float(self.initial_ee_orientation_rpy_deg[2]), 4)
+            #         }
+            #     }
+            # if self.final_ee_orientation_quat is not None and self.final_ee_orientation_rpy_deg is not None:
+            #     result["final_end_effector_orientation"] = {
+            #         "quat": {
+            #             "x": round(float(self.final_ee_orientation_quat[0]), 6),
+            #             "y": round(float(self.final_ee_orientation_quat[1]), 6),
+            #             "z": round(float(self.final_ee_orientation_quat[2]), 6),
+            #             "w": round(float(self.final_ee_orientation_quat[3]), 6)
+            #         },
+            #         "rpy": {
+            #             "roll": round(float(self.final_ee_orientation_rpy_deg[0]), 4),
+            #             "pitch": round(float(self.final_ee_orientation_rpy_deg[1]), 4),
+            #             "yaw": round(float(self.final_ee_orientation_rpy_deg[2]), 4)
+            #         }
+            #     }
         else:
             # Add error message on failure
             if self.error_message:
                 result["error"] = self.error_message
 
         output_result(result)
+
+
+def run_verify_grasp(object_name, mode):
+    """Run verify_grasp.py as a subprocess to check if object is grasped.
+
+    Sim mode: checks object-to-gripper distance.
+    Real mode: checks gripper width is valid for the grasp.
+
+    Returns True if grasp is verified, False otherwise.
+    """
+    import subprocess
+    import threading
+
+    script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               'queries', 'verify_grasp.py')
+
+    cmd = [sys.executable, script_path,
+           '--object-name', object_name,
+           '--mode', mode]
+
+    if mode == 'real':
+        # Use width-only check (just verify gripper is holding something)
+        cmd.append('--width-only')
+
+    print(f"[INFO] Verifying grasp for {object_name} ({mode} mode)...")
+
+    env = os.environ.copy()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+
+    output_lines = []
+
+    def stream_output(pipe):
+        for line in iter(pipe.readline, ''):
+            line = line.rstrip()
+            if line:
+                output_lines.append(line)
+                print(f"[verify_grasp] {line}")
+        pipe.close()
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env
+    )
+
+    output_thread = threading.Thread(target=stream_output, args=(process.stdout,), daemon=True)
+    output_thread.start()
+
+    try:
+        returncode = process.wait(timeout=15)
+        output_thread.join(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        print("[ERROR] verify_grasp timed out")
+        process.kill()
+        return False
+
+    if returncode != 0:
+        print("[ERROR] Grasp verification FAILED - object may not be grasped")
+        return False
+
+    print("[INFO] Grasp verification passed")
+    return True
 
 
 def main(args=None):
@@ -2162,6 +2222,20 @@ def main(args=None):
         if args.use_default_base_orientation and args.target_base_orientation is not None:
             parser.error("Cannot use both --target-base-orientation and --use-default-base-orientation")
     
+    # === Verify grasp before starting ===
+    grasp_verified = run_verify_grasp(
+        object_name=args.object_name,
+        mode=args.mode
+    )
+    if not grasp_verified:
+        output_result({
+            "result": "failure",
+            "object_name": args.object_name,
+            "base_name": args.base_name,
+            "error": "Grasp verification failed - object may not be grasped"
+        })
+        sys.exit(1)
+
     node = None
     success = False
     try:

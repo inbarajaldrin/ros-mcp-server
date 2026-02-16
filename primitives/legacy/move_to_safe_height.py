@@ -23,7 +23,7 @@ from primitives.utils.workspace_config import SAFE_HEIGHT
 import json
 import yaml
 
-from primitives.utils.ik_solver import compute_ik, compute_ik_robust
+from primitives.utils.ik_solver import compute_ik, compute_ik_robust, compute_cartesian_waypoints_ik
 
 class MoveToSafeHeight(Node):
     def __init__(self, height=None):
@@ -205,65 +205,27 @@ class MoveToSafeHeight(Node):
         current_pos = pose_data['position']
         current_quat = pose_data['orientation']
         
-        # Convert quaternion directly to rotation matrix to avoid precision loss from RPY conversion
-        from scipy.spatial.transform import Rotation as Rot
-        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
-
-        # Keep the current orientation (don't change it, just move to safe height)
-        target_rotation = Rot.from_quat(current_quat)
-        target_rot_matrix = target_rotation.as_matrix()
-
-        # Create target position with safe height (same x,y but z=safe_height)
-        target_position = current_pos.copy()
-        target_position[2] = self.safe_height
-
         try:
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
                 return
 
-            joint_bounds = [
-                (-np.pi, np.pi),     # shoulder_pan
-                (-np.pi, np.pi),     # shoulder_lift
-                (-np.pi, np.pi),     # elbow
-                (-np.pi, np.pi),     # wrist_1
-                (-np.pi, np.pi),     # wrist_2
-                (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
-            ]
-
-            # Cartesian-interpolated waypoints to prevent x,y drift
-            dz = abs(target_position[2] - current_pos[2])
-            num_waypoints = max(2, int(dz / 0.02))  # one waypoint every 20mm
+            num_waypoints = 60
             total_duration = 5.0
 
-            prev_joints = self.current_joint_angles.copy()
-            all_joint_angles = [prev_joints.copy()]
+            # Use fast Jacobian-based IK for dense waypoints
+            self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
+            waypoints = compute_cartesian_waypoints_ik(
+                self.current_joint_angles, self.safe_height,
+                num_waypoints=num_waypoints
+            )
+            if waypoints is None:
+                self.error_message = "IK failed for Cartesian waypoints"
+                self.get_logger().error(self.error_message)
+                return
 
-            for i in range(1, num_waypoints + 1):
-                alpha = i / num_waypoints
-                waypoint_pos = current_pos.copy()
-                waypoint_pos[2] = current_pos[2] + alpha * (target_position[2] - current_pos[2])
-
-                waypoint_pose = np.eye(4)
-                waypoint_pose[:3, 3] = waypoint_pos
-                waypoint_pose[:3, :3] = target_rot_matrix
-
-                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
-                joint_angles = solver.solve(
-                    seeds=[prev_joints.copy()],
-                    target_pose=waypoint_pose,
-                    perturbations=5,
-                    dx=0.001,
-                )
-
-                if joint_angles is None:
-                    self.error_message = f"IK failed at waypoint {i}/{num_waypoints} (z={waypoint_pos[2]*1000:.0f}mm)"
-                    self.get_logger().error(self.error_message)
-                    return
-
-                all_joint_angles.append(np.array([float(x) for x in joint_angles]))
-                prev_joints = np.array(joint_angles)
+            all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
             # Trapezoidal velocity profile (same as perform_insert)
             n_total = len(all_joint_angles)

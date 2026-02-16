@@ -60,26 +60,26 @@ class GripperCenterPoseReader:
     
     def compute_gripper_center_from_tcp(self, tcp_position, tcp_quaternion):
         """Compute the gripper center pose from TCP pose using the same logic as move_to_grasp.
-        
+
         The offset vector is defined in the tool frame (gripper frame) and then
         transformed to world frame using the tool orientation quaternion.
-        
+
         Args:
             tcp_position: TCP position in world frame [x, y, z]
             tcp_quaternion: TCP/tool orientation quaternion [x, y, z, w] (tool frame to world frame)
-        
+
         Returns:
             gripper_center_position: Position of the gripper center in world frame [x, y, z]
         """
         # Offset vector in tool frame (gripper frame): [0, 0, offset_distance]
         # In tool frame, Z-axis points from TCP to gripper center (downward)
         offset_vector_tool_frame = self.tcp_to_gripper_center_offset
-        
+
         # Transform offset vector from tool frame to world frame using quaternion
         # The quaternion represents the rotation from tool frame to world frame
         r = R.from_quat(tcp_quaternion)
         offset_vector_world = r.apply(offset_vector_tool_frame)
-        
+
         # Compute gripper center: TCP + offset_vector_world
         # (going forward from TCP to gripper center along the tool Z-axis)
         gripper_center_position = np.array(tcp_position) + offset_vector_world

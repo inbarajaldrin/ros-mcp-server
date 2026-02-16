@@ -55,3 +55,34 @@ def get_assembly_data_dir() -> Path:
     """Get assembly data directory path (same as data dir)."""
     return get_aruco_data_dir()
 
+
+def find_object_cad_file(object_name: str) -> Optional[Path]:
+    """
+    Find CAD .obj file for an object by name.
+
+    Searches in common locations:
+    - aruco-grasp-annotator/data/models/
+    - aruco-grasp-annotator/data/objects/
+    - etc.
+
+    Args:
+        object_name: Name of the object (e.g., 'u_orange', 'fork')
+
+    Returns:
+        Path to .obj file if found, None otherwise
+    """
+    try:
+        data_dir = get_aruco_data_dir()
+    except FileNotFoundError:
+        return None
+
+    # Search for .obj files with matching name in data directory and subdirectories
+    for obj_file in data_dir.rglob(f"{object_name}.obj"):
+        return obj_file
+
+    # Also try with common prefixes
+    for obj_file in data_dir.rglob(f"*{object_name}*.obj"):
+        return obj_file
+
+    return None
+

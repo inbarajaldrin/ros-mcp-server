@@ -3,7 +3,7 @@
 Gripper Control with Verification
 
 Controls gripper and verifies movement using gripper width readings (both sim and real).
-Supports "open", "close", "half-open" (35mm), or numeric values 0-110 (width in mm).
+Supports "open", "close", "half-open" (35mm), or numeric values 0-100 (width in mm).
 
 Usage:
     python3 control_gripper.py open [--mode sim|real]
@@ -22,9 +22,9 @@ import json
 import threading
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-# Gripper range: 0.0 - 110.0mm
+# Gripper range: 0.0 - 100.0mm
 GRIPPER_MIN_WIDTH = 0.0
-GRIPPER_MAX_WIDTH = 110.0
+GRIPPER_MAX_WIDTH = 100.0
 GRIPPER_HALF_OPEN_WIDTH = 35.0  # mm
 
 MAX_RETRIES = 3
@@ -72,7 +72,7 @@ class GripperController(Node):
         if command.lower() == "open":
             self.target_state = "open"
             self.ros_command = "open"
-            self.numeric_value = 1100
+            self.numeric_value = 1000
         elif command.lower() == "close":
             self.target_state = "close"
             self.ros_command = "close"
@@ -80,20 +80,20 @@ class GripperController(Node):
         elif command.lower() == "half-open":
             # Half-open: uses GRIPPER_HALF_OPEN_WIDTH
             self.target_state = "numeric"
-            self.numeric_value = int(GRIPPER_HALF_OPEN_WIDTH * 10)  # Convert mm to 0-1100 range
+            self.numeric_value = int(GRIPPER_HALF_OPEN_WIDTH * 10)  # Convert mm to 0-1000 range
             self.ros_command = str(self.numeric_value)
         else:
-            # Numeric value 0-110 (convert to 0-1100 for ROS)
+            # Numeric value 0-100 (convert to 0-1000 for ROS)
             try:
                 value = float(command)
-                if not (0 <= value <= 110):
-                    self.get_logger().error(f"Value {value} out of range. Use 0-110.")
+                if not (0 <= value <= 100):
+                    self.get_logger().error(f"Value {value} out of range. Use 0-100.")
                     sys.exit(1)
                 self.target_state = "numeric"
-                self.numeric_value = int(value * 10)  # Convert 0-110 to 0-1100
+                self.numeric_value = int(value * 10)  # Convert 0-100 to 0-1000
                 self.ros_command = str(self.numeric_value)
             except ValueError:
-                self.get_logger().error(f"Invalid command '{command}'. Use 'open', 'close', 'half-open', or 0-110.")
+                self.get_logger().error(f"Invalid command '{command}'. Use 'open', 'close', 'half-open', or 0-100.")
                 sys.exit(1)
         
         self.get_logger().info(f"Target state: {self.target_state}, ROS command: {self.ros_command}, Mode: {self.mode}")
@@ -154,14 +154,14 @@ class GripperController(Node):
             return False
         
         if self.target_state == "open":
-            # Open: should be near max width (110mm)
+            # Open: should be near max width (100mm)
             return width >= (GRIPPER_MAX_WIDTH - tolerance)
         elif self.target_state == "close":
             # Close: should be near min width (0mm), tolerance 0-10mm
             return width <= (GRIPPER_MIN_WIDTH + close_tolerance)
         else:  # numeric
             # Numeric: should be close to target value
-            target_width = self.numeric_value / 10.0  # Convert from 0-1100 to 0-110
+            target_width = self.numeric_value / 10.0  # Convert from 0-1000 to 0-100
             return abs(width - target_width) <= tolerance
     
     def verify_gripper_state(self, initial_value=None):
@@ -345,7 +345,7 @@ def output_result(result):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Control gripper with verification')
-    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (35mm), or 0-110 (width in mm)')
+    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (35mm), or 0-100 (width in mm)')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
 

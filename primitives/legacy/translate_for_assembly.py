@@ -37,7 +37,7 @@ import argparse
 import time
 import glob
 
-from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params, compute_ik
+from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params, compute_ik, compute_cartesian_waypoints_ik
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
 from primitives.rotate_object import FoldSymmetry, ExtendedCardinalOrientations
 from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
@@ -47,7 +47,7 @@ ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
-HOVER_HEIGHT = 0.40  # Height to hover above base before descending
+HOVER_HEIGHT = 0.15  # Height to hover above base before descending
 
 
 def output_result(result):
@@ -791,8 +791,12 @@ class TranslateForAssembly(Node):
         ee_target_quat = ee_target_rotation.as_quat()
         
         # Create hover position (same XY as target, but at HOVER_HEIGHT above base)
-        hover_position = ee_target_position.copy()
-        hover_position[2] = base_current_position[2] + HOVER_HEIGHT
+        # Compute hover for gripper center, then convert to flange position
+        hover_gripper_center = ee_target_position.copy()
+        hover_gripper_center[2] = base_current_position[2] + HOVER_HEIGHT
+        tool_offset_world = ee_target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+        hover_position = hover_gripper_center - tool_offset_world
+        self.get_logger().info(f"Hover gripper center Z: {hover_gripper_center[2]:.4f}, hover flange Z: {hover_position[2]:.4f} (offset: {tool_offset_world[2]:.4f})")
         
         # Log final object position
         self.get_logger().info(f"Final object position: [{target_object_position_abs[0]:.4f}, {target_object_position_abs[1]:.4f}, {target_object_position_abs[2]:.4f}]")
@@ -923,13 +927,25 @@ class TranslateForAssembly(Node):
             object_name: Name of the object being held
             base_name: Name of the base object (e.g., 'base')
             duration: Duration for trajectory execution
-            final_base_pos: [x, y, z] final base position (required in real mode)
-            final_base_orientation: [x, y, z, w] final base orientation quaternion (required in real mode)
+            final_base_pos: [x, y, z] final base position (required unless use_default_base)
+            final_base_orientation: [x, y, z, w] final base orientation quaternion (required unless use_default_base)
             use_default_base: Use default base position/orientation if True
+            grasp_id: Grasp point ID (required)
+            object_orientation: Current object orientation quaternion [x, y, z, w] (required)
         """
         # Store names for JSON output
         self.object_name = object_name
         self.base_name = base_name
+
+        # Validate required parameters
+        if grasp_id is None:
+            self.error_message = "grasp_id is required for real mode"
+            self.get_logger().error(self.error_message)
+            return False
+        if object_orientation is None:
+            self.error_message = "object_orientation is required for real mode"
+            self.get_logger().error(self.error_message)
+            return False
 
         # Load assembly config based on base_name if not already loaded for this base
         if self.loaded_base_name != base_name:
@@ -1011,64 +1027,64 @@ class TranslateForAssembly(Node):
         self.get_logger().info(f"Target object position (world): {target_object_position_abs}")
         self.get_logger().info(f"Target object orientation (world): {target_orientation_abs}")
         
-        # Keep current EE orientation unchanged (assumed correct from reorient step)
-        ee_target_quat = R.from_matrix(T_EE_current[:3, :3]).as_quat()
         self.get_logger().info("Keeping current EE orientation unchanged (from reorient step)")
-        
-        # Calculate EE (flange) position from target object position
-        # If grasp_id is provided, offset by the grasp point position (rotated into world frame)
-        R_ee = T_EE_current[:3, :3]
-        ee_target_position = target_object_position_abs.copy()
 
-        if grasp_id is not None:
-            grasp_offset = load_grasp_point_position(object_name, grasp_id, logger=self.get_logger())
-            if grasp_offset is None:
-                self.error_message = f"Could not load grasp point {grasp_id} for '{object_name}'"
-                self.get_logger().error(self.error_message)
-                return None
+        # Load grasp point offset
+        grasp_offset = load_grasp_point_position(object_name, grasp_id, logger=self.get_logger())
+        if grasp_offset is None:
+            self.error_message = f"Could not load grasp point {grasp_id} for '{object_name}'"
+            self.get_logger().error(self.error_message)
+            return None
 
-            # Determine rotation to apply to grasp offset
-            if object_orientation is not None:
-                # Use fold symmetry to snap current object orientation to closest equivalent
-                R_object_current = R.from_quat(object_orientation).as_matrix()
-                symmetry_dir = str(get_symmetry_dir())
-                fold_data = FoldSymmetry.load_symmetry_data(object_name, symmetry_dir)
+        # Validate quaternion before using
+        quat_array = np.array(object_orientation)
+        quat_norm_sq = np.sum(quat_array ** 2)
+        if abs(quat_norm_sq - 1.0) > 0.1:
+            self.get_logger().error(
+                f"Invalid quaternion: norm² = {quat_norm_sq:.2f} (expected ~1.0). "
+                f"Values: {quat_array}"
+            )
+            self.error_message = "Current object orientation quaternion is malformed or corrupted"
+            return None
 
-                if fold_data is not None:
-                    equivalents = FoldSymmetry.generate_equivalent_target_orientations(
-                        R_target_abs, fold_data, logger=self.get_logger()
-                    )
-                    # Find closest equivalent to current object orientation
-                    best_dist = float('inf')
-                    R_grasp_rotation = R_target_abs  # fallback
-                    for R_eq in equivalents:
-                        dist = ExtendedCardinalOrientations.rotation_matrix_distance(R_object_current, R_eq)
-                        if dist < best_dist:
-                            best_dist = dist
-                            R_grasp_rotation = R_eq
-                    self.get_logger().info(f"Snapped object orientation to closest equivalent (error: {np.degrees(best_dist):.1f}°)")
-                else:
-                    self.get_logger().info("No symmetry data found, using current object orientation directly")
-                    R_grasp_rotation = R_object_current
-            else:
-                # No object orientation provided, use assembly target rotation
-                R_grasp_rotation = R_target_abs
+        # Use fold symmetry to snap current object orientation to closest equivalent
+        R_object_current = R.from_quat(object_orientation).as_matrix()
+        symmetry_dir = str(get_symmetry_dir())
+        fold_data = FoldSymmetry.load_symmetry_data(object_name, symmetry_dir)
 
-            grasp_world_offset = R_grasp_rotation @ grasp_offset
-            ee_target_position += grasp_world_offset
-            self.get_logger().info(f"Grasp point {grasp_id} offset (CAD frame): {grasp_offset}")
-            self.get_logger().info(f"Grasp point offset (world frame): {grasp_world_offset}")
+        if fold_data is not None:
+            equivalents = FoldSymmetry.generate_equivalent_target_orientations(
+                R_target_abs, fold_data, logger=self.get_logger()
+            )
+            best_pos_error = float('inf')
+            best_orientation_error = float('inf')
+            R_grasp_rotation = R_target_abs  # fallback
+            for R_eq in equivalents:
+                orientation_error = ExtendedCardinalOrientations.rotation_matrix_distance(R_object_current, R_eq)
+                grasp_world_offset_candidate = R_eq @ grasp_offset
+                pos_error = np.linalg.norm(grasp_world_offset_candidate - (R_object_current @ grasp_offset))
+                if pos_error < best_pos_error or (pos_error == best_pos_error and orientation_error < best_orientation_error):
+                    best_pos_error = pos_error
+                    best_orientation_error = orientation_error
+                    R_grasp_rotation = R_eq
+            self.get_logger().info(f"Snapped object orientation to closest equivalent (angle error: {np.degrees(best_orientation_error):.1f}°, position error: {best_pos_error*1000:.2f}mm)")
+        else:
+            self.get_logger().info("No symmetry data found, using current object orientation directly")
+            R_grasp_rotation = R_object_current
 
-        ee_target_position -= R_ee @ GRIPPER_CENTER_TOOL_OFFSET
-        
-        # Apply height offset - add HOVER_HEIGHT above base (step 1: hover position only)
-        hover_position = ee_target_position.copy()
-        hover_position[2] = base_current_position[2] + HOVER_HEIGHT
-        
-        self.get_logger().info(f"Calculated EE position from target object position:")
-        self.get_logger().info(f"  Target object: {target_object_position_abs}")
-        self.get_logger().info(f"  EE (flange) position: {ee_target_position}")
-        self.get_logger().info(f"  Hover position (with {HOVER_HEIGHT}m height offset): {hover_position}")
+        grasp_world_offset = R_grasp_rotation @ grasp_offset
+        self.get_logger().info(f"Grasp point {grasp_id} offset (CAD frame): {grasp_offset}")
+        self.get_logger().info(f"Grasp point offset (world frame): {grasp_world_offset}")
+
+        # Compute target gripper center position (no flange offset needed)
+        target_gripper_center = target_object_position_abs + grasp_world_offset
+
+        # Hover position: same XY as target gripper center, Z = base + HOVER_HEIGHT
+        hover_gripper_center = target_gripper_center.copy()
+        hover_gripper_center[2] = base_current_position[2] + HOVER_HEIGHT
+
+        self.get_logger().info(f"Target gripper center: {target_gripper_center}")
+        self.get_logger().info(f"Hover gripper center (with {HOVER_HEIGHT}m height offset): {hover_gripper_center}")
 
         # Read current joint angles before computing IK
         if self.current_joint_angles is None:
@@ -1078,36 +1094,33 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Cartesian-interpolated waypoints with trapezoidal velocity profile
+        # Convert gripper center target to flange target using FK-derived rotation
+        # (avoids mismatch between topic-reported orientation and FK)
+        from primitives.utils.ik_solver import forward_kinematics
+        T_fk = forward_kinematics(dh_params, self.current_joint_angles)
+        R_fk = T_fk[:3, :3]
+        tool_offset_world = R_fk @ GRIPPER_CENTER_TOOL_OFFSET
+        hover_flange = hover_gripper_center - tool_offset_world
+
+        self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
+
+        # Use Jacobian-based differential IK (same as move_to_safe_height)
         total_duration = 5.0
-        start_pos = np.array([self.current_ee_pose.pose.position.x,
-                              self.current_ee_pose.pose.position.y,
-                              self.current_ee_pose.pose.position.z])
-        target_pos = hover_position
+        num_waypoints = 60
 
-        dist = np.linalg.norm(target_pos - start_pos)
-        num_waypoints = max(2, int(dist / 0.02))
+        self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
+        waypoints = compute_cartesian_waypoints_ik(
+            self.current_joint_angles,
+            target_z=hover_flange[2],
+            num_waypoints=num_waypoints,
+            target_pos=hover_flange.tolist(),
+        )
+        if waypoints is None:
+            self.error_message = "IK failed for Cartesian waypoints"
+            self.get_logger().error(self.error_message)
+            return False
 
-        all_joint_angles = [self.current_joint_angles.copy()]
-
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_pos = start_pos + alpha * (target_pos - start_pos)
-
-            waypoint_joint_angles = self.compute_ik_with_current_seed(
-                waypoint_pos.tolist(),
-                ee_target_quat.tolist(),
-                max_tries=5,
-                dx=0.001
-            )
-
-            if waypoint_joint_angles is None:
-                self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
-                self.get_logger().error(self.error_message)
-                return False
-
-            self.current_joint_angles = waypoint_joint_angles.copy()
-            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
+        all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
         # Trapezoidal velocity profile
         n_total = len(all_joint_angles)
@@ -1180,10 +1193,93 @@ class TranslateForAssembly(Node):
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
-            self.get_logger().error("Failed to reach hover position")
+            self.get_logger().error("Failed to reach target position")
             return False
 
-        return success
+        # Closed-loop correction: re-read joints, check gripper center error, correct if needed
+        CORRECTION_THRESHOLD = 0.00025  # 0.25mm
+        MAX_CORRECTIONS = 3
+
+        for correction_iter in range(MAX_CORRECTIONS):
+            # Re-read current joint angles and EE pose from topics
+            self.joint_angles_received = False
+            self.current_ee_pose = None
+            timeout = 0
+            while rclpy.ok() and (not self.joint_angles_received or self.current_ee_pose is None) and timeout < 50:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                timeout += 1
+
+            if not self.joint_angles_received or self.current_ee_pose is None:
+                self.get_logger().warn("Could not read pose data for correction")
+                break
+
+            # Get actual gripper center from ROS topic (ground truth)
+            ee_pos_topic = np.array([self.current_ee_pose.pose.position.x,
+                                     self.current_ee_pose.pose.position.y,
+                                     self.current_ee_pose.pose.position.z])
+            ee_quat_topic = np.array([self.current_ee_pose.pose.orientation.x,
+                                      self.current_ee_pose.pose.orientation.y,
+                                      self.current_ee_pose.pose.orientation.z,
+                                      self.current_ee_pose.pose.orientation.w])
+            R_ee_topic = R.from_quat(ee_quat_topic).as_matrix()
+            actual_gripper_center = ee_pos_topic + R_ee_topic @ GRIPPER_CENTER_TOOL_OFFSET
+            gripper_center_error = hover_gripper_center - actual_gripper_center
+            pos_error = np.linalg.norm(gripper_center_error)
+
+            self.get_logger().info(
+                f"Correction check {correction_iter + 1}: gripper center error = {pos_error*1000:.2f}mm "
+                f"(actual: [{actual_gripper_center[0]*1000:.1f}, {actual_gripper_center[1]*1000:.1f}, {actual_gripper_center[2]*1000:.1f}]mm)"
+            )
+
+            if pos_error <= CORRECTION_THRESHOLD:
+                self.get_logger().info(f"Position accuracy OK ({pos_error*1000:.2f}mm <= {CORRECTION_THRESHOLD*1000:.2f}mm)")
+                break
+
+            # Apply the error as a delta to the current FK flange position
+            # This bridges FK/topic mismatch: we measure error in topic space
+            # but apply correction in FK space as a relative offset
+            T_fk_current = forward_kinematics(dh_params, self.current_joint_angles)
+            current_flange_fk = T_fk_current[:3, 3]
+            corrected_flange = current_flange_fk + gripper_center_error
+
+            self.get_logger().info(f"Applying correction move (error: {pos_error*1000:.2f}mm, delta: [{gripper_center_error[0]*1000:.2f}, {gripper_center_error[1]*1000:.2f}, {gripper_center_error[2]*1000:.2f}]mm)...")
+            correction_waypoints = compute_cartesian_waypoints_ik(
+                self.current_joint_angles,
+                target_z=corrected_flange[2],
+                num_waypoints=20,
+                target_pos=corrected_flange.tolist(),
+            )
+            if correction_waypoints is None:
+                self.get_logger().warn("Correction IK failed, skipping")
+                break
+
+            # Build quick correction trajectory (1s duration)
+            corr_all = [self.current_joint_angles.copy()] + list(correction_waypoints)
+            corr_n = len(corr_all)
+            corr_duration = 1.0
+            corr_points = []
+            for i in range(corr_n):
+                t_i = corr_duration * i / (corr_n - 1)
+                if i == 0 or i == corr_n - 1:
+                    vels = [0.0] * 6
+                else:
+                    delta = corr_all[min(i+1, corr_n-1)] - corr_all[max(i-1, 0)]
+                    dn = np.linalg.norm(delta)
+                    if dn > 1e-8:
+                        vels = [float(delta[j] / dn * pos_error / corr_duration) for j in range(6)]
+                    else:
+                        vels = [0.0] * 6
+                corr_points.append({
+                    "positions": [float(x) for x in corr_all[i]],
+                    "velocities": vels,
+                    "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+                })
+
+            if not self.execute_trajectory({"traj1": corr_points}):
+                self.get_logger().warn("Correction trajectory failed")
+                break
+
+        return True
 
     def execute_trajectory(self, trajectory):
         """Execute trajectory with multiple waypoints and wait for completion"""
@@ -1265,6 +1361,10 @@ def main(args=None):
     if args.mode == 'real':
         if not args.use_default_base and args.final_base_pos is None:
             parser.error("In real mode, either --final-base-pos or --use-default-base is required")
+        if args.grasp_id is None:
+            parser.error("In real mode, --grasp-id is required")
+        if args.current_object_orientation is None:
+            parser.error("In real mode, --current-object-orientation is required")
     
     rclpy.init()
 

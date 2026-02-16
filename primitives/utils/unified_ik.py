@@ -37,21 +37,21 @@ def _make_cached_quaternion_objective(target_pose: np.ndarray, dh: list = None) 
     return objective
 
 
-# Default L-BFGS-B options: relaxed tolerances sufficient for IK (cost threshold is 0.01).
-# Default scipy ftol/gtol are ~2.2e-15 which wastes iterations converging far beyond needed.
-# ftol=1e-6, gtol=1e-5 still yields cost ~3e-6 (well below 0.01) with ~25% fewer iterations.
-_DEFAULT_SOLVER_OPTIONS = {'ftol': 1e-6, 'gtol': 1e-5}
+# L-BFGS-B options for high-precision IK (cost threshold is 0.0025).
+# Tightened from previous relaxed tolerances to achieve ~0.25mm position accuracy.
+# ftol=1e-7, gtol=1e-6 provides better convergence for tighter cost threshold.
+_DEFAULT_SOLVER_OPTIONS = {'ftol': 1e-7, 'gtol': 1e-6}
 
 
 @dataclass
 class IKSolverConfig:
     """Configuration for IK solving."""
-    cost_threshold: float = 0.01        # Immediate return threshold (tight tolerance)
-    acceptable_cost: float = 0.1        # Fallback acceptance threshold
+    cost_threshold: float = 0.0025      # Immediate return threshold (tight tolerance, ~0.25mm position error)
+    acceptable_cost: float = 0.05       # Fallback acceptance threshold (~0.5mm position error)
     early_termination: bool = True      # Stop on good solution
     objective_fn: Optional[Callable] = None  # Custom objective; defaults to ik_objective_quaternion
     joint_bounds: Optional[list] = None      # Custom joint bounds; defaults to [(-pi, pi)] * 6
-    solver_options: Optional[Dict] = None    # L-BFGS-B options; defaults to relaxed tolerances
+    solver_options: Optional[Dict] = None    # L-BFGS-B options; defaults to tightened tolerances
     dh_params: Optional[list] = None         # Custom DH params; defaults to standard dh_params
 
 

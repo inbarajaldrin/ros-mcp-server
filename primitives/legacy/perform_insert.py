@@ -33,23 +33,21 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped, WrenchStamped
+from geometry_msgs.msg import PoseStamped, Wrench
+from geometry_msgs.msg import WrenchStamped
 from builtin_interfaces.msg import Duration
 from scipy.spatial.transform import Rotation as R
 
 import numpy as np
 import time
 import argparse
-from primitives.utils.ik_solver import compute_ik, ik_objective_quaternion, dh_params
-from scipy.optimize import minimize
+from primitives.utils.ik_solver import compute_cartesian_waypoints_ik
 from tf2_msgs.msg import TFMessage
 import json
 import os
 import glob
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
-from primitives.legacy.translate_for_assembly import load_grasp_point_position
+from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
 from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
-from primitives.utils.unified_ik import IKSolverConfig, IKSolver
 
 
 # Configuration (auto-discovered)
@@ -110,6 +108,35 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     return None
 
 
+def load_grasp_point_position(object_name, grasp_id, logger=None):
+    """Load grasp point position from grasp points JSON file.
+
+    Returns:
+        np.array([x, y, z]) position relative to object CAD center, or None if not found
+    """
+    data_dir = get_aruco_data_dir() / "grasp_points"
+    for name_variant in [object_name, f"{object_name}_scaled70"]:
+        json_path = data_dir / f"{name_variant}_grasp_points.json"
+        if json_path.exists():
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                for gp in data.get('grasp_points', []):
+                    if gp['id'] == grasp_id:
+                        pos = gp['position']
+                        if logger:
+                            logger.info(f"Loaded grasp point {grasp_id} for {name_variant}: [{pos['x']:.4f}, {pos['y']:.4f}, {pos['z']:.4f}]")
+                        return np.array([pos['x'], pos['y'], pos['z']])
+                if logger:
+                    logger.warn(f"Grasp ID {grasp_id} not found in {json_path.name}")
+            except (json.JSONDecodeError, IOError, KeyError) as e:
+                if logger:
+                    logger.error(f"Error reading {json_path}: {e}")
+    if logger:
+        logger.error(f"No grasp points file found for '{object_name}'")
+    return None
+
+
 class PerformInsertController(Node):
     """
     Performs insert operation with force compliance.
@@ -118,26 +145,38 @@ class PerformInsertController(Node):
     Z-direction moves down regardless of force.
     """
     
-    def __init__(self, mode=None, speed=0.005, gain=1.67, deadband=1.0, max_vel=15.0, reverse=False, z_threshold=-10.0, xy_force_threshold=1.0, object_name=None, base_name=None, grasp_id=None):
+    def __init__(self, mode=None, object_name=None, base_name=None, grasp_id=None,
+                 yaw_compliant=True, max_retries=3,
+                 final_base_pos=None, final_base_orientation=None,
+                 use_default_base=False, object_orientation=None):
         super().__init__('perform_insert_controller')
-        
+
         # Mode must be explicitly specified
         if mode is None:
             raise ValueError("Mode must be explicitly specified. Use 'sim' or 'real'.")
         if mode not in ['sim', 'real']:
             raise ValueError(f"Invalid mode '{mode}'. Must be 'sim' or 'real'.")
-        
+
         self.mode = mode  # 'sim' or 'real'
 
         # Error tracking for JSON output
         self.error_message = None
 
+        # Store object and base names
+        self.object_name = object_name
+        self.base_name = base_name
+        self.grasp_id = grasp_id
+
+        # Real mode: grasp-adjusted target params
+        self.final_base_pos = final_base_pos
+        self.final_base_orientation = final_base_orientation
+        self.use_default_base = use_default_base
+        self.object_orientation = object_orientation
+
         # For sim mode, we need object and base names
         if self.mode == 'sim':
             if object_name is None or base_name is None:
                 raise ValueError("In sim mode, object_name and base_name are required")
-            self.object_name = object_name
-            self.base_name = base_name
             # Find and load assembly config for sim mode based on base_name
             assembly_json_file = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
             if assembly_json_file:
@@ -149,8 +188,6 @@ class PerformInsertController(Node):
             self.current_poses = {}
             self.object_sub = self.create_subscription(TFMessage, "/objects_poses_sim", self.object_callback, 10)
         else:
-            self.object_name = None
-            self.base_name = None
             self.assembly_config = None
             self.current_poses = {}
             self.object_sub = None
@@ -160,50 +197,17 @@ class PerformInsertController(Node):
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
         ]
         
-        self.speed = speed          # m/s downward speed
-        self.gain = gain            # mm/s per Newton for X/Y compliance
-        self.deadband = deadband    # N deadband for X/Y forces
-        self.max_vel = max_vel      # mm/s max velocity for X/Y compliance
-        self.reverse = reverse      # If True, reverse X/Y force response directions
-        self.z_threshold = z_threshold  # Z force threshold in N (negative = upward force/resistance)
-        self.xy_force_threshold = xy_force_threshold  # Minimum X/Y force magnitude required to enter alignment (N)
-        
+        # Real mode: insert_compliance params
+        self.yaw_compliant = yaw_compliant
+        self.max_retries = max_retries
+
         # Current state
         self.pos = None             # [x, y, z] in meters
         self.rpy = None             # [r, p, y] in degrees
         self.quat = None            # [x, y, z, w] quaternion (raw from topic, for sim mode)
         self.joints = None
         self.force = None           # [fx, fy, fz] in N
-        
-        # Fixed orientation (captured at start)
-        self.fixed_rpy = None       # [r, p, y] in degrees
-        
-        # Baseline force
-        self.baseline = np.array([0.0, 0.0, 0.0])
-        
-        # Force smoothing for alignment mode (to prevent oscillation)
-        self.smoothed_force_xy = np.array([0.0, 0.0])  # Smoothed X/Y forces
-        self.force_smoothing_alpha = 0.3  # EMA smoothing factor (0-1, lower = more smoothing)
-        
-        # Starting position (for maintaining X/Y during search phase)
-        self.start_x = None
-        self.start_y = None
-        
-        # Contact detection and alignment mode
-        self.contact_detected = False  # Whether Z force threshold has been crossed
-        self.alignment_mode = False    # Whether we're in alignment mode (minimizing X/Y forces)
-        self.just_detected_contact = False  # Flag to trigger trajectory cancellation
-        self.current_goal_handle = None  # Current trajectory goal handle (for cancellation)
-        self.alignment_start_time = None  # Time when alignment mode started
-        self.alignment_stop_timeout = 10.0  # Stop alignment after this many seconds
-        self.alignment_min_duration = 1.0  # Minimum time in alignment mode before checking for completion
-        self.low_force_start_time = None  # Time when X/Y forces first went low (after min duration)
-        self.low_force_threshold = deadband  # X/Y force magnitude threshold to consider "low" (use deadband value)
-        self.low_force_required_duration = 2.0  # How long forces must be low before stopping
-        
-        # Safety limits to prevent excessive forces
-        self.max_z_force = -5.0  # Maximum Z force (N) - stop if exceeded
-        self.max_xy_force = 10.0  # Maximum X/Y force (N) - stop if exceeded
+        self.wrench = None          # Wrench message (force + torque)
         
         # Setup
         self.traj_client = ActionClient(
@@ -227,126 +231,54 @@ class PerformInsertController(Node):
         # Create initial subscriptions
         self._create_subscriptions()
 
-        # Wait for data with timeout and retry mechanism
-        max_retries = 5
-        timeout_sec = 15.0
+        # Wait for data — only needed in sim mode (real mode subprocesses to insert_compliance)
+        if self.mode == 'sim':
+            max_retries = 5
+            timeout_sec = 15.0
 
-        for attempt in range(max_retries):
-            self.get_logger().info(f"Waiting for initial data (attempt {attempt + 1}/{max_retries})...")
-            start_time = time.time()
+            for attempt in range(max_retries):
+                self.get_logger().info(f"Waiting for initial data (attempt {attempt + 1}/{max_retries})...")
+                start_time = time.time()
 
-            # Wait for data with timeout
-            # In sim mode, also wait for quaternion data (needed for maintaining orientation)
-            while rclpy.ok():
-                elapsed = time.time() - start_time
+                while rclpy.ok():
+                    elapsed = time.time() - start_time
 
-                # Check if we have all required data
-                if self.mode == 'sim':
                     have_all_data = (self.pos is not None and
                                    self.joints is not None and
                                    self.quat is not None)
-                else:
-                    have_all_data = (self.pos is not None and
-                                   self.joints is not None and
-                                   (self.force is not None or self.mode != 'real'))
 
-                if have_all_data:
-                    self.get_logger().info(f"Received all initial data after {elapsed:.1f}s")
-                    break
+                    if have_all_data:
+                        self.get_logger().info(f"Received all initial data after {elapsed:.1f}s")
+                        break
 
-                # Check timeout
-                if elapsed > timeout_sec:
-                    self.get_logger().warn(f"Timeout waiting for data after {timeout_sec}s")
-                    missing = []
-                    if self.pos is None:
-                        missing.append("pose")
-                    if self.joints is None:
-                        missing.append("joints")
-                    if self.mode == 'sim' and self.quat is None:
-                        missing.append("quaternion")
-                    if self.mode == 'real' and self.force is None:
-                        missing.append("force")
-                    self.get_logger().warn(f"Missing: {', '.join(missing)}")
+                    if elapsed > timeout_sec:
+                        self.get_logger().warn(f"Timeout waiting for data after {timeout_sec}s")
+                        missing = []
+                        if self.pos is None:
+                            missing.append("pose")
+                        if self.joints is None:
+                            missing.append("joints")
+                        if self.quat is None:
+                            missing.append("quaternion")
+                        self.get_logger().warn(f"Missing: {', '.join(missing)}")
 
-                    # Retry: destroy and recreate subscriptions
-                    if attempt < max_retries - 1:
-                        self.get_logger().info("Recreating subscriptions...")
-                        self._destroy_subscriptions()
-                        time.sleep(0.5)  # Brief delay before recreating
-                        self._create_subscriptions()
-                    break
+                        if attempt < max_retries - 1:
+                            self.get_logger().info("Recreating subscriptions...")
+                            self._destroy_subscriptions()
+                            time.sleep(0.5)
+                            self._create_subscriptions()
+                        break
 
-                rclpy.spin_once(self, timeout_sec=0.1)
+                    rclpy.spin_once(self, timeout_sec=0.1)
 
-            # If we got all data, exit retry loop
-            if self.mode == 'sim':
                 if self.pos is not None and self.joints is not None and self.quat is not None:
                     break
             else:
-                if self.pos is not None and self.joints is not None:
-                    if self.mode != 'real' or self.force is not None:
-                        break
-        else:
-            # All retries exhausted
-            self.get_logger().error(f"Failed to receive initial data after {max_retries} attempts")
-            self.get_logger().error("SUGGESTION: Try running the same command again. The issue is often transient and succeeds on retry.")
-            raise RuntimeError(f"Failed to receive initial data after {max_retries} attempts. Try running the command again.")
+                self.get_logger().error(f"Failed to receive initial data after {max_retries} attempts")
+                raise RuntimeError(f"Failed to receive initial data after {max_retries} attempts.")
         
-        # Capture and store fixed orientation
-        if self.rpy is not None:
-            # Set fixed orientation to [0, 180, 0.01] - face down with yaw = 0.01°
-            self.fixed_rpy = np.array([0.0, 180.0, 0.01])
-        else:
-            # Default orientation: face down with yaw = 0.01°
-            self.fixed_rpy = np.array([0.0, 180.0, 0.01])
-        
-        # Store grasp_id for real mode target adjustment
+        # Store grasp_id
         self.grasp_id = grasp_id
-
-        # Compute grasp-adjusted insert target offset (assembly position + rotated grasp offset)
-        self.insert_target_offset = np.array([0.0, 0.0, 0.0])  # default: no offset
-        if self.mode == 'real' and grasp_id is not None and object_name is not None and base_name is not None:
-            grasp_offset = load_grasp_point_position(object_name, grasp_id, logger=self.get_logger())
-            if grasp_offset is not None:
-                assembly_json = find_assembly_json_by_base_name(base_name, ASSEMBLY_DATA_DIR, self.get_logger())
-                if assembly_json:
-                    with open(assembly_json, 'r') as f:
-                        config = json.load(f)
-                    target_quat = None
-                    target_pos = None
-                    for comp in config.get('components', []):
-                        if comp['name'] in [object_name, f"{object_name}_scaled70"]:
-                            rot = comp.get('rotation', {}).get('quaternion', {})
-                            target_quat = [rot.get('x', 0), rot.get('y', 0), rot.get('z', 0), rot.get('w', 1)]
-                            pos = comp.get('position', {})
-                            target_pos = np.array([pos.get('x', 0), pos.get('y', 0), pos.get('z', 0)])
-                            break
-                    if target_quat is not None and target_pos is not None:
-                        R_base = R.from_quat(DEFAULT_BASE_ORIENTATION).as_matrix()
-                        R_assembly = R.from_quat(target_quat).as_matrix()
-                        R_target = R_base @ R_assembly
-                        grasp_world_offset = R_target @ grasp_offset
-                        # Full 3D offset: assembly position relative to base + rotated grasp point
-                        self.insert_target_offset = target_pos + grasp_world_offset
-                        self.get_logger().info(f"Grasp insert offset: assembly_pos={target_pos*1000} mm, grasp_world={grasp_world_offset*1000} mm, total={self.insert_target_offset*1000} mm")
-
-        # Store starting X and Y position (will be maintained during search phase)
-        if self.pos is not None:
-            self.start_x = self.pos[0]
-            self.start_y = self.pos[1]
-        
-        # Get baseline force (average over 2 seconds) - only in real mode
-        if self.mode == 'real':
-            samples = []
-            start = time.time()
-            while time.time() - start < 2.0:
-                rclpy.spin_once(self, timeout_sec=0.05)
-                if self.force is not None:
-                    samples.append(self.force.copy())
-                time.sleep(0.05)
-            self.baseline = np.mean(samples, axis=0)
-        else:
-            self.baseline = np.array([0.0, 0.0, 0.0])  # No baseline needed for sim mode
         
         self.get_logger().info(f"Using {self.mode.upper()} mode")
     
@@ -396,10 +328,14 @@ class PerformInsertController(Node):
             for joint_name in self.joint_names:
                 if joint_name in joint_dict:
                     ordered_positions.append(joint_dict[joint_name])
-            
+
             if len(ordered_positions) == 6:
                 self.joints = np.array(ordered_positions)
-    
+
+    def _wrench_cb(self, msg):
+        """Callback for force/torque sensor data"""
+        self.wrench = msg.wrench
+
     def object_callback(self, msg):
         """Callback for object poses (sim mode only)"""
         for transform in msg.transforms:
@@ -418,14 +354,31 @@ class PerformInsertController(Node):
             self.get_logger().error(f"Error parsing assembly JSON: {e}")
             return {}
     
-    def get_object_target_position(self, object_name):
+    def get_object_target_position(self, object_name, assembly_config=None):
         """Get target position for object from assembly configuration"""
-        for component in self.assembly_config.get('components', []):
+        config = assembly_config if assembly_config is not None else self.assembly_config
+        for component in config.get('components', []):
             if component.get('name') == object_name or component.get('name') == f"{object_name}_scaled70":
                 position = component.get('position', {})
                 return np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
         return None
-    
+
+    def get_object_target_orientation(self, object_name, assembly_config=None):
+        """Get target orientation for object from assembly configuration"""
+        config = assembly_config if assembly_config is not None else self.assembly_config
+        for component in config.get('components', []):
+            comp_name = component.get('name', '')
+            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+                rotation = component.get('rotation', {})
+                quat = rotation.get('quaternion', {})
+                return np.array([
+                    quat.get('x', 0.0),
+                    quat.get('y', 0.0),
+                    quat.get('z', 0.0),
+                    quat.get('w', 1.0),
+                ])
+        return None
+
     def transform_to_matrix(self, transform):
         """Convert ROS Transform to 4x4 transformation matrix"""
         t = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
@@ -712,95 +665,6 @@ class PerformInsertController(Node):
             timeout_count += 1
         return self.joints.copy() if self.joints is not None else None
     
-    def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001):
-        """
-        Compute IK using current joint angles as seed.
-        Uses unified IK solver with joint-distance tracking for smooth motion.
-
-        Args:
-            target_position: [x, y, z] target position
-            target_quat: [x, y, z, w] target orientation quaternion
-            max_tries: Number of position perturbations to try
-            dx: Position perturbation step size
-
-        Returns:
-            Joint angles if successful, None otherwise
-        """
-        target_rotation = R.from_quat(target_quat)
-        target_rot_matrix = target_rotation.as_matrix()
-
-        target_pose = np.eye(4)
-        target_pose[:3, 3] = target_position
-        target_pose[:3, :3] = target_rot_matrix
-
-        if self.joints is None:
-            self.get_logger().error("Current joint angles not available! Cannot compute IK.")
-            return None
-
-        q_guess = self.joints.copy()
-
-        # Collision checker for sim mode
-        def collision_checker(joint_angles):
-            if self.mode != 'sim':
-                return False
-            return (self.check_collision_with_table(joint_angles)
-                    or self.check_self_collision(joint_angles)
-                    or self.check_ee_below_base(joint_angles, z_threshold=0.05))
-
-        joint_bounds = [
-            (-np.pi, np.pi),     # shoulder_pan
-            (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
-            (0, np.pi),          # elbow: positive only (elbow down)
-            (-np.pi, np.pi),     # wrist_1
-            (-np.pi, 0),         # wrist_2: negative only (wrist-down)
-            (-2*np.pi, 2*np.pi)  # wrist_3: extended range
-        ]
-        config = IKSolverConfig(
-            joint_bounds=joint_bounds,
-        )
-        solver = IKSolver(config)
-
-        # Phase 1: Current joint angles as seed with perturbations
-        result = solver.solve(
-            seeds=[q_guess],
-            target_pose=target_pose,
-            collision_checker=collision_checker,
-            perturbations=max_tries,
-            dx=dx,
-        )
-        if result is not None:
-            return result
-
-        # Phase 2: Fallback predefined seeds
-        target_rpy_deg = R.from_matrix(target_rot_matrix).as_euler('xyz', degrees=True).tolist()
-
-        seed_configs = [
-            np.radians([85, -80, 90, -90, -90, -(np.mod(target_rpy_deg[2] + 180, 360) - 180)]),
-            np.radians([90, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([0, -90, 90, -90, -90, target_rpy_deg[2]]),
-            np.radians([85, -100, 120, -110, -90, target_rpy_deg[2]]),
-            np.radians([85, -80, 90, -90, 0, target_rpy_deg[2]]),
-            np.radians([85, -70, 80, -100, -90, target_rpy_deg[2]]),
-        ]
-
-        # Reset solver state for fallback phase
-        solver = IKSolver(config)
-        result = solver.solve(
-            seeds=seed_configs,
-            target_pose=target_pose,
-            collision_checker=collision_checker,
-            perturbations=max_tries,
-            dx=dx,
-        )
-        if result is not None:
-            return result
-
-        if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution (table + self-collision + EE below base) even with multiple seeds")
-        else:
-            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
-        return None
-    
     def execute_trajectory_sim(self, trajectory):
         """Execute trajectory and wait for completion (sim mode)"""
         try:
@@ -958,73 +822,28 @@ class PerformInsertController(Node):
                 self.get_logger().error("Could not read current joint angles")
                 return False
 
-        # Multi-waypoint Cartesian interpolation with frozen w2+w3.
-        # Frozen wrists preserve orientation with 0° error while
-        # multi-waypoint ensures straight-line Cartesian path.
-        num_waypoints = 10
+        # Compute IK waypoints using Jacobian-based differential IK
+        num_waypoints = 60
         total_duration = 5.0
-        current_ee_position = ee_current_position
-        target_position = ee_target_position
 
-        wrist_2_val = self.joints[4]
-        wrist_3_val = self.joints[5]
-        joint_bounds_frozen = [
-            (-np.pi, np.pi),     # shoulder_pan
-            (-np.pi, 0),         # shoulder_lift: elbow-down
-            (0, np.pi),          # elbow: elbow-down
-            (-np.pi, np.pi),     # wrist_1
-            (wrist_2_val, wrist_2_val),  # wrist_2: frozen
-            (wrist_3_val, wrist_3_val),  # wrist_3: frozen
-        ]
+        self.get_logger().info("Computing Cartesian IK waypoints...")
+        ik_waypoints = compute_cartesian_waypoints_ik(
+            np.array(self.joints, dtype=float),
+            target_z=None,
+            num_waypoints=num_waypoints,
+            target_pos=ee_target_position,
+            target_orientation=ee_target_rot_matrix,
+        )
+        if ik_waypoints is None:
+            self.error_message = "IK failed for Cartesian waypoints"
+            self.get_logger().error(self.error_message)
+            return False
 
-        solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
-
-        # First pass: solve IK for all waypoints
-        # Start with current joints as waypoint 0 (t=0, vel=0) for smooth ramp-up
+        # Prepend current joints as waypoint 0 for smooth ramp-up
         start_joints = np.array([float(x) for x in self.joints])
-        all_joint_angles = [start_joints]
+        all_joint_angles = [start_joints] + [np.array([float(x) for x in w]) for w in ik_waypoints]
 
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
-
-            waypoint_pose = np.eye(4)
-            waypoint_pose[:3, 3] = waypoint_position
-            waypoint_pose[:3, :3] = ee_target_rot_matrix
-
-            rng = np.random.default_rng(seed=i)
-            seeds = [self.joints.copy()]
-            for _ in range(10):
-                perturbed = self.joints + rng.normal(0, 0.1, 6)
-                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
-                seeds.append(perturbed)
-
-            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
-            waypoint_joint_angles = solver.solve(
-                seeds=seeds,
-                target_pose=waypoint_pose,
-                perturbations=1,
-            )
-
-            if waypoint_joint_angles is None and solver._best_result is not None:
-                waypoint_joint_angles = solver._best_result.joint_angles
-
-            if waypoint_joint_angles is None:
-                fallback = self.compute_ik_with_current_seed(
-                    waypoint_position.tolist(), ee_target_quat.tolist(),
-                    max_tries=3, dx=0.001
-                )
-                if fallback is None:
-                    self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
-                    self.get_logger().error(self.error_message)
-                    return False
-                waypoint_joint_angles = fallback
-
-            self.joints = waypoint_joint_angles.copy()
-            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
-
-        # Second pass: trapezoidal velocity profile for smooth accel/cruise/decel.
-        # 1) Compute cumulative arc length in joint space
+        # Trapezoidal velocity profile (arc-length parameterized)
         n_total = len(all_joint_angles)
         segment_dists = []
         for i in range(1, n_total):
@@ -1035,33 +854,24 @@ class PerformInsertController(Node):
             cumulative_s.append(cumulative_s[-1] + d)
         total_s = cumulative_s[-1]
 
-        # 2) Trapezoidal profile: accel phase, cruise phase, decel phase
-        # Use 20% of total duration for accel, 20% for decel, 60% cruise
         accel_frac = 0.2
         decel_frac = 0.2
         t_accel = accel_frac * total_duration
         t_decel = decel_frac * total_duration
         t_cruise = total_duration - t_accel - t_decel
-
-        # v_max from: total_s = 0.5*v_max*t_accel + v_max*t_cruise + 0.5*v_max*t_decel
-        # total_s = v_max * (0.5*t_accel + t_cruise + 0.5*t_decel)
         v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
         a_accel = v_max / t_accel
         a_decel = v_max / t_decel
 
         def trapez_s_and_v(t_query):
-            """Return (arc_length, velocity) at time t_query along trapezoidal profile."""
             if t_query <= t_accel:
-                # Acceleration phase: s = 0.5 * a * t^2
                 s = 0.5 * a_accel * t_query ** 2
                 v = a_accel * t_query
             elif t_query <= t_accel + t_cruise:
-                # Cruise phase
                 s_accel = 0.5 * v_max * t_accel
                 s = s_accel + v_max * (t_query - t_accel)
                 v = v_max
             else:
-                # Deceleration phase
                 s_accel = 0.5 * v_max * t_accel
                 s_cruise = v_max * t_cruise
                 t_in_decel = t_query - t_accel - t_cruise
@@ -1069,12 +879,9 @@ class PerformInsertController(Node):
                 v = v_max - a_decel * t_in_decel
             return s, max(v, 0.0)
 
-        # 3) Map each waypoint's arc length to a time on the trapezoidal profile
-        # Invert: given s_i, find t such that trapez_s(t) = s_i
         def find_time_for_s(target_s):
-            """Binary search for time that achieves target arc length."""
             lo, hi = 0.0, total_duration
-            for _ in range(50):  # converges in ~50 iterations
+            for _ in range(50):
                 mid = (lo + hi) / 2
                 s_mid, _ = trapez_s_and_v(mid)
                 if s_mid < target_s:
@@ -1087,16 +894,14 @@ class PerformInsertController(Node):
         waypoint_times[0] = 0.0
         waypoint_times[-1] = total_duration
 
-        # 4) Compute joint velocities: scale the trapezoidal speed by the joint-space direction
         trajectory_points = []
         for i in range(n_total):
             t_i = waypoint_times[i]
-            _, speed_scalar = trapez_s_and_v(t_i)  # scalar speed along path
+            _, speed_scalar = trapez_s_and_v(t_i)
 
             if i == 0 or i == n_total - 1:
                 velocities = [0.0] * 6
             else:
-                # Direction: central difference normalized
                 delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
                 delta_norm = np.linalg.norm(delta)
                 if delta_norm > 1e-8:
@@ -1114,7 +919,7 @@ class PerformInsertController(Node):
 
         self.get_logger().info(
             f"Trajectory created with {len(trajectory_points)} waypoints "
-            f"(trapezoidal profile, v_max={np.degrees(v_max):.1f}°/s)"
+            f"({total_duration:.1f}s, trapezoidal velocity profile)"
         )
 
         success = self.execute_trajectory_sim({"traj1": trajectory_points})
@@ -1135,14 +940,11 @@ class PerformInsertController(Node):
         self.joint_subscription = self.create_subscription(
             JointState, '/joint_states', self._joint_cb, 10
         )
+        self.force_subscription = self.create_subscription(
+            WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10
+        )
 
-        # Only subscribe to force sensor in real mode
-        if self.mode == 'real':
-            self.force_subscription = self.create_subscription(
-                WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10
-            )
-        else:
-            self.force = np.array([0.0, 0.0, 0.0])  # Dummy force for sim mode
+        self.force = np.array([0.0, 0.0, 0.0])  # Dummy force (real mode uses insert_compliance subprocess)
 
     def _destroy_subscriptions(self):
         """Destroy all subscriptions to allow recreation"""
@@ -1156,141 +958,6 @@ class PerformInsertController(Node):
             self.destroy_subscription(self.force_subscription)
             self.force_subscription = None
 
-    def _wrench_cb(self, msg):
-        self.force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
-    
-    def get_force_xy(self, use_deadband=True):
-        """
-        Get X and Y force components with baseline removed.
-        Optionally apply deadband.
-        
-        Args:
-            use_deadband: If True, apply deadband. If False, return raw forces (for alignment mode).
-        """
-        if self.force is None:
-            return np.array([0.0, 0.0])
-        f = self.force - self.baseline
-        # Only use X and Y components
-        f_xy = np.array([f[0], f[1]])
-        if use_deadband:
-            mag = np.linalg.norm(f_xy)
-            if mag < self.deadband:
-                return np.array([0.0, 0.0])
-        return f_xy
-    
-    def get_force_z(self):
-        """
-        Get Z force component with baseline removed.
-        """
-        if self.force is None:
-            return 0.0
-        f = self.force - self.baseline
-        return f[2]
-    
-    def get_next_waypoint(self) -> tuple:
-        """
-        Get the next waypoint.
-        - Search mode (before contact): Only Z moves down, X/Y maintained at starting position
-        - Alignment mode (after contact): Z moves slowly, X/Y adjusted based on force compliance
-        
-        Returns:
-            (x, y, z) tuple in meters
-        """
-        if self.pos is None:
-            return None
-        
-        current_pos = self.pos.copy()
-        
-        # Check Z force and X/Y forces to detect contact with misalignment
-        f_z = self.get_force_z()
-        f_xy = self.get_force_xy(use_deadband=False)  # Get raw X/Y forces (no deadband)
-        f_xy_mag = np.linalg.norm(f_xy)
-        
-        # Check if contact detected: Z force reaches threshold (negative = upward resistance)
-        # AND X/Y forces are present (indicating misalignment that needs fixing)
-        if not self.contact_detected:
-            z_contact = f_z <= self.z_threshold  # Negative Z = upward resistance
-            xy_misalignment = f_xy_mag >= self.xy_force_threshold  # X/Y forces present
-            
-            if z_contact and xy_misalignment:
-                self.contact_detected = True
-                self.just_detected_contact = True  # Flag to trigger cancellation in run loop
-                self.get_logger().info(f"Contact detected: Z force = {f_z:.2f}N, X/Y force = {f_xy_mag:.2f}N. Entering alignment mode.")
-        
-        # TODO: Fix move down speed till first contact - adjust search phase speed if needed
-        # Z-direction movement
-        dt = 0.6  # Trajectory duration (matches time_from_start in trajectory)
-        
-        if self.alignment_mode:
-            # In alignment mode: very slow downward movement (1% of normal speed)
-            # Always moves down regardless of X/Y forces (like old code)
-            dz = -self.speed * dt * 0.01  # 1% of normal speed for very slow insertion
-        else:
-            # Normal mode: move down at full speed
-            dz = -self.speed * dt  # Negative Z is down
-        
-        next_z = current_pos[2] + dz
-        
-        # X and Y: Only adjust in alignment mode (after contact detected)
-        # Before contact: maintain starting X/Y position (no force compliance)
-        if self.alignment_mode:
-            # In alignment mode: adjust X/Y based on force compliance
-            # Don't use deadband to be more sensitive to small forces (like old code)
-            f_xy_raw = self.get_force_xy(use_deadband=False)
-            
-            # Apply exponential moving average smoothing to reduce oscillation
-            # This filters out high-frequency noise that causes back-and-forth movement
-            self.smoothed_force_xy = (self.force_smoothing_alpha * f_xy_raw + 
-                                     (1.0 - self.force_smoothing_alpha) * self.smoothed_force_xy)
-            f_xy = self.smoothed_force_xy
-            
-            # Use base gain value
-            effective_gain = self.gain
-            
-            # Compute displacement for X and Y based on force
-            # Move WITH the force (yield to it) to minimize lateral forces
-            # Default behavior:
-            #   X axis is inverted: if force is +X, move -X (inverted)
-            #   Y axis: same direction as force
-            # If reverse=True, the directions are flipped
-            displacement_xy = np.array([0.0, 0.0])
-            
-            # In alignment mode, always try to minimize forces (even very small ones)
-            f_xy_mag = np.linalg.norm(f_xy)
-            if f_xy_mag > 0.2:  # Small threshold to avoid noise (increased from 0.1 to reduce oscillation)
-                # Determine sign based on reverse flag
-                x_sign = 1.0 if self.reverse else -1.0  # Normal: inverted, Reverse: same direction
-                y_sign = -1.0 if self.reverse else 1.0   # Normal: same direction, Reverse: inverted
-                
-                # X axis displacement
-                dx = x_sign * effective_gain * f_xy[0] * dt / 1000.0  # meters
-                # Limit maximum displacement per step
-                max_disp = self.max_vel * dt / 1000.0  # meters per timestep
-                if abs(dx) > max_disp:
-                    dx = np.sign(dx) * max_disp
-                displacement_xy[0] = dx
-                
-                # Y axis displacement
-                dy = y_sign * effective_gain * f_xy[1] * dt / 1000.0  # meters
-                if abs(dy) > max_disp:
-                    dy = np.sign(dy) * max_disp
-                displacement_xy[1] = dy
-            
-            next_x = current_pos[0] + displacement_xy[0]
-            next_y = current_pos[1] + displacement_xy[1]
-        else:
-            # Search mode: maintain starting X/Y position (no force compliance)
-            # Only Z moves down
-            if self.start_x is not None and self.start_y is not None:
-                next_x = self.start_x
-                next_y = self.start_y
-            else:
-                # Fallback to current position if start not stored
-                next_x = current_pos[0]
-                next_y = current_pos[1]
-        
-        return (next_x, next_y, next_z)
-    
     def wait_for_poses_with_retry(self, timeout_per_attempt=5.0, max_retries=3):
         """
         Wait for object poses from /objects_poses_sim topic with retry logic.
@@ -1342,576 +1009,383 @@ class PerformInsertController(Node):
             # Real mode: original force-compliant movement
             return self.run_real()
     
-    def run_real(self):
-        
-        if not self.traj_client.wait_for_server(timeout_sec=5.0):
-            self.error_message = "UR robot driver isn't running"
-            self.get_logger().error(self.error_message)
-            return
-        
-        # First, run the search phase with precomputed waypoints
-        self.running = True
-        search_complete = self.run_search_phase()
-        
-        if not self.running:
-            return
-        
-        # If contact detected with misalignment, run alignment phase
-        if self.contact_detected and self.alignment_mode:
-            self.run_alignment_phase()
-        
-        self.get_logger().info("Movement completed successfully")
-    
-    def run_search_phase(self):
-        """
-        Search phase: Cartesian interpolation with frozen wrists (same approach as sim mode).
-        Pre-computes multi-waypoint trajectory with trapezoidal velocity profile.
-        Monitors force during execution and cancels if contact is detected.
-        Returns True if completed, False if interrupted.
-        """
+    def _compute_grasp_adjusted_target_z(self):
+        """Compute grasp-adjusted target Z using assembly config and grasp points.
 
-        if self.pos is None or self.joints is None:
-            self.get_logger().error("Position or joint angles not available!")
+        Returns the target Z for insert_compliance, or None on error.
+        """
+        from primitives.rotate_object import FoldSymmetry, ExtendedCardinalOrientations
+
+        if self.grasp_id is None:
+            self.error_message = "grasp_id is required for real mode insertion"
+            self.get_logger().error(self.error_message)
+            return None
+        if self.object_name is None:
+            self.error_message = "object_name is required for real mode insertion"
+            self.get_logger().error(self.error_message)
+            return None
+        if self.base_name is None:
+            self.error_message = "base_name is required for real mode insertion"
+            self.get_logger().error(self.error_message)
+            return None
+        if self.object_orientation is None:
+            self.error_message = "current_object_orientation is required for real mode insertion"
+            self.get_logger().error(self.error_message)
+            return None
+
+        # Load assembly config
+        assembly_json = find_assembly_json_by_base_name(self.base_name, ASSEMBLY_DATA_DIR, self.get_logger())
+        if not assembly_json:
+            self.error_message = f"No assembly JSON found for base '{self.base_name}'"
+            self.get_logger().error(self.error_message)
+            return None
+
+        assembly_config = self.load_assembly_config(assembly_json)
+        target_pos_relative = self.get_object_target_position(self.object_name, assembly_config)
+        if target_pos_relative is None:
+            self.error_message = f"No target position found for '{self.object_name}' in assembly JSON"
+            self.get_logger().error(self.error_message)
+            return None
+
+        target_ori_relative = self.get_object_target_orientation(self.object_name, assembly_config)
+
+        # Determine base position and orientation
+        if self.use_default_base:
+            base_pos = np.array(DEFAULT_BASE_POSITION)
+            base_ori_quat = np.array(DEFAULT_BASE_ORIENTATION)
+        elif self.final_base_pos is not None and self.final_base_orientation is not None:
+            base_pos = np.array(self.final_base_pos)
+            base_ori_quat = np.array(self.final_base_orientation)
+        else:
+            self.error_message = "No base position provided (use --use-default-base or --final-base-pos/--final-base-orientation)"
+            self.get_logger().error(self.error_message)
+            return None
+
+        # Transform target position to world frame
+        R_base = R.from_quat(base_ori_quat).as_matrix()
+        target_object_position_abs = base_pos + R_base @ target_pos_relative
+
+        # Transform target orientation to world frame
+        if target_ori_relative is not None:
+            R_target_abs = R_base @ R.from_quat(target_ori_relative).as_matrix()
+        else:
+            R_target_abs = R_base
+
+        # Load grasp offset
+        grasp_offset = load_grasp_point_position(self.object_name, self.grasp_id, self.get_logger())
+        if grasp_offset is None:
+            self.error_message = f"Could not load grasp point {self.grasp_id} for '{self.object_name}'"
+            self.get_logger().error(self.error_message)
+            return None
+
+        # Determine rotation to apply to grasp offset using fold symmetry
+        R_object_current = R.from_quat(self.object_orientation).as_matrix()
+        symmetry_dir = str(get_symmetry_dir())
+        fold_data = FoldSymmetry.load_symmetry_data(self.object_name, symmetry_dir)
+
+        if fold_data is not None:
+            equivalents = FoldSymmetry.generate_equivalent_target_orientations(
+                R_target_abs, fold_data, logger=self.get_logger()
+            )
+            best_dist = float('inf')
+            R_grasp_rotation = R_target_abs
+            for R_eq in equivalents:
+                dist = ExtendedCardinalOrientations.rotation_matrix_distance(R_object_current, R_eq)
+                if dist < best_dist:
+                    best_dist = dist
+                    R_grasp_rotation = R_eq
+            self.get_logger().info(f"Snapped object orientation to closest equivalent (error: {np.degrees(best_dist):.1f}°)")
+        else:
+            self.get_logger().info("No symmetry data found, using current object orientation directly")
+            R_grasp_rotation = R_object_current
+
+        # Compute EE target position
+        grasp_world_offset = R_grasp_rotation @ grasp_offset
+        ee_target_position = target_object_position_abs + grasp_world_offset
+
+        # Wait for EE pose to get current orientation
+        timeout = 3.0
+        start = time.time()
+        while self.pos is None and (time.time() - start) < timeout:
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        if self.quat is not None:
+            R_ee = R.from_quat(self.quat).as_matrix()
+            ee_target_position -= R_ee @ GRIPPER_CENTER_TOOL_OFFSET
+        else:
+            self.error_message = "Could not read EE pose (timeout waiting for /tcp_pose_broadcaster/pose)"
+            self.get_logger().error(self.error_message)
+            return None
+
+        # Extract full target position (x, y, z) for insertion
+        target_z = ee_target_position[2]
+        self.get_logger().info(f"Computed grasp-adjusted target position: {target_object_position_abs}")
+        self.get_logger().info(f"  Target Z for insertion: {target_z:.4f}m")
+        self.get_logger().info(f"  Grasp offset (world): {grasp_world_offset}")
+        # Return (target_x, target_y, target_z) so insertion moves to correct hole location
+        return (target_object_position_abs[0], target_object_position_abs[1], target_z)
+
+    def _perform_xy_correction(self):
+        """Apply Rx/Ry compliance to correct residual tilt after insertion.
+
+        If high_torque_detected during insertion, the object may still have
+        some tilt. This function keeps Rx/Ry compliance active and monitors
+        Tx/Ty to verify the object is settling into alignment.
+
+        Returns:
+            True if torques stabilize, False on timeout/error
+        """
+        try:
+            self.get_logger().info("Applying Rx/Ry compliance to correct residual tilt...")
+
+            # Enable XYZ+Rx/Ry compliance to let object self-correct
+            from ur_msgs.srv import SetForceMode
+            from geometry_msgs.msg import Wrench, Twist
+            import subprocess
+            import re
+
+            # Step 1: Reactivate controllers (insert_compliance may have deactivated them)
+            def get_active_controllers():
+                """Return set of active controller names."""
+                result = subprocess.run(
+                    ['ros2', 'control', 'list_controllers'],
+                    capture_output=True, text=True, timeout=10
+                )
+                active = set()
+                ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+                for line in result.stdout.splitlines():
+                    clean = ansi_re.sub('', line)
+                    parts = clean.split()
+                    if len(parts) >= 3 and 'active' in parts:
+                        active.add(parts[0])
+                return active
+
+            def switch_controllers(activate_list, deactivate_list):
+                """Switch controllers."""
+                active = get_active_controllers()
+                to_activate = [c for c in activate_list if c not in active]
+                to_deactivate = [c for c in deactivate_list if c in active]
+                if not to_activate and not to_deactivate:
+                    return True
+                cmd = ['ros2', 'control', 'switch_controllers']
+                if to_activate:
+                    cmd += ['--activate'] + to_activate
+                if to_deactivate:
+                    cmd += ['--deactivate'] + to_deactivate
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                return result.returncode == 0
+
+            # Activate passthrough + force mode, deactivate scaled
+            switch_controllers(
+                ['passthrough_trajectory_controller', 'force_mode_controller'],
+                ['scaled_joint_trajectory_controller']
+            )
+            time.sleep(0.5)
+
+            # Setup force mode client
+            force_mode_client = self.create_client(SetForceMode, '/force_mode_controller/start_force_mode')
+            if not force_mode_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().warn("Force mode service unavailable, using passive settling only")
+                time.sleep(2.0)
+                return True
+
+            # Start XYZ+Rx/Ry compliance with downward force
+            req = SetForceMode.Request()
+            req.task_frame.header.frame_id = 'base_link'
+            req.task_frame.pose.orientation.w = 1.0
+            req.selection_vector_x = True
+            req.selection_vector_y = True
+            req.selection_vector_z = True
+            req.selection_vector_rx = True
+            req.selection_vector_ry = True
+            req.selection_vector_rz = False
+            req.wrench = Wrench()
+            req.wrench.force.z = -5.0  # maintain contact force
+            req.type = 2  # NO_TRANSFORM
+            req.speed_limits = Twist()
+            req.speed_limits.linear.x = 0.005
+            req.speed_limits.linear.y = 0.005
+            req.speed_limits.linear.z = 0.03
+            req.speed_limits.angular.x = 0.1
+            req.speed_limits.angular.y = 0.1
+            req.speed_limits.angular.z = 0.5
+            req.damping_factor = 0.0
+            req.gain_scaling = 1.0
+
+            future = force_mode_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            resp = future.result()
+            if resp is None or not resp.success:
+                self.get_logger().warn("Failed to enable compliance, using passive settling")
+                time.sleep(2.0)
+                return True
+
+            self.get_logger().info("XYZ+Rx/Ry compliance active, monitoring Tx/Ty for settling...")
+
+            # Monitor Tx/Ty for stabilization
+            start_time = time.time()
+            SETTLING_TIMEOUT = 5.0
+            LOW_TORQUE_THRESHOLD = 0.1  # Nm
+            SUSTAIN_TIME = 1.0  # seconds
+            low_torque_start = None
+            last_log = 0.0
+
+            while (time.time() - start_time) < SETTLING_TIMEOUT:
+                rclpy.spin_once(self, timeout_sec=0.1)
+
+                if self.wrench is not None:
+                    tx = abs(self.wrench.torque.x)
+                    ty = abs(self.wrench.torque.y)
+                    elapsed = time.time() - start_time
+
+                    # Log every 1 second
+                    if elapsed - last_log >= 1.0:
+                        last_log = elapsed
+                        self.get_logger().info(f"Settling: Tx={tx:.4f} Ty={ty:.4f} ({elapsed:.1f}s)")
+
+                    # Check if torques are low
+                    if tx < LOW_TORQUE_THRESHOLD and ty < LOW_TORQUE_THRESHOLD:
+                        if low_torque_start is None:
+                            low_torque_start = time.time()
+                        elif (time.time() - low_torque_start) >= SUSTAIN_TIME:
+                            self.get_logger().info(
+                                f"Tilt corrected! Tx={tx:.4f} Ty={ty:.4f} stable for {SUSTAIN_TIME:.1f}s"
+                            )
+                            return True
+                    else:
+                        low_torque_start = None
+
+            self.get_logger().warn(f"Settling timeout after {SETTLING_TIMEOUT}s")
+            return True  # Still consider it success (object is in hole)
+
+        except Exception as e:
+            self.get_logger().error(f"Tilt correction failed: {e}")
             return False
 
-        # Target flange Z: base position + assembly/grasp Z offset + gripper center offset
-        target_flange_z = DEFAULT_BASE_POSITION[2] + self.insert_target_offset[2] + GRIPPER_CENTER_TOOL_OFFSET[2]
-        start_z = self.pos[2]
-        distance_to_move = start_z - target_flange_z
+    def run_real(self):
+        """Run real-mode insertion via insert_compliance.py subprocess."""
+        import subprocess as sp
 
-        if distance_to_move <= 0.001:
-            self.get_logger().info(f"Already at or below target Z position ({start_z:.3f}m). Exiting.")
-            return True
+        result = self._compute_grasp_adjusted_target_z()
+        if result is None:
+            return False
 
-        self.get_logger().info(f"Moving from Z={start_z*1000:.1f}mm to Z={target_flange_z*1000:.1f}mm (base={DEFAULT_BASE_POSITION[2]*1000:.1f}mm + offset={self.insert_target_offset[2]*1000:.1f}mm + gripper={GRIPPER_CENTER_TOOL_OFFSET[2]*1000:.1f}mm)")
+        # Result is (target_x, target_y, target_z) computed from object pose and grasp point
+        if isinstance(result, tuple) and len(result) == 3:
+            target_x, target_y, target_z = result
+            self.get_logger().info(f"Will insert at target position: [{target_x:.4f}, {target_y:.4f}, {target_z:.4f}]")
+        else:
+            # Fallback for old code that returns just Z
+            target_z = result
+            target_x = None
+            target_y = None
+            self.get_logger().info(f"Inserting at current X/Y. Target Z (grasp-adjusted): {target_z:.4f}")
 
-        # Use current quaternion for orientation target
-        current_quat = self.quat if self.quat is not None else np.array([0.0, -1.0, 0.0, 0.0])
-        target_rot_matrix = R.from_quat(current_quat).as_matrix()
-
-        # Frozen wrist IK bounds (same as sim mode)
-        wrist_2_val = self.joints[4]
-        wrist_3_val = self.joints[5]
-        joint_bounds_frozen = [
-            (-np.pi, np.pi),     # shoulder_pan
-            (-np.pi, 0),         # shoulder_lift: elbow-down
-            (0, np.pi),          # elbow: elbow-down
-            (-np.pi, np.pi),     # wrist_1
-            (wrist_2_val, wrist_2_val),  # wrist_2: frozen
-            (wrist_3_val, wrist_3_val),  # wrist_3: frozen
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'insert_compliance.py')
+        cmd = [
+            sys.executable, script_path,
+            '--target-z', str(target_z),
         ]
+        if target_x is not None:
+            cmd.extend(['--target-x', str(target_x)])
+        if target_y is not None:
+            cmd.extend(['--target-y', str(target_y)])
 
-        # Multi-waypoint Cartesian interpolation
-        num_waypoints = 10
-        total_duration = 5.0
-        current_ee_position = self.pos.copy()
-        # X/Y already positioned correctly by translate_for_assembly (includes grasp offset)
-        # Perform insert only moves Z down
-        target_position = np.array([self.start_x, self.start_y, target_flange_z])
+        self.get_logger().info(f"Running: {' '.join(cmd)}")
 
-        start_joints = np.array([float(x) for x in self.joints])
-        all_joint_angles = [start_joints]
+        env = os.environ.copy()
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        env['PYTHONPATH'] = f"{project_root}:{env.get('PYTHONPATH', '')}"
 
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_position = current_ee_position + alpha * (target_position - current_ee_position)
+        output_lines = []
+        process = sp.Popen(
+            cmd,
+            stdout=sp.PIPE,
+            stderr=sp.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
 
-            waypoint_pose = np.eye(4)
-            waypoint_pose[:3, 3] = waypoint_position
-            waypoint_pose[:3, :3] = target_rot_matrix
+        # Stream output in real-time
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                stripped = line.rstrip()
+                output_lines.append(stripped)
+                self.get_logger().info(stripped)
+        process.wait()
 
-            rng = np.random.default_rng(seed=i)
-            seeds = [self.joints.copy()]
-            for _ in range(10):
-                perturbed = self.joints + rng.normal(0, 0.1, 6)
-                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
-                seeds.append(perturbed)
+        output_text = '\n'.join(output_lines)
 
-            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen, dh_params=dh_params))
-            waypoint_joint_angles = solver.solve(
-                seeds=seeds,
-                target_pose=waypoint_pose,
-                perturbations=1,
-            )
+        # Parse JSON result
+        if '__RESULT_JSON__' in output_text and '__END_RESULT_JSON__' in output_text:
+            json_str = output_text.split('__RESULT_JSON__')[1].split('__END_RESULT_JSON__')[0].strip()
+            try:
+                result_data = json.loads(json_str)
+                if result_data.get('result') == 'success':
+                    self.get_logger().info(f"Insertion success: {result_data}")
 
-            if waypoint_joint_angles is None and solver._best_result is not None:
-                waypoint_joint_angles = solver._best_result.joint_angles
+                    # Post-insertion XY correction if high torque was detected
+                    if result_data.get('high_torque_detected', False):
+                        self.get_logger().info("High torque was detected during insertion. Performing XY adjustment...")
+                        if self._perform_xy_correction():
+                            self.get_logger().info("XY correction completed successfully")
+                        else:
+                            self.get_logger().warn("XY correction failed or not available")
 
-            if waypoint_joint_angles is None:
-                self.error_message = f"IK failed at Cartesian waypoint {i}/{num_waypoints}"
+                    return True
+                else:
+                    self.error_message = result_data.get('error', 'Unknown insertion failure')
+                    self.get_logger().error(f"Insertion failed: {self.error_message}")
+                    return False
+            except json.JSONDecodeError as e:
+                self.error_message = f"Failed to parse insertion result: {e}"
                 self.get_logger().error(self.error_message)
                 return False
 
-            self.joints = waypoint_joint_angles.copy()
-            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
-
-        # Trapezoidal velocity profile (same as sim mode)
-        n_total = len(all_joint_angles)
-        segment_dists = []
-        for i in range(1, n_total):
-            dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
-            segment_dists.append(max(dist, 1e-6))
-        cumulative_s = [0.0]
-        for d in segment_dists:
-            cumulative_s.append(cumulative_s[-1] + d)
-        total_s = cumulative_s[-1]
-
-        accel_frac = 0.2
-        decel_frac = 0.2
-        t_accel = accel_frac * total_duration
-        t_decel = decel_frac * total_duration
-        t_cruise = total_duration - t_accel - t_decel
-        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
-        a_accel = v_max / t_accel
-        a_decel = v_max / t_decel
-
-        def trapez_s_and_v(t_query):
-            if t_query <= t_accel:
-                s = 0.5 * a_accel * t_query ** 2
-                v = a_accel * t_query
-            elif t_query <= t_accel + t_cruise:
-                s_accel = 0.5 * v_max * t_accel
-                s = s_accel + v_max * (t_query - t_accel)
-                v = v_max
-            else:
-                s_accel = 0.5 * v_max * t_accel
-                s_cruise = v_max * t_cruise
-                t_in_decel = t_query - t_accel - t_cruise
-                s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
-                v = v_max - a_decel * t_in_decel
-            return s, max(v, 0.0)
-
-        def find_time_for_s(target_s):
-            lo, hi = 0.0, total_duration
-            for _ in range(50):
-                mid = (lo + hi) / 2
-                s_mid, _ = trapez_s_and_v(mid)
-                if s_mid < target_s:
-                    lo = mid
-                else:
-                    hi = mid
-            return (lo + hi) / 2
-
-        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
-        waypoint_times[0] = 0.0
-        waypoint_times[-1] = total_duration
-
-        # Build trajectory with velocities
-        trajectory = JointTrajectory()
-        trajectory.joint_names = self.joint_names
-
-        for i in range(n_total):
-            t_i = waypoint_times[i]
-            _, speed_scalar = trapez_s_and_v(t_i)
-
-            if i == 0 or i == n_total - 1:
-                velocities = [0.0] * 6
-            else:
-                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
-                delta_norm = np.linalg.norm(delta)
-                if delta_norm > 1e-8:
-                    direction = delta / delta_norm
-                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
-                else:
-                    velocities = [0.0] * 6
-
-            point = JointTrajectoryPoint()
-            point.positions = [float(x) for x in all_joint_angles[i]]
-            point.velocities = velocities
-            point.time_from_start = Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
-            trajectory.points.append(point)
-
-        self.get_logger().info(
-            f"Trajectory: {len(trajectory.points)} waypoints, "
-            f"trapezoidal profile, v_max={np.degrees(v_max):.1f} deg/s"
-        )
-        
-        # Send trajectory
-        goal = FollowJointTrajectory.Goal()
-        goal.trajectory = trajectory
-        goal.goal_time_tolerance = Duration(sec=2)
-        
-        self.get_logger().info("Trajectory sent and accepted")
-        
-        future = self.traj_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        
-        goal_handle = future.result()
-        if not goal_handle or not goal_handle.accepted:
-            self.error_message = "External control program stopped or robot in protective stop"
-            self.get_logger().error(self.error_message)
-            return False
-
-        self.current_goal_handle = goal_handle
-        self.get_logger().info("Trajectory accepted. Monitoring force during execution...")
-        
-        # Monitor force during trajectory execution
-        start_time = time.time()
-        last_log_time = start_time
-        
-        while self.running and rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.02)  # 50Hz monitoring
-            
-            # Check force for contact detection
-            f_z = self.get_force_z()
-            f_xy = self.get_force_xy(use_deadband=False)
-            f_xy_mag = np.linalg.norm(f_xy)
-            
-            # Check for contact
-            z_contact = f_z <= self.z_threshold
-            xy_misalignment = f_xy_mag >= self.xy_force_threshold
-            
-            if z_contact:
-                self.contact_detected = True
-                
-                # Cancel trajectory
-                if self.current_goal_handle is not None:
-                    try:
-                        cancel_future = self.current_goal_handle.cancel_goal_async()
-                        rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=0.5)
-                        self.get_logger().info("Cancelled search trajectory due to contact")
-                    except Exception as e:
-                        self.get_logger().warn(f"Error cancelling trajectory: {e}")
-                
-                if xy_misalignment:
-                    self.get_logger().info("=" * 60)
-                    self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
-                    self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag:.2f}N. Entering alignment mode.")
-                    self.get_logger().info("=" * 60)
-                    self.alignment_mode = True
-                    # Don't set alignment_start_time here - it will be set when run_alignment_phase() actually starts
-                    self.low_force_start_time = None  # Reset low force timer when entering alignment
-                    self.smoothed_force_xy = np.array([0.0, 0.0])  # Reset smoothed force when entering alignment
-                else:
-                    self.get_logger().info("=" * 60)
-                    self.get_logger().info(f"CONTACT DETECTED: Z force = {f_z:.2f} N (threshold: {self.z_threshold:.1f} N)")
-                    self.get_logger().info("Moving down until Z force reaches -5N to confirm no misalignment...")
-                    self.get_logger().info("=" * 60)
-                    
-                    # Move down until Z force reaches -5N to confirm no misalignment
-                    confirm_z_target = -5.0  # Target Z force in N
-                    dt_confirm = 0.6  # Trajectory duration for confirmation steps
-                    confirm_waypoint_count = 0
-                    last_confirm_trajectory_time = 0.0
-                    min_trajectory_interval = 0.1
-                    
-                    while self.running and rclpy.ok():
-                        rclpy.spin_once(self, timeout_sec=0.1)
-                        
-                        if self.pos is None or self.fixed_rpy is None:
-                            break
-                        
-                        # Check current Z force
-                        f_z_current = self.get_force_z()
-                        
-                        # Stop if we've reached target Z force
-                        if f_z_current <= confirm_z_target:
-                            # Check forces at target Z force
-                            f_xy_confirm = self.get_force_xy(use_deadband=False)
-                            f_xy_mag_confirm = np.linalg.norm(f_xy_confirm)
-                            
-                            self.get_logger().info(f"Reached Z force = {f_z_current:.2f} N")
-                            self.get_logger().info(f"X/Y force = {f_xy_mag_confirm:.2f} N")
-                            
-                            # Check if misalignment appeared
-                            if f_xy_mag_confirm >= self.xy_force_threshold:
-                                self.get_logger().info("=" * 60)
-                                self.get_logger().info(f"Misalignment detected: X/Y force = {f_xy_mag_confirm:.2f}N. Entering alignment mode.")
-                                self.get_logger().info("=" * 60)
-                                self.alignment_mode = True
-                                # Don't set alignment_start_time here - it will be set when run_alignment_phase() actually starts
-                                self.low_force_start_time = None
-                                self.smoothed_force_xy = np.array([0.0, 0.0])
-                                # Continue to alignment phase
-                            else:
-                                self.get_logger().info("=" * 60)
-                                self.get_logger().info("Contact confirmed - no misalignment at Z force = -5N")
-                                self.get_logger().info("=" * 60)
-                                self.running = False
-                            break
-                        
-                        # Rate limit trajectory sends
-                        current_time = time.time()
-                        if current_time - last_confirm_trajectory_time < min_trajectory_interval:
-                            time.sleep(0.05)
-                            continue
-                        last_confirm_trajectory_time = current_time
-                        
-                        # Move down slowly (same speed as alignment phase: 0.5% of search speed)
-                        current_pos = self.pos.copy()
-                        dz = -self.speed * dt_confirm * 0.005  # 0.5% of search speed
-                        next_z = current_pos[2] + dz
-                        target_rpy = list(self.fixed_rpy)
-                        
-                        # Compute IK
-                        if self.joints is not None:
-                            joint_angles = compute_ik([current_pos[0], current_pos[1], next_z], target_rpy)
-                            
-                            if joint_angles is not None:
-                                # Create and send trajectory
-                                trajectory = JointTrajectory()
-                                trajectory.joint_names = self.joint_names
-                                
-                                point = JointTrajectoryPoint()
-                                point.positions = [float(j) for j in joint_angles]
-                                point.velocities = [0.0] * 6
-                                point.time_from_start = Duration(sec=0, nanosec=600000000)
-                                trajectory.points.append(point)
-                                
-                                goal = FollowJointTrajectory.Goal()
-                                goal.trajectory = trajectory
-                                goal.goal_time_tolerance = Duration(sec=1)
-                                
-                                future = self.traj_client.send_goal_async(goal)
-                                rclpy.spin_until_future_complete(self, future, timeout_sec=0.5)
-                                
-                                goal_handle = future.result()
-                                if goal_handle and goal_handle.accepted:
-                                    time.sleep(0.2)
-                                    confirm_waypoint_count += 1
-                                else:
-                                    self.get_logger().warn(f"Confirmation trajectory rejected at waypoint {confirm_waypoint_count}")
-                            else:
-                                self.get_logger().warn(f"IK failed for confirmation waypoint {confirm_waypoint_count}")
-                                time.sleep(0.1)
-                        
-                        rclpy.spin_once(self, timeout_sec=0.1)
-                    
-                    # If we're not entering alignment mode, return True to exit search phase
-                    if not self.alignment_mode:
-                        return True
-                
-                return True
-            
-            # Check if trajectory completed (check position)
-            if self.pos is not None and self.pos[2] <= target_flange_z + 0.005:
-                self.get_logger().info(f"Reached target Z position ({self.pos[2]:.3f}m) without contact.")
-                return True
-            
-            # Periodic logging
-            current_time = time.time()
-            if current_time - last_log_time >= 2.0:
-                if self.pos is not None:
-                    self.get_logger().info(
-                        f"Search: Z={self.pos[2]*1000:.1f}mm, "
-                        f"Force Z={f_z:+.2f}N, X/Y={f_xy_mag:.2f}N"
-                    )
-                last_log_time = current_time
-        
-        return True
-    
-    def run_alignment_phase(self):
-        """
-        Alignment phase: Slow movement with X/Y force compliance.
-        Uses one-by-one waypoints for responsive force-based adjustment.
-        """
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("=" * 60)
-        
-        # Start alignment timer when alignment phase actually begins (motion starts)
-        self.alignment_start_time = time.time()
-        
-        self.low_force_start_time = None
-        self.smoothed_force_xy = np.array([0.0, 0.0])
-        
-        dt = 0.6  # Trajectory duration for alignment steps
-        last_log_time = time.time()
-        waypoint_count = 0
-        last_trajectory_time = 0.0
-        min_trajectory_interval = 0.1
-        
-        while self.running and rclpy.ok():
-            try:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                
-                # Check safety limits first (before any other checks)
-                f_z_current = self.get_force_z()
-                f_xy_raw = self.get_force_xy(use_deadband=False)  # Get raw forces for safety check
-                f_xy_mag_raw = np.linalg.norm(f_xy_raw)
-                
-                # Check alignment completion
-                if self.alignment_start_time is not None:
-                    elapsed = time.time() - self.alignment_start_time
-                    
-                    # Check alignment stop timeout
-                    if elapsed >= self.alignment_stop_timeout:
-                        self.get_logger().info("=" * 60)
-                        self.get_logger().info(f"Alignment timeout reached ({self.alignment_stop_timeout:.1f}s)")
-                        self.get_logger().info("Stopping alignment phase")
-                        self.get_logger().info("=" * 60)
-                        break
-                    
-                    # Check for low forces after minimum duration
-                    if elapsed >= self.alignment_min_duration:
-                        # Check if X/Y forces are low for sufficient duration
-                        # Use smoothed forces to be consistent with movement calculations
-                        f_xy_raw = self.get_force_xy(use_deadband=False)
-                        # Update smoothed force (same as in get_next_waypoint)
-                        self.smoothed_force_xy = (self.force_smoothing_alpha * f_xy_raw + 
-                                                 (1.0 - self.force_smoothing_alpha) * self.smoothed_force_xy)
-                        f_xy_mag = np.linalg.norm(self.smoothed_force_xy)
-                        
-                        if f_xy_mag < self.low_force_threshold:
-                            if self.low_force_start_time is None:
-                                self.low_force_start_time = time.time()
-                            else:
-                                low_force_duration = time.time() - self.low_force_start_time
-                                if low_force_duration >= self.low_force_required_duration:
-                                    self.get_logger().info("=" * 60)
-                                    self.get_logger().info("Alignment complete")
-                                    self.get_logger().info(f"Final X/Y force magnitude: {f_xy_mag:.2f} N")
-                                    self.get_logger().info("=" * 60)
-                                    break
-                        else:
-                            self.low_force_start_time = None  # Reset if forces increase
-                
-                # Get next waypoint
-                waypoint = self.get_next_waypoint()
-                
-                if waypoint is None:
-                    for _ in range(10):
-                        if not self.running:
-                            break
-                        time.sleep(0.01)
-                    continue
-                
-                x, y, z = waypoint
-                
-                # Use fixed orientation
-                if self.fixed_rpy is None:
-                    self.get_logger().warn("Fixed RPY not available, skipping waypoint")
-                    time.sleep(0.1)
-                    continue
-                
-                target_rpy = list(self.fixed_rpy)
-                
-                # Compute IK for this waypoint with fixed orientation
-                joint_angles = compute_ik([x, y, z], target_rpy)
-                
-                if joint_angles is None:
-                    self.get_logger().warn(
-                        f"IK failed at waypoint {waypoint_count}: "
-                        f"pos=[{x*1000:.1f}, {y*1000:.1f}, {z*1000:.1f}] mm"
-                    )
-                    for _ in range(10):
-                        if not self.running:
-                            break
-                        time.sleep(0.01)
-                    continue
-                
-                # Rate limit trajectory sends
-                current_time = time.time()
-                if current_time - last_trajectory_time < min_trajectory_interval:
-                    time.sleep(0.05)
-                    continue
-                last_trajectory_time = current_time
-                
-                # Create trajectory with single waypoint
-                trajectory = JointTrajectory()
-                trajectory.joint_names = self.joint_names
-                
-                point = JointTrajectoryPoint()
-                point.positions = [float(j) for j in joint_angles]
-                point.velocities = [0.0] * 6
-                point.time_from_start = Duration(sec=0, nanosec=600000000)  # 0.6 seconds
-                trajectory.points.append(point)
-                
-                # Send trajectory
-                goal = FollowJointTrajectory.Goal()
-                goal.trajectory = trajectory
-                goal.goal_time_tolerance = Duration(sec=1, nanosec=0)
-                
-                future = self.traj_client.send_goal_async(goal)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=0.5)
-                
-                if not self.running:
-                    break
-                
-                goal_handle = future.result()
-                if goal_handle and goal_handle.accepted:
-                    self.current_goal_handle = goal_handle
-                    for _ in range(20):
-                        if not self.running:
-                            break
-                        time.sleep(0.01)
-                else:
-                    self.get_logger().warn(f"Trajectory goal rejected at waypoint {waypoint_count}")
-                
-                # Spin to update pose and wrench data
-                rclpy.spin_once(self, timeout_sec=0.1)
-                
-            except KeyboardInterrupt:
-                self.get_logger().info("KeyboardInterrupt detected in trajectory loop")
-                self.running = False
-                break
-            
-            # Periodically log status
-            current_time = time.time()
-            if current_time - last_log_time >= 2.0:
-                if self.pos is not None:
-                    f = self.force - self.baseline if self.force is not None else np.array([0.0, 0.0, 0.0])
-                    # Log forces with deadband applied (same as used for compliance)
-                    f_xy = self.get_force_xy()
-                    f_xy_mag = np.linalg.norm(f_xy)
-                    f_z = self.get_force_z()
-                    self.get_logger().info(
-                        f"Waypoint {waypoint_count} [ALIGNMENT]: "
-                        f"Pos=[{self.pos[0]*1000:.1f}, {self.pos[1]*1000:.1f}, {self.pos[2]*1000:.1f}] mm, "
-                        f"X/Y Force magnitude={f_xy_mag:.2f} N, "
-                        f"X/Y Force=[{f_xy[0]:+.2f}, {f_xy[1]:+.2f}] N, "
-                        f"Z Force={f_z:+.2f} N"
-                    )
-                last_log_time = current_time
-            
-            waypoint_count += 1
+        self.error_message = f"No JSON result from insert_compliance.py (exit code {process.returncode})"
+        self.get_logger().error(self.error_message)
+        return False
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Force compliant move down - fixed orientation, moves down continuously, adjusts X/Y based on force',
+        description='Perform insertion — sim mode (Cartesian IK) or real mode (peg-in-hole force control)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Real mode with defaults
+  # Real mode (peg-in-hole with force mode)
   python3 perform_insert.py --mode real
 
   # Sim mode (step 2 from translate_for_assembly)
   python3 perform_insert.py --mode sim --object-name fork_orange --base-name base
 
-  # Real mode with custom speed and compliance parameters
-  python3 perform_insert.py --mode real --speed 0.01 --gain 5.0 --deadband 3.0
-
-  # Real mode: Reverse force response directions
-  python3 perform_insert.py --mode real --reverse
-
-  # Real mode: Peg-in-hole insertion with custom Z threshold
-  python3 perform_insert.py --mode real --z-threshold -8.0
+  # Real mode with yaw compliance disabled
+  python3 perform_insert.py --mode real --no-yaw-compliant
         """
     )
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
-                       help='Mode: sim (step 2 from translate_for_assembly) or real (force-compliant movement)')
-    
+                       help='Mode: sim (Cartesian IK move down) or real (peg-in-hole force control)')
+
     # Sim mode arguments
     parser.add_argument('--object-name', type=str, help='Name of the object being held (required in sim mode)')
     parser.add_argument('--base-name', type=str, help='Name of the base object (required in sim mode)')
-    
+
     # Real mode arguments
-    parser.add_argument('--speed', type=float, default=0.005,
-                        help='Downward speed in m/s (default: 0.005 = 5mm/s, real mode only)')
-    parser.add_argument('--gain', type=float, default=1.67,
-                        help='X/Y compliance gain in mm/s per Newton (default: 1.67, real mode only)')
-    parser.add_argument('--deadband', type=float, default=1.0,
-                        help='X/Y force deadband in N (default: 1.0, real mode only)')
-    parser.add_argument('--max-vel', type=float, default=15.0,
-                        help='X/Y max compliance velocity in mm/s (default: 15.0, real mode only)')
-    parser.add_argument('--reverse', action='store_true',
-                        help='Reverse X/Y force response directions (default: False, real mode only)')
-    parser.add_argument('--z-threshold', type=float, default=-10.0,
-                        help='Z force threshold in N to detect contact (default: -10.0 N, negative = upward resistance, real mode only)')
-    parser.add_argument('--xy-threshold', type=float, default=1.0,
-                        help='Minimum X/Y force magnitude required to enter alignment mode (default: 1.0 N, real mode only)')
+    parser.add_argument('--no-yaw-compliant', action='store_true',
+                        help='Disable yaw compliance during insertion (default: enabled)')
+    parser.add_argument('--max-retries', type=int, default=3,
+                        help='Max retries on drift (default: 3, real mode only)')
     parser.add_argument('--grasp-id', type=int, default=None,
-                        help='Grasp point ID for target position offset (real mode only)')
+                        help='Grasp point ID for target Z computation (real mode)')
+    parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                        help='Base position [x, y, z] in meters (real mode)')
+    parser.add_argument('--final-base-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
+                        help='Base orientation quaternion [x, y, z, w] (real mode)')
+    parser.add_argument('--use-default-base', action='store_true',
+                        help='Use default base position and orientation (real mode)')
+    parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
+                        help='Current object orientation quaternion [x, y, z, w] (real mode, for fold symmetry)')
     args = parser.parse_args()
     
     # Validate arguments based on mode
@@ -1935,16 +1409,15 @@ Examples:
         else:
             node = PerformInsertController(
                 mode=args.mode,
-                speed=args.speed,
-                gain=args.gain,
-                deadband=args.deadband,
-                max_vel=args.max_vel,
-                reverse=args.reverse,
-                z_threshold=args.z_threshold,
-                xy_force_threshold=args.xy_threshold,
                 object_name=args.object_name,
                 base_name=args.base_name,
-                grasp_id=args.grasp_id
+                grasp_id=args.grasp_id,
+                yaw_compliant=not args.no_yaw_compliant,
+                max_retries=args.max_retries,
+                final_base_pos=args.final_base_pos,
+                final_base_orientation=args.final_base_orientation,
+                use_default_base=args.use_default_base,
+                object_orientation=args.current_object_orientation,
             )
 
         # Give system time to stabilize
@@ -1952,21 +1425,12 @@ Examples:
 
         # Execute trajectory
         try:
-            if args.mode == 'sim':
-                success = node.run()
-                if success:
-                    node.get_logger().info("Move down completed successfully!")
-                else:
-                    node.get_logger().error("Move down failed")
-                    error = node.error_message
+            success = node.run()
+            if success:
+                node.get_logger().info("Insert completed successfully!")
             else:
-                node.run()
-                # Real mode: check if error occurred
-                if node.error_message:
-                    success = False
-                    error = node.error_message
-                else:
-                    success = True
+                node.get_logger().error("Insert failed")
+                error = node.error_message
         except KeyboardInterrupt:
             # Set running flag to stop the loop
             if hasattr(node, 'running'):

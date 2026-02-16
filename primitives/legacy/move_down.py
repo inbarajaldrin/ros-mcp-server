@@ -20,7 +20,6 @@ from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
-from std_msgs.msg import Float64
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -31,8 +30,10 @@ import yaml
 import argparse
 import threading
 import time
+import subprocess
 
 from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.ik_solver import compute_cartesian_waypoints_ik
 
 try:
     from primitives.utils.action_libraries import move_robust
@@ -43,8 +44,8 @@ except ImportError:
 # =============================================================================
 # CONFIGURABLE PARAMETERS
 # =============================================================================
-# Sim mode: F/T sensor via /ur5e_wrist_force (Float64 Fz from gripper joint)
-# Uses same force detection logic as real mode but with different thresholds
+# Sim mode: F/T sensor via /force_torque_sensor_broadcaster/wrench_sim (WrenchStamped)
+# Uses same force detection logic and message type as real mode but with different thresholds
 # Simulated forces may have different scaling/characteristics than real sensor
 
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
@@ -87,8 +88,8 @@ class MoveDown(Node):
         self.target_height = target_height
         
         # Force monitoring - both sim and real use WrenchStamped (6-DOF F/T sensor)
-        # Sim: /ur5e_wrist_force (Float64 Fz from gripper joint)
-        # Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor)
+        # Sim: /force_torque_sensor_broadcaster/wrench_sim
+        # Real: /force_torque_sensor_broadcaster/wrench
         self.current_force_x = 0.0
         self.current_force_y = 0.0
         self.current_force_z = 0.0
@@ -132,12 +133,11 @@ class MoveDown(Node):
         
         # Subscriber for force/torque data - different message types for sim vs real
         if self.mode == 'sim':
-            # Simulation mode: Fz from gripper joint via get_measured_joint_forces()
-            # Published as Float64 by Isaac Sim extension at physics rate (~60 Hz)
+            # Simulation mode: full 6-DOF WrenchStamped from Isaac Sim extension
             self.force_sub = self.create_subscription(
-                Float64,
-                '/ur5e_wrist_force',
-                self.sim_force_callback,
+                WrenchStamped,
+                '/force_torque_sensor_broadcaster/wrench_sim',
+                self.force_callback,
                 10
             )
         else:
@@ -416,6 +416,25 @@ class MoveDown(Node):
 
         return False  # No collision
 
+    def zero_force_sensor(self):
+        """Zero the force/torque sensor via service call"""
+        try:
+            self.get_logger().info("Zeroing force sensor...")
+            result = subprocess.run(
+                ['ros2', 'service', 'call', '/io_and_status_controller/zero_ftsensor',
+                 'std_srvs/srv/Trigger'],
+                capture_output=True, text=True, timeout=10
+            )
+            if 'success=True' in result.stdout or 'success: true' in result.stdout.lower():
+                self.get_logger().info("Force sensor zeroed successfully")
+                return True
+            else:
+                self.get_logger().warn(f"Force sensor zero may have failed: {result.stdout.strip()}")
+                return False
+        except Exception as e:
+            self.get_logger().warn(f"Could not zero force sensor: {e}")
+            return False
+
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber with retry"""
         max_retries = 5
@@ -485,10 +504,6 @@ class MoveDown(Node):
         self.current_torque_y = msg.wrench.torque.y
         self.current_torque_z = msg.wrench.torque.z
 
-    def sim_force_callback(self, msg: Float64):
-        """Callback for sim mode force data (Float64 with Fz value from gripper joint)."""
-        self.current_force_z = msg.data
-
     def start_force_monitoring(self):
         """Start monitoring force during trajectory execution (non-blocking)"""
         import time
@@ -535,8 +550,8 @@ class MoveDown(Node):
         """Check force during trajectory execution and cancel if threshold exceeded.
 
         Both sim and real modes use the same WrenchStamped-based detection:
-        - Sim: /ur5e_wrist_force (Float64 Fz from gripper joint) - uses SIM_* thresholds
-        - Real: /force_torque_sensor_broadcaster/wrench (from wrist F/T sensor) - uses real thresholds
+        - Sim: /force_torque_sensor_broadcaster/wrench_sim - uses SIM_* thresholds
+        - Real: /force_torque_sensor_broadcaster/wrench - uses real thresholds
         """
         if not self.moving:
             return
@@ -762,7 +777,12 @@ class MoveDown(Node):
     def _execute_move_down(self, current_pos, current_quat):
         """Execute the actual move down calculation and trajectory sending"""
         from scipy.spatial.transform import Rotation as Rot
-        
+
+        # Zero force sensor before movement starts (only on first movement)
+        if not self.moving and self.baseline_force_z is None:
+            self.zero_force_sensor()
+            time.sleep(0.5)  # Wait for sensor to settle after zeroing
+
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
@@ -814,130 +834,107 @@ class MoveDown(Node):
 
         # Compute inverse kinematics
         try:
-            from primitives.utils.ik_solver import forward_kinematics, dh_params
-            from primitives.utils.unified_ik import IKSolverConfig, IKSolver
-
-            target_pose = np.eye(4)
-            target_pose[:3, 3] = target_position
-            target_pose[:3, :3] = target_rot_matrix
-
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available! Cannot compute IK."
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
 
-            q_guess = self.current_joint_angles.copy()
-
-            # Collision checker for sim mode
-            def collision_checker(joint_angles_candidate):
-                if self.mode != 'sim':
-                    return False
-                return (self.check_collision_with_table(joint_angles_candidate)
-                        or self.check_self_collision(joint_angles_candidate))
-
-            # Single-point trajectory with frozen w2+w3 for smooth motion.
-            # For typical move_down distances (<100mm), XY arc is <3mm with 0° orientation error.
-            # w1 is free to compensate for lift+elbow changes, preserving orientation.
-            wrist_2_val = q_guess[4]
-            wrist_3_val = q_guess[5]
-            joint_bounds_frozen = [
-                (-np.pi, np.pi),     # shoulder_pan
-                (-np.pi, 0),         # shoulder_lift: elbow-down
-                (0, np.pi),          # elbow: elbow-down
-                (-np.pi, 0),         # wrist_1: elbow-down
-                (wrist_2_val, wrist_2_val),  # wrist_2: frozen
-                (wrist_3_val, wrist_3_val),  # wrist_3: frozen
-            ]
-            joint_bounds_free = [
-                (-np.pi, np.pi),     # shoulder_pan
-                (-np.pi, 0),         # shoulder_lift: elbow-down
-                (0, np.pi),          # elbow: elbow-down
-                (-np.pi, 0),         # wrist_1: elbow-down
-                (-np.pi, np.pi),     # wrist_2
-                (-2*np.pi, 2*np.pi)  # wrist_3: extended range
-            ]
-
-            # Solve with frozen wrists + perturbed seeds
-            rng = np.random.default_rng()
-            seeds = [q_guess.copy()]
-            for _ in range(30):
-                perturbed = q_guess + rng.normal(0, 0.1, 6)
-                perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_frozen], [b[1] for b in joint_bounds_frozen])
-                seeds.append(perturbed)
-
-            solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_frozen))
-            joint_angles = solver.solve(
-                seeds=seeds,
-                target_pose=target_pose,
-                collision_checker=collision_checker,
-                perturbations=1,
-                dx=0.001,
-            )
-
-            if joint_angles is None and solver._best_result is not None:
-                self.get_logger().info(f"Using best frozen IK solution with cost={solver._best_result.cost:.6f}")
-                joint_angles = solver._best_result.joint_angles
-
-            # Fallback: free wrist constraints
-            if joint_angles is None:
-                self.get_logger().info("Frozen wrist IK failed, falling back to free wrist bounds")
-                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_free))
-                seeds_free = [q_guess.copy()]
-                for _ in range(30):
-                    perturbed = q_guess + rng.normal(0, 0.1, 6)
-                    perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_free], [b[1] for b in joint_bounds_free])
-                    seeds_free.append(perturbed)
-                joint_angles = solver.solve(
-                    seeds=seeds_free,
-                    target_pose=target_pose,
-                    collision_checker=collision_checker,
-                    perturbations=1,
-                    dx=0.001,
-                )
-
-                if joint_angles is None and solver._best_result is not None:
-                    self.get_logger().info(f"Using best IK solution with cost={solver._best_result.cost:.6f}")
-                    joint_angles = solver._best_result.joint_angles
-
-            # Stage 2: If IK failed at target Z, try incrementally higher Z values
-            if joint_angles is None:
-                self.get_logger().warn(f"IK failed at target Z={target_position[2]:.3f}m. Trying higher Z values...")
-                solver2 = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_free))
-                for z_attempt in range(1, 11):
-                    test_z = target_position[2] + z_attempt * 0.05
-                    self.get_logger().info(f"Trying IK at Z={test_z:.3f}m (attempt {z_attempt}/10)")
-                    test_pose = target_pose.copy()
-                    test_pose[2, 3] = test_z
-                    ik_result = solver2._solve_single(q_guess, test_pose, collision_checker)
-                    if (ik_result is not None and not ik_result.has_collision
-                            and ik_result.cost < 0.01):
-                        joint_angles = ik_result.joint_angles
-                        target_position[2] = test_z
-                        self.get_logger().info(f"IK succeeded at Z={test_z:.3f}m")
-                        break
-
-                if joint_angles is None:
-                    self.error_message = "IK solver failed: no valid solution to perform move down"
-                    self.get_logger().error(self.error_message)
-                    rclpy.shutdown()
-                    return
-
-            self.get_logger().info(f"Computed joint angles: {joint_angles}")
-
+            num_waypoints = 60
             total_duration = MOVEMENT_DURATION
 
-            # Single endpoint — UR controller handles smooth S-curve
-            trajectory_points = [JointTrajectoryPoint(
-                positions=[float(x) for x in joint_angles],
-                velocities=[0.0] * 6,
-                time_from_start=Duration(sec=int(total_duration),
-                                        nanosec=int((total_duration % 1) * 1e9))
-            )]
+            self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
+            waypoints = compute_cartesian_waypoints_ik(
+                self.current_joint_angles, target_position[2],
+                num_waypoints=num_waypoints
+            )
+            if waypoints is None:
+                self.error_message = "IK failed for Cartesian waypoints"
+                self.get_logger().error(self.error_message)
+                rclpy.shutdown()
+                return
+
+            all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
+
+            # Trapezoidal velocity profile
+            n_total = len(all_joint_angles)
+            segment_dists = []
+            for i in range(1, n_total):
+                dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
+                segment_dists.append(max(dist, 1e-6))
+            cumulative_s = [0.0]
+            for d in segment_dists:
+                cumulative_s.append(cumulative_s[-1] + d)
+            total_s = cumulative_s[-1]
+
+            accel_frac = 0.2
+            decel_frac = 0.2
+            t_accel = accel_frac * total_duration
+            t_decel = decel_frac * total_duration
+            t_cruise = total_duration - t_accel - t_decel
+            v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
+            a_accel = v_max / t_accel
+            a_decel = v_max / t_decel
+
+            def trapez_s_and_v(t_query):
+                if t_query <= t_accel:
+                    s = 0.5 * a_accel * t_query ** 2
+                    v = a_accel * t_query
+                elif t_query <= t_accel + t_cruise:
+                    s_accel = 0.5 * v_max * t_accel
+                    s = s_accel + v_max * (t_query - t_accel)
+                    v = v_max
+                else:
+                    s_accel = 0.5 * v_max * t_accel
+                    s_cruise = v_max * t_cruise
+                    t_in_decel = t_query - t_accel - t_cruise
+                    s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
+                    v = v_max - a_decel * t_in_decel
+                return s, max(v, 0.0)
+
+            def find_time_for_s(target_s):
+                lo, hi = 0.0, total_duration
+                for _ in range(50):
+                    mid = (lo + hi) / 2
+                    s_mid, _ = trapez_s_and_v(mid)
+                    if s_mid < target_s:
+                        lo = mid
+                    else:
+                        hi = mid
+                return (lo + hi) / 2
+
+            waypoint_times = [find_time_for_s(s) for s in cumulative_s]
+            waypoint_times[0] = 0.0
+            waypoint_times[-1] = total_duration
+
+            traj_points = []
+            for i in range(n_total):
+                t_i = waypoint_times[i]
+                _, speed_scalar = trapez_s_and_v(t_i)
+
+                if i == 0 or i == n_total - 1:
+                    velocities = [0.0] * 6
+                else:
+                    delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
+                    delta_norm = np.linalg.norm(delta)
+                    if delta_norm > 1e-8:
+                        direction = delta / delta_norm
+                        velocities = [float(speed_scalar * direction[j]) for j in range(6)]
+                    else:
+                        velocities = [0.0] * 6
+
+                point = JointTrajectoryPoint(
+                    positions=[float(x) for x in all_joint_angles[i]],
+                    velocities=velocities,
+                    time_from_start=Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+                )
+                traj_points.append(point)
+
+            self.get_logger().info(f"Generated {len(traj_points)} dense waypoints with trapezoidal velocity profile")
 
             traj = JointTrajectory()
             traj.joint_names = self.joint_names
-            traj.points = trajectory_points
+            traj.points = traj_points
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj

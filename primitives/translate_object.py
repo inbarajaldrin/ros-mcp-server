@@ -8,7 +8,7 @@ This primitive combines functionality from translate_for_assembly and perform_in
 - --move-to-safe-height: Moves to safe height (after closing gripper)
 - --move-away-from-base: Calls move_to_clear_area to move object away from base to a clear area
 
-In real mode, --perform-insert receives --grasp-id, --object-name, and --base-name when provided (for grasp-adjusted insert target).
+In real mode, --perform-insert delegates to prismatic_peg_insertion.py (force-controlled insertion with compliance).
 
 Note: --move-to-base, --perform-insert, --move-to-safe-height, and --move-away-from-base are mutually exclusive (cannot be used together).
 
@@ -25,8 +25,8 @@ Usage:
     # Real mode - safe height only
     python3 translate_object.py --mode real --base-name base --move-to-base --final-base-pos 0.5 -0.37 0.1882 --final-base-orientation 0.0 0.0 0.0 1.0
 
-    # Real mode - perform insert with force compliance (optional: pass object/base/grasp-id for grasp-adjusted target)
-    python3 translate_object.py --mode real --perform-insert --object-name u_orange --base-name base1 --grasp-id 1 --speed 0.01 --gain 2.0
+    # Real mode - perform insert (peg-in-hole force control)
+    python3 translate_object.py --mode real --perform-insert
 
     # Real mode - move to safe height only
     python3 translate_object.py --mode real --move-to-safe-height
@@ -155,9 +155,27 @@ def run_translate_for_assembly(args):
 
 def run_perform_insert(args):
     """Run perform_insert script and return (success, output_text)"""
-    script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'perform_insert.py')
+    # In real mode, choose insertion method based on --insertion-type flag
+    if args.mode == 'real':
+        insertion_type = getattr(args, 'insertion_type', 'prismatic')
 
-    cmd = [sys.executable, script_path, '--mode', args.mode]
+        if insertion_type == 'prismatic':
+            script_path = os.path.join(os.path.dirname(__file__), 'prismatic_peg_insertion.py')
+            logger.info("Using prismatic peg insertion")
+        elif insertion_type == 'legacy':
+            script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'peg_in_hole_insert.py')
+            logger.info("Using legacy peg_in_hole_insert")
+        else:
+            logger.error(f"Unknown insertion type: {insertion_type}")
+            return False, f"Unknown insertion type: {insertion_type}"
+    else:
+        script_path = os.path.join(os.path.dirname(__file__), 'legacy', 'perform_insert.py')
+
+    cmd = [sys.executable, script_path]
+
+    # Add mode for sim mode only (real mode scripts don't need it)
+    if args.mode == 'sim':
+        cmd.extend(['--mode', args.mode])
 
     # Add sim mode arguments if provided
     if args.mode == 'sim':
@@ -166,27 +184,27 @@ def run_perform_insert(args):
         if args.base_name:
             cmd.extend(['--base-name', args.base_name])
 
-    # Add real mode force compliance parameters
+    # Real mode: pass grasp-adjusted target params (same as translate_for_assembly)
     if args.mode == 'real':
-        cmd.extend(['--speed', str(args.speed)])
-        cmd.extend(['--gain', str(args.gain)])
-        cmd.extend(['--deadband', str(args.deadband)])
-        cmd.extend(['--max-vel', str(args.max_vel)])
-        if args.reverse:
-            cmd.append('--reverse')
-        cmd.extend(['--z-threshold', str(args.z_threshold)])
-        cmd.extend(['--xy-threshold', str(args.xy_threshold)])
-        if args.grasp_id is not None:
-            cmd.extend(['--grasp-id', str(args.grasp_id)])
         if args.object_name:
             cmd.extend(['--object-name', args.object_name])
         if args.base_name:
             cmd.extend(['--base-name', args.base_name])
+        if args.grasp_id is not None:
+            cmd.extend(['--grasp-id', str(args.grasp_id)])
+        if args.final_base_pos:
+            cmd.extend(['--final-base-pos'] + [str(x) for x in args.final_base_pos])
+        if args.final_base_orientation:
+            cmd.extend(['--final-base-orientation'] + [str(x) for x in args.final_base_orientation])
+        if args.use_default_base_position:
+            cmd.append('--use-default-base-position')
+        if args.current_object_orientation is not None:
+            cmd.extend(['--current-object-orientation'] + [str(x) for x in args.current_object_orientation])
 
     if args.mode == 'sim':
         logger.info(f"Moving down {args.object_name} to {args.base_name}")
     else:
-        logger.info("Moving down with force compliance")
+        logger.info("Moving down with passive compliance (XY stiff until contact, then full XYZ compliance)")
 
     # Set PYTHONPATH to include project root for imports
     env = os.environ.copy()
@@ -306,8 +324,8 @@ Examples:
   # Real mode - safe height only (using defaults)
   python3 translate_object.py --mode real --base-name base --move-to-base --use-default-base-position
 
-  # Real mode - perform insert only with force compliance
-  python3 translate_object.py --mode real --perform-insert --speed 0.01 --gain 2.0
+  # Real mode - perform insert (peg-in-hole force control)
+  python3 translate_object.py --mode real --perform-insert
 
   # Real mode - move to safe height only
   python3 translate_object.py --mode real --move-to-safe-height
@@ -350,21 +368,10 @@ Examples:
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'),
                        help='Current object orientation quaternion [x, y, z, w] (real mode only, used with grasp-id for fold symmetry)')
 
-    # Real mode force compliance parameters (for perform_insert)
-    parser.add_argument('--speed', type=float, default=0.005,
-                       help='Downward speed in m/s (default: 0.005, real mode only)')
-    parser.add_argument('--gain', type=float, default=1.67,
-                       help='X/Y compliance gain in mm/s per Newton (default: 1.67, real mode only)')
-    parser.add_argument('--deadband', type=float, default=1.0,
-                       help='X/Y force deadband in N (default: 1.0, real mode only)')
-    parser.add_argument('--max-vel', type=float, default=15.0,
-                       help='X/Y max compliance velocity in mm/s (default: 15.0, real mode only)')
-    parser.add_argument('--reverse', action='store_true',
-                       help='Reverse X/Y force response directions (real mode only)')
-    parser.add_argument('--z-threshold', type=float, default=-10.0,
-                       help='Z force threshold in N to detect contact (default: -10.0, real mode only)')
-    parser.add_argument('--xy-threshold', type=float, default=1.0,
-                       help='Minimum X/Y force magnitude for alignment mode (default: 1.0, real mode only)')
+    # Insertion method selector (real mode only)
+    parser.add_argument('--insertion-type', type=str, default='prismatic',
+                       choices=['prismatic', 'legacy'],
+                       help='Insertion control strategy (real mode only): prismatic=peg insertion with compliance, legacy=peg_in_hole_insert')
 
     args = parser.parse_args()
 

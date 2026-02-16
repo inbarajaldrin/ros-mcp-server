@@ -105,12 +105,13 @@ When performing assembly onto the base, half open gripper as to not disturb the 
 Verify assembly after each object assembly.
 Move home after each object is assembled.
 Don't orchestrate the tools to perform a composed policy. Perform the tasks using individual tools calls. 
+Before moving to assembly make sure the current object orietnaion is close to the target orientation. If the object fell after placing down, you might want to fix it again.
 
 **Verification**
 
 > To verify if an assembly was successful: run verify assembly once you you've ran all tools required to move one object into the fixed base.
 > 1.**SUCCESS**: verify assembly returns success.
-> 2.**FAILURE**: verify assembly returns failure. Pause and Request for assistance on further instructions.
+> 2.**FAILURE**: verify assembly returns failure. try grabbing the object, and moving to clear space and start the cycle over for that object.
 
 **Output**
 

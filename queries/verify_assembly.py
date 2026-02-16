@@ -110,7 +110,7 @@ class FoldSymmetry:
             os.path.join(symmetry_dir, f"{object_name}*_symmetry.json"),
             os.path.join(symmetry_dir, f"{object_name.replace('_scaled70', '')}*_symmetry.json"),
         ]
-        
+
         for pattern in patterns:
             if '*' in pattern:
                 matches = glob.glob(pattern)
@@ -125,27 +125,28 @@ class FoldSymmetry:
     @staticmethod
     def get_symmetry_rotations_as_matrices(fold_data):
         """
-        Extract symmetry rotations as rotation matrices.
-        
-        Returns list of 3x3 rotation matrices representing symmetry transformations.
+        Generate all combinations of fold symmetry rotations.
+
+        For objects with multiple fold axes (e.g., X, Y, Z), generate all combinations
+        by applying rotations in sequence (R_combined = R_x @ R_y @ R_z).
+
+        Returns list of 3x3 rotation matrices representing all symmetry transformations.
         Always includes identity.
         """
         if fold_data is None:
             return [np.eye(3)]
-        
-        symmetry_matrices = []
-        seen = set()
-        
-        # Always include identity
-        symmetry_matrices.append(np.eye(3))
-        seen.add(tuple(np.eye(3).flatten().round(6)))
-        
+
+        # Extract rotations for each axis
+        axis_rotations = {}
         for axis in ['x', 'y', 'z']:
             if axis not in fold_data.get('fold_axes', {}):
+                axis_rotations[axis] = [np.eye(3)]
                 continue
-            
+
             axis_data = fold_data['fold_axes'][axis]
-            for q_data in axis_data.get('quaternions', []):
+            rotations = [np.eye(3)]  # Always include identity
+
+            for q_data in axis_data.get('quaternions', [])[1:]:  # Skip first (identity)
                 q = np.array([
                     q_data['quaternion']['x'],
                     q_data['quaternion']['y'],
@@ -153,34 +154,41 @@ class FoldSymmetry:
                     q_data['quaternion']['w']
                 ])
                 q = q / np.linalg.norm(q)
-                
-                # Convert to rotation matrix
                 R_sym = R.from_quat(q).as_matrix()
-                
-                # Check for duplicates
-                key = tuple(R_sym.flatten().round(6))
-                if key not in seen:
-                    seen.add(key)
-                    symmetry_matrices.append(R_sym)
-        
-        return symmetry_matrices
+                rotations.append(R_sym)
+
+            axis_rotations[axis] = rotations
+
+        # Generate all combinations: R_combined = R_x @ R_y @ R_z
+        combined_matrices = []
+        seen = set()
+
+        for R_x in axis_rotations.get('x', [np.eye(3)]):
+            for R_y in axis_rotations.get('y', [np.eye(3)]):
+                for R_z in axis_rotations.get('z', [np.eye(3)]):
+                    R_combined = R_x @ R_y @ R_z
+                    key = tuple(R_combined.flatten().round(6))
+                    if key not in seen:
+                        seen.add(key)
+                        combined_matrices.append(R_combined)
+
+        return combined_matrices
     
     @staticmethod
-    def generate_equivalent_target_orientations(R_target_world, fold_data, logger=None):
+    def generate_equivalent_target_orientations(R_target_world, fold_data):
         """
         Generate all symmetry-equivalent target orientations.
-        
+
         For an object with fold symmetry, multiple orientations are visually identical.
         This generates all such equivalent orientations for the assembly target.
-        
+
         Math: R_equivalent = R_target × R_symmetry
         (Apply symmetry rotation in object's local frame)
-        
+
         Args:
             R_target_world: Target orientation as 3x3 rotation matrix (world frame)
             fold_data: Fold symmetry data from JSON
-            logger: Optional logger for debug output
-            
+
         Returns:
             List of 3x3 rotation matrices (all equivalent target orientations)
         """
@@ -509,7 +517,7 @@ class VerifyAssembly(Node):
 
             # Generate all equivalent target orientations using fold symmetry
             equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-                R_target_relative, fold_data, logger=self.get_logger() if fold_data else None
+                R_target_relative, fold_data
             )
 
             # Check if current orientation matches ANY equivalent target
@@ -626,6 +634,8 @@ def main(args=None):
     args = parser.parse_args()
 
     # Validate arguments
+    if args.mode == 'real' and args.check_all:
+        parser.error("--check-all is not supported in real mode. Verify one object at a time.")
     if not args.check_all and not args.object_name:
         parser.error("Either --object-name or --check-all must be specified")
 
@@ -736,9 +746,11 @@ def main(args=None):
                 "result": "success" if success else "failure",
                 "base_name": args.base_name,
                 "all_assembled": success,
-                "assembled_objects": assembled_objects,
-                "unassembled_objects": unassembled_objects,
             }
+            # Only include object lists in sim mode
+            if args.mode == 'sim':
+                result["assembled_objects"] = assembled_objects
+                result["unassembled_objects"] = unassembled_objects
         else:
             result = {
                 "result": "success" if success else "failure",
@@ -750,8 +762,9 @@ def main(args=None):
             if error_data:
                 result.update(error_data)
 
-            # Add unassembled objects list
-            result["unassembled_objects"] = unassembled_objects
+            # Add unassembled objects list (sim mode only)
+            if args.mode == 'sim':
+                result["unassembled_objects"] = unassembled_objects
 
         # Add error message if present
         if error_msg:

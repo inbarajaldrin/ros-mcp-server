@@ -30,6 +30,7 @@ from scipy.spatial.transform import Rotation as R
 import time
 
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
+from primitives.utils.workspace_config import DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
 
 
 def output_result(result):
@@ -42,10 +43,6 @@ def output_result(result):
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 GRASP_DATA_DIR = get_aruco_data_dir() / "grasp_points"
 BASE_TOPIC = "/objects_poses_sim"
-
-# Default base position and orientation (used in real mode)
-DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
-DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):

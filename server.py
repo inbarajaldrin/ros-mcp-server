@@ -738,6 +738,75 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
 
+def _run_elicitation(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Elicitation") -> Dict[str, Any]:
+    """Helper function to run elicitation scripts and return raw output.
+
+    Elicitations are verification/interaction scripts that provide structured data.
+    This runs them the same way as queries, but from the elicitations folder.
+
+    Args:
+        script_name: Name of the elicitation script (e.g., "verify_clearance.py")
+        command_args: Optional command-line arguments to pass to the script
+        timeout: Timeout for the subprocess (default: 10 seconds)
+        error_prefix: Prefix for error messages (default: "Elicitation")
+
+    Returns:
+        Dictionary with output from the elicitation script (stdout + stderr)
+    """
+    import subprocess
+    import os
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    cmd_parts = [
+        f"cd {script_dir}/elicitations",
+        f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
+    ]
+
+    cmd = "\n".join(cmd_parts)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True,
+            timeout=timeout + 5  # Add buffer for subprocess timeout
+        )
+
+        # Return combined stdout and stderr
+        output = result.stdout if result.stdout else ""
+        if result.stderr:
+            output += result.stderr
+
+        # Check if output contains JSON markers (parse JSON if present)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result_json = json.loads(json_str)
+                return result_json
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to returning raw output
+                pass
+
+        # Fallback: return raw output if no JSON markers or parsing failed
+        return {"output": output}
+
+    except subprocess.TimeoutExpired:
+        return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+    except Exception as e:
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+
 ## ############################################################################################## ##
 ##
 ##                      QUERIES
@@ -807,20 +876,45 @@ def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim
     return _run_with_retry(_run_query, "get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
 
 @mcp.tool()
-def verify_grasp(object_name: str, mode: Mode = "sim") -> Dict[str, Any]:
+def verify_grasp(object_name: str, mode: Mode = "sim", grasp_id: int = None, current_object_orientation: List[float] = None) -> Dict[str, Any]:
     """Verify if object is within grasp radius from gripper center.
 
-    Checks if object position is within 6cm radius from gripper center.
+    Sim mode: Checks if object position is within 6cm radius from gripper center.
+    Real mode: Verifies grasp point validity using gripper width and object orientation.
+
     Only call this tool after moving to safe height.
 
     Args:
         object_name: Name of the object to verify
-        mode: Robot mode
+        mode: "sim" for simulation mode (default), "real" for real mode
+        grasp_id: Grasp point ID to use (required for real mode)
+        current_object_orientation: Object orientation quaternion [x, y, z, w] (required for real mode)
 
     Returns:
-        Dictionary with result (success or failure)
+        Dictionary with result (success or failure) and verification details
     """
-    return _run_with_retry(_run_query, "verify_grasp.py", f"--object-name \"{object_name}\" --mode {mode} --radius 0.06", timeout=30, error_prefix="Verify grasp")
+    # Build command based on mode
+    if mode == "real":
+        missing = []
+        if grasp_id is None:
+            missing.append("grasp_id (get from get_scene_info)")
+        if current_object_orientation is None:
+            missing.append("current_object_orientation [x,y,z,w] (get from get_current_object_pose)")
+        if missing:
+            return {"result": "failure", "object_name": object_name, "mode": "real",
+                   "error": f"Real mode requires: {', '.join(missing)}"}
+        if not isinstance(current_object_orientation, list) or len(current_object_orientation) != 4:
+            return {"result": "failure", "object_name": object_name, "mode": "real",
+                   "error": "current_object_orientation must be a list of 4 floats [x, y, z, w]"}
+        quat_str = " ".join(str(v) for v in current_object_orientation)
+        cmd = f"--object-name \"{object_name}\" --mode real --grasp-id {grasp_id} --current-object-orientation {quat_str}"
+    elif mode == "sim":
+        cmd = f"--object-name \"{object_name}\" --mode sim --radius 0.06"
+    else:
+        return {"result": "failure", "object_name": object_name,
+                "error": f"Invalid mode '{mode}'. Must be 'sim' or 'real'."}
+
+    return _run_with_retry(_run_query, "verify_grasp.py", cmd, timeout=30, error_prefix="Verify grasp")
 
 @mcp.tool()
 def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
@@ -829,7 +923,7 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
     Args:
         base_name: Name of the base object
         object_name: Name of the object to verify (optional if check_all is True)
-        check_all: If True, check all objects in the assembly instead of a specific one
+        check_all: If True, check all objects in the assembly instead of a specific one (sim mode only)
         mode: Robot mode
 
     Returns:
@@ -840,21 +934,98 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
         - "position_error_m": Position error metrics (x, y, z)
         - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
         - "within_tolerance": Boolean indicating if within tolerance
-        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled
+        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled (sim mode only)
 
-        When check_all=True:
+        When check_all=True (sim mode only):
         - "result": "success" if all assembled, "failure" otherwise
         - "base_name": Name of the base object
         - "all_assembled": Boolean indicating if all objects are assembled
         - "assembled_objects": List of objects that are correctly assembled
         - "unassembled_objects": List of objects that are NOT assembled
     """
+    if check_all and mode == "real":
+        return {"result": "failure", "error": "check_all is not supported in real mode. Verify one object at a time."}
     if check_all:
-        return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
+        result = _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
     elif object_name:
-        return _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify assembly")
+        result = _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify assembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
+
+    # In real mode, don't return assembled_objects (only unassembled matters)
+    if mode == "real" and isinstance(result, dict):
+        result.pop("assembled_objects", None)
+
+    return result
+
+@mcp.tool()
+async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mode: Mode = "real") -> Dict[str, Any]:
+    """Verify if assembly objects have sufficient clearance for gripper access.
+
+    Checks if all objects for assembly are present and have enough space for the gripper to operate.
+    If verification fails due to setup issues, automatically offers interactive elicitation.
+
+    Args:
+        base_name: Name of the base object
+        ctx: MCP context for elicitation support
+        mode: Robot mode (default: "real")
+
+    Returns:
+        Dictionary with clearance verification results:
+        - "result": "success" or "failure"
+        - "ready_for_assembly": Boolean indicating if ready to proceed
+        - "base_name": Name of the base object
+        - If failure:
+          - "error": Description of the issue
+          - "missing_objects": List of missing objects (if any)
+          - "objects_with_clearance_issues": List of objects with clearance problems (if any)
+    """
+    result = _run_with_retry(_run_elicitation, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
+
+    # Check if verification failed
+    if isinstance(result, dict) and result.get("result") == "failure":
+        has_missing = "missing_objects" in result
+        has_clearance_issues = "objects_with_clearance_issues" in result
+
+        # Offer elicitation if there are setup issues
+        if has_missing or has_clearance_issues:
+            try:
+                # Import verify_clearance script to get message builder
+                import importlib.util
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                verify_clearance_path = os.path.join(script_dir, "elicitations/verify_clearance.py")
+
+                spec = importlib.util.spec_from_file_location("elicitations.verify_clearance_loader", verify_clearance_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                # Build message using the script's message builder
+                message = module.build_elicitation_message(result)
+
+                # Call generic elicitation tool with result context for dynamic schema
+                elicit_response = await elicit_user(ctx, "verify_clearance", message, result)
+
+                if elicit_response.get("action") == "accept":
+                    user_action = elicit_response.get("user_action")
+
+                    if user_action == "retry":
+                        # Retry the verification
+                        result = _run_with_retry(_run_elicitation, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
+                        result["retried"] = True
+                    elif user_action == "skip":
+                        result["skipped"] = True
+                        result["warning"] = "Proceeding without proper environment setup may cause assembly failures"
+
+                elif elicit_response.get("action") == "decline":
+                    result["declined"] = True
+                    result["result"] = "declined"
+
+            except Exception as e:
+                # If elicitation fails, just return the original error
+                if "Method not found" not in str(e):
+                    logger.warning(f"Elicitation failed: {e}")
+
+    return result
 
 @mcp.tool()
 def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
@@ -906,7 +1077,7 @@ def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[s
     """Control gripper.
 
     Args:
-        command: Gripper action or numeric width 0-110 mm
+        command: Gripper action or numeric width 0-100 mm
         mode: Robot mode
     """
     return _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
@@ -990,15 +1161,22 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
         - "movement_type": The action that was performed (move_to_clear_space, move_down, or move_ee_top_down)
         - "error": Error message (only present if result is "failure")
     """
+    # Verify object is grasped before moving to clear space
+    if action == "move_to_clear_space":
+        grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
+        if isinstance(grasp_result, dict) and grasp_result.get("result") == "failure":
+            return {"result": "failure", "mode": mode, "movement_type": "move_to_clear_space",
+                    "error": f"Grasp check failed: {grasp_result.get('error', 'gripper not holding object')}"}
+
     cmd = f"--mode {mode} --{action.replace('_', '-')}"
     return _run_with_retry(_run_primitive, "move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
 @mcp.tool()
-def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Optional[str] = None, object_name: Optional[str] = None, use_default_base_position: bool = False) -> Dict[str, Any]:
+def translate_object(action: TranslateAction, mode: Mode = "sim", object_name: Optional[str] = None, base_name: Optional[str] = None, grasp_id: Optional[int] = None, current_object_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
     """Translate object to target position.
 
     Call this tool only if the object is already grasped.
-    Moves object to target position for assembly. Maintains object's current orientation. 
+    Moves object to target position for assembly. Maintains object's current orientation.
 
     Workflow for assembly:
     1. Call move_to_base to move to the base
@@ -1012,34 +1190,53 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", base_name: Opt
 
     Args:
         action: Which step to perform (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
+        object_name: Name of the object being held
+        base_name: Name of the base object
+        grasp_id: Grasp point ID used when grasping the object
+        current_object_orientation: Current object orientation quaternion [x, y, z, w]
         mode: Robot mode
-        base_name: Required for move_to_base/perform_insert in sim mode
-        object_name: Required for move_to_base/perform_insert in sim mode
-        use_default_base_position: Use default base position (for real mode)
 
     Returns:
         Dictionary containing:
         - "result": "success" or "failure"
         - "mode": Robot mode ("sim" or "real")
         - "movement_type": The action that was performed (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
-        - "object_name": Name of the object (present in sim mode for certain actions)
-        - "base_name": Name of the base (present in sim mode for certain actions)
+        - "object_name": Name of the object
+        - "base_name": Name of the base object
         - "error": Error message (only present if result is "failure")
     """
-    # Validate sim mode requirements for certain actions
-    if mode == "sim" and action in ["move_to_base", "perform_insert"]:
-        if object_name is None:
-            return {"output": "Error: object_name is required in sim mode for this action"}
-        if base_name is None:
-            return {"output": "Error: base_name is required in sim mode for this action"}
+    # Validate required fields per action
+    if action in ["move_to_base", "perform_insert", "move_away_from_base"]:
+        missing = []
+        if not object_name:
+            missing.append("object_name")
+        if not base_name:
+            missing.append("base_name")
+        if missing:
+            return {"result": "failure",
+                    "error": f"Action '{action}' requires: {', '.join(missing)}"}
+
+    if mode == "real":
+        missing = []
+        if grasp_id is None:
+            missing.append("grasp_id")
+        if current_object_orientation is None:
+            missing.append("current_object_orientation")
+        if missing:
+            return {"result": "failure",
+                    "error": f"Real mode requires: {', '.join(missing)}"}
 
     cmd = f"--mode {mode}"
-    if object_name is not None:
+    if object_name:
         cmd += f" --object-name \"{object_name}\""
-    if base_name is not None:
+    if base_name:
         cmd += f" --base-name \"{base_name}\""
     cmd += f" --{action.replace('_', '-')}"
-    if use_default_base_position:
+    if grasp_id is not None:
+        cmd += f" --grasp-id {grasp_id}"
+    if current_object_orientation is not None:
+        cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
+    if mode == "real":
         cmd += " --use-default-base-position"
 
     # Adjust timeout based on action
@@ -1059,13 +1256,15 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
     Call this tool only if the object is already grasped.
     Rotates object from current to target orientation relative to base orientation.
 
+    In real mode, uses default base orientation [0, 0, 0, 1] automatically (same as translate_object).
+
     Args:
         object_name: Name of the object to rotate (required)
         base_name: Name of the base object (required)
         mode: Robot mode (default: "sim")
         current_object_orientation: Current object orientation quaternion [x, y, z, w]. Required in real mode, optional in sim mode (reads from ROS topic if not provided)
-        target_base_orientation: Target base orientation quaternion [x, y, z, w]. Optional in sim mode (reads from ROS topic if not provided), required in real mode unless use_default_base_orientation is True
-        use_default_base_orientation: Use default base orientation [0, 0, 0, 1]. Optional, mainly for real mode
+        target_base_orientation: Target base orientation quaternion [x, y, z, w]. Optional in sim mode (reads from ROS topic if not provided). Ignored in real mode (always uses default [0, 0, 0, 1])
+        use_default_base_orientation: Force use of default base orientation [0, 0, 0, 1]. In real mode, this is automatic and does not need to be set. In sim mode, set to True to use default instead of target_base_orientation
 
     Returns:
         Dictionary containing:
@@ -1088,7 +1287,8 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
     if current_object_orientation is not None:
         # Format numbers to avoid scientific notation which can confuse argument parser
         cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
-    if use_default_base_orientation:
+    # In real mode, use default base orientation unless explicitly overridden
+    if use_default_base_orientation or mode == "real":
         cmd += " --use-default-base-orientation"
     elif target_base_orientation is not None:
         # Format numbers to avoid scientific notation which can confuse argument parser
@@ -1097,113 +1297,89 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
 
 ## ############################################################################################## ##
 ##
-##                      ELICITATION TOOL
+##                      ELICITATION TOOLS
 ##
 ## ############################################################################################## ##
 
-# Elicitation allows MCP servers to pause execution and request structured input from the user.
-# This is useful for:
-# 1. Confirming potentially dangerous operations before executing
-# 2. Collecting additional parameters that weren't provided initially
-# 3. Offering choices when multiple valid options exist
-# 4. Human-in-the-loop workflows where user decisions are needed mid-execution
-#
-# Define schemas using Pydantic models - these define what fields the user will be asked to fill
-# Note: MCP elicitation supports primitive types: str, int, float, bool, or list[str]
-# For enum-style selection, use json_schema_extra={"enum": [...]} on str fields
+@mcp.tool()
+async def elicit_user(ctx: Context[ServerSession, None], elicitation_script: str, message: str, context_data: dict = None) -> Dict[str, Any]:
+    """Generic elicitation tool for user interaction.
 
-# class GripperConfirmation(BaseModel):
-#     """Schema for confirming gripper operation."""
-#     confirm: bool = Field(
-#         default=True,
-#         description="Confirm you want to proceed with this gripper operation?"
-#     )
-#     action: str = Field(
-#         default="open",
-#         description="Select gripper action",
-#         json_schema_extra={"enum": ["open", "close", "half-open", "cancel"]}
-#     )
-#     width_mm: int = Field(
-#         default=50,
-#         description="Gripper width in mm (0-110), only used for custom width"
-#     )
+    Dynamically loads schema from elicitation script and presents user with a form to fill.
 
-# @mcp.tool()
-# async def demo_elicitation_gripper(ctx: Context[ServerSession, None]) -> Dict[str, Any]:
-#     """
-#     DEMO: Demonstrates MCP elicitation by asking user to confirm gripper operation.
-#
-#     This tool shows how elicitation works:
-#     1. Server pauses and sends a schema to the client
-#     2. Client presents a form/dialog to the user
-#     3. User fills in the form and submits
-#     4. Server receives the structured response and continues
-#
-#     NOTE: Elicitation requires client support. Claude Desktop/Claude Code may not
-#     support elicitation yet (will return "Method not found" error).
-#     """
-#     try:
-#         # Request user input using elicitation
-#         # The schema defines what fields the user will see
-#         result = await ctx.elicit(
-#             message="Please confirm the gripper operation you want to perform:",
-#             schema=GripperConfirmation
-#         )
-#
-#         # Handle the response
-#         # result.action can be: "accept", "decline", or "cancel"
-#         if result.action == "accept" and result.data:
-#             data = result.data
-#             if not data.confirm:
-#                 return {
-#                     "status": "cancelled",
-#                     "message": "User declined to proceed with gripper operation"
-#                 }
-#
-#             # Literal type ensures action is valid - no runtime validation needed
-#             if data.action == "cancel":
-#                 return {
-#                     "status": "cancelled",
-#                     "message": "User selected cancel"
-#                 }
-#
-#             # In a real implementation, you would execute the gripper command here
-#             # For demo purposes, we just return what would happen
-#             return {
-#                 "status": "success",
-#                 "message": f"Would execute gripper action: {data.action}",
-#                 "parameters": {
-#                     "action": data.action,
-#                     "width_mm": data.width_mm
-#                 },
-#                 "note": "This is a demo - no actual gripper movement occurred"
-#             }
-#
-#         elif result.action == "decline":
-#             return {
-#                 "status": "declined",
-#                 "message": "User declined the elicitation request"
-#             }
-#
-#         else:  # cancelled
-#             return {
-#                 "status": "cancelled",
-#                 "message": "Elicitation was cancelled"
-#             }
-#
-#     except Exception as e:
-#         error_msg = str(e)
-#         if "Method not found" in error_msg:
-#             return {
-#                 "status": "error",
-#                 "message": "Elicitation not supported by this client",
-#                 "details": "Claude Desktop and Claude Code don't currently support MCP elicitation. Try using an MCP client that supports elicitation (like the MCP Inspector or custom clients).",
-#                 "error": error_msg
-#             }
-#         return {
-#             "status": "error",
-#             "message": f"Elicitation failed: {error_msg}"
-#         }
+    Args:
+        elicitation_script: Name of the elicitation script (e.g., "verify_clearance")
+        message: The message to display to the user
+        context_data: Optional context passed to get_elicitation_schema for dynamic schema selection
+
+    Returns:
+        Dictionary with user's response (action: accept/decline/cancel, data: form fields if accepted)
+    """
+    try:
+        # Import the elicitation script to get the schema class
+        import importlib.util
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        elicitation_path = os.path.join(script_dir, f"elicitations/{elicitation_script}.py")
+
+        if not os.path.exists(elicitation_path):
+            return {
+                "status": "error",
+                "message": f"Elicitation script not found: {elicitation_script}",
+                "error": f"Path: {elicitation_path}"
+            }
+
+        # Load the module
+        spec = importlib.util.spec_from_file_location(f"elicitations.{elicitation_script}", elicitation_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        # Get the schema class
+        if not hasattr(module, "get_elicitation_schema"):
+            return {
+                "status": "error",
+                "message": f"Elicitation script missing get_elicitation_schema function: {elicitation_script}"
+            }
+
+        schema_class = module.get_elicitation_schema(context_data)
+
+        # Request user input using elicitation
+        result = await ctx.elicit(
+            message=message,
+            schema=schema_class
+        )
+
+        # Handle the response
+        if result.action == "accept" and result.data:
+            return {
+                "action": "accept",
+                "user_action": result.data.action if hasattr(result.data, 'action') else None,
+                "data": result.data.model_dump() if hasattr(result.data, 'model_dump') else vars(result.data)
+            }
+        elif result.action == "decline":
+            return {
+                "action": "decline",
+                "message": "User declined the elicitation"
+            }
+        else:  # cancelled
+            return {
+                "action": "cancel",
+                "message": "Elicitation was cancelled"
+            }
+
+    except Exception as e:
+        error_msg = str(e)
+        if "Method not found" in error_msg:
+            return {
+                "status": "error",
+                "message": "Elicitation not supported by this client",
+                "details": "This client may not support MCP elicitation. Try using an MCP client that supports elicitation (like the MCP Inspector or custom clients).",
+                "error": error_msg
+            }
+        return {
+            "status": "error",
+            "message": f"Elicitation failed: {error_msg}",
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     # Start services BEFORE MCP server runs (outside async context)

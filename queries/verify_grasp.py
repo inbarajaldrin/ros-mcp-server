@@ -29,6 +29,12 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
+from primitives.utils.data_path_finder import get_aruco_data_dir
+from std_msgs.msg import Float32, Float64
+
+# Gripper specifications
+GRIPPER_HALF_OPEN_WIDTH_MM = 35.0
+GRIPPER_MAX_WIDTH_MM = 100.0
 
 
 def output_result(result):
@@ -46,40 +52,179 @@ EE_TOPIC = "/tcp_pose_broadcaster/pose"
 DEFAULT_RADIUS = 0.06  # 6cm default radius
 
 
+# ============================================================================
+# REAL MODE HELPER FUNCTIONS
+# ============================================================================
+
+def load_grasp_point_and_validity(object_name, grasp_id=0, logger=None):
+    """Load grasp point and validity from JSON"""
+    try:
+        data_dir = get_aruco_data_dir() / "grasp_points"
+    except Exception:
+        if logger:
+            logger.error("Could not find aruco data directory")
+        return None, None
+
+    for name_variant in [object_name, f"{object_name}_scaled70"]:
+        json_path = data_dir / f"{name_variant}_grasp_points.json"
+        if json_path.exists():
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                for gp in data.get('grasp_points', []):
+                    if gp['id'] == grasp_id:
+                        pos = gp['position']
+                        grasp_point = np.array([pos['x'], pos['y'], pos['z']])
+                        grasp_validity = gp.get('grasp_validity', {})
+                        if logger:
+                            logger.info(f"Loaded grasp point {grasp_id} for {name_variant}")
+                        return grasp_point, grasp_validity
+            except (json.JSONDecodeError, IOError, KeyError):
+                pass
+
+    if logger:
+        logger.error(f"No grasp points file found for '{object_name}'")
+    return None, None
+
+
+def load_fold_symmetry(object_name, logger=None):
+    """Load fold symmetry data for an object. Returns None if not found."""
+    try:
+        data_dir = get_aruco_data_dir() / "symmetry"
+    except Exception:
+        return None
+
+    for name_variant in [object_name, f"{object_name}_scaled70"]:
+        json_path = data_dir / f"{name_variant}_symmetry.json"
+        if json_path.exists():
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                if logger:
+                    logger.info(f"Loaded fold symmetry for {name_variant}")
+                return data
+            except (json.JSONDecodeError, IOError):
+                pass
+    return None
+
+
+def get_fold_symmetry_matrices(fold_data):
+    """Generate all combinations of fold symmetry rotations as 3x3 matrices.
+    Always includes identity."""
+    if fold_data is None:
+        return [np.eye(3)]
+
+    axis_rotations = {}
+    for axis in ['x', 'y', 'z']:
+        if axis not in fold_data.get('fold_axes', {}):
+            axis_rotations[axis] = [np.eye(3)]
+            continue
+
+        axis_data = fold_data['fold_axes'][axis]
+        rotations = [np.eye(3)]
+        for q_data in axis_data.get('quaternions', [])[1:]:  # Skip identity
+            q = np.array([
+                q_data['quaternion']['x'], q_data['quaternion']['y'],
+                q_data['quaternion']['z'], q_data['quaternion']['w']
+            ])
+            q = q / np.linalg.norm(q)
+            rotations.append(R.from_quat(q).as_matrix())
+        axis_rotations[axis] = rotations
+
+    combined = []
+    seen = set()
+    for R_x in axis_rotations.get('x', [np.eye(3)]):
+        for R_y in axis_rotations.get('y', [np.eye(3)]):
+            for R_z in axis_rotations.get('z', [np.eye(3)]):
+                R_c = R_x @ R_y @ R_z
+                key = tuple(R_c.flatten().round(6))
+                if key not in seen:
+                    seen.add(key)
+                    combined.append(R_c)
+    return combined
+
+
+def determine_grip_axis(grasp_point_world):
+    """Determine grip axis from grasp point direction"""
+    abs_vals = np.abs(grasp_point_world)
+    max_idx = np.argmax(abs_vals)
+    return ["x_axis", "y_axis", "z_axis"][max_idx]
+
+
+def check_gripper_width_valid(gripper_width_mm, valid_modes):
+    """Check if gripper width matches valid modes"""
+    if gripper_width_mm <= 0:
+        return False, f"Gripper fully closed (width: {gripper_width_mm:.2f}mm) - nothing grasped"
+
+    if gripper_width_mm >= GRIPPER_MAX_WIDTH_MM:
+        return False, f"Gripper fully open (width: {gripper_width_mm:.2f}mm) - no grip"
+
+    if not valid_modes:
+        return False, "No valid gripper modes for this axis"
+
+    has_half_open = "half-open" in valid_modes
+    has_open = "open" in valid_modes
+
+    if has_half_open:
+        if gripper_width_mm < GRIPPER_HALF_OPEN_WIDTH_MM:
+            return True, f"Valid: width {gripper_width_mm:.2f}mm < half-open {GRIPPER_HALF_OPEN_WIDTH_MM:.1f}mm"
+        else:
+            return False, f"Invalid: width {gripper_width_mm:.2f}mm >= half-open {GRIPPER_HALF_OPEN_WIDTH_MM:.1f}mm"
+    elif has_open:
+        if GRIPPER_HALF_OPEN_WIDTH_MM <= gripper_width_mm < GRIPPER_MAX_WIDTH_MM:
+            return True, f"Valid: width {gripper_width_mm:.2f}mm in open range [{GRIPPER_HALF_OPEN_WIDTH_MM:.1f}, {GRIPPER_MAX_WIDTH_MM:.1f})"
+        else:
+            return False, f"Invalid: width {gripper_width_mm:.2f}mm not in open range [{GRIPPER_HALF_OPEN_WIDTH_MM:.1f}, {GRIPPER_MAX_WIDTH_MM:.1f})"
+
+    return False, "Unknown valid modes"
+
+
 class VerifyGrasp(Node):
-    def __init__(self, object_name, mode='sim', radius=DEFAULT_RADIUS):
+    def __init__(self, object_name, mode='sim', radius=DEFAULT_RADIUS, grasp_id=0, object_orientation=None):
         super().__init__('verify_grasp')
-        
+
         self.object_name = object_name
         self.mode = mode
         self.radius = radius
-        
+        self.grasp_id = grasp_id
+        self.object_orientation = object_orientation
+
         # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
         self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
-        
+
         # Determine topic name based on mode
         if mode == 'sim':
             object_topic = OBJECT_TOPIC_SIM
         else:  # real mode
             object_topic = OBJECT_TOPIC_REAL
-        
+
         # Subscribers for pose data
         self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
-        
+
         # Configure QoS to match the publisher (VOLATILE durability - default for most publishers)
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
             depth=10
         )
-        
+
         self.ee_sub = self.create_subscription(
             PoseStamped,
             EE_TOPIC,
             self.ee_callback,
             qos_profile
         )
-        
+
+        # Gripper width (both modes, different topics)
+        self.gripper_width = None
+        self.gripper_width_received = False
+        if mode == 'real':
+            self.width_sub = self.create_subscription(
+                Float32, '/gripper_width_offset', self.width_callback, 10)
+        else:
+            self.width_sub = self.create_subscription(
+                Float64, '/gripper_width_sim', self.width_callback_sim, 10)
+
         # Store current poses
         self.current_poses = {}
         self.current_ee_pose = None
@@ -99,7 +244,17 @@ class VerifyGrasp(Node):
         """Callback for end-effector pose"""
         self.current_ee_pose = msg
         self.ee_pose_received = True
-    
+
+    def width_callback(self, msg):
+        """Callback for gripper width (real mode, Float32 in mm)"""
+        self.gripper_width = msg.data
+        self.gripper_width_received = True
+
+    def width_callback_sim(self, msg):
+        """Callback for gripper width (sim mode, Float64 in mm)"""
+        self.gripper_width = msg.data
+        self.gripper_width_received = True
+
     def compute_gripper_center_from_tcp(self, tcp_position, tcp_quaternion):
         """Compute the gripper center pose from TCP pose using the same logic as move_to_grasp.
         
@@ -203,62 +358,270 @@ class VerifyGrasp(Node):
         
         return success, distance, object_position, gripper_center_position
 
+    def verify_grasp_real(self):
+        """
+        Real mode: Verify grasp using grasp points and gripper width.
+
+        Returns:
+            tuple: (success: bool, result_dict: dict)
+        """
+        result = {
+            'result': 'success',
+            'object_name': self.object_name,
+            'mode': 'real',
+        }
+
+        # Check data
+        if not self.gripper_width_received:
+            result['result'] = 'failure'
+            result['error'] = "Gripper width not received"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        if self.object_orientation is None:
+            result['result'] = 'failure'
+            result['error'] = "Object orientation not provided"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        # Load grasp point and validity
+        grasp_point_cad, grasp_validity = load_grasp_point_and_validity(
+            self.object_name, self.grasp_id, logger=self.get_logger()
+        )
+
+        if grasp_point_cad is None:
+            result['result'] = 'failure'
+            result['error'] = f"Could not load grasp point {self.grasp_id}"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        # Load fold symmetry to try all equivalent orientations
+        fold_data = load_fold_symmetry(self.object_name, logger=self.get_logger())
+        symmetry_matrices = get_fold_symmetry_matrices(fold_data)
+        self.get_logger().info(f"Fold symmetry: {len(symmetry_matrices)} equivalent orientations")
+
+        R_object = R.from_quat(self.object_orientation).as_matrix()
+
+        # Try all fold-equivalent orientations, accept if any yields a valid grip axis
+        is_valid = False
+        reason = ""
+        best_axis = None
+        for i, R_sym in enumerate(symmetry_matrices):
+            R_equiv = R_object @ R_sym
+            grasp_point_world = R_equiv @ grasp_point_cad
+            grip_axis = determine_grip_axis(grasp_point_world)
+            valid_modes = grasp_validity.get(grip_axis, [])
+
+            valid_i, reason_i = check_gripper_width_valid(self.gripper_width, valid_modes)
+            if i == 0:
+                self.get_logger().info(f"Grasp point in world: [{grasp_point_world[0]:.6f}, {grasp_point_world[1]:.6f}, {grasp_point_world[2]:.6f}]")
+                self.get_logger().info(f"Grip axis: {grip_axis}, valid modes: {valid_modes}")
+
+            if valid_i:
+                is_valid = True
+                reason = reason_i
+                best_axis = grip_axis
+                if i > 0:
+                    self.get_logger().info(f"Valid via fold symmetry #{i}: axis={grip_axis}, modes={valid_modes}")
+                break
+            elif i == 0:
+                reason = reason_i  # Keep first orientation's reason as fallback
+
+        if best_axis:
+            self.get_logger().info(f"Grip axis (accepted): {best_axis}")
+
+        self.get_logger().info(f"Gripper width: {self.gripper_width:.2f}mm")
+        self.get_logger().info(f"Width check: {reason}")
+
+        if is_valid:
+            self.get_logger().info("✓ Real mode grasp verification PASSED")
+        else:
+            result['result'] = 'failure'
+            result['error'] = reason
+            self.get_logger().error("✗ Real mode grasp verification FAILED")
+
+        return is_valid, result
+
+    def verify_grasp_width_only(self):
+        """Simple check that gripper is holding something (width > 0 and < max). Works for both sim and real.
+
+        Returns:
+            tuple: (success: bool, result_dict: dict)
+        """
+        result = {
+            'result': 'success',
+            'object_name': self.object_name,
+            'mode': self.mode,
+        }
+
+        if not self.gripper_width_received:
+            result['result'] = 'failure'
+            result['error'] = "Gripper width not received"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        self.get_logger().info(f"Gripper width: {self.gripper_width:.2f}mm")
+
+        if self.gripper_width <= 0:
+            result['result'] = 'failure'
+            result['error'] = f"Gripper fully closed (width: {self.gripper_width:.2f}mm) - nothing grasped"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        if self.gripper_width >= GRIPPER_MAX_WIDTH_MM:
+            result['result'] = 'failure'
+            result['error'] = f"Gripper fully open (width: {self.gripper_width:.2f}mm) - no grip"
+            self.get_logger().error(result['error'])
+            return False, result
+
+        self.get_logger().info(f"Width-only grasp check PASSED (width: {self.gripper_width:.2f}mm)")
+        return True, result
+
+    def verify_grasp_dispatch(self, width_only=False):
+        """Dispatch to sim or real mode verification"""
+        # Width-only check works for both sim and real
+        if width_only:
+            return self.verify_grasp_width_only()
+
+        if self.mode == 'real':
+            return self.verify_grasp_real()
+        elif self.mode == 'sim':
+            success, distance, object_pos, ref_pos = self.verify_grasp()
+            result = {
+                'result': 'success' if success else 'failure',
+                'object_name': self.object_name,
+                'mode': 'sim',
+            }
+            if not success:
+                if distance is None:
+                    result['error'] = f"Object '{self.object_name}' not found"
+                else:
+                    result['error'] = "Object is outside grasp radius"
+            return success, result
+        else:
+            result = {
+                'result': 'failure',
+                'object_name': self.object_name,
+                'error': f"Invalid mode '{self.mode}'. Must be 'sim' or 'real'."
+            }
+            return False, result
+
 
 def main(args=None):
-    parser = argparse.ArgumentParser(description='Verify Grasp - Check if object is within radius from gripper center')
-    parser.add_argument('--object-name', type=str, required=True, help='Name of the object to verify')
-    parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
-                       help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
+    parser = argparse.ArgumentParser(description='Verify Grasp - Sim or Real mode')
+    parser.add_argument('--object-name', type=str, required=True, help='Object name')
+    parser.add_argument('--mode', type=str, choices=['sim', 'real'], default='sim', help='Sim or real mode')
     parser.add_argument('--radius', type=float, default=DEFAULT_RADIUS,
-                       help=f'Radius tolerance in meters (default: {DEFAULT_RADIUS}m = {DEFAULT_RADIUS*1000:.0f}mm)')
+                       help=f'Radius tolerance in meters (sim mode)')
+    parser.add_argument('--grasp-id', type=int, default=None, help='Grasp point ID (required for real mode)')
+    parser.add_argument('--current-object-orientation', type=float, nargs=4,
+                       help='Object orientation quaternion [x, y, z, w] (real mode)')
+    parser.add_argument('--width-only', action='store_true',
+                       help='Real mode: only check gripper width > 0 (skip grasp point/axis validation)')
 
     parsed_args = parser.parse_args()
 
+    # Validate arguments
+    if parsed_args.mode == 'real' and not parsed_args.width_only:
+        if parsed_args.current_object_orientation is None:
+            result = {'result': 'failure', 'object_name': parsed_args.object_name, 'mode': 'real',
+                     'error': 'Object orientation required for real mode (--current-object-orientation x y z w)'}
+            output_result(result)
+            sys.exit(1)
+        if parsed_args.grasp_id is None or parsed_args.grasp_id < 0:
+            result = {'result': 'failure', 'object_name': parsed_args.object_name, 'mode': 'real',
+                     'error': 'Grasp ID required for real mode (--grasp-id <int>)'}
+            output_result(result)
+            sys.exit(1)
+
     success = False
-    error = None
+    result = {}
     node = None
 
     try:
         rclpy.init()
-        node = VerifyGrasp(object_name=parsed_args.object_name, mode=parsed_args.mode, radius=parsed_args.radius)
 
-        # Wait for pose data (wait indefinitely until received)
-        node.get_logger().info(f"Waiting for pose data for object: {parsed_args.object_name} and end-effector")
-        start_time = time.time()
-        last_log_time = start_time
+        # Real mode requires object orientation
+        object_quat = None
+        if parsed_args.mode == 'real':
+            object_quat = np.array(parsed_args.current_object_orientation)
 
-        while not (node.object_pose_received and node.ee_pose_received):
-            rclpy.spin_once(node, timeout_sec=0.1)
-            time.sleep(0.1)
+        node = VerifyGrasp(
+            object_name=parsed_args.object_name,
+            mode=parsed_args.mode,
+            radius=parsed_args.radius,
+            grasp_id=parsed_args.grasp_id,
+            object_orientation=object_quat
+        )
 
-            # Log every 5 seconds to show we're still waiting
-            current_time = time.time()
-            if current_time - last_log_time >= 5.0:
-                elapsed = current_time - start_time
-                missing = []
-                if not node.object_pose_received:
-                    missing.append("object")
-                if not node.ee_pose_received:
-                    missing.append("end-effector")
-                node.get_logger().info(f"Still waiting for pose data ({', '.join(missing)})... ({elapsed:.1f}s elapsed)")
-                last_log_time = current_time
+        # Wait for required data
+        if parsed_args.width_only:
+            # Width-only mode: just need gripper width (works for both sim and real)
+            node.get_logger().info("Waiting for gripper width data...")
+            start_time = time.time()
+            last_log_time = start_time
 
-        elapsed = time.time() - start_time
-        node.get_logger().info(f"Received pose data (waited {elapsed:.1f}s)")
+            while not node.gripper_width_received:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                time.sleep(0.1)
 
-        # Verify grasp (already logs the result)
-        success, distance, object_pos, gripper_center_pos = node.verify_grasp()
+                current_time = time.time()
+                if current_time - last_log_time >= 5.0:
+                    elapsed = current_time - start_time
+                    node.get_logger().info(f"Waiting for gripper width... ({elapsed:.1f}s)")
+                    last_log_time = current_time
 
-        if not success:
-            if distance is None:
-                error = f"Object '{parsed_args.object_name}' not found"
-            else:
-                error = "Object is outside grasp radius"
+            elapsed = time.time() - start_time
+            node.get_logger().info(f"Received gripper width (waited {elapsed:.1f}s)")
+
+        elif parsed_args.mode == 'sim':
+            node.get_logger().info(f"Waiting for pose data for object: {parsed_args.object_name}")
+            start_time = time.time()
+            last_log_time = start_time
+
+            while not (node.object_pose_received and node.ee_pose_received):
+                rclpy.spin_once(node, timeout_sec=0.1)
+                time.sleep(0.1)
+
+                current_time = time.time()
+                if current_time - last_log_time >= 5.0:
+                    elapsed = current_time - start_time
+                    missing = []
+                    if not node.object_pose_received:
+                        missing.append("object")
+                    if not node.ee_pose_received:
+                        missing.append("end-effector")
+                    node.get_logger().info(f"Waiting for ({', '.join(missing)})... ({elapsed:.1f}s)")
+                    last_log_time = current_time
+
+            elapsed = time.time() - start_time
+            node.get_logger().info(f"Received pose data (waited {elapsed:.1f}s)")
+
+        else:  # real mode (full verification)
+            node.get_logger().info("Waiting for gripper width data...")
+            start_time = time.time()
+            last_log_time = start_time
+
+            while not node.gripper_width_received:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                time.sleep(0.1)
+
+                current_time = time.time()
+                if current_time - last_log_time >= 5.0:
+                    elapsed = current_time - start_time
+                    node.get_logger().info(f"Waiting for gripper width... ({elapsed:.1f}s)")
+                    last_log_time = current_time
+
+            elapsed = time.time() - start_time
+            node.get_logger().info(f"Received gripper width (waited {elapsed:.1f}s)")
+
+        # Verify grasp
+        success, result = node.verify_grasp_dispatch(width_only=parsed_args.width_only)
 
     except KeyboardInterrupt:
-        error = "Interrupted by user"
+        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'error': 'Interrupted'}
     except Exception as e:
-        error = str(e)
+        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'error': str(e)}
     finally:
         try:
             if node is not None:
@@ -266,15 +629,6 @@ def main(args=None):
             rclpy.shutdown()
         except Exception:
             pass
-
-    # Build and output result
-    result = {
-        "result": "success" if success else "failure",
-        "object_name": parsed_args.object_name,
-        "mode": parsed_args.mode
-    }
-    if not success and error:
-        result["error"] = error
 
     output_result(result)
     sys.exit(0 if success else 1)
