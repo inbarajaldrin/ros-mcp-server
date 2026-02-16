@@ -42,6 +42,9 @@ GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
+PhaseNumber = Literal[1, 2, 3]
+PhaseStatus = Literal["success", "failure"]
+PhaseAction = Literal["randomize", "reverified"]
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -738,74 +741,6 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
 
-def _run_elicitation(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Elicitation") -> Dict[str, Any]:
-    """Helper function to run elicitation scripts and return raw output.
-
-    Elicitations are verification/interaction scripts that provide structured data.
-    This runs them the same way as queries, but from the elicitations folder.
-
-    Args:
-        script_name: Name of the elicitation script (e.g., "verify_clearance.py")
-        command_args: Optional command-line arguments to pass to the script
-        timeout: Timeout for the subprocess (default: 10 seconds)
-        error_prefix: Prefix for error messages (default: "Elicitation")
-
-    Returns:
-        Dictionary with output from the elicitation script (stdout + stderr)
-    """
-    import subprocess
-    import os
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    cmd_parts = [
-        f"cd {script_dir}/elicitations",
-        f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
-    ]
-
-    cmd = "\n".join(cmd_parts)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=timeout + 5  # Add buffer for subprocess timeout
-        )
-
-        # Return combined stdout and stderr
-        output = result.stdout if result.stdout else ""
-        if result.stderr:
-            output += result.stderr
-
-        # Check if output contains JSON markers (parse JSON if present)
-        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
-            # Extract JSON portion - use rfind to get the LAST occurrence
-            # This handles cases where subprocess output also contains markers with ROS logger prefixes
-            start_marker = "__RESULT_JSON__"
-            end_marker = "__END_RESULT_JSON__"
-            start_idx = output.rfind(start_marker) + len(start_marker)
-            end_idx = output.rfind(end_marker)
-            json_str = output[start_idx:end_idx].strip()
-
-            try:
-                # Parse and return the JSON directly (no extra fields)
-                import json
-                result_json = json.loads(json_str)
-                return result_json
-            except json.JSONDecodeError:
-                # If JSON parsing fails, fall through to returning raw output
-                pass
-
-        # Fallback: return raw output if no JSON markers or parsing failed
-        return {"output": output}
-
-    except subprocess.TimeoutExpired:
-        return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
-    except Exception as e:
-        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
 
 ## ############################################################################################## ##
 ##
@@ -980,50 +915,14 @@ async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mo
           - "missing_objects": List of missing objects (if any)
           - "objects_with_clearance_issues": List of objects with clearance problems (if any)
     """
-    result = _run_with_retry(_run_elicitation, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
+    result = _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
 
-    # Check if verification failed
+    # On failure, invoke human elicitation to fix setup issues
     if isinstance(result, dict) and result.get("result") == "failure":
-        has_missing = "missing_objects" in result
-        has_clearance_issues = "objects_with_clearance_issues" in result
+        def retry_query(bn, m):
+            return _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{bn}\" --mode {m}", timeout=30, error_prefix="Verify clearance")
 
-        # Offer elicitation if there are setup issues
-        if has_missing or has_clearance_issues:
-            try:
-                # Import verify_clearance script to get message builder
-                import importlib.util
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                verify_clearance_path = os.path.join(script_dir, "elicitations/verify_clearance.py")
-
-                spec = importlib.util.spec_from_file_location("elicitations.verify_clearance_loader", verify_clearance_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-
-                # Build message using the script's message builder
-                message = module.build_elicitation_message(result)
-
-                # Call generic elicitation tool with result context for dynamic schema
-                elicit_response = await elicit_user(ctx, "verify_clearance", message, result)
-
-                if elicit_response.get("action") == "accept":
-                    user_action = elicit_response.get("user_action")
-
-                    if user_action == "retry":
-                        # Retry the verification
-                        result = _run_with_retry(_run_elicitation, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
-                        result["retried"] = True
-                    elif user_action == "skip":
-                        result["skipped"] = True
-                        result["warning"] = "Proceeding without proper environment setup may cause assembly failures"
-
-                elif elicit_response.get("action") == "decline":
-                    result["declined"] = True
-                    result["result"] = "declined"
-
-            except Exception as e:
-                # If elicitation fails, just return the original error
-                if "Method not found" not in str(e):
-                    logger.warning(f"Elicitation failed: {e}")
+        result = await handle_clearance_failure(result, base_name, mode, ctx, _handle_elicitation, retry_query)
 
     return result
 
@@ -1297,13 +1196,57 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
 
 ## ############################################################################################## ##
 ##
-##                      ELICITATION TOOLS
+##                      TRIGGER TOOLS
 ##
 ## ############################################################################################## ##
 
+from triggers.signal_phase_complete import handle_phase_signal
+from triggers.pre_assembly_check import handle_clearance_failure
+
 @mcp.tool()
-async def elicit_user(ctx: Context[ServerSession, None], elicitation_script: str, message: str, context_data: dict = None) -> Dict[str, Any]:
-    """Generic elicitation tool for user interaction.
+async def signal_phase_complete(
+    phase: PhaseNumber,
+    status: PhaseStatus,
+    ctx: Context[ServerSession, None],
+    action: Optional[PhaseAction] = None,
+    comment: str = "",
+) -> Dict[str, Any]:
+    """Signal completion of an assembly phase to the MCP client.
+
+    Called by the agent at the end of each phase to report results
+    and trigger the next phase.
+
+    Args:
+        phase: Which phase completed (1=disassembly discovery,
+               2=assembly discovery, 3=real-world execution)
+        status: Whether the phase succeeded or failed
+        action: Phase 2 only - provide "randomize" to reset the scene and verify
+                the assembly sequence again, or "reverified" to confirm verification
+                is done and proceed to phase 3. Do not provide for phases 1 or 3.
+        comment: Optional comment (should explain failure reasons)
+
+    Returns:
+        Structured result with phase, status, and any verification data.
+        Phase 2 without action returns options for the agent to choose from.
+        For phase 3, includes human verification response.
+    """
+    return await handle_phase_signal(
+        phase=phase,
+        status=status,
+        action=action,
+        comment=comment,
+        ctx=ctx,
+        elicit_user_fn=_handle_elicitation,
+    )
+
+## ############################################################################################## ##
+##
+##                      ELICITATION HANDLER
+##
+## ############################################################################################## ##
+
+async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_script: str, message: str, context_data: dict = None) -> Dict[str, Any]:
+    """Handle an elicitation by loading its schema and presenting a form to the user.
 
     Dynamically loads schema from elicitation script and presents user with a form to fill.
 

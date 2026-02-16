@@ -2,6 +2,11 @@
 """
 Verify Clearance - Checks if assembly objects have enough space for gripper to grab them.
 
+Related files (clearance check pipeline):
+  - queries/verify_clearance.py    (this file) — ROS query that checks poses and computes clearance
+  - triggers/pre_assembly_check.py — handles failure by invoking human elicitation
+  - elicitations/fix_scene.py      — Pydantic schemas for human interaction
+
 For real-world assemblies, this script verifies:
 1. All required objects for the assembly are present in the scene
 2. Objects that are not yet assembled have sufficient clearance
@@ -29,7 +34,6 @@ import time
 import sys
 import os
 import glob
-from pydantic import BaseModel, Field
 
 # Add project root to path
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,104 +42,6 @@ if _project_root not in sys.path:
 
 from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
-
-# ============================================================================
-# ELICITATION SCHEMA & MESSAGE BUILDER
-# ============================================================================
-
-class MissingObjectsSchema(BaseModel):
-    """Schema when objects are missing from the scene."""
-
-    objects_placed: bool = Field(
-        default=False,
-        description="Have you placed the missing objects in the workspace?"
-    )
-
-    action: str = Field(
-        default="retry",
-        description="What would you like to do?",
-        json_schema_extra={"enum": ["retry", "skip"]}
-    )
-
-
-class ClearanceIssuesSchema(BaseModel):
-    """Schema when objects have insufficient clearance."""
-
-    objects_repositioned: bool = Field(
-        default=False,
-        description="Have you moved the objects further apart so the gripper can reach them?"
-    )
-
-    action: str = Field(
-        default="retry",
-        description="What would you like to do?",
-        json_schema_extra={"enum": ["retry", "skip"]}
-    )
-
-
-class MissingAndClearanceSchema(BaseModel):
-    """Schema when both missing objects and clearance issues exist."""
-
-    objects_placed: bool = Field(
-        default=False,
-        description="Have you placed the missing objects in the workspace?"
-    )
-
-    objects_repositioned: bool = Field(
-        default=False,
-        description="Have you moved the objects further apart so the gripper can reach them?"
-    )
-
-    action: str = Field(
-        default="retry",
-        description="What would you like to do?",
-        json_schema_extra={"enum": ["retry", "skip"]}
-    )
-
-
-def get_elicitation_schema(result: dict = None):
-    """Return the appropriate elicitation schema based on the error type.
-
-    Args:
-        result: The failed verification result. If None, returns the combined schema.
-    """
-    if result is None:
-        return MissingAndClearanceSchema
-
-    has_missing = bool(result.get("missing_objects"))
-    has_clearance = bool(result.get("objects_with_clearance_issues"))
-
-    if has_missing and has_clearance:
-        return MissingAndClearanceSchema
-    elif has_missing:
-        return MissingObjectsSchema
-    elif has_clearance:
-        return ClearanceIssuesSchema
-    else:
-        return MissingAndClearanceSchema
-
-
-def build_elicitation_message(result: dict) -> str:
-    """Build an elicitation message from clearance verification results.
-
-    Args:
-        result: The failed verification result containing missing_objects and/or clearance_issues
-
-    Returns:
-        Formatted message string for the user
-    """
-    message_parts = []
-
-    missing = result.get("missing_objects", [])
-    clearance_issues = result.get("objects_with_clearance_issues", [])
-
-    if missing:
-        message_parts.append(f"Missing objects: {', '.join(missing)}")
-
-    if clearance_issues:
-        message_parts.append(f"Clearance issues: {', '.join(clearance_issues)} (too close to other objects for gripper access)")
-
-    return "\n".join(message_parts)
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -274,7 +180,7 @@ class VerifyClearance(Node):
                 base_name = base_name.replace('_scaled70', '')
                 self.get_logger().info(f"Identified base object from config: {base_name}")
                 return base_name
-        
+
         # Fallback: use the input base name if no board type found
         self.get_logger().warn(f"No component with type='board' found, using input name: {self.base_name_input}")
         return self.base_name_input
@@ -427,7 +333,7 @@ class VerifyClearance(Node):
         """
         if exclude_objects is None:
             exclude_objects = []
-        
+
         pos = self.get_object_position(object_name)
         rot = self.get_object_orientation(object_name)
 
@@ -598,11 +504,11 @@ class VerifyClearance(Node):
         clearance_ok_count = 0
         missing_objects = []
         clearance_issues = []
-        
+
         # First pass: identify missing, present, and assembled objects
         object_status = {}  # normalized_name -> 'missing' | 'base' | 'assembled' | 'unassembled'
         assembled_objects = []  # List of assembled object names
-        
+
         for obj_name in components:
             # Normalize name (remove _scaled70 suffix for checking)
             normalized_name = obj_name.replace('_scaled70', '')
@@ -625,12 +531,12 @@ class VerifyClearance(Node):
                 else:
                     object_status[normalized_name] = 'unassembled'
                     present_count += 1
-        
+
         # Second pass: Check clearance and build results
         for obj_name in components:
             normalized_name = obj_name.replace('_scaled70', '')
             status = object_status[normalized_name]
-            
+
             if status == 'missing':
                 results['components'].append({
                     'name': normalized_name,
@@ -656,7 +562,7 @@ class VerifyClearance(Node):
                 # - Other unassembled objects
                 # Exclude only assembled objects (not the base)
                 clearance_result = self.check_clearance_for_object(
-                    normalized_name, 
+                    normalized_name,
                     exclude_objects=assembled_objects
                 )
                 results['components'].append({
@@ -718,7 +624,7 @@ def main():
     base_name = args.base_name.replace('-', '_')
 
     rclpy.init()
-    
+
     success = False
     error_msg = None
     simple_result = {}
@@ -744,19 +650,19 @@ def main():
             missing = summary.get('missing_objects', [])
             clearance_issues = summary.get('clearance_issues', [])
             objects_with_issues = [issue['object'] for issue in clearance_issues]
-            
+
             # Determine success
             all_present = len(missing) == 0
             all_clearances_ok = len(objects_with_issues) == 0
             success = all_present and all_clearances_ok
-            
+
             # Build simple result
             simple_result = {
                 'result': 'success' if success else 'failure',
                 'base_name': detailed_result.get('base_detected', base_name),
                 'ready_for_assembly': success
             }
-            
+
             # Add error details on failure
             if not success:
                 issues = []
@@ -764,9 +670,9 @@ def main():
                     issues.append(f"{len(missing)} missing")
                 if objects_with_issues:
                     issues.append(f"{len(objects_with_issues)} clearance issues")
-                
+
                 simple_result['error'] = ', '.join(issues)
-                
+
                 if missing:
                     simple_result['missing_objects'] = missing
                 if objects_with_issues:
