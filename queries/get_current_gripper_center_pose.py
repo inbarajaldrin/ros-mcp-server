@@ -21,7 +21,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
 
 
 def output_result(result):

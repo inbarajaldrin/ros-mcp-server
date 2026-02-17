@@ -41,7 +41,7 @@ from pathlib import Path
 
 # Add project root to Python path if running as script
 if __name__ == "__main__":
-    project_root = Path(__file__).parent.parent.parent
+    project_root = Path(__file__).parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
@@ -68,7 +68,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from primitives.utils.data_path_finder import get_aruco_data_dir
+from utils.data_path_finder import get_aruco_data_dir
 
 
 class GraspPointsPublisher(Node):
@@ -93,7 +93,6 @@ class GraspPointsPublisher(Node):
         
         # Load all grasp points JSON files
         self.grasp_data: Dict[str, dict] = {}
-        # Map from topic object names (e.g., "fork_yellow") to JSON object names (e.g., "fork_yellow_scaled70")
         self.object_name_map: Dict[str, str] = {}
         self.load_grasp_data()
         
@@ -223,18 +222,10 @@ class GraspPointsPublisher(Node):
                     data = json.load(f)
                     object_name_json = data.get('object_name')
                     if object_name_json:
-                        # Store with full name
                         self.grasp_data[object_name_json] = data
-                        
-                        # Create mapping: topic name (without _scaled70) -> JSON name (with _scaled70)
-                        # Also try direct match and without _scaled70
-                        topic_name = object_name_json.replace('_scaled70', '')
-                        self.object_name_map[topic_name] = object_name_json
-                        # Also allow direct match
                         self.object_name_map[object_name_json] = object_name_json
-                        
+
                         self.get_logger().info(f"  Loaded: {object_name_json} ({data.get('total_grasp_points', 0)} grasp points)")
-                        self.get_logger().debug(f"    Mapped topic name '{topic_name}' -> JSON name '{object_name_json}'")
             except Exception as e:
                 self.get_logger().error(f"Error loading {grasp_file}: {e}")
     

@@ -28,7 +28,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -62,19 +62,15 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     # Search for all JSON files in the data directory
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
     
-    # Try exact match first, then with _scaled70 suffix
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-    
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-            
-            # Check if any component matches the base name
+
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -87,105 +83,7 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     return None
 
 
-class FoldSymmetry:
-    """
-    Proper fold symmetry handling (same as in verify_assembly).
-    
-    The JSON stores symmetry rotations as quaternions.
-    These represent rotations IN THE OBJECT FRAME that result in identical appearance.
-    """
-    
-    @staticmethod
-    def load_symmetry_data(object_name, symmetry_dir):
-        """Load fold symmetry JSON"""
-        patterns = [
-            os.path.join(symmetry_dir, f"{object_name}_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name}*_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name.replace('_scaled70', '')}*_symmetry.json"),
-        ]
-        
-        for pattern in patterns:
-            if '*' in pattern:
-                matches = glob.glob(pattern)
-                if matches:
-                    with open(matches[0], 'r') as f:
-                        return json.load(f)
-            elif os.path.exists(pattern):
-                with open(pattern, 'r') as f:
-                    return json.load(f)
-        return None
-    
-    @staticmethod
-    def get_symmetry_rotations_as_matrices(fold_data):
-        """
-        Extract symmetry rotations as rotation matrices.
-        
-        Returns list of 3x3 rotation matrices representing symmetry transformations.
-        Always includes identity.
-        """
-        if fold_data is None:
-            return [np.eye(3)]
-        
-        symmetry_matrices = []
-        seen = set()
-        
-        # Always include identity
-        symmetry_matrices.append(np.eye(3))
-        seen.add(tuple(np.eye(3).flatten().round(6)))
-        
-        for axis in ['x', 'y', 'z']:
-            if axis not in fold_data.get('fold_axes', {}):
-                continue
-            
-            axis_data = fold_data['fold_axes'][axis]
-            for q_data in axis_data.get('quaternions', []):
-                q = np.array([
-                    q_data['quaternion']['x'],
-                    q_data['quaternion']['y'],
-                    q_data['quaternion']['z'],
-                    q_data['quaternion']['w']
-                ])
-                q = q / np.linalg.norm(q)
-                
-                # Convert to rotation matrix
-                R_sym = R.from_quat(q).as_matrix()
-                
-                # Check for duplicates
-                key = tuple(R_sym.flatten().round(6))
-                if key not in seen:
-                    seen.add(key)
-                    symmetry_matrices.append(R_sym)
-        
-        return symmetry_matrices
-    
-    @staticmethod
-    def generate_equivalent_target_orientations(R_target_world, fold_data, logger=None):
-        """
-        Generate all symmetry-equivalent target orientations.
-        
-        For an object with fold symmetry, multiple orientations are visually identical.
-        This generates all such equivalent orientations for the assembly target.
-        
-        Math: R_equivalent = R_target × R_symmetry
-        (Apply symmetry rotation in object's local frame)
-        
-        Args:
-            R_target_world: Target orientation as 3x3 rotation matrix (world frame)
-            fold_data: Fold symmetry data from JSON
-            logger: Optional logger for debug output
-            
-        Returns:
-            List of 3x3 rotation matrices (all equivalent target orientations)
-        """
-        symmetry_rotations = FoldSymmetry.get_symmetry_rotations_as_matrices(fold_data)
-        
-        equivalent_targets = []
-        for i, R_sym in enumerate(symmetry_rotations):
-            # Apply symmetry in object frame: R_equiv = R_target × R_sym
-            R_equivalent = R_target_world @ R_sym
-            equivalent_targets.append(R_equivalent)
-        
-        return equivalent_targets
+from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 
 
 class VerifyDisassembly(Node):
@@ -308,11 +206,11 @@ class VerifyDisassembly(Node):
     def get_object_target_position(self, object_name):
         """Get target position for object from assembly configuration (relative to base)"""
         for component in self.assembly_config.get('components', []):
-            if component.get('name') == object_name or component.get('name') == f"{object_name}_scaled70":
+            if component.get('name') == object_name:
                 position = component.get('position', {})
                 return np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
         return None
-    
+
     def get_object_target_orientation(self, object_name):
         """
         Get target orientation for object from assembly configuration (relative to base),
@@ -320,7 +218,7 @@ class VerifyDisassembly(Node):
         """
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 rotation = component.get('rotation', {})
                 quat = rotation.get('quaternion', {})
                 # Default to identity if fields are missing
@@ -356,22 +254,16 @@ class VerifyDisassembly(Node):
             return False, {"error": error_msg}
 
         # Check if object exists
-        original_object_name = object_name
         if object_name not in self.current_poses:
-            object_name = f"{object_name}_scaled70"
-            if object_name not in self.current_poses:
-                error_msg = f"{original_object_name} not found in JSON"
-                self.get_logger().error(f"Object {original_object_name} not found in poses")
-                return False, {"error": error_msg}
+            error_msg = f"{object_name} not found in JSON"
+            self.get_logger().error(f"Object {object_name} not found in poses")
+            return False, {"error": error_msg}
 
         # Check if base exists
-        original_base_name = base_name
         if base_name not in self.current_poses:
-            base_name = f"{base_name}_scaled70"
-            if base_name not in self.current_poses:
-                error_msg = f"{original_base_name} not found in JSON"
-                self.get_logger().error(f"Base {original_base_name} not found in poses")
-                return False, {"error": error_msg}
+            error_msg = f"{base_name} not found in JSON"
+            self.get_logger().error(f"Base {base_name} not found in poses")
+            return False, {"error": error_msg}
         
         # Convert poses to matrices
         T_object_current = self.transform_to_matrix(self.current_poses[object_name].transform)
@@ -387,17 +279,17 @@ class VerifyDisassembly(Node):
         object_relative_rpy_deg = np.degrees(object_relative_rpy_rad)
 
         # Get target position and orientation from JSON (relative to base)
-        target_position_relative = self.get_object_target_position(original_object_name)
-        target_orientation_relative = self.get_object_target_orientation(original_object_name)
+        target_position_relative = self.get_object_target_position(object_name)
+        target_orientation_relative = self.get_object_target_orientation(object_name)
 
         if target_position_relative is None:
             error_msg = f"target position not found"
-            self.get_logger().error(f"No target position found for {original_object_name} in assembly config")
+            self.get_logger().error(f"No target position found for {object_name} in assembly config")
             return False, {"error": error_msg}
 
         if target_orientation_relative is None:
             error_msg = f"target orientation not found"
-            self.get_logger().error(f"No target orientation found for {original_object_name} in assembly config")
+            self.get_logger().error(f"No target orientation found for {object_name} in assembly config")
             return False, {"error": error_msg}
         
         # Calculate position error (vector and magnitude)
@@ -405,9 +297,7 @@ class VerifyDisassembly(Node):
         position_error = np.linalg.norm(position_error_vector)
         
         # === Load fold symmetry and generate equivalent target orientations ===
-        fold_data = FoldSymmetry.load_symmetry_data(original_object_name, self.symmetry_dir)
-        if fold_data is None:
-            fold_data = FoldSymmetry.load_symmetry_data(f"{original_object_name}_scaled70", self.symmetry_dir)
+        fold_data = load_symmetry_data(object_name, self.symmetry_dir)
         
         # Get target orientation as rotation matrix (from quaternion)
         target_quat = target_orientation_relative  # Already a quaternion [x, y, z, w]
@@ -416,9 +306,7 @@ class VerifyDisassembly(Node):
         target_rpy_deg = np.degrees(target_rpy_rad)
 
         # Generate all equivalent target orientations using fold symmetry
-        equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-            R_target_relative, fold_data, logger=self.get_logger() if fold_data else None
-        )
+        equivalent_targets = equivalent_orientations(R_target_relative, fold_data)
 
         # Check if current orientation matches ANY equivalent target
         min_orientation_error_deg = float('inf')
@@ -523,23 +411,20 @@ def main(args=None):
 
             for component in components:
                 comp_name = component.get('name', '')
-                comp_name_base = comp_name.replace('_scaled70', '')
-
                 # Skip the board
                 if component.get('type') == 'board':
                     continue
 
                 # Verify this component is disassembled
                 try:
-                    is_disassembled, _ = node.verify_disassembly(comp_name_base, args.base_name)
+                    is_disassembled, _ = node.verify_disassembly(comp_name, args.base_name)
                     if is_disassembled:
-                        disassembled_objects.append(comp_name_base)
+                        disassembled_objects.append(comp_name)
                     else:
-                        still_assembled_objects.append(comp_name_base)
+                        still_assembled_objects.append(comp_name)
                 except Exception as e:
-                    node.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
-                    # If we can't verify, assume it's still assembled (conservative)
-                    still_assembled_objects.append(comp_name_base)
+                    node.get_logger().debug(f"Could not verify {comp_name}: {e}")
+                    still_assembled_objects.append(comp_name)
 
             # Success if all objects are disassembled
             success = len(still_assembled_objects) == 0

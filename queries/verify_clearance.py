@@ -40,8 +40,8 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
-from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -67,8 +67,6 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
         return None
 
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
@@ -77,7 +75,7 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             if logger:
@@ -104,7 +102,7 @@ def load_object_dimensions(object_name, assembly_config):
     """
     for component in assembly_config.get('components', []):
         comp_name = component.get('name', '')
-        if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+        if comp_name == object_name:
             dims = component.get('dimensions', {})
             if dims:
                 return {
@@ -176,8 +174,6 @@ class VerifyClearance(Node):
             comp_type = component.get('type', '')
             if comp_type == 'board':
                 base_name = component.get('name', '')
-                # Remove _scaled70 suffix if present
-                base_name = base_name.replace('_scaled70', '')
                 self.get_logger().info(f"Identified base object from config: {base_name}")
                 return base_name
 
@@ -205,34 +201,29 @@ class VerifyClearance(Node):
 
     def get_object_position(self, object_name):
         """Get current position of object in world frame"""
-        # Try original name and scaled variant
-        names_to_try = [object_name, f"{object_name}_scaled70"]
+        if object_name not in self.current_poses:
+            return None
 
-        for name in names_to_try:
-            if name in self.current_poses:
-                transform = self.current_poses[name]
-                return np.array([
-                    transform.transform.translation.x,
-                    transform.transform.translation.y,
-                    transform.transform.translation.z
-                ])
-        return None
+        transform = self.current_poses[object_name]
+        return np.array([
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            transform.transform.translation.z
+        ])
 
     def get_object_orientation(self, object_name):
         """Get current orientation of object in world frame"""
-        names_to_try = [object_name, f"{object_name}_scaled70"]
+        if object_name not in self.current_poses:
+            return None
 
-        for name in names_to_try:
-            if name in self.current_poses:
-                transform = self.current_poses[name]
-                q = np.array([
-                    transform.transform.rotation.x,
-                    transform.transform.rotation.y,
-                    transform.transform.rotation.z,
-                    transform.transform.rotation.w
-                ])
-                return R.from_quat(q).as_matrix()
-        return None
+        transform = self.current_poses[object_name]
+        q = np.array([
+            transform.transform.rotation.x,
+            transform.transform.rotation.y,
+            transform.transform.rotation.z,
+            transform.transform.rotation.w
+        ])
+        return R.from_quat(q).as_matrix()
 
     def get_assembly_components(self):
         """Get list of all components in the assembly"""
@@ -240,8 +231,7 @@ class VerifyClearance(Node):
 
     def is_object_present(self, object_name):
         """Check if object is in the scene"""
-        return (object_name in self.current_poses or
-                f"{object_name}_scaled70" in self.current_poses)
+        return object_name in self.current_poses
 
     def get_bounding_box_aabb(self, object_name, position, rotation=None):
         """
@@ -353,13 +343,13 @@ class VerifyClearance(Node):
 
         for other_name in self.current_poses.keys():
             # Skip self
-            if other_name == object_name or other_name == f"{object_name}_scaled70":
+            if other_name == object_name:
                 continue
 
             # Skip excluded objects (e.g., assembled objects)
             should_skip = False
             for excluded in exclude_objects:
-                if other_name == excluded or other_name == f"{excluded}_scaled70":
+                if other_name == excluded:
                     should_skip = True
                     break
             if should_skip:
@@ -433,7 +423,7 @@ class VerifyClearance(Node):
         # Get target position relative to base
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 target_pos = component.get('position', {})
                 target_pos = np.array([
                     target_pos.get('x', 0),
@@ -510,8 +500,7 @@ class VerifyClearance(Node):
         assembled_objects = []  # List of assembled object names
 
         for obj_name in components:
-            # Normalize name (remove _scaled70 suffix for checking)
-            normalized_name = obj_name.replace('_scaled70', '')
+            normalized_name = obj_name
 
             # Check if object is present
             if not self.is_object_present(normalized_name):
@@ -534,7 +523,7 @@ class VerifyClearance(Node):
 
         # Second pass: Check clearance and build results
         for obj_name in components:
-            normalized_name = obj_name.replace('_scaled70', '')
+            normalized_name = obj_name
             status = object_status[normalized_name]
 
             if status == 'missing':

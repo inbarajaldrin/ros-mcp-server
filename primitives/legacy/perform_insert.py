@@ -41,13 +41,15 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import time
 import argparse
-from primitives.utils.ik_solver import compute_cartesian_waypoints_ik
+from primitives.shared.ik import compute_cartesian_waypoints_ik
+from primitives.shared.velocity_profiles import trapezoidal_profile
 from tf2_msgs.msg import TFMessage
 import json
 import os
 import glob
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
+from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
+from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
+from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
 
 
 # Configuration (auto-discovered)
@@ -81,19 +83,16 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     # Search for all JSON files in the data directory
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
     
-    # Try exact match first, then with _scaled70 suffix
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-    
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-            
+
             # Check if any component matches the base name
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     if logger:
                         logger.info(f"Found assembly JSON for base '{base_name}': {json_file}")
                     return json_file
@@ -115,23 +114,22 @@ def load_grasp_point_position(object_name, grasp_id, logger=None):
         np.array([x, y, z]) position relative to object CAD center, or None if not found
     """
     data_dir = get_aruco_data_dir() / "grasp_points"
-    for name_variant in [object_name, f"{object_name}_scaled70"]:
-        json_path = data_dir / f"{name_variant}_grasp_points.json"
-        if json_path.exists():
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                for gp in data.get('grasp_points', []):
-                    if gp['id'] == grasp_id:
-                        pos = gp['position']
-                        if logger:
-                            logger.info(f"Loaded grasp point {grasp_id} for {name_variant}: [{pos['x']:.4f}, {pos['y']:.4f}, {pos['z']:.4f}]")
-                        return np.array([pos['x'], pos['y'], pos['z']])
-                if logger:
-                    logger.warn(f"Grasp ID {grasp_id} not found in {json_path.name}")
-            except (json.JSONDecodeError, IOError, KeyError) as e:
-                if logger:
-                    logger.error(f"Error reading {json_path}: {e}")
+    json_path = data_dir / f"{object_name}_grasp_points.json"
+    if json_path.exists():
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            for gp in data.get('grasp_points', []):
+                if gp['id'] == grasp_id:
+                    pos = gp['position']
+                    if logger:
+                        logger.info(f"Loaded grasp point {grasp_id} for {object_name}: [{pos['x']:.4f}, {pos['y']:.4f}, {pos['z']:.4f}]")
+                    return np.array([pos['x'], pos['y'], pos['z']])
+            if logger:
+                logger.warn(f"Grasp ID {grasp_id} not found in {json_path.name}")
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            if logger:
+                logger.error(f"Error reading {json_path}: {e}")
     if logger:
         logger.error(f"No grasp points file found for '{object_name}'")
     return None
@@ -358,7 +356,7 @@ class PerformInsertController(Node):
         """Get target position for object from assembly configuration"""
         config = assembly_config if assembly_config is not None else self.assembly_config
         for component in config.get('components', []):
-            if component.get('name') == object_name or component.get('name') == f"{object_name}_scaled70":
+            if component.get('name') == object_name:
                 position = component.get('position', {})
                 return np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
         return None
@@ -368,7 +366,7 @@ class PerformInsertController(Node):
         config = assembly_config if assembly_config is not None else self.assembly_config
         for component in config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 rotation = component.get('rotation', {})
                 quat = rotation.get('quaternion', {})
                 return np.array([
@@ -409,252 +407,6 @@ class PerformInsertController(Node):
         rpy_rad = r.as_euler('xyz')
         rpy_deg = np.degrees(rpy_rad)
         return position, rpy_deg
-
-    def compute_all_joint_positions(self, joint_angles):
-        """
-        Compute the 3D positions of all joints given joint angles.
-        Returns a list of [x, y, z] positions for each joint.
-        """
-        # UR5e DH parameters (from ik_solver.py)
-        dh_params = [
-            (0,  0.1625,  0,     np.pi/2),
-            (0,  0,      -0.425,  0),
-            (0,  0,      -0.3922, 0),
-            (0,  0.1333,  0,     np.pi/2),
-            (0,  0.0997,  0,    -np.pi/2),
-            (0,  0.0996,  0,     0)
-        ]
-
-        def dh_transform(theta, d, a, alpha):
-            ct, st = np.cos(theta), np.sin(theta)
-            ca, sa = np.cos(alpha), np.sin(alpha)
-            return np.array([
-                [ct, -st * ca,  st * sa, a * ct],
-                [st,  ct * ca, -ct * sa, a * st],
-                [0,   sa,       ca,      d],
-                [0,   0,        0,       1]
-            ])
-
-        # Compute cumulative transformations and extract positions
-        joint_positions = []
-        T = np.eye(4)
-
-        # Add base position (always at origin)
-        joint_positions.append(T[:3, 3].copy())
-
-        # Compute position of each joint
-        for i, (theta, d, a, alpha) in enumerate(dh_params):
-            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
-            T = np.dot(T, T_i)
-            joint_positions.append(T[:3, 3].copy())
-
-        return joint_positions
-
-    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT, verbose=False):
-        """
-        Check if any part of the robot (all joints) goes below the table.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            z_threshold: Minimum allowed Z position (meters).
-            verbose: If True, log which joint caused collision
-
-        Returns:
-            True if collision detected (any joint below threshold), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        for i, pos in enumerate(joint_positions):
-            if pos[2] < z_threshold:
-                if verbose:
-                    self.get_logger().warn(
-                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
-                        f"(threshold: {z_threshold*1000:.1f}mm)"
-                    )
-                return True  # Collision detected
-
-        return False  # No collision
-
-    def segment_distance(self, p1, p2, p3, p4):
-        """
-        Compute minimum distance between two line segments (p1-p2) and (p3-p4).
-        Used for capsule-based collision detection between robot links.
-
-        Args:
-            p1, p2: Start and end points of first segment (numpy arrays)
-            p3, p4: Start and end points of second segment (numpy arrays)
-
-        Returns:
-            Minimum distance between the two segments
-        """
-        d1 = p2 - p1  # Direction of segment 1
-        d2 = p4 - p3  # Direction of segment 2
-        r = p1 - p3
-
-        a = np.dot(d1, d1)  # Squared length of segment 1
-        e = np.dot(d2, d2)  # Squared length of segment 2
-        f = np.dot(d2, r)
-
-        EPSILON = 1e-8
-
-        # Check if both segments are points
-        if a < EPSILON and e < EPSILON:
-            return np.linalg.norm(p1 - p3)
-
-        # First segment is a point
-        if a < EPSILON:
-            s = 0.0
-            t = np.clip(f / e, 0.0, 1.0)
-        else:
-            c = np.dot(d1, r)
-            # Second segment is a point
-            if e < EPSILON:
-                t = 0.0
-                s = np.clip(-c / a, 0.0, 1.0)
-            else:
-                # General case
-                b = np.dot(d1, d2)
-                denom = a * e - b * b
-
-                if abs(denom) > EPSILON:
-                    s = np.clip((b * f - c * e) / denom, 0.0, 1.0)
-                else:
-                    s = 0.0
-
-                t = (b * s + f) / e
-
-                if t < 0.0:
-                    t = 0.0
-                    s = np.clip(-c / a, 0.0, 1.0)
-                elif t > 1.0:
-                    t = 1.0
-                    s = np.clip((b - c) / a, 0.0, 1.0)
-
-        closest1 = p1 + s * d1
-        closest2 = p3 + t * d2
-
-        return np.linalg.norm(closest1 - closest2)
-
-    def check_self_collision(self, joint_angles, verbose=False):
-        """
-        Check if the robot configuration causes self-collision.
-        Models links as capsules and checks distances between non-adjacent links.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            verbose: If True, log collision details
-
-        Returns:
-            True if self-collision detected, False otherwise
-        """
-        # UR5e approximate link radii (meters) - conservative estimates
-        # These represent the "thickness" of each link for collision purposes
-        link_radii = [
-            0.075,  # Base (joint 0-1)
-            0.065,  # Shoulder to elbow (joint 1-2) - upper arm
-            0.055,  # Elbow to wrist1 (joint 2-3) - forearm
-            0.045,  # Wrist1 to wrist2 (joint 3-4)
-            0.045,  # Wrist2 to wrist3 (joint 4-5)
-            0.040,  # Wrist3 to EE (joint 5-6)
-        ]
-
-        # Safety margin for collision detection
-        safety_margin = 0.01  # 1cm extra margin
-
-        # Get all joint positions
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        # Check collisions between non-adjacent links
-        # Links are defined by consecutive joint positions
-        # Link i connects joint_positions[i] to joint_positions[i+1]
-        num_links = len(joint_positions) - 1
-
-        for i in range(num_links):
-            for j in range(i + 2, num_links):  # Skip adjacent links (i+1)
-                # Get segment endpoints
-                p1 = np.array(joint_positions[i])
-                p2 = np.array(joint_positions[i + 1])
-                p3 = np.array(joint_positions[j])
-                p4 = np.array(joint_positions[j + 1])
-
-                # Compute distance between segments
-                dist = self.segment_distance(p1, p2, p3, p4)
-
-                # Minimum allowed distance is sum of link radii plus safety margin
-                min_dist = link_radii[i] + link_radii[j] + safety_margin
-
-                if dist < min_dist:
-                    if verbose:
-                        self.get_logger().warn(
-                            f"Self-collision detected: Link {i} and Link {j} "
-                            f"distance={dist*1000:.1f}mm < threshold={min_dist*1000:.1f}mm"
-                        )
-                    return True  # Collision detected
-
-        return False  # No collision
-
-    def check_ee_below_base(self, joint_angles, z_threshold=0.1625, verbose=False):
-        """
-        Check if the end effector goes below the robot base height.
-
-        The UR5e base is at Z=0, and the shoulder (joint 1) is at Z=162.5mm.
-        We don't want the EE to go below this height as it could collide with
-        the robot's own base or mounting structure.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            z_threshold: Minimum allowed Z position for EE (meters).
-                        Default 0.1625m (162.5mm) = robot base height.
-            verbose: If True, log details
-
-        Returns:
-            True if EE is below threshold (violation), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        # EE position is the last joint position
-        ee_pos = joint_positions[-1]
-        ee_z = ee_pos[2]
-
-        if ee_z < z_threshold:
-            if verbose:
-                self.get_logger().warn(
-                    f"EE below robot base: EE Z={ee_z*1000:.1f}mm "
-                    f"(threshold: {z_threshold*1000:.1f}mm)"
-                )
-            return True  # Violation detected
-
-        return False  # No violation
-
-    def check_compact_configuration(self, joint_angles, min_wrist_shoulder_xy=0.20, verbose=False):
-        """
-        Check if the robot configuration is too compact (wrist too close to shoulder).
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            min_wrist_shoulder_xy: Minimum allowed XY distance (meters) between
-                                   wrist2 and shoulder.
-            verbose: If True, log details
-
-        Returns:
-            True if configuration is too compact (should be rejected), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        shoulder_pos = np.array(joint_positions[1])
-        wrist2_pos = np.array(joint_positions[5])
-
-        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
-
-        if xy_dist < min_wrist_shoulder_xy:
-            if verbose:
-                self.get_logger().warn(
-                    f"Compact configuration detected: wrist-shoulder XY distance="
-                    f"{xy_dist*1000:.1f}mm < threshold={min_wrist_shoulder_xy*1000:.1f}mm"
-                )
-            return True  # Too compact
-
-        return False  # Configuration OK
 
     def read_current_joint_angles(self):
         """Read current joint angles using ROS2 subscriber"""
@@ -715,11 +467,10 @@ class PerformInsertController(Node):
         Returns:
             (True, distance) if grasped, (False, distance) if not
         """
-        obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
-        if obj_key not in self.current_poses:
+        if object_name not in self.current_poses:
             return False, float('inf')
 
-        transform = self.current_poses[obj_key].transform
+        transform = self.current_poses[object_name].transform
         object_pos = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
 
         gripper_center = self.pos + R.from_quat(self.quat).as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
@@ -739,15 +490,13 @@ class PerformInsertController(Node):
             return False
         
         # Check if object exists
-        obj_key = self.object_name if self.object_name in self.current_poses else f"{self.object_name}_scaled70"
-        if obj_key not in self.current_poses:
+        if self.object_name not in self.current_poses:
             self.error_message = f"Object {self.object_name} not found"
             self.get_logger().error(self.error_message)
             return False
 
         # Check if base exists
-        base_key = self.base_name if self.base_name in self.current_poses else f"{self.base_name}_scaled70"
-        if base_key not in self.current_poses:
+        if self.base_name not in self.current_poses:
             self.error_message = f"Base {self.base_name} not found"
             self.get_logger().error(self.error_message)
             return False
@@ -779,8 +528,8 @@ class PerformInsertController(Node):
         
         # Convert poses to matrices
         T_EE_current = self.pose_to_matrix(current_ee_pose_msg.pose)
-        T_object_current = self.transform_to_matrix(self.current_poses[obj_key].transform)
-        T_base_current = self.transform_to_matrix(self.current_poses[base_key].transform)
+        T_object_current = self.transform_to_matrix(self.current_poses[self.object_name].transform)
+        T_base_current = self.transform_to_matrix(self.current_poses[self.base_name].transform)
         
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
@@ -844,74 +593,11 @@ class PerformInsertController(Node):
         all_joint_angles = [start_joints] + [np.array([float(x) for x in w]) for w in ik_waypoints]
 
         # Trapezoidal velocity profile (arc-length parameterized)
-        n_total = len(all_joint_angles)
-        segment_dists = []
-        for i in range(1, n_total):
-            dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
-            segment_dists.append(max(dist, 1e-6))
-        cumulative_s = [0.0]
-        for d in segment_dists:
-            cumulative_s.append(cumulative_s[-1] + d)
-        total_s = cumulative_s[-1]
-
-        accel_frac = 0.2
-        decel_frac = 0.2
-        t_accel = accel_frac * total_duration
-        t_decel = decel_frac * total_duration
-        t_cruise = total_duration - t_accel - t_decel
-        v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
-        a_accel = v_max / t_accel
-        a_decel = v_max / t_decel
-
-        def trapez_s_and_v(t_query):
-            if t_query <= t_accel:
-                s = 0.5 * a_accel * t_query ** 2
-                v = a_accel * t_query
-            elif t_query <= t_accel + t_cruise:
-                s_accel = 0.5 * v_max * t_accel
-                s = s_accel + v_max * (t_query - t_accel)
-                v = v_max
-            else:
-                s_accel = 0.5 * v_max * t_accel
-                s_cruise = v_max * t_cruise
-                t_in_decel = t_query - t_accel - t_cruise
-                s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
-                v = v_max - a_decel * t_in_decel
-            return s, max(v, 0.0)
-
-        def find_time_for_s(target_s):
-            lo, hi = 0.0, total_duration
-            for _ in range(50):
-                mid = (lo + hi) / 2
-                s_mid, _ = trapez_s_and_v(mid)
-                if s_mid < target_s:
-                    lo = mid
-                else:
-                    hi = mid
-            return (lo + hi) / 2
-
-        waypoint_times = [find_time_for_s(s) for s in cumulative_s]
-        waypoint_times[0] = 0.0
-        waypoint_times[-1] = total_duration
-
+        profile = trapezoidal_profile(all_joint_angles, total_duration)
         trajectory_points = []
-        for i in range(n_total):
-            t_i = waypoint_times[i]
-            _, speed_scalar = trapez_s_and_v(t_i)
-
-            if i == 0 or i == n_total - 1:
-                velocities = [0.0] * 6
-            else:
-                delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
-                delta_norm = np.linalg.norm(delta)
-                if delta_norm > 1e-8:
-                    direction = delta / delta_norm
-                    velocities = [float(speed_scalar * direction[j]) for j in range(6)]
-                else:
-                    velocities = [0.0] * 6
-
+        for positions, velocities, t_i in profile:
             point = {
-                "positions": [float(x) for x in all_joint_angles[i]],
+                "positions": positions,
                 "velocities": velocities,
                 "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
             }
@@ -1014,7 +700,8 @@ class PerformInsertController(Node):
 
         Returns the target Z for insert_compliance, or None on error.
         """
-        from primitives.rotate_object import FoldSymmetry, ExtendedCardinalOrientations
+        from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+        from primitives.rotate_object import ExtendedCardinalOrientations
 
         if self.grasp_id is None:
             self.error_message = "grasp_id is required for real mode insertion"
@@ -1081,12 +768,10 @@ class PerformInsertController(Node):
         # Determine rotation to apply to grasp offset using fold symmetry
         R_object_current = R.from_quat(self.object_orientation).as_matrix()
         symmetry_dir = str(get_symmetry_dir())
-        fold_data = FoldSymmetry.load_symmetry_data(self.object_name, symmetry_dir)
+        fold_data = load_symmetry_data(self.object_name, symmetry_dir)
 
         if fold_data is not None:
-            equivalents = FoldSymmetry.generate_equivalent_target_orientations(
-                R_target_abs, fold_data, logger=self.get_logger()
-            )
+            equivalents = equivalent_orientations(R_target_abs, fold_data)
             best_dist = float('inf')
             R_grasp_rotation = R_target_abs
             for R_eq in equivalents:

@@ -82,8 +82,7 @@ class ObjectPoseReader(Node):
             # If getting all, mark as received once we have any data
             if self.get_all:
                 self.pose_received = True
-            # Check for exact match or with _scaled70 suffix
-            elif frame_id == self.object_name or frame_id == f"{self.object_name}_scaled70":
+            elif frame_id == self.object_name:
                 self.pose_received = True
     
     def get_object_pose(self, timeout=5.0):
@@ -111,17 +110,10 @@ class ObjectPoseReader(Node):
                 }
             return all_poses
         
-        # Try exact match first, then with _scaled70 suffix
-        object_key = None
-        if self.object_name in self.current_poses:
-            object_key = self.object_name
-        elif f"{self.object_name}_scaled70" in self.current_poses:
-            object_key = f"{self.object_name}_scaled70"
-        
-        if object_key is None or object_key not in self.current_poses:
+        if self.object_name not in self.current_poses:
             return None, None
         
-        transform = self.current_poses[object_key].transform
+        transform = self.current_poses[self.object_name].transform
         position = np.array([
             transform.translation.x,
             transform.translation.y,

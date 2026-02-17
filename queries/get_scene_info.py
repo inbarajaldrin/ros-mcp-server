@@ -28,7 +28,7 @@ from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import MarkerArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import time
-from primitives.utils.data_path_finder import get_aruco_data_dir
+from utils.data_path_finder import get_aruco_data_dir
 
 
 # =============================================================================
@@ -83,7 +83,6 @@ def load_grasp_validity_data():
 
     Returns:
         Dict mapping object_name -> {grasp_id -> list of valid gripper states}
-        Object names are mapped both with and without '_scaled70' suffix.
     """
     validity_data = {}
     try:
@@ -99,8 +98,7 @@ def load_grasp_validity_data():
             with open(grasp_file, 'r') as f:
                 data = json.load(f)
                 object_name_json = data.get('object_name', '')
-                # Create topic name (without _scaled70)
-                topic_name = object_name_json.replace('_scaled70', '')
+                topic_name = object_name_json
 
                 grasp_points = data.get('grasp_points', [])
                 id_to_states = {}

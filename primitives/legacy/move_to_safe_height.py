@@ -19,11 +19,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
 import re
 
-from primitives.utils.workspace_config import SAFE_HEIGHT
+from primitives.shared.config import SAFE_HEIGHT
 import json
 import yaml
 
-from primitives.utils.ik_solver import compute_ik, compute_ik_robust, compute_cartesian_waypoints_ik
+from primitives.shared.ik import compute_cartesian_waypoints_ik
+from primitives.shared.velocity_profiles import trapezoidal_profile
 
 class MoveToSafeHeight(Node):
     def __init__(self, height=None):
@@ -227,75 +228,12 @@ class MoveToSafeHeight(Node):
 
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
-            # Trapezoidal velocity profile (same as perform_insert)
-            n_total = len(all_joint_angles)
-            segment_dists = []
-            for i in range(1, n_total):
-                dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
-                segment_dists.append(max(dist, 1e-6))
-            cumulative_s = [0.0]
-            for d in segment_dists:
-                cumulative_s.append(cumulative_s[-1] + d)
-            total_s = cumulative_s[-1]
-
-            accel_frac = 0.2
-            decel_frac = 0.2
-            t_accel = accel_frac * total_duration
-            t_decel = decel_frac * total_duration
-            t_cruise = total_duration - t_accel - t_decel
-            v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
-            a_accel = v_max / t_accel
-            a_decel = v_max / t_decel
-
-            def trapez_s_and_v(t_query):
-                if t_query <= t_accel:
-                    s = 0.5 * a_accel * t_query ** 2
-                    v = a_accel * t_query
-                elif t_query <= t_accel + t_cruise:
-                    s_accel = 0.5 * v_max * t_accel
-                    s = s_accel + v_max * (t_query - t_accel)
-                    v = v_max
-                else:
-                    s_accel = 0.5 * v_max * t_accel
-                    s_cruise = v_max * t_cruise
-                    t_in_decel = t_query - t_accel - t_cruise
-                    s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
-                    v = v_max - a_decel * t_in_decel
-                return s, max(v, 0.0)
-
-            def find_time_for_s(target_s):
-                lo, hi = 0.0, total_duration
-                for _ in range(50):
-                    mid = (lo + hi) / 2
-                    s_mid, _ = trapez_s_and_v(mid)
-                    if s_mid < target_s:
-                        lo = mid
-                    else:
-                        hi = mid
-                return (lo + hi) / 2
-
-            waypoint_times = [find_time_for_s(s) for s in cumulative_s]
-            waypoint_times[0] = 0.0
-            waypoint_times[-1] = total_duration
-
+            # Trapezoidal velocity profile
+            profile = trapezoidal_profile(all_joint_angles, total_duration)
             traj_points = []
-            for i in range(n_total):
-                t_i = waypoint_times[i]
-                _, speed_scalar = trapez_s_and_v(t_i)
-
-                if i == 0 or i == n_total - 1:
-                    velocities = [0.0] * 6
-                else:
-                    delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
-                    delta_norm = np.linalg.norm(delta)
-                    if delta_norm > 1e-8:
-                        direction = delta / delta_norm
-                        velocities = [float(speed_scalar * direction[j]) for j in range(6)]
-                    else:
-                        velocities = [0.0] * 6
-
+            for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
-                    positions=[float(x) for x in all_joint_angles[i]],
+                    positions=positions,
                     velocities=velocities,
                     time_from_start=Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
                 )

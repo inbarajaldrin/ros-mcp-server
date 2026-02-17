@@ -28,8 +28,8 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.utils.workspace_config import GRIPPER_CENTER_TOOL_OFFSET
-from primitives.utils.data_path_finder import get_aruco_data_dir
+from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
+from utils.data_path_finder import get_aruco_data_dir
 from std_msgs.msg import Float32, Float64
 
 # Gripper specifications
@@ -65,83 +65,49 @@ def load_grasp_point_and_validity(object_name, grasp_id=0, logger=None):
             logger.error("Could not find aruco data directory")
         return None, None
 
-    for name_variant in [object_name, f"{object_name}_scaled70"]:
-        json_path = data_dir / f"{name_variant}_grasp_points.json"
-        if json_path.exists():
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                for gp in data.get('grasp_points', []):
-                    if gp['id'] == grasp_id:
-                        pos = gp['position']
-                        grasp_point = np.array([pos['x'], pos['y'], pos['z']])
-                        grasp_validity = gp.get('grasp_validity', {})
-                        if logger:
-                            logger.info(f"Loaded grasp point {grasp_id} for {name_variant}")
-                        return grasp_point, grasp_validity
-            except (json.JSONDecodeError, IOError, KeyError):
-                pass
+    json_path = data_dir / f"{object_name}_grasp_points.json"
+    if json_path.exists():
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            for gp in data.get('grasp_points', []):
+                if gp['id'] == grasp_id:
+                    pos = gp['position']
+                    grasp_point = np.array([pos['x'], pos['y'], pos['z']])
+                    grasp_validity = gp.get('grasp_validity', {})
+                    if logger:
+                        logger.info(f"Loaded grasp point {grasp_id} for {object_name}")
+                    return grasp_point, grasp_validity
+        except (json.JSONDecodeError, IOError, KeyError):
+            pass
 
     if logger:
         logger.error(f"No grasp points file found for '{object_name}'")
     return None, None
 
 
+from primitives.shared.fold_symmetry import (
+    load_symmetry_data as _load_sym,
+    get_symmetry_matrices as _get_sym_matrices,
+)
+
+
 def load_fold_symmetry(object_name, logger=None):
     """Load fold symmetry data for an object. Returns None if not found."""
     try:
-        data_dir = get_aruco_data_dir() / "symmetry"
+        symmetry_dir = str(get_aruco_data_dir() / "symmetry")
     except Exception:
         return None
-
-    for name_variant in [object_name, f"{object_name}_scaled70"]:
-        json_path = data_dir / f"{name_variant}_symmetry.json"
-        if json_path.exists():
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                if logger:
-                    logger.info(f"Loaded fold symmetry for {name_variant}")
-                return data
-            except (json.JSONDecodeError, IOError):
-                pass
-    return None
+    data = _load_sym(object_name, symmetry_dir)
+    if data and logger:
+        logger.info(f"Loaded fold symmetry for {object_name}")
+    return data
 
 
 def get_fold_symmetry_matrices(fold_data):
     """Generate all combinations of fold symmetry rotations as 3x3 matrices.
     Always includes identity."""
-    if fold_data is None:
-        return [np.eye(3)]
-
-    axis_rotations = {}
-    for axis in ['x', 'y', 'z']:
-        if axis not in fold_data.get('fold_axes', {}):
-            axis_rotations[axis] = [np.eye(3)]
-            continue
-
-        axis_data = fold_data['fold_axes'][axis]
-        rotations = [np.eye(3)]
-        for q_data in axis_data.get('quaternions', [])[1:]:  # Skip identity
-            q = np.array([
-                q_data['quaternion']['x'], q_data['quaternion']['y'],
-                q_data['quaternion']['z'], q_data['quaternion']['w']
-            ])
-            q = q / np.linalg.norm(q)
-            rotations.append(R.from_quat(q).as_matrix())
-        axis_rotations[axis] = rotations
-
-    combined = []
-    seen = set()
-    for R_x in axis_rotations.get('x', [np.eye(3)]):
-        for R_y in axis_rotations.get('y', [np.eye(3)]):
-            for R_z in axis_rotations.get('z', [np.eye(3)]):
-                R_c = R_x @ R_y @ R_z
-                key = tuple(R_c.flatten().round(6))
-                if key not in seen:
-                    seen.add(key)
-                    combined.append(R_c)
-    return combined
+    return _get_sym_matrices(fold_data)
 
 
 def determine_grip_axis(grasp_point_world):
@@ -236,8 +202,7 @@ class VerifyGrasp(Node):
         for transform in msg.transforms:
             frame_id = transform.child_frame_id
             self.current_poses[frame_id] = transform
-            # Check for exact match or with _scaled70 suffix
-            if frame_id == self.object_name or frame_id == f"{self.object_name}_scaled70":
+            if frame_id == self.object_name:
                 self.object_pose_received = True
     
     def ee_callback(self, msg):
@@ -306,17 +271,12 @@ class VerifyGrasp(Node):
             return False, None, None, None
         
         # Check if object exists
-        original_object_name = self.object_name
-        object_key = None
-        if self.object_name in self.current_poses:
-            object_key = self.object_name
-        elif f"{self.object_name}_scaled70" in self.current_poses:
-            object_key = f"{self.object_name}_scaled70"
-        
-        if object_key is None:
-            self.get_logger().error(f"Object {original_object_name} not found in poses")
+        if self.object_name not in self.current_poses:
+            self.get_logger().error(f"Object {self.object_name} not found in poses")
             return False, None, None, None
         
+        object_key = self.object_name
+
         # Get object position
         transform = self.current_poses[object_key].transform
         object_position = np.array([

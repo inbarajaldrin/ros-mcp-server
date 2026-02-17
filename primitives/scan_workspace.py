@@ -32,7 +32,8 @@ from builtin_interfaces.msg import Duration
 import numpy as np
 import argparse
 import time
-from primitives.utils.ik_solver import compute_ik
+from primitives.shared.ik import IKSolver, IKSolverConfig, rpy_to_matrix
+from primitives.shared.velocity_profiles import single_point
 
 # Configuration
 OBJECT_TOPIC_REAL = "/objects_poses_real"
@@ -188,8 +189,7 @@ class ScanWorkspace(Node):
             frame_id = transform.child_frame_id
             self.current_poses[frame_id] = transform
             
-            # Check for exact match or with _scaled70 suffix
-            if frame_id == self.object_name or frame_id == f"{self.object_name}_scaled70":
+            if frame_id == self.object_name:
                 if not self.object_found:
                     self.object_found = True
                     self.get_logger().info(f"Object '{self.object_name}' detected at waypoint {self.current_waypoint_index + 1}/{len(self.scan_path)}")
@@ -214,22 +214,30 @@ class ScanWorkspace(Node):
         """
         # Compute IK for target position
         rpy = [FIXED_ROLL, FIXED_PITCH, FIXED_YAW]
-        joint_angles = compute_ik(position, rpy)
+        target_pose = np.eye(4)
+        target_pose[:3, 3] = np.array(position)
+        target_pose[:3, :3] = rpy_to_matrix(rpy)
+        q6 = -(np.mod(rpy[2] + 180, 360) - 180)
+        q_guess = np.radians([85, -80, 90, -90, -90, q6])
+        solver = IKSolver(IKSolverConfig())
+        joint_angles = solver.solve(seeds=[q_guess], target_pose=target_pose, perturbations=5, dx=0.001)
         
         if joint_angles is None:
             self.get_logger().warn(f"IK failed for position {position}, skipping waypoint")
             return False
         
-        # Create trajectory point
-        traj_point = JointTrajectoryPoint()
-        traj_point.positions = [float(x) for x in joint_angles]
-        traj_point.velocities = [0.0] * 6
-        traj_point.time_from_start = Duration(sec=int(MOVEMENT_DURATION))
-        
+        # Create trajectory point via single_point profile
+        profile = single_point(joint_angles, MOVEMENT_DURATION)
+        positions, velocities, t = profile[0]
+
         # Create trajectory message
         traj_msg = JointTrajectory()
         traj_msg.joint_names = JOINT_NAMES
-        traj_msg.points = [traj_point]
+        traj_msg.points = [JointTrajectoryPoint(
+            positions=positions,
+            velocities=velocities,
+            time_from_start=Duration(sec=int(t))
+        )]
         
         # Create goal
         goal = FollowJointTrajectory.Goal()

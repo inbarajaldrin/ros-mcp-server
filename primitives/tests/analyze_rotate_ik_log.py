@@ -3,8 +3,8 @@
 Analyze rotate_object IK test logs to identify optimization opportunities.
 
 Usage:
-    python3 tests/analyze_rotate_ik_log.py
-    python3 tests/analyze_rotate_ik_log.py --verbose
+    python3 primitives/tests/analyze_rotate_ik_log.py
+    python3 primitives/tests/analyze_rotate_ik_log.py --verbose
 """
 
 import argparse

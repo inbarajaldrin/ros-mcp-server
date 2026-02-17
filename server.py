@@ -97,7 +97,7 @@ def _start_services():
     # Start grasp publisher
     script_dir = os.path.dirname(os.path.abspath(__file__))
     _grasp_publisher_process = subprocess.Popen(
-        ["/usr/bin/python3", f"{script_dir}/primitives/utils/grasp_points_publisher.py", "--mode", "default"],
+        ["/usr/bin/python3", f"{script_dir}/utils/grasp_points_publisher.py", "--mode", "default"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True
     )
@@ -143,7 +143,7 @@ def _ensure_services_healthy():
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         _grasp_publisher_process = subprocess.Popen(
-            ["/usr/bin/python3", f"{script_dir}/primitives/utils/grasp_points_publisher.py", "--mode", "default"],
+            ["/usr/bin/python3", f"{script_dir}/utils/grasp_points_publisher.py", "--mode", "default"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True
         )
@@ -401,12 +401,12 @@ import sys
 #     Allows executable Python code that calls server primitives with complex control flow
 #     (loops, conditionals, result-based branching, etc.).
 #
-#     Available API: Import with 'from primitives.utils.primitives_api import *'
+#     Available API: Import with 'from primitives.shared.primitives_api import *'
 #     All primitives return dictionaries with results for decision-making.
 #
 #     Example:
 #     ```python
-#     from primitives.utils.primitives_api import *
+#     from primitives.shared.primitives_api import *
 #
 #     # Use any available primitives
 #     result = some_primitive(param1, param2)
@@ -417,7 +417,7 @@ import sys
 #     ```
 #
 #     Args:
-#         code: Python code (must import from primitives.utils.primitives_api)
+#         code: Python code (must import from primitives.shared.primitives_api)
 #         timeout: Maximum execution time in seconds (default: 3600)
 #
 #     Returns:

@@ -35,19 +35,26 @@ import subprocess
 import json
 from scipy.spatial.transform import Rotation as R
 
-# Import from local action_libraries file
-from primitives.utils.action_libraries import hover_over_grasp_quat
-from primitives.utils.ik_solver import rpy_to_matrix, ik_objective_quaternion, dh_params, forward_kinematics
+from primitives.shared.ik import dh_params, forward_kinematics
+from primitives.shared.velocity_profiles import trapezoidal_profile, single_point
 
-# Import quaternion controller for gimbal-lock-free gripper orientation
-from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
-
-# Import path finder for auto-discovering aruco-grasp-annotator data directory
-from primitives.utils.data_path_finder import get_symmetry_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
+from utils.data_path_finder import get_symmetry_dir
+from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
+
+
+def _extract_yaw(q):
+    """Extract yaw (Z rotation) from quaternion, normalized to [-180, 180]."""
+    yaw = R.from_quat(q).as_euler('xyz', degrees=True)[2]
+    return ((yaw + 180) % 360) - 180
+
+
+def _face_down_quaternion(yaw_degrees):
+    """Quaternion for face-down gripper (pitch=180) with given yaw."""
+    return R.from_euler('xyz', [0, 180, yaw_degrees], degrees=True).as_quat()
 
 
 def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, dx=0.001, prefer_elbow_down=True):
@@ -62,7 +69,7 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
         prefer_elbow_down: If True, constrain joints to the standard picking configuration
             to avoid unusual arm postures regardless of initial robot pose.
     """
-    from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+    from primitives.shared.ik import IKSolverConfig, IKSolver
 
     original_position = np.array(position)
     target_rot_matrix = R.from_euler('xyz', rpy, degrees=True).as_matrix()
@@ -194,9 +201,6 @@ class DirectObjectMove(Node):
         
         # Initialize Quaternion Orientation Controller for gimbal-lock-free gripper control
         # This ensures stable gripper orientation at pitch=180° (face down) for any yaw angle
-        self.quat_controller = QuaternionOrientationController()
-        self.get_logger().info("Quaternion orientation controller initialized (gimbal-lock-free mode)")
-        
         # Fold symmetry directory for canonical pose matching (auto-discovered)
         self.symmetry_dir = str(get_symmetry_dir())
         
@@ -745,9 +749,9 @@ class DirectObjectMove(Node):
             )
             
             # Extract yaw from returned quaternion (canonical match or fallback)
-            object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
+            object_yaw = _extract_yaw(canonical_quat)
             
-            target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
+            target_quaternion = _face_down_quaternion(object_yaw)
             
             step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
             self.get_logger().info(step_msg)
@@ -885,10 +889,10 @@ class DirectObjectMove(Node):
                 )
                 
                 # Extract yaw from returned quaternion (canonical match or fallback)
-                grasp_point_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
+                grasp_point_yaw = _extract_yaw(canonical_quat)
                 
                 # Create face-down quaternion with grasp point yaw (QUATERNION-BASED, no gimbal lock)
-                target_quaternion = self.quat_controller.face_down_quaternion(grasp_point_yaw)
+                target_quaternion = _face_down_quaternion(grasp_point_yaw)
                 
                 step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
                 self.get_logger().info(step_msg)
@@ -959,7 +963,7 @@ class DirectObjectMove(Node):
             )
             
             # Extract yaw from returned quaternion (canonical match or fallback)
-            object_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
+            object_yaw = _extract_yaw(canonical_quat)
             
             
             # Smooth Z position after recovery to prevent height jumps
@@ -991,7 +995,7 @@ class DirectObjectMove(Node):
             # Align end-effector with object orientation using QUATERNION (no gimbal lock)
             # For top-down approach: use object's yaw to align, pitch=180 (face down), roll=0
             # This ensures the gripper aligns with the object's orientation while approaching from above
-            target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
+            target_quaternion = _face_down_quaternion(object_yaw)
             
             # Log fold symmetry matching result
             match_status = "Canonical match" if canonical_match else "No canonical match (using detected)"
@@ -1025,8 +1029,8 @@ class DirectObjectMove(Node):
                     # Use last known position (QUATERNION-BASED, no gimbal lock)
                     object_position = self.last_known_object_position.copy()
                     working_object_quat = self.last_known_object_quat.copy()
-                    object_yaw = self.quat_controller.extract_yaw_from_quaternion(working_object_quat)
-                    target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
+                    object_yaw = _extract_yaw(working_object_quat)
+                    target_quaternion = _face_down_quaternion(object_yaw)
                     
                     # Track if we're using stale data in step 2
                     if self.step1_completed:
@@ -1045,8 +1049,8 @@ class DirectObjectMove(Node):
                     if self.last_known_object_position is not None:
                         object_position = self.last_known_object_position.copy()
                         working_object_quat = self.last_known_object_quat.copy()
-                        object_yaw = self.quat_controller.extract_yaw_from_quaternion(working_object_quat)
-                        target_quaternion = self.quat_controller.face_down_quaternion(object_yaw)
+                        object_yaw = _extract_yaw(working_object_quat)
+                        target_quaternion = _face_down_quaternion(object_yaw)
                         
                         # Track if we're using stale data in step 2
                         if self.step1_completed:
@@ -1143,8 +1147,8 @@ class DirectObjectMove(Node):
             )
 
             # Extract yaw from returned quaternion
-            grasp_point_yaw = self.quat_controller.extract_yaw_from_quaternion(canonical_quat)
-            step3_target_quaternion = self.quat_controller.face_down_quaternion(grasp_point_yaw)
+            grasp_point_yaw = _extract_yaw(canonical_quat)
+            step3_target_quaternion = _face_down_quaternion(grasp_point_yaw)
 
             # Compute step 3 target position (same as step 2 target, but recomputed for final positioning)
             step3_target_ee = grasp_point_position.copy()
@@ -1213,7 +1217,6 @@ class DirectObjectMove(Node):
 
         # Solve IK for both yaw and yaw+180 (gripper is symmetric),
         # then pick the solution requiring least joint movement.
-        from primitives.utils.action_libraries import make_point
         ik_position = target_position.copy()
         ik_position[2] = target_ee_position[2]
 
@@ -1226,7 +1229,7 @@ class DirectObjectMove(Node):
 
         if self.step1_completed:
             # Step 2: use Cartesian waypoints for straight-line descent (no curved joint-space interpolation)
-            from primitives.utils.ik_solver import compute_cartesian_waypoints_ik
+            from primitives.shared.ik import compute_cartesian_waypoints_ik
 
             gc_target = np.array(ik_position)
 
@@ -1262,78 +1265,15 @@ class DirectObjectMove(Node):
                 self.execute_trajectory({"traj1": []})
                 return
 
-            # Build trajectory with trapezoidal velocity profile (same as move_to_safe_height)
+            # Build trajectory with trapezoidal velocity profile
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
             total_duration = step2_duration
-            n_total = len(all_joint_angles)
 
-            segment_dists = []
-            for i in range(1, n_total):
-                dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
-                segment_dists.append(max(dist, 1e-6))
-            cumulative_s = [0.0]
-            for d in segment_dists:
-                cumulative_s.append(cumulative_s[-1] + d)
-            total_s = cumulative_s[-1]
-
-            accel_frac = 0.2
-            decel_frac = 0.2
-            t_accel = accel_frac * total_duration
-            t_decel = decel_frac * total_duration
-            t_cruise = total_duration - t_accel - t_decel
-            v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
-            a_accel = v_max / t_accel
-            a_decel = v_max / t_decel
-
-            def trapez_s_and_v(t_query):
-                if t_query <= t_accel:
-                    s = 0.5 * a_accel * t_query ** 2
-                    v = a_accel * t_query
-                elif t_query <= t_accel + t_cruise:
-                    s_accel = 0.5 * v_max * t_accel
-                    s = s_accel + v_max * (t_query - t_accel)
-                    v = v_max
-                else:
-                    s_accel = 0.5 * v_max * t_accel
-                    s_cruise = v_max * t_cruise
-                    t_in_decel = t_query - t_accel - t_cruise
-                    s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
-                    v = v_max - a_decel * t_in_decel
-                return s, max(v, 0.0)
-
-            def find_time_for_s(target_s):
-                lo, hi = 0.0, total_duration
-                for _ in range(50):
-                    mid = (lo + hi) / 2
-                    s_mid, _ = trapez_s_and_v(mid)
-                    if s_mid < target_s:
-                        lo = mid
-                    else:
-                        hi = mid
-                return (lo + hi) / 2
-
-            waypoint_times = [find_time_for_s(s) for s in cumulative_s]
-            waypoint_times[0] = 0.0
-            waypoint_times[-1] = total_duration
-
+            profile = trapezoidal_profile(all_joint_angles, total_duration)
             traj_points = []
-            for i in range(n_total):
-                t_i = waypoint_times[i]
-                _, speed_scalar = trapez_s_and_v(t_i)
-
-                if i == 0 or i == n_total - 1:
-                    velocities = [0.0] * 6
-                else:
-                    delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
-                    delta_norm = np.linalg.norm(delta)
-                    if delta_norm > 1e-8:
-                        direction = delta / delta_norm
-                        velocities = [float(speed_scalar * direction[j]) for j in range(6)]
-                    else:
-                        velocities = [0.0] * 6
-
+            for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
-                    positions=[float(x) for x in all_joint_angles[i]],
+                    positions=positions,
                     velocities=velocities,
                     time_from_start=Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
                 )
@@ -1393,8 +1333,8 @@ class DirectObjectMove(Node):
                 joint_angles = sol_a if sol_a is not None else sol_b
 
         if joint_angles is not None:
-            traj_point = make_point(joint_angles, movement_duration)
-            trajectory = {"traj1": [traj_point]}
+            positions, velocities, t = single_point(joint_angles, movement_duration)[0]
+            trajectory = {"traj1": [{"positions": positions, "velocities": velocities, "duration": t}]}
         else:
             trajectory = {"traj1": []}
         
@@ -1503,7 +1443,7 @@ class DirectObjectMove(Node):
             self.trajectory_in_progress = False
             return
 
-        from primitives.utils.ik_solver import compute_cartesian_waypoints_ik
+        from primitives.shared.ik import compute_cartesian_waypoints_ik
 
         T_current = forward_kinematics(dh_params, self.current_joint_angles)
         current_rot_matrix = T_current[:3, :3]
@@ -1562,75 +1502,12 @@ class DirectObjectMove(Node):
 
             # Build trajectory with trapezoidal velocity profile (same as step 2)
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
-            n_total = len(all_joint_angles)
 
-            segment_dists = []
-            for i in range(1, n_total):
-                dist = np.linalg.norm(all_joint_angles[i] - all_joint_angles[i - 1])
-                segment_dists.append(max(dist, 1e-6))
-            cumulative_s = [0.0]
-            for d in segment_dists:
-                cumulative_s.append(cumulative_s[-1] + d)
-            total_s = cumulative_s[-1]
-
-            accel_frac = 0.2
-            decel_frac = 0.2
-            t_accel = accel_frac * total_duration
-            t_decel = decel_frac * total_duration
-            t_cruise = total_duration - t_accel - t_decel
-            v_max = total_s / (0.5 * t_accel + t_cruise + 0.5 * t_decel)
-            a_accel = v_max / t_accel
-            a_decel = v_max / t_decel
-
-            def trapez_s_and_v(t_query):
-                if t_query <= t_accel:
-                    s = 0.5 * a_accel * t_query ** 2
-                    v = a_accel * t_query
-                elif t_query <= t_accel + t_cruise:
-                    s_accel = 0.5 * v_max * t_accel
-                    s = s_accel + v_max * (t_query - t_accel)
-                    v = v_max
-                else:
-                    s_accel = 0.5 * v_max * t_accel
-                    s_cruise = v_max * t_cruise
-                    t_in_decel = t_query - t_accel - t_cruise
-                    s = s_accel + s_cruise + v_max * t_in_decel - 0.5 * a_decel * t_in_decel ** 2
-                    v = v_max - a_decel * t_in_decel
-                return s, max(v, 0.0)
-
-            def find_time_for_s(target_s):
-                lo, hi = 0.0, total_duration
-                for _ in range(50):
-                    mid = (lo + hi) / 2
-                    s_mid, _ = trapez_s_and_v(mid)
-                    if s_mid < target_s:
-                        lo = mid
-                    else:
-                        hi = mid
-                return (lo + hi) / 2
-
-            waypoint_times = [find_time_for_s(s) for s in cumulative_s]
-            waypoint_times[0] = 0.0
-            waypoint_times[-1] = total_duration
-
+            profile = trapezoidal_profile(all_joint_angles, total_duration)
             traj_points = []
-            for i in range(n_total):
-                t_i = waypoint_times[i]
-                _, speed_scalar = trapez_s_and_v(t_i)
-
-                if i == 0 or i == n_total - 1:
-                    velocities = [0.0] * 6
-                else:
-                    delta = all_joint_angles[i + 1] - all_joint_angles[i - 1]
-                    delta_norm = np.linalg.norm(delta)
-                    if delta_norm > 1e-8:
-                        direction = delta / delta_norm
-                        velocities = [float(speed_scalar * direction[j]) for j in range(6)]
-                    else:
-                        velocities = [0.0] * 6
-
+            for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
-                    positions=[float(x) for x in all_joint_angles[i]],
+                    positions=positions,
                     velocities=velocities,
                     time_from_start=Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
                 )
@@ -1671,7 +1548,7 @@ class DirectObjectMove(Node):
             
             point = trajectory['traj1'][0]
             positions = point['positions']
-            duration = point['time_from_start'].sec
+            duration = int(point['duration'])
             
             # Create trajectory message
             traj_msg = JointTrajectory()
@@ -1756,11 +1633,10 @@ class DirectObjectMove(Node):
         Returns:
             Tuple of (canonical_quat, match_found, distance)
         """
-        from primitives.utils.quaternion_orientation_controller import QuaternionOrientationController
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+
         # Load fold symmetry data
-        fold_data = QuaternionOrientationController.load_fold_symmetry_json(object_name, self.symmetry_dir)
+        fold_data = load_symmetry_data(object_name, self.symmetry_dir)
         
         if fold_data is None:
             # No symmetry data - log error once and use fallback
@@ -1787,7 +1663,7 @@ class DirectObjectMove(Node):
         # Function to try a single threshold
         def try_threshold(thresh):
             canonical_quat, symmetry_used, distance = \
-                QuaternionOrientationController.find_closest_canonical_quaternion(
+                find_closest_canonical_quaternion(
                     detected_quat, fold_data, thresh
                 )
             return thresh, canonical_quat, distance
@@ -2025,7 +1901,7 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='Direct Object Movement Node')
     parser.add_argument('--topic', type=str, default=None, 
                        help='Topic name for object poses subscription (default: /objects_poses_sim for sim mode, /objects_poses_real for real mode)')
-    parser.add_argument('--object-name', type=str, default="fork_orange_scaled70",
+    parser.add_argument('--object-name', type=str, default="fork_orange",
                        help='Name of the object to move to (e.g., blue_dot_0, red_dot_0)')
     parser.add_argument('--height', type=float, default=None,
                        help='Exact gripper center height in meters (if not specified, uses grasp point Z minus offset)')

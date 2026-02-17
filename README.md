@@ -4,7 +4,7 @@
 [![smithery badge](https://smithery.ai/badge/@lpigeon/ros-mcp-server)](https://smithery.ai/server/@lpigeon/ros-mcp-server)
 ![Static Badge](https://img.shields.io/badge/License-MIT-blue)
 
-<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/img/framework.png"/></center>
+<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/media/framework.png"/></center>
 
 The ROS MCP Server is designed to support robots in performing complex tasks and adapting effectively to various environments by providing a set of functions that transform natural language commands, entered by a user through an LLM, into ROS commands for robot control. Furthermore, by utilizing ``rosbridge``, it is configured to operate with both ``ROS`` and ``ROS2`` systems, and its WebSocket-based communication enables broad applicability across diverse platforms.
 
@@ -141,16 +141,16 @@ ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 ### 3. Run any AI system that has imported ``ros-mcp-server``.
 
 ### 4. Type "Make the robot move forward.".
-<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/img/how_to_use_1.png" width="500"/></center>
+<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/media/how_to_use_1.png" width="500"/></center>
 
 ### 5. Check `rosbridge_server` and `ros topic`.
 - `rosbridge_server`
-<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/img/how_to_use_2.png" /></center>
+<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/media/how_to_use_2.png" /></center>
 
 - `ros topic`
-<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/img/how_to_use_3.png" /></center>
+<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/media/how_to_use_3.png" /></center>
 
 ## Simulation Test
 MCP-based control using the MOCA mobile manipulator within the NVIDIA Isaac Sim simulation environment. 
 
-<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/img/result.gif" /></center>
+<center><img src="https://github.com/lpigeon/ros-mcp-server/blob/main/media/result.gif" /></center>

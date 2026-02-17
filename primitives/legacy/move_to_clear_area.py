@@ -19,11 +19,12 @@ from sensor_msgs.msg import JointState
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import numpy as np
 
-from primitives.utils.workspace_config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
 
-from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
+from primitives.shared.velocity_profiles import single_point
+from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
+from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
 
 class MoveToClearArea(Node):
     def __init__(self, mode='move'):
@@ -144,217 +145,6 @@ class MoveToClearArea(Node):
         
         return [roll, pitch, yaw]
 
-    def compute_all_joint_positions(self, joint_angles):
-        """
-        Compute the 3D positions of all joints in the robot arm using forward kinematics.
-
-        Args:
-            joint_angles: Array of 6 joint angles in radians
-
-        Returns:
-            List of 7 positions (base + 6 joints) as numpy arrays [x, y, z]
-        """
-        # UR5e DH parameters (same as in ik_solver.py)
-        dh_params_local = [
-            (0,  0.1625,  0,     np.pi/2),   # Joint 1
-            (0,  0,      -0.425,  0),         # Joint 2
-            (0,  0,      -0.3922, 0),         # Joint 3
-            (0,  0.1333,  0,     np.pi/2),   # Joint 4
-            (0,  0.0997,  0,    -np.pi/2),   # Joint 5
-            (0,  0.0996,  0,     0)           # Joint 6
-        ]
-
-        def dh_transform(theta, d, a, alpha):
-            ct, st = np.cos(theta), np.sin(theta)
-            ca, sa = np.cos(alpha), np.sin(alpha)
-            return np.array([
-                [ct, -st * ca,  st * sa, a * ct],
-                [st,  ct * ca, -ct * sa, a * st],
-                [0,   sa,       ca,      d],
-                [0,   0,        0,       1]
-            ])
-
-        # Compute cumulative transformations and extract positions
-        joint_positions = []
-        T = np.eye(4)
-
-        # Add base position (always at origin)
-        joint_positions.append(T[:3, 3].copy())
-
-        # Compute position of each joint
-        for i, (theta, d, a, alpha) in enumerate(dh_params_local):
-            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
-            T = np.dot(T, T_i)
-            joint_positions.append(T[:3, 3].copy())
-
-        return joint_positions
-
-    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, verbose=False):
-        """
-        Check if any part of the robot (all joints) goes below the table.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            z_threshold: Minimum allowed Z position (meters).
-            verbose: If True, log which joint caused collision
-
-        Returns:
-            True if collision detected (any joint below threshold), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        for i, pos in enumerate(joint_positions):
-            if pos[2] < z_threshold:
-                if verbose:
-                    self.get_logger().warn(
-                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
-                        f"(threshold: {z_threshold*1000:.1f}mm)"
-                    )
-                return True  # Collision detected
-
-        return False  # No collision
-
-    def segment_distance(self, p1, p2, p3, p4):
-        """
-        Compute the minimum distance between two line segments.
-
-        Args:
-            p1, p2: Start and end points of first segment (numpy arrays)
-            p3, p4: Start and end points of second segment (numpy arrays)
-
-        Returns:
-            Minimum distance between the two segments
-        """
-        d1 = p2 - p1  # Direction of segment 1
-        d2 = p4 - p3  # Direction of segment 2
-        r = p1 - p3
-
-        a = np.dot(d1, d1)  # Squared length of segment 1
-        e = np.dot(d2, d2)  # Squared length of segment 2
-        f = np.dot(d2, r)
-
-        EPSILON = 1e-8
-
-        # Check if both segments are points
-        if a < EPSILON and e < EPSILON:
-            return np.linalg.norm(p1 - p3)
-
-        # First segment is a point
-        if a < EPSILON:
-            s = 0.0
-            t = np.clip(f / e, 0.0, 1.0)
-        else:
-            c = np.dot(d1, r)
-            # Second segment is a point
-            if e < EPSILON:
-                t = 0.0
-                s = np.clip(-c / a, 0.0, 1.0)
-            else:
-                # General case
-                b = np.dot(d1, d2)
-                denom = a * e - b * b
-
-                if abs(denom) > EPSILON:
-                    s = np.clip((b * f - c * e) / denom, 0.0, 1.0)
-                else:
-                    s = 0.0
-
-                t = (b * s + f) / e
-
-                if t < 0.0:
-                    t = 0.0
-                    s = np.clip(-c / a, 0.0, 1.0)
-                elif t > 1.0:
-                    t = 1.0
-                    s = np.clip((b - c) / a, 0.0, 1.0)
-
-        closest1 = p1 + s * d1
-        closest2 = p3 + t * d2
-
-        return np.linalg.norm(closest1 - closest2)
-
-    def check_self_collision(self, joint_angles, verbose=False):
-        """
-        Check if the robot configuration causes self-collision.
-        Models links as capsules and checks distances between non-adjacent links.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            verbose: If True, log collision details
-
-        Returns:
-            True if self-collision detected, False otherwise
-        """
-        # UR5e approximate link radii (meters) - conservative estimates
-        # These represent the "thickness" of each link for collision purposes
-        link_radii = [
-            0.075,  # Base (joint 0-1)
-            0.065,  # Shoulder to elbow (joint 1-2) - upper arm
-            0.055,  # Elbow to wrist1 (joint 2-3) - forearm
-            0.045,  # Wrist1 to wrist2 (joint 3-4)
-            0.045,  # Wrist2 to wrist3 (joint 4-5)
-            0.040,  # Wrist3 to EE (joint 5-6)
-        ]
-
-        # Safety margin for collision detection
-        safety_margin = 0.01  # 1cm extra margin
-
-        # Get all joint positions
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        # Check collisions between non-adjacent links
-        # Links are defined by consecutive joint positions
-        # Link i connects joint_positions[i] to joint_positions[i+1]
-        num_links = len(joint_positions) - 1
-
-        for i in range(num_links):
-            for j in range(i + 2, num_links):  # Skip adjacent links (i+1)
-                # Get segment endpoints
-                p1 = np.array(joint_positions[i])
-                p2 = np.array(joint_positions[i + 1])
-                p3 = np.array(joint_positions[j])
-                p4 = np.array(joint_positions[j + 1])
-
-                # Compute distance between segments
-                dist = self.segment_distance(p1, p2, p3, p4)
-
-                # Minimum allowed distance is sum of link radii plus safety margin
-                min_dist = link_radii[i] + link_radii[j] + safety_margin
-
-                if dist < min_dist:
-                    if verbose:
-                        self.get_logger().warn(
-                            f"Self-collision detected: Link {i} and Link {j} "
-                            f"distance={dist*1000:.1f}mm < threshold={min_dist*1000:.1f}mm"
-                        )
-                    return True  # Collision detected
-
-        return False  # No collision
-
-    def check_trajectory_collision(self, start_joints, target_joints, num_samples=20, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS):
-        """
-        Check if any point along the interpolated trajectory has a collision.
-
-        Args:
-            start_joints: Starting joint configuration
-            target_joints: Target joint configuration
-            num_samples: Number of samples along the trajectory to check
-            z_threshold: Minimum allowed Z position (meters)
-
-        Returns:
-            True if collision detected along trajectory, False otherwise
-        """
-        for i in range(num_samples + 1):
-            alpha = i / num_samples
-            interpolated_joints = start_joints + alpha * (target_joints - start_joints)
-            if self.check_collision_with_table(interpolated_joints, z_threshold=z_threshold):
-                self.get_logger().warn(f"Trajectory table collision at alpha={alpha:.2f}")
-                return True
-            if self.check_self_collision(interpolated_joints):
-                self.get_logger().warn(f"Trajectory self-collision at alpha={alpha:.2f}")
-                return True
-        return False
-
     def read_current_ee_pose(self):
         """Read current end-effector pose and joint angles using ROS2 subscriber"""
         # Reset the flags
@@ -412,7 +202,7 @@ class MoveToClearArea(Node):
         # Determine target orientation based on mode
         if self.mode == 'hover':
             from scipy.spatial.transform import Rotation as Rot
-            from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+            from primitives.shared.ik import IKSolverConfig, IKSolver
 
             if self.current_joint_angles is None:
                 self.error_message = "Current joint angles not available for hover IK"
@@ -623,14 +413,14 @@ class MoveToClearArea(Node):
                     rclpy.shutdown()
                     return
 
-                from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+                from primitives.shared.ik import IKSolverConfig, IKSolver
 
                 q_guess = self.current_joint_angles.copy()
                 start_joints = self.current_joint_angles.copy()
 
                 def collision_checker(joint_angles):
-                    return (self.check_collision_with_table(joint_angles)
-                            or self.check_self_collision(joint_angles))
+                    return (check_collision_with_table(joint_angles)
+                            or check_self_collision(joint_angles))
 
                 joint_bounds_base = [
                     (-np.pi, np.pi),     # shoulder_pan
@@ -790,12 +580,12 @@ class MoveToClearArea(Node):
                         wrapping_variants = new_variants
 
                     for variant in wrapping_variants:
-                        if self.check_collision_with_table(variant):
+                        if check_collision_with_table(variant):
                             continue
-                        if self.check_self_collision(variant):
+                        if check_self_collision(variant):
                             continue
 
-                        if not self.check_trajectory_collision(start_joints, variant, num_samples=20):
+                        if not check_trajectory_collision(start_joints, variant, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, num_samples=20, logger=self.get_logger()):
                             travel_distance = np.sum(np.abs(variant - start_joints))
                             collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
 
@@ -815,11 +605,12 @@ class MoveToClearArea(Node):
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
                 # Single endpoint trajectory — let the UR controller handle smooth acceleration/deceleration
+                positions, velocities, t = single_point(target_joints, total_duration)[0]
                 trajectory_points = [JointTrajectoryPoint(
-                    positions=[float(x) for x in target_joints],
-                    velocities=[0.0] * 6,
-                    time_from_start=Duration(sec=int(total_duration),
-                                            nanosec=int((total_duration % 1) * 1e9))
+                    positions=positions,
+                    velocities=velocities,
+                    time_from_start=Duration(sec=int(t),
+                                            nanosec=int((t % 1) * 1e9))
                 )]
 
                 # Create and send trajectory

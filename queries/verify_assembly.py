@@ -28,7 +28,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -62,19 +62,15 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     # Search for all JSON files in the data directory
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
     
-    # Try exact match first, then with _scaled70 suffix
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-    
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-            
-            # Check if any component matches the base name
+
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -87,120 +83,7 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     return None
 
 
-class FoldSymmetry:
-    """
-    Proper fold symmetry handling (same as in reorient_for_assembly).
-    
-    The JSON stores symmetry rotations as quaternions.
-    These represent rotations IN THE OBJECT FRAME that result in identical appearance.
-    
-    For fork with 2-fold Y symmetry:
-    - Identity (0°): object as-is
-    - 180° around Y: object flipped, but looks the same
-    
-    To generate equivalent targets:
-    R_equivalent = R_target × R_symmetry  (object-frame rotation)
-    """
-    
-    @staticmethod
-    def load_symmetry_data(object_name, symmetry_dir):
-        """Load fold symmetry JSON"""
-        patterns = [
-            os.path.join(symmetry_dir, f"{object_name}_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name}*_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name.replace('_scaled70', '')}*_symmetry.json"),
-        ]
-
-        for pattern in patterns:
-            if '*' in pattern:
-                matches = glob.glob(pattern)
-                if matches:
-                    with open(matches[0], 'r') as f:
-                        return json.load(f)
-            elif os.path.exists(pattern):
-                with open(pattern, 'r') as f:
-                    return json.load(f)
-        return None
-    
-    @staticmethod
-    def get_symmetry_rotations_as_matrices(fold_data):
-        """
-        Generate all combinations of fold symmetry rotations.
-
-        For objects with multiple fold axes (e.g., X, Y, Z), generate all combinations
-        by applying rotations in sequence (R_combined = R_x @ R_y @ R_z).
-
-        Returns list of 3x3 rotation matrices representing all symmetry transformations.
-        Always includes identity.
-        """
-        if fold_data is None:
-            return [np.eye(3)]
-
-        # Extract rotations for each axis
-        axis_rotations = {}
-        for axis in ['x', 'y', 'z']:
-            if axis not in fold_data.get('fold_axes', {}):
-                axis_rotations[axis] = [np.eye(3)]
-                continue
-
-            axis_data = fold_data['fold_axes'][axis]
-            rotations = [np.eye(3)]  # Always include identity
-
-            for q_data in axis_data.get('quaternions', [])[1:]:  # Skip first (identity)
-                q = np.array([
-                    q_data['quaternion']['x'],
-                    q_data['quaternion']['y'],
-                    q_data['quaternion']['z'],
-                    q_data['quaternion']['w']
-                ])
-                q = q / np.linalg.norm(q)
-                R_sym = R.from_quat(q).as_matrix()
-                rotations.append(R_sym)
-
-            axis_rotations[axis] = rotations
-
-        # Generate all combinations: R_combined = R_x @ R_y @ R_z
-        combined_matrices = []
-        seen = set()
-
-        for R_x in axis_rotations.get('x', [np.eye(3)]):
-            for R_y in axis_rotations.get('y', [np.eye(3)]):
-                for R_z in axis_rotations.get('z', [np.eye(3)]):
-                    R_combined = R_x @ R_y @ R_z
-                    key = tuple(R_combined.flatten().round(6))
-                    if key not in seen:
-                        seen.add(key)
-                        combined_matrices.append(R_combined)
-
-        return combined_matrices
-    
-    @staticmethod
-    def generate_equivalent_target_orientations(R_target_world, fold_data):
-        """
-        Generate all symmetry-equivalent target orientations.
-
-        For an object with fold symmetry, multiple orientations are visually identical.
-        This generates all such equivalent orientations for the assembly target.
-
-        Math: R_equivalent = R_target × R_symmetry
-        (Apply symmetry rotation in object's local frame)
-
-        Args:
-            R_target_world: Target orientation as 3x3 rotation matrix (world frame)
-            fold_data: Fold symmetry data from JSON
-
-        Returns:
-            List of 3x3 rotation matrices (all equivalent target orientations)
-        """
-        symmetry_rotations = FoldSymmetry.get_symmetry_rotations_as_matrices(fold_data)
-        
-        equivalent_targets = []
-        for i, R_sym in enumerate(symmetry_rotations):
-            # Apply symmetry in object frame: R_equiv = R_target × R_sym
-            R_equivalent = R_target_world @ R_sym
-            equivalent_targets.append(R_equivalent)
-        
-        return equivalent_targets
+from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 
 
 class VerifyAssembly(Node):
@@ -329,7 +212,7 @@ class VerifyAssembly(Node):
     def get_object_target_position(self, object_name):
         """Get target position for object from assembly configuration (relative to base)"""
         for component in self.assembly_config.get('components', []):
-            if component.get('name') == object_name or component.get('name') == f"{object_name}_scaled70":
+            if component.get('name') == object_name:
                 position = component.get('position', {})
                 return np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
         return None
@@ -360,7 +243,7 @@ class VerifyAssembly(Node):
         """
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 rotation = component.get('rotation', {})
                 quat = rotation.get('quaternion', {})
                 # Default to identity if fields are missing
@@ -386,7 +269,7 @@ class VerifyAssembly(Node):
 
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 if component.get('subtype') == 'peg':
                     axis_str = component.get('axis')
                     return axis_map.get(axis_str)
@@ -442,20 +325,15 @@ class VerifyAssembly(Node):
         # Check if object exists
         original_object_name = object_name
         if object_name not in self.current_poses:
-            object_name = f"{object_name}_scaled70"
-            if object_name not in self.current_poses:
-                error_msg = f"{original_object_name} not found in JSON"
-                self.get_logger().error(f"Object {original_object_name} not found in poses")
-                return False, {"error": error_msg}
+            error_msg = f"{object_name} not found in JSON"
+            self.get_logger().error(f"Object {object_name} not found in poses")
+            return False, {"error": error_msg}
 
         # Check if base exists
-        original_base_name = base_name
         if base_name not in self.current_poses:
-            base_name = f"{base_name}_scaled70"
-            if base_name not in self.current_poses:
-                error_msg = f"{original_base_name} not found in JSON"
-                self.get_logger().error(f"Base {original_base_name} not found in poses")
-                return False, {"error": error_msg}
+            error_msg = f"{base_name} not found in JSON"
+            self.get_logger().error(f"Base {base_name} not found in poses")
+            return False, {"error": error_msg}
 
         # Convert poses to matrices
         T_object_current = self.transform_to_matrix(self.current_poses[object_name].transform)
@@ -511,12 +389,10 @@ class VerifyAssembly(Node):
             )
         else:
             # For regular parts: use full orientation check with fold symmetry
-            fold_data = FoldSymmetry.load_symmetry_data(original_object_name, self.symmetry_dir)
-            if fold_data is None:
-                fold_data = FoldSymmetry.load_symmetry_data(f"{original_object_name}_scaled70", self.symmetry_dir)
+            fold_data = load_symmetry_data(original_object_name, self.symmetry_dir)
 
             # Generate all equivalent target orientations using fold symmetry
-            equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
+            equivalent_targets = equivalent_orientations(
                 R_target_relative, fold_data
             )
 
@@ -585,40 +461,30 @@ class VerifyAssembly(Node):
         # Get all components from assembly config
         components = self.assembly_config.get('components', [])
         
-        # Normalize exclude_object_name (remove _scaled70 if present for comparison)
-        exclude_name_base = exclude_object_name.replace('_scaled70', '')
-        
         for component in components:
             comp_name = component.get('name', '')
-            comp_name_base = comp_name.replace('_scaled70', '')
-            
+
             # Skip the object being verified
-            if comp_name_base == exclude_name_base:
+            if comp_name == exclude_object_name:
                 continue
-            
+
             # Skip the board
             if component.get('type') == 'board':
                 continue
-            
+
             # Check if this component is assembled
-            # Try both with and without _scaled70 suffix
-            object_to_check = comp_name
-            if object_to_check not in self.current_poses:
-                object_to_check = comp_name_base
-                if object_to_check not in self.current_poses:
-                    # Object not found in poses, consider it unassembled
-                    unassembled.append(comp_name_base)
-                    continue
-            
+            if comp_name not in self.current_poses:
+                unassembled.append(comp_name)
+                continue
+
             # Verify if this object is assembled
             try:
-                is_assembled, _ = self.verify_assembly_pose(comp_name_base, base_name)
+                is_assembled, _ = self.verify_assembly_pose(comp_name, base_name)
                 if not is_assembled:
-                    unassembled.append(comp_name_base)
+                    unassembled.append(comp_name)
             except Exception as e:
-                # If verification fails, consider it unassembled
-                self.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
-                unassembled.append(comp_name_base)
+                self.get_logger().debug(f"Could not verify {comp_name}: {e}")
+                unassembled.append(comp_name)
         
         return unassembled
 
@@ -677,22 +543,20 @@ def main(args=None):
 
             for component in components:
                 comp_name = component.get('name', '')
-                comp_name_base = comp_name.replace('_scaled70', '')
-
                 # Skip the board
                 if component.get('type') == 'board':
                     continue
 
                 # Verify this component
                 try:
-                    is_assembled, _ = node.verify_assembly_pose(comp_name_base, args.base_name)
+                    is_assembled, _ = node.verify_assembly_pose(comp_name, args.base_name)
                     if is_assembled:
-                        assembled_objects.append(comp_name_base)
+                        assembled_objects.append(comp_name)
                     else:
-                        unassembled_objects.append(comp_name_base)
+                        unassembled_objects.append(comp_name)
                 except Exception as e:
-                    node.get_logger().debug(f"Could not verify {comp_name_base}: {e}")
-                    unassembled_objects.append(comp_name_base)
+                    node.get_logger().debug(f"Could not verify {comp_name}: {e}")
+                    unassembled_objects.append(comp_name)
 
             # Success if all objects are assembled
             success = len(unassembled_objects) == 0

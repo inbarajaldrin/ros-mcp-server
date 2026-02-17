@@ -32,9 +32,10 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 
 from primitives.rotate_object import ExtendedCardinalOrientations
-from primitives.utils.unified_ik import IKSolver, IKSolverConfig
-from primitives.utils.ik_solver import forward_kinematics, dh_params
-from primitives.utils.workspace_config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
+from primitives.shared.ik import IKSolver, IKSolverConfig, forward_kinematics, dh_params
+from primitives.shared.velocity_profiles import single_point
+from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
+from primitives.shared.collision import check_collision_with_table, check_self_collision, check_trajectory_collision
 
 
 class SnapToCardinal(Node):
@@ -98,86 +99,13 @@ class SnapToCardinal(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         return self.ee_pose_received and self.joint_angles_received
 
-    # --- Collision checks (from move_to_clear_area) ---
-
-    def compute_all_joint_positions(self, joint_angles):
-        dh_local = [
-            (0, 0.1625, 0, np.pi/2),
-            (0, 0, -0.425, 0),
-            (0, 0, -0.3922, 0),
-            (0, 0.1333, 0, np.pi/2),
-            (0, 0.0997, 0, -np.pi/2),
-            (0, 0.0996, 0, 0),
-        ]
-        def dh_transform(theta, d, a, alpha):
-            ct, st = np.cos(theta), np.sin(theta)
-            ca, sa = np.cos(alpha), np.sin(alpha)
-            return np.array([
-                [ct, -st*ca, st*sa, a*ct],
-                [st, ct*ca, -ct*sa, a*st],
-                [0, sa, ca, d],
-                [0, 0, 0, 1],
-            ])
-        positions = []
-        T = np.eye(4)
-        positions.append(T[:3, 3].copy())
-        for i, (theta, d, a, alpha) in enumerate(dh_local):
-            T = T @ dh_transform(joint_angles[i] + theta, d, a, alpha)
-            positions.append(T[:3, 3].copy())
-        return positions
+    # --- Collision checks ---
 
     def check_table_collision(self, joint_angles, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
-        z_threshold = TABLE_HEIGHT - margin
-        for pos in self.compute_all_joint_positions(joint_angles):
-            if pos[2] < z_threshold:
-                return True
-        return False
-
-    def segment_distance(self, p1, p2, p3, p4):
-        d1, d2, r = p2 - p1, p4 - p3, p1 - p3
-        a, e, f = np.dot(d1, d1), np.dot(d2, d2), np.dot(d2, r)
-        EPS = 1e-8
-        if a < EPS and e < EPS:
-            return np.linalg.norm(p1 - p3)
-        if a < EPS:
-            return np.linalg.norm(p1 - (p3 + np.clip(f/e, 0, 1)*d2))
-        c = np.dot(d1, r)
-        if e < EPS:
-            return np.linalg.norm((p1 + np.clip(-c/a, 0, 1)*d1) - p3)
-        b = np.dot(d1, d2)
-        denom = a*e - b*b
-        s = np.clip((b*f - c*e) / denom, 0, 1) if abs(denom) > EPS else 0.0
-        t = (b*s + f) / e
-        if t < 0:
-            t = 0.0; s = np.clip(-c/a, 0, 1)
-        elif t > 1:
-            t = 1.0; s = np.clip((b - c)/a, 0, 1)
-        return np.linalg.norm((p1 + s*d1) - (p3 + t*d2))
-
-    def check_self_collision(self, joint_angles):
-        radii = [0.075, 0.065, 0.055, 0.045, 0.045, 0.040]
-        margin = 0.01
-        positions = self.compute_all_joint_positions(joint_angles)
-        n = len(positions) - 1
-        for i in range(n):
-            for j in range(i + 2, n):
-                dist = self.segment_distance(
-                    positions[i], positions[i+1], positions[j], positions[j+1]
-                )
-                if dist < radii[i] + radii[j] + margin:
-                    return True
-        return False
-
-    def check_trajectory_collision(self, start, target, num_samples=20, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
-        for i in range(num_samples + 1):
-            alpha = i / num_samples
-            interp = start + alpha * (target - start)
-            if self.check_table_collision(interp, margin=margin) or self.check_self_collision(interp):
-                return True
-        return False
+        return check_collision_with_table(joint_angles, z_threshold=TABLE_HEIGHT - margin)
 
     def collision_checker(self, joint_angles, margin=TABLE_COLLISION_MARGIN_SIDEWAYS):
-        return self.check_table_collision(joint_angles, margin=margin) or self.check_self_collision(joint_angles)
+        return self.check_table_collision(joint_angles, margin=margin) or check_self_collision(joint_angles)
 
     # --- World-frame direction checks ---
 
@@ -258,7 +186,7 @@ class SnapToCardinal(Node):
             ik_cost = solver._best_result.cost
             camera_bad = self.check_camera_direction(solution)
             ee_bad = self.check_ee_facing_robot(solution)
-            traj_collision = self.check_trajectory_collision(seed_joints, solution, margin=margin)
+            traj_collision = check_trajectory_collision(seed_joints, solution, z_threshold=TABLE_HEIGHT - margin)
 
             if camera_bad:
                 status = 'REJECTED (tool Z toward -X world)'
@@ -328,13 +256,16 @@ class SnapToCardinal(Node):
         self.execute_trajectory(selected['joints'])
 
     def execute_trajectory(self, target_joints):
+        profile = single_point(target_joints, 5.0)
+        positions, velocities, t = profile[0]
+
         goal = FollowJointTrajectory.Goal()
         traj = JointTrajectory()
         traj.joint_names = self.joint_names
         traj.points = [JointTrajectoryPoint(
-            positions=[float(x) for x in target_joints],
-            velocities=[0.0] * 6,
-            time_from_start=Duration(sec=5),
+            positions=positions,
+            velocities=velocities,
+            time_from_start=Duration(sec=int(t)),
         )]
         goal.trajectory = traj
         goal.goal_time_tolerance = Duration(sec=1)

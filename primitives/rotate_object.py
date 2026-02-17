@@ -33,14 +33,15 @@ from builtin_interfaces.msg import Duration
 import json
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from scipy.optimize import minimize
 import argparse
 import time
 import glob
 
-from primitives.utils.ik_solver import ik_objective_quaternion, forward_kinematics, dh_params
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
-from primitives.utils.workspace_config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
+from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.shared.velocity_profiles import single_point
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
+from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
 
 
 def output_result(result):
@@ -55,7 +56,7 @@ ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
-# DEFAULT_BASE_ORIENTATION is imported from workspace_config
+# DEFAULT_BASE_ORIENTATION is imported from config
 
 
 def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
@@ -78,19 +79,16 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     # Search for all JSON files in the data directory
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
     
-    # Try exact match first, then with _scaled70 suffix
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-    
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-            
+
             # Check if any component matches the base name
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -260,127 +258,7 @@ class ExtendedCardinalOrientations:
             return (None, None, best_distance)
 
 
-class FoldSymmetry:
-    """
-    Proper fold symmetry handling.
-    
-    The JSON stores symmetry rotations as quaternions.
-    These represent rotations IN THE OBJECT FRAME that result in identical appearance.
-    
-    For fork with 2-fold Y symmetry:
-    - Identity (0°): object as-is
-    - 180° around Y: object flipped, but looks the same
-    
-    To generate equivalent targets:
-    R_equivalent = R_target × R_symmetry  (object-frame rotation)
-    """
-    
-    @staticmethod
-    def load_symmetry_data(object_name, symmetry_dir):
-        """Load fold symmetry JSON"""
-        patterns = [
-            os.path.join(symmetry_dir, f"{object_name}_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name}*_symmetry.json"),
-            os.path.join(symmetry_dir, f"{object_name.replace('_scaled70', '')}*_symmetry.json"),
-        ]
-        
-        for pattern in patterns:
-            if '*' in pattern:
-                matches = glob.glob(pattern)
-                if matches:
-                    with open(matches[0], 'r') as f:
-                        return json.load(f)
-            elif os.path.exists(pattern):
-                with open(pattern, 'r') as f:
-                    return json.load(f)
-        return None
-    
-    @staticmethod
-    def get_symmetry_rotations_as_matrices(fold_data):
-        """
-        Extract symmetry rotations as rotation matrices.
-
-        Returns list of 3x3 rotation matrices representing the FULL symmetry group,
-        which includes all compositions of individual axis rotations.
-        Always includes identity.
-        """
-        if fold_data is None:
-            return [np.eye(3)]
-
-        # Collect rotations from each axis
-        axis_rotations = {'x': [np.eye(3)], 'y': [np.eye(3)], 'z': [np.eye(3)]}
-
-        for axis in ['x', 'y', 'z']:
-            if axis not in fold_data.get('fold_axes', {}):
-                continue
-
-            axis_data = fold_data['fold_axes'][axis]
-            for q_data in axis_data.get('quaternions', []):
-                q = np.array([
-                    q_data['quaternion']['x'],
-                    q_data['quaternion']['y'],
-                    q_data['quaternion']['z'],
-                    q_data['quaternion']['w']
-                ])
-                q = q / np.linalg.norm(q)
-                R_sym = R.from_quat(q).as_matrix()
-
-                # Check if this rotation is already in the axis list
-                is_dup = False
-                for existing in axis_rotations[axis]:
-                    if np.allclose(R_sym, existing, atol=1e-6):
-                        is_dup = True
-                        break
-                if not is_dup:
-                    axis_rotations[axis].append(R_sym)
-
-        # Generate full symmetry group by composing all combinations
-        # Group = X × Y × Z (all products of rotations from each axis)
-        symmetry_matrices = []
-        seen = set()
-
-        for Rx in axis_rotations['x']:
-            for Ry in axis_rotations['y']:
-                for Rz in axis_rotations['z']:
-                    # Compose: R = Rx @ Ry @ Rz (order matters for non-commutative rotations)
-                    R_combined = Rx @ Ry @ Rz
-
-                    # Check for duplicates
-                    key = tuple(R_combined.flatten().round(5))
-                    if key not in seen:
-                        seen.add(key)
-                        symmetry_matrices.append(R_combined)
-
-        return symmetry_matrices
-    
-    @staticmethod
-    def generate_equivalent_target_orientations(R_target_world, fold_data, logger=None):
-        """
-        Generate all symmetry-equivalent target orientations.
-        
-        For an object with fold symmetry, multiple orientations are visually identical.
-        This generates all such equivalent orientations for the assembly target.
-        
-        Math: R_equivalent = R_target × R_symmetry
-        (Apply symmetry rotation in object's local frame)
-        
-        Args:
-            R_target_world: Target orientation as 3x3 rotation matrix (world frame)
-            fold_data: Fold symmetry data from JSON
-            logger: Optional logger for debug output
-            
-        Returns:
-            List of 3x3 rotation matrices (all equivalent target orientations)
-        """
-        symmetry_rotations = FoldSymmetry.get_symmetry_rotations_as_matrices(fold_data)
-        
-        equivalent_targets = []
-        for i, R_sym in enumerate(symmetry_rotations):
-            # Apply symmetry in object frame: R_equiv = R_target × R_sym
-            R_equivalent = R_target_world @ R_sym
-            equivalent_targets.append(R_equivalent)
-        
-        return equivalent_targets
+from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 
 
 class ReorientForAssembly(Node):
@@ -566,7 +444,7 @@ class ReorientForAssembly(Node):
         """
         for component in self.assembly_config.get('components', []):
             comp_name = component.get('name', '')
-            if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+            if comp_name == object_name:
                 rotation = component.get('rotation', {})
                 quat = rotation.get('quaternion', {})
                 # Default to identity if fields are missing
@@ -585,252 +463,6 @@ class ReorientForAssembly(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
             timeout += 1
         return self.current_joint_angles.copy() if self.joint_angles_received else None
-
-    def compute_all_joint_positions(self, joint_angles):
-        """
-        Compute the 3D positions of all joints given joint angles.
-        Returns a list of [x, y, z] positions for each joint.
-        """
-        # UR5e DH parameters (from ik_solver.py)
-        dh_params_local = [
-            (0,  0.1625,  0,     np.pi/2),
-            (0,  0,      -0.425,  0),
-            (0,  0,      -0.3922, 0),
-            (0,  0.1333,  0,     np.pi/2),
-            (0,  0.0997,  0,    -np.pi/2),
-            (0,  0.0996,  0,     0)
-        ]
-
-        def dh_transform(theta, d, a, alpha):
-            ct, st = np.cos(theta), np.sin(theta)
-            ca, sa = np.cos(alpha), np.sin(alpha)
-            return np.array([
-                [ct, -st * ca,  st * sa, a * ct],
-                [st,  ct * ca, -ct * sa, a * st],
-                [0,   sa,       ca,      d],
-                [0,   0,        0,       1]
-            ])
-
-        # Compute cumulative transformations and extract positions
-        joint_positions = []
-        T = np.eye(4)
-
-        # Add base position (always at origin)
-        joint_positions.append(T[:3, 3].copy())
-
-        # Compute position of each joint
-        for i, (theta, d, a, alpha) in enumerate(dh_params_local):
-            T_i = dh_transform(joint_angles[i] + theta, d, a, alpha)
-            T = np.dot(T, T_i)
-            joint_positions.append(T[:3, 3].copy())
-
-        return joint_positions
-
-    def check_collision_with_table(self, joint_angles, z_threshold=TABLE_HEIGHT, verbose=False):
-        """
-        Check if any part of the robot (all joints) goes below the table.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            z_threshold: Minimum allowed Z position (meters).
-            verbose: If True, log which joint caused collision
-
-        Returns:
-            True if collision detected (any joint below threshold), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        for i, pos in enumerate(joint_positions):
-            if pos[2] < z_threshold:
-                if verbose:
-                    self.get_logger().warn(
-                        f"Collision detected: Joint {i} at Z={pos[2]*1000:.1f}mm "
-                        f"(threshold: {z_threshold*1000:.1f}mm)"
-                    )
-                return True  # Collision detected
-
-        return False  # No collision
-
-    def segment_distance(self, p1, p2, p3, p4):
-        """
-        Compute minimum distance between two line segments (p1-p2) and (p3-p4).
-        Used for capsule-based collision detection between robot links.
-
-        Args:
-            p1, p2: Start and end points of first segment (numpy arrays)
-            p3, p4: Start and end points of second segment (numpy arrays)
-
-        Returns:
-            Minimum distance between the two segments
-        """
-        d1 = p2 - p1  # Direction of segment 1
-        d2 = p4 - p3  # Direction of segment 2
-        r = p1 - p3
-
-        a = np.dot(d1, d1)  # Squared length of segment 1
-        e = np.dot(d2, d2)  # Squared length of segment 2
-        f = np.dot(d2, r)
-
-        EPSILON = 1e-8
-
-        # Check if both segments are points
-        if a < EPSILON and e < EPSILON:
-            return np.linalg.norm(p1 - p3)
-
-        # First segment is a point
-        if a < EPSILON:
-            s = 0.0
-            t = np.clip(f / e, 0.0, 1.0)
-        else:
-            c = np.dot(d1, r)
-            # Second segment is a point
-            if e < EPSILON:
-                t = 0.0
-                s = np.clip(-c / a, 0.0, 1.0)
-            else:
-                # General case
-                b = np.dot(d1, d2)
-                denom = a * e - b * b
-
-                if abs(denom) > EPSILON:
-                    s = np.clip((b * f - c * e) / denom, 0.0, 1.0)
-                else:
-                    s = 0.0
-
-                t = (b * s + f) / e
-
-                if t < 0.0:
-                    t = 0.0
-                    s = np.clip(-c / a, 0.0, 1.0)
-                elif t > 1.0:
-                    t = 1.0
-                    s = np.clip((b - c) / a, 0.0, 1.0)
-
-        closest1 = p1 + s * d1
-        closest2 = p3 + t * d2
-
-        return np.linalg.norm(closest1 - closest2)
-
-    def check_self_collision(self, joint_angles, verbose=False):
-        """
-        Check if the robot configuration causes self-collision.
-        Models links as capsules and checks distances between non-adjacent links.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            verbose: If True, log collision details
-
-        Returns:
-            True if self-collision detected, False otherwise
-        """
-        # UR5e approximate link radii (meters) - conservative estimates
-        # These represent the "thickness" of each link for collision purposes
-        link_radii = [
-            0.075,  # Base (joint 0-1)
-            0.065,  # Shoulder to elbow (joint 1-2) - upper arm
-            0.055,  # Elbow to wrist1 (joint 2-3) - forearm
-            0.045,  # Wrist1 to wrist2 (joint 3-4)
-            0.045,  # Wrist2 to wrist3 (joint 4-5)
-            0.040,  # Wrist3 to EE (joint 5-6)
-        ]
-
-        # Safety margin for collision detection
-        safety_margin = 0.01  # 1cm extra margin
-
-        # Get all joint positions
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        # Check collisions between non-adjacent links
-        # Links are defined by consecutive joint positions
-        # Link i connects joint_positions[i] to joint_positions[i+1]
-        num_links = len(joint_positions) - 1
-
-        for i in range(num_links):
-            for j in range(i + 2, num_links):  # Skip adjacent links (i+1)
-                # Get segment endpoints
-                p1 = np.array(joint_positions[i])
-                p2 = np.array(joint_positions[i + 1])
-                p3 = np.array(joint_positions[j])
-                p4 = np.array(joint_positions[j + 1])
-
-                # Compute distance between segments
-                dist = self.segment_distance(p1, p2, p3, p4)
-
-                # Minimum allowed distance is sum of link radii plus safety margin
-                min_dist = link_radii[i] + link_radii[j] + safety_margin
-
-                if dist < min_dist:
-                    if verbose:
-                        self.get_logger().warn(
-                            f"Self-collision detected: Link {i} and Link {j} "
-                            f"distance={dist*1000:.1f}mm < threshold={min_dist*1000:.1f}mm"
-                        )
-                    return True  # Collision detected
-
-        return False  # No collision
-
-    def check_ee_below_base(self, joint_angles, z_threshold=0.1625, verbose=False):
-        """
-        Check if the end-effector goes below the robot base height.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            z_threshold: Minimum allowed EE Z position (meters).
-                        Default 0.1625 is the robot base height (first DH d parameter).
-            verbose: If True, log details
-
-        Returns:
-            True if EE is below threshold, False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-        # EE position is the last element
-        ee_pos = joint_positions[-1]
-
-        if ee_pos[2] < z_threshold:
-            if verbose:
-                self.get_logger().warn(
-                    f"EE below base: Z={ee_pos[2]*1000:.1f}mm < threshold={z_threshold*1000:.1f}mm"
-                )
-            return True  # EE too low
-
-        return False  # EE height OK
-
-    def check_compact_configuration(self, joint_angles, min_wrist_shoulder_xy=0.20, verbose=False):
-        """
-        Check if the robot configuration is too compact (wrist too close to shoulder).
-
-        This detects problematic configurations where the arm is folded back on itself,
-        causing the wrist to be physically close to the shoulder/base area even though
-        standard link-to-link collision checks pass.
-
-        Args:
-            joint_angles: Array of 6 joint angles
-            min_wrist_shoulder_xy: Minimum allowed XY distance (meters) between
-                                   wrist2 and shoulder. Default 0.20m (200mm).
-            verbose: If True, log details
-
-        Returns:
-            True if configuration is too compact (should be rejected), False otherwise
-        """
-        joint_positions = self.compute_all_joint_positions(joint_angles)
-
-        # Shoulder position is at index 1 (after first joint)
-        # Wrist2 position is at index 5
-        shoulder_pos = np.array(joint_positions[1])
-        wrist2_pos = np.array(joint_positions[5])
-
-        # Calculate XY (horizontal) distance between wrist and shoulder
-        xy_dist = np.linalg.norm(wrist2_pos[:2] - shoulder_pos[:2])
-
-        if xy_dist < min_wrist_shoulder_xy:
-            if verbose:
-                self.get_logger().warn(
-                    f"Compact configuration detected: wrist-shoulder XY distance="
-                    f"{xy_dist*1000:.1f}mm < threshold={min_wrist_shoulder_xy*1000:.1f}mm"
-                )
-            return True  # Too compact
-
-        return False  # Configuration OK
 
     def check_ee_facing_robot(self, R_EE, y_threshold=0.5):
         """
@@ -879,7 +511,7 @@ class ReorientForAssembly(Node):
             True if collision detected, False otherwise
         """
         # Get joint positions and EE pose from FK
-        joint_positions = self.compute_all_joint_positions(joint_angles)
+        joint_positions = compute_all_joint_positions(joint_angles)
         T_ee = forward_kinematics(dh_params, joint_angles)
         ee_pos = T_ee[:3, 3]
         R_ee = T_ee[:3, :3]
@@ -922,7 +554,7 @@ class ReorientForAssembly(Node):
         elbow_pos = np.array(joint_positions[2])
 
         # Distance from gripper segment (TCP to tip) to upper arm segment
-        gripper_to_upper_arm_dist = self.segment_distance(ee_pos, gripper_tip, shoulder_pos, elbow_pos)
+        gripper_to_upper_arm_dist = segment_distance(ee_pos, gripper_tip, shoulder_pos, elbow_pos)
         upper_arm_radius = 0.05  # 5cm radius for upper arm
 
         if gripper_to_upper_arm_dist < upper_arm_radius + min_safe_distance:
@@ -976,7 +608,7 @@ class ReorientForAssembly(Node):
         Higher values indicate more spread-out configurations.
         """
         link_radii = [0.075, 0.065, 0.055, 0.045, 0.045, 0.040]
-        joint_positions = self.compute_all_joint_positions(joint_angles)
+        joint_positions = compute_all_joint_positions(joint_angles)
         num_links = len(joint_positions) - 1
         min_clearance = float('inf')
         for i in range(num_links):
@@ -985,7 +617,7 @@ class ReorientForAssembly(Node):
                 p2 = np.array(joint_positions[i + 1])
                 p3 = np.array(joint_positions[j])
                 p4 = np.array(joint_positions[j + 1])
-                dist = self.segment_distance(p1, p2, p3, p4)
+                dist = segment_distance(p1, p2, p3, p4)
                 clearance = dist - (link_radii[i] + link_radii[j])
                 if clearance < min_clearance:
                     min_clearance = clearance
@@ -1002,7 +634,7 @@ class ReorientForAssembly(Node):
             return False
 
         # Compute FK once (previously computed 6-8 times across sub-checks)
-        joint_positions = self.compute_all_joint_positions(joint_angles)
+        joint_positions = compute_all_joint_positions(joint_angles)
         T_ee = forward_kinematics(dh_params, joint_angles)
 
         # Short-circuit: check cheapest tests first, return on first collision
@@ -1035,7 +667,7 @@ class ReorientForAssembly(Node):
             return True
 
         # 5. Self collision (expensive: O(n^2) segment distances)
-        if self.check_self_collision(joint_angles):
+        if check_self_collision(joint_angles):
             return True
 
         # 6. Extended gripper collision (moderate: segment distance)
@@ -1044,18 +676,8 @@ class ReorientForAssembly(Node):
 
         return False
 
-    def _try_ik_seed(self, seed, target_pose, joint_bounds):
-        """Try IK with a single seed. Returns (joint_angles, cost) or (None, inf)."""
-        result = minimize(ik_objective_quaternion, seed, args=(target_pose,),
-                          method='L-BFGS-B', bounds=joint_bounds)
-        if result.success or ik_objective_quaternion(result.x, target_pose) < 0.01:
-            cost = ik_objective_quaternion(result.x, target_pose)
-            if cost < 0.1 and not self._check_collision(result.x):
-                return result.x, cost
-        return None, float('inf')
-
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001, try_yaw_flip=True):
-        from primitives.utils.unified_ik import IKSolverConfig, IKSolver
+        from primitives.shared.ik import IKSolverConfig, IKSolver
 
         ReorientForAssembly._collision_log_count = 0  # Reset for each IK attempt
 
@@ -1314,9 +936,7 @@ class ReorientForAssembly(Node):
             R_base: If provided, used to transform cardinals to world frame for facing-robot check
         """
         # Generate all symmetry-equivalent target orientations
-        equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-            R_object_target_world, fold_data, self.get_logger()
-        )
+        equivalent_targets = equivalent_orientations(R_object_target_world, fold_data)
 
         self.get_logger().info(f"  -> Generated {len(equivalent_targets)} equivalent targets from fold symmetry")
         
@@ -1463,11 +1083,10 @@ class ReorientForAssembly(Node):
         Returns:
             (True, distance) if grasped, (False, distance) if not
         """
-        obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
-        if obj_key not in self.current_poses:
+        if object_name not in self.current_poses:
             return False, float('inf')
 
-        transform = self.current_poses[obj_key].transform
+        transform = self.current_poses[object_name].transform
         object_pos = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
 
         tcp_pos = np.array([self.current_ee_pose.pose.position.x,
@@ -1523,12 +1142,11 @@ class ReorientForAssembly(Node):
         if current_object_orientation is not None:
             R_object_current = self.get_rotation_from_quat(current_object_orientation)
         else:
-            obj_key = object_name if object_name in self.current_poses else f"{object_name}_scaled70"
-            if obj_key not in self.current_poses:
+            if object_name not in self.current_poses:
                 self.error_message = f"Object {object_name} not found"
                 self.get_logger().error(self.error_message)
                 return False
-            R_object_current = self.get_rotation_from_transform(self.current_poses[obj_key].transform)
+            R_object_current = self.get_rotation_from_transform(self.current_poses[object_name].transform)
 
         # Store initial object orientation for JSON output
         initial_quat = R.from_matrix(R_object_current).as_quat()
@@ -1539,26 +1157,21 @@ class ReorientForAssembly(Node):
         if target_base_orientation is not None:
             R_base = self.get_rotation_from_quat(target_base_orientation)
         else:
-            base_key = base_name if base_name in self.current_poses else f"{base_name}_scaled70"
-            if base_key not in self.current_poses:
+            if base_name not in self.current_poses:
                 self.error_message = f"Base {base_name} not found"
                 self.get_logger().error(self.error_message)
                 return False
-            R_base = self.get_rotation_from_transform(self.current_poses[base_key].transform)
+            R_base = self.get_rotation_from_transform(self.current_poses[base_name].transform)
 
         # === Get target orientation from JSON (relative to base, quaternion) ===
         target_quat = self.get_object_target_orientation(object_name)
-        if target_quat is None:
-            target_quat = self.get_object_target_orientation(f"{object_name}_scaled70")
         if target_quat is None:
             self.error_message = f"No target orientation for {object_name} in assembly config"
             self.get_logger().error(self.error_message)
             return False
         
         # === Load fold symmetry ===
-        fold_data = FoldSymmetry.load_symmetry_data(object_name, self.symmetry_dir)
-        if fold_data is None:
-            fold_data = FoldSymmetry.load_symmetry_data(f"{object_name}_scaled70", self.symmetry_dir)
+        fold_data = load_symmetry_data(object_name, self.symmetry_dir)
         
         # === Calculate grasp rotation ===
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
@@ -1688,9 +1301,7 @@ class ReorientForAssembly(Node):
             R_object_from_cardinal = R_EE_cardinal @ R_grasp
             
             # Find the closest equivalent target to the object orientation from cardinal EE
-            equivalent_targets = FoldSymmetry.generate_equivalent_target_orientations(
-                R_object_target_world, fold_data, None
-            )
+            equivalent_targets = equivalent_orientations(R_object_target_world, fold_data)
             cardinal_object_error = float('inf')
             best_cardinal_target_R = None
             for R_target_equiv in equivalent_targets:
@@ -1963,10 +1574,11 @@ class ReorientForAssembly(Node):
         best_quat = final_ee_quat  # Update for later use
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
+        positions, velocities, t = single_point(joint_angles, duration)[0]
         trajectory = {"traj1": [{
-            "positions": [float(x) for x in joint_angles],
-            "velocities": [0.0] * 6,
-            "time_from_start": Duration(sec=int(duration), nanosec=int((duration % 1) * 1e9))
+            "positions": positions,
+            "velocities": velocities,
+            "time_from_start": Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
         }]}
         
         success = self.execute_trajectory(trajectory)

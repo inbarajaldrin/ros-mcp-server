@@ -29,8 +29,8 @@ from tf2_msgs.msg import TFMessage
 from scipy.spatial.transform import Rotation as R
 import time
 
-from primitives.utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
-from primitives.utils.workspace_config import DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
+from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
+from primitives.shared.config import DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
 
 
 def output_result(result):
@@ -65,19 +65,15 @@ def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logge
     # Search for all JSON files in the data directory
     json_files = glob.glob(os.path.join(data_dir, "*.json"))
     
-    # Try exact match first, then with _scaled70 suffix
-    base_name_variants = [base_name, f"{base_name}_scaled70"]
-    
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 config = json.load(f)
-            
-            # Check if any component matches the base name
+
             components = config.get('components', [])
             for component in components:
                 comp_name = component.get('name', '')
-                if comp_name in base_name_variants:
+                if comp_name == base_name:
                     return json_file
         except (json.JSONDecodeError, IOError) as e:
             # Skip invalid JSON files
@@ -132,7 +128,7 @@ def get_object_target_position(assembly_config, object_name):
     """
     for component in assembly_config.get('components', []):
         comp_name = component.get('name', '')
-        if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+        if comp_name == object_name:
             position = component.get('position', {})
             return np.array([
                 position.get('x', 0.0),
@@ -156,7 +152,7 @@ def get_object_target_orientation(assembly_config, object_name):
     """
     for component in assembly_config.get('components', []):
         comp_name = component.get('name', '')
-        if comp_name == object_name or comp_name == f"{object_name}_scaled70":
+        if comp_name == object_name:
             rotation = component.get('rotation', {})
             quat = rotation.get('quaternion', {})
             # Default to identity if fields are missing
@@ -174,28 +170,19 @@ def load_grasp_points_data(object_name, grasp_data_dir=GRASP_DATA_DIR):
     Load grasp points data for a specific object from JSON file.
 
     Args:
-        object_name: Name of the object (will search with and without _scaled70 suffix)
+        object_name: Name of the object
         grasp_data_dir: Directory containing grasp points JSON files
 
     Returns:
         Dictionary with grasp points data, or None if not found
     """
-    # Try with _scaled70 suffix first, then without
-    object_name_variants = [
-        f"{object_name}_scaled70",
-        object_name,
-        object_name.replace('_scaled70', '')
-    ]
-
-    for variant in object_name_variants:
-        grasp_file = grasp_data_dir / f"{variant}_grasp_points.json"
-        if grasp_file.exists():
-            try:
-                with open(grasp_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"Error loading grasp points from {grasp_file}: {e}")
-                continue
+    grasp_file = grasp_data_dir / f"{object_name}_grasp_points.json"
+    if grasp_file.exists():
+        try:
+            with open(grasp_file, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading grasp points from {grasp_file}: {e}")
 
     return None
 
@@ -274,7 +261,7 @@ class BasePoseReader(Node):
         for transform in msg.transforms:
             frame_id = transform.child_frame_id
             self.current_poses[frame_id] = transform
-            if frame_id == self.base_name or frame_id == f"{self.base_name}_scaled70":
+            if frame_id == self.base_name:
                 self.pose_received = True
     
     def get_base_pose(self, timeout=5.0):
@@ -283,11 +270,10 @@ class BasePoseReader(Node):
         while rclpy.ok() and not self.pose_received and (time.time() - start_time) < timeout:
             rclpy.spin_once(self, timeout_sec=0.1)
         
-        base_key = self.base_name if self.base_name in self.current_poses else f"{self.base_name}_scaled70"
-        if base_key not in self.current_poses:
+        if self.base_name not in self.current_poses:
             return None, None
         
-        transform = self.current_poses[base_key].transform
+        transform = self.current_poses[self.base_name].transform
         position = np.array([
             transform.translation.x,
             transform.translation.y,

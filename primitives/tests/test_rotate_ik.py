@@ -5,8 +5,8 @@ Queries current/target object poses and joint angles, then simulates
 which IK seeds would win in rotate_object.
 
 Usage:
-    python3 tests/test_rotate_ik.py --object fork_orange --base base3
-    python3 tests/test_rotate_ik.py --object fork_yellow --base base3
+    python3 primitives/tests/test_rotate_ik.py --object fork_orange --base base3
+    python3 primitives/tests/test_rotate_ik.py --object fork_yellow --base base3
 """
 
 import argparse
@@ -24,7 +24,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from primitives.utils.ik_solver import dh_params, forward_kinematics
+from primitives.shared.ik import dh_params, forward_kinematics
 
 # Joint name order from /joint_states topic → standard order mapping
 JOINT_ORDER = [
