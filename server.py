@@ -6,8 +6,6 @@ from pathlib import Path
 import json
 import base64
 from utils.websocket_manager import WebSocketManager
-from msgs.geometry_msgs import Twist, PoseStamped
-from msgs.sensor_msgs import Image as RosImage, JointState
 import subprocess
 import sys
 import logging
