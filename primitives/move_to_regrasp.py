@@ -82,7 +82,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
+                    f"timeout 45 /usr/bin/python3 core/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
 
@@ -143,7 +143,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
+                    f"timeout 45 /usr/bin/python3 core/move_to_clear_area.py {move_mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
 
@@ -202,7 +202,7 @@ class MoveToRegrasp(Node):
             try:
                 cmd_parts = [
                     f"cd {script_dir}",
-                    f"timeout 300 /usr/bin/python3 legacy/move_down.py --mode {self.mode}"
+                    f"timeout 300 /usr/bin/python3 core/move_down.py --mode {self.mode}"
                 ]
                 cmd = "\n".join(cmd_parts)
 
@@ -259,7 +259,7 @@ class MoveToRegrasp(Node):
         try:
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 45 /usr/bin/python3 legacy/move_to_clear_area.py {move_mode}"
+                f"timeout 45 /usr/bin/python3 core/move_to_clear_area.py {move_mode}"
             ]
             cmd = "\n".join(cmd_parts)
             
@@ -316,7 +316,7 @@ class MoveToRegrasp(Node):
         try:
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 300 /usr/bin/python3 legacy/move_down.py --mode {self.mode}"
+                f"timeout 300 /usr/bin/python3 core/move_down.py --mode {self.mode}"
             ]
             cmd = "\n".join(cmd_parts)
             

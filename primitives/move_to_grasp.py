@@ -1959,7 +1959,7 @@ def main(args=None):
             
             cmd_parts = [
                 f"cd {script_dir}",
-                f"timeout 30 /usr/bin/python3 legacy/move_to_safe_height.py"
+                f"timeout 30 /usr/bin/python3 core/move_to_safe_height.py"
             ]
             cmd = "\n".join(cmd_parts)
             
