@@ -24,7 +24,7 @@ import json
 import yaml
 
 from primitives.shared.ik import compute_cartesian_waypoints_ik
-from primitives.shared.velocity_profiles import trapezoidal_profile
+from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 
 class MoveToSafeHeight(Node):
     def __init__(self, height=None):
@@ -213,7 +213,6 @@ class MoveToSafeHeight(Node):
                 return
 
             num_waypoints = 60
-            total_duration = 5.0
 
             # Use fast Jacobian-based IK for dense waypoints
             self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
@@ -228,8 +227,14 @@ class MoveToSafeHeight(Node):
 
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
-            # Trapezoidal velocity profile
-            profile = trapezoidal_profile(all_joint_angles, total_duration)
+            cart_dist = abs(self.safe_height - current_pos[2])
+            joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(
+                joint_distance=joint_dist, cartesian_distance=cart_dist, profile='s_curve'
+            )
+            self.get_logger().info(f"Duration: {total_duration:.2f}s (cart={cart_dist:.3f}m, joint={joint_dist:.2f}rad)")
+
+            profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
@@ -239,7 +244,7 @@ class MoveToSafeHeight(Node):
                 )
                 traj_points.append(point)
 
-            self.get_logger().info(f"Generated {len(traj_points)} Cartesian waypoints with trapezoidal velocity profile")
+            self.get_logger().info(f"Generated {len(traj_points)} Cartesian waypoints with s-curve velocity profile")
 
             # Create and send trajectory
             goal = FollowJointTrajectory.Goal()

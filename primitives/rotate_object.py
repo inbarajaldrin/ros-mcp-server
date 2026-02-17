@@ -38,7 +38,7 @@ import time
 import glob
 
 from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
@@ -1100,7 +1100,7 @@ class ReorientForAssembly(Node):
         distance = np.linalg.norm(object_pos - gripper_center)
         return distance <= radius, distance
 
-    def reorient_for_target(self, object_name, base_name, duration=5.0,
+    def reorient_for_target(self, object_name, base_name,
                             current_object_orientation=None, target_base_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
 
@@ -1574,6 +1574,9 @@ class ReorientForAssembly(Node):
         best_quat = final_ee_quat  # Update for later use
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
+        joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
+        duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
         positions, velocities, t = single_point(joint_angles, duration)[0]
         trajectory = {"traj1": [{
             "positions": positions,
@@ -1863,9 +1866,6 @@ def main(args=None):
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
 
-        # Default duration is 5.0 seconds
-        duration = 5.0
-
         # Use default base orientation if flag is set
         target_base_orientation = args.target_base_orientation
         if args.use_default_base_orientation:
@@ -1873,7 +1873,7 @@ def main(args=None):
             node.get_logger().info(f"Using default base orientation: {target_base_orientation}")
 
         success = node.reorient_for_target(
-            args.object_name, args.base_name, duration,
+            args.object_name, args.base_name,
             args.current_object_orientation, target_base_orientation
         )
 

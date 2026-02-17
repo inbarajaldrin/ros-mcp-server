@@ -28,12 +28,13 @@ from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from sensor_msgs.msg import JointState
 from builtin_interfaces.msg import Duration
 import numpy as np
 import argparse
 import time
 from primitives.shared.ik import IKSolver, IKSolverConfig, rpy_to_matrix
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 
 # Configuration
 OBJECT_TOPIC_REAL = "/objects_poses_real"
@@ -130,6 +131,10 @@ class ScanWorkspace(Node):
         self.should_exit = False  # Flag to signal main loop to exit
         self.error_message = None  # Track error for JSON output
         
+        # Joint state tracking
+        self.current_joint_angles = None
+        self.joint_angles_received = False
+
         # Action client for trajectory execution
         self.action_client = ActionClient(self, FollowJointTrajectory, ACTION_SERVER)
         
@@ -146,6 +151,11 @@ class ScanWorkspace(Node):
             ee_qos
         )
         
+        # Subscribe to joint states for duration computation
+        self.joint_sub = self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback, 10
+        )
+
         # Subscribe to object poses (real mode only)
         self.object_sub = self.create_subscription(
             TFMessage,
@@ -164,6 +174,19 @@ class ScanWorkspace(Node):
         # Start with first waypoint
         self.trajectory_completed = True  # Allow first movement to start
     
+    def joint_state_callback(self, msg):
+        """Callback for joint state data"""
+        if len(msg.name) >= 6 and len(msg.position) >= 6:
+            joint_dict = dict(zip(msg.name, msg.position))
+            positions = []
+            for name in JOINT_NAMES:
+                if name in joint_dict:
+                    positions.append(joint_dict[name])
+                else:
+                    return
+            self.current_joint_angles = np.array(positions)
+            self.joint_angles_received = True
+
     def ee_pose_callback(self, msg):
         """Callback for current end-effector pose"""
         if not self.ee_pose_received:
@@ -225,9 +248,16 @@ class ScanWorkspace(Node):
         if joint_angles is None:
             self.get_logger().warn(f"IK failed for position {position}, skipping waypoint")
             return False
-        
+
+        # Compute duration dynamically based on joint distance
+        duration = MOVEMENT_DURATION  # fallback
+        if self.current_joint_angles is not None:
+            joint_dist = float(np.max(np.abs(np.array(joint_angles) - self.current_joint_angles)))
+            duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
+
         # Create trajectory point via single_point profile
-        profile = single_point(joint_angles, MOVEMENT_DURATION)
+        profile = single_point(joint_angles, duration)
         positions, velocities, t = profile[0]
 
         # Create trajectory message

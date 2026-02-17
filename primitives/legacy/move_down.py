@@ -34,7 +34,7 @@ import subprocess
 
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN, GRIPPER_CENTER_TOOL_OFFSET
 from primitives.shared.ik import compute_cartesian_waypoints_ik
-from primitives.shared.velocity_profiles import trapezoidal_profile
+from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision
 
 # =============================================================================
@@ -56,7 +56,6 @@ SIM_Z_FORCE_THRESHOLD = 10.0  # Z force threshold (positive = contact pushback i
 FORCE_THRESHOLD = 20.0  # Stop when force/torque changes by this amount from baseline (Newtons)
 Z_FORCE_THRESHOLD = -5.0  # Z force threshold in N (negative = upward force/resistance)
 
-MOVEMENT_DURATION = 5.0  # Duration for smooth movement in seconds
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
 MOVE_DOWN_INCREMENT = 0.6  # Distance to move down per increment in meters
 MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
@@ -654,7 +653,6 @@ class MoveDown(Node):
                 return
 
             num_waypoints = 60
-            total_duration = MOVEMENT_DURATION
 
             self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
             waypoints = compute_cartesian_waypoints_ik(
@@ -669,8 +667,13 @@ class MoveDown(Node):
 
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
-            # Trapezoidal velocity profile
-            profile = trapezoidal_profile(all_joint_angles, total_duration)
+            joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(
+                joint_distance=joint_dist, cartesian_distance=distance_to_target, profile='s_curve'
+            )
+            self.get_logger().info(f"Duration: {total_duration:.2f}s (cart={distance_to_target:.3f}m, joint={joint_dist:.2f}rad)")
+
+            profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
@@ -680,7 +683,7 @@ class MoveDown(Node):
                 )
                 traj_points.append(point)
 
-            self.get_logger().info(f"Generated {len(traj_points)} dense waypoints with trapezoidal velocity profile")
+            self.get_logger().info(f"Generated {len(traj_points)} dense waypoints with s-curve velocity profile")
 
             traj = JointTrajectory()
             traj.joint_names = self.joint_names

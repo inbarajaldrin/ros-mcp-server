@@ -38,7 +38,7 @@ import time
 import glob
 
 from primitives.shared.ik import forward_kinematics, dh_params, compute_cartesian_waypoints_ik
-from primitives.shared.velocity_profiles import trapezoidal_profile
+from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 from primitives.rotate_object import ExtendedCardinalOrientations
@@ -444,7 +444,7 @@ class TranslateForAssembly(Node):
         self.get_logger().error("IK failed: couldn't find solution for translate")
         return None
     
-    def translate_for_target_sim(self, object_name, base_name, duration=20.0):
+    def translate_for_target_sim(self, object_name, base_name):
         """
         Sim mode: Calculate and execute EE translation to hover position (step 1 only).
         Uses topics to get base and object poses.
@@ -559,39 +559,39 @@ class TranslateForAssembly(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Cartesian-interpolated waypoints with trapezoidal velocity profile
-        total_duration = 5.0
-        # Use FK flange position (not TCP from topic) so start and target are in the same frame
-        T_fk_start = forward_kinematics(dh_params, self.current_joint_angles)
-        start_pos = T_fk_start[:3, 3]
-        target_pos = hover_position
+        # Jacobian-based differential IK (same approach as real mode)
+        num_waypoints = 60
 
-        dist = np.linalg.norm(target_pos - start_pos)
-        num_waypoints = max(2, int(dist / 0.02))  # one waypoint every 20mm
+        self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
+        waypoints = compute_cartesian_waypoints_ik(
+            self.current_joint_angles,
+            target_z=hover_position[2],
+            num_waypoints=num_waypoints,
+            target_pos=hover_position.tolist(),
+        )
+        if waypoints is None:
+            self.error_message = "IK failed for Cartesian waypoints"
+            self.get_logger().error(self.error_message)
+            return False
 
-        all_joint_angles = [self.current_joint_angles.copy()]
-
-        for i in range(1, num_waypoints + 1):
-            alpha = i / num_waypoints
-            waypoint_pos = start_pos + alpha * (target_pos - start_pos)
-
-            waypoint_joint_angles = self.compute_ik_with_current_seed(
-                waypoint_pos.tolist(),
-                ee_target_quat.tolist(),
-                max_tries=5,
-                dx=0.001
-            )
-
-            if waypoint_joint_angles is None:
-                self.error_message = f"IK failed at waypoint {i}/{num_waypoints}"
+        # Post-hoc collision check on all waypoints
+        for i, wp_joints in enumerate(waypoints):
+            if (check_collision_with_table(wp_joints)
+                    or check_self_collision(wp_joints)
+                    or check_ee_below_base(wp_joints)
+                    or check_compact_configuration(wp_joints)):
+                self.error_message = f"Collision detected at waypoint {i+1}/{num_waypoints}"
                 self.get_logger().error(self.error_message)
                 return False
 
-            self.current_joint_angles = waypoint_joint_angles.copy()
-            all_joint_angles.append(np.array([float(x) for x in waypoint_joint_angles]))
+        all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
+
+        joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+        total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
 
         # Trapezoidal velocity profile
-        profile = trapezoidal_profile(all_joint_angles, total_duration)
+        profile = s_curve_profile(all_joint_angles, total_duration)
         trajectory_points = []
         for positions, velocities, t_i in profile:
             trajectory_points.append({
@@ -600,7 +600,7 @@ class TranslateForAssembly(Node):
                 "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
             })
 
-        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with trapezoidal velocity profile")
+        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with s-curve velocity profile")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
@@ -608,7 +608,7 @@ class TranslateForAssembly(Node):
 
         return success
 
-    def translate_for_target_real(self, object_name, base_name, duration=20.0,
+    def translate_for_target_real(self, object_name, base_name,
                             final_base_pos=None, final_base_orientation=None,
                             use_default_base=False, grasp_id=None,
                             object_orientation=None):
@@ -619,7 +619,6 @@ class TranslateForAssembly(Node):
         Args:
             object_name: Name of the object being held
             base_name: Name of the base object (e.g., 'base')
-            duration: Duration for trajectory execution
             final_base_pos: [x, y, z] final base position (required unless use_default_base)
             final_base_orientation: [x, y, z, w] final base orientation quaternion (required unless use_default_base)
             use_default_base: Use default base position/orientation if True
@@ -796,7 +795,6 @@ class TranslateForAssembly(Node):
         self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
 
         # Use Jacobian-based differential IK (same as move_to_safe_height)
-        total_duration = 5.0
         num_waypoints = 60
 
         self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
@@ -813,8 +811,12 @@ class TranslateForAssembly(Node):
 
         all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
+        joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+        total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+
         # Trapezoidal velocity profile
-        profile = trapezoidal_profile(all_joint_angles, total_duration)
+        profile = s_curve_profile(all_joint_angles, total_duration)
         trajectory_points = []
         for positions, velocities, t_i in profile:
             trajectory_points.append({
@@ -823,7 +825,7 @@ class TranslateForAssembly(Node):
                 "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
             })
 
-        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with trapezoidal velocity profile")
+        self.get_logger().info(f"Generated {len(trajectory_points)} Cartesian waypoints with s-curve velocity profile")
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
@@ -1021,21 +1023,16 @@ def main(args=None):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 time.sleep(0.1)
 
-        # Default duration
-        duration = 5.0
-
         # Execute translation (step 1 only: hover position)
         if args.mode == 'sim':
             success = node.translate_for_target_sim(
                 args.object_name,
                 args.base_name,
-                duration=duration
             )
         else:  # real mode
             success = node.translate_for_target_real(
                 args.object_name,
                 args.base_name,
-                duration=duration,
                 final_base_pos=args.final_base_pos,
                 final_base_orientation=args.final_base_orientation,
                 use_default_base=args.use_default_base,

@@ -33,7 +33,7 @@ from sensor_msgs.msg import JointState
 
 from primitives.rotate_object import ExtendedCardinalOrientations
 from primitives.shared.ik import IKSolver, IKSolverConfig, forward_kinematics, dh_params
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
 from primitives.shared.collision import check_collision_with_table, check_self_collision, check_trajectory_collision
 
@@ -256,7 +256,10 @@ class SnapToCardinal(Node):
         self.execute_trajectory(selected['joints'])
 
     def execute_trajectory(self, target_joints):
-        profile = single_point(target_joints, 5.0)
+        joint_dist = float(np.max(np.abs(np.array(target_joints) - np.array(self.current_joint_angles))))
+        duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
+        profile = single_point(target_joints, duration)
         positions, velocities, t = profile[0]
 
         goal = FollowJointTrajectory.Goal()

@@ -22,7 +22,7 @@ import numpy as np
 from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
 
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
 
@@ -554,7 +554,6 @@ class MoveToClearArea(Node):
                 # Try each candidate solution with different joint wrapping options
                 # Collect ALL collision-free trajectories, then pick shortest path
                 num_waypoints = 10
-                total_duration = 5.0
                 collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
 
                 for cost, candidate_joints, yaw in candidate_solutions:
@@ -603,6 +602,10 @@ class MoveToClearArea(Node):
                 shortest_travel, target_joints, best_cost, best_yaw = collision_free_trajectories[0]
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
+
+                joint_dist = float(np.max(np.abs(target_joints - start_joints)))
+                total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+                self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
 
                 # Single endpoint trajectory — let the UR controller handle smooth acceleration/deceleration
                 positions, velocities, t = single_point(target_joints, total_duration)[0]

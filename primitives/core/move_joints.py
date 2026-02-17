@@ -45,7 +45,7 @@ import numpy as np
 import argparse
 import math
 import json
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 
 JOINT_NAMES = [
     "shoulder_pan_joint",   # 0
@@ -179,6 +179,12 @@ class MoveJoints(Node):
             f"Current (deg): {[f'{math.degrees(x):.2f}' for x in start_joints]}")
         self.get_logger().info(
             f"Target  (deg): {[f'{math.degrees(x):.2f}' for x in target_joints]}")
+
+        # Compute duration dynamically unless user explicitly set it via CLI
+        if self.duration == DEFAULT_DURATION:
+            joint_dist = float(np.max(np.abs(target_joints - start_joints)))
+            self.duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Duration: {self.duration:.2f}s (joint={joint_dist:.2f}rad)")
 
         # Single target point — the UR controller handles smooth interpolation
         profile = single_point(target_joints, self.duration)

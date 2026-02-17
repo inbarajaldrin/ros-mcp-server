@@ -18,10 +18,11 @@ from controller_manager_msgs.srv import ListControllers
 from rclpy.action import ActionClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
+from sensor_msgs.msg import JointState
 from threading import Timer
 
 from primitives.shared.ik import IKSolver, IKSolverConfig, rpy_to_matrix
-from primitives.shared.velocity_profiles import single_point
+from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
 
 ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
@@ -65,7 +66,7 @@ class PerformIKRunner(Node):
         # Resolve position to EE frame
         self.target_position = resolve_ee_position(target_position, target_rpy, reference_frame)
         self.target_rpy = target_rpy
-        self.duration = duration
+        self.duration = duration if duration is not None else 5.0  # fallback if auto-compute fails
         self.client = ActionClient(self, FollowJointTrajectory, ACTION_SERVER)
         self.shutdown_called = False
         self.retry_count = 0
@@ -75,13 +76,40 @@ class PerformIKRunner(Node):
         self.trajectory_completed = False
         self.success = False
         self.error = None
+        self.current_joint_angles = None
+        self.joint_angles_received = False
+        self._user_duration = duration  # None means auto-compute
+
+        self.joint_sub = self.create_subscription(
+            JointState, '/joint_states', self._joint_state_callback, 10
+        )
 
         if self.client.wait_for_server(timeout_sec=10.0):
+            self._read_joint_angles()
             self.send_trajectory()
         else:
             self.error = "UR robot driver isn't running"
             self.get_logger().error("Action server not available. Exiting.")
             self.shutdown()
+
+    def _joint_state_callback(self, msg):
+        if len(msg.name) >= 6 and len(msg.position) >= 6:
+            joint_dict = dict(zip(msg.name, msg.position))
+            positions = []
+            for name in JOINT_NAMES:
+                if name in joint_dict:
+                    positions.append(joint_dict[name])
+                else:
+                    return
+            self.current_joint_angles = np.array(positions)
+            self.joint_angles_received = True
+
+    def _read_joint_angles(self):
+        self.joint_angles_received = False
+        timeout = 0
+        while rclpy.ok() and not self.joint_angles_received and timeout < 100:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            timeout += 1
 
     def shutdown(self):
         if not self.shutdown_called:
@@ -103,6 +131,12 @@ class PerformIKRunner(Node):
             self.get_logger().error(self.error)
             self.shutdown()
             return
+
+        # Compute duration dynamically if not explicitly set by caller
+        if self.current_joint_angles is not None and self._user_duration is None:
+            joint_dist = float(np.max(np.abs(np.array(joint_angles) - self.current_joint_angles)))
+            self.duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Duration: {self.duration:.2f}s (joint={joint_dist:.2f}rad)")
 
         profile = single_point(joint_angles, self.duration)
         positions, velocities, t = profile[0]
@@ -223,7 +257,7 @@ class PerformIKRunner(Node):
         self.shutdown()
 
 
-def run_ik(target_position, target_rpy, duration=5.0, reference_frame='ee'):
+def run_ik(target_position, target_rpy, duration=None, reference_frame='ee'):
     """Run IK and execute trajectory. Returns (success, error)."""
     rclpy.init(args=None)
     node = PerformIKRunner(target_position, target_rpy, duration, reference_frame)
@@ -232,7 +266,7 @@ def run_ik(target_position, target_rpy, duration=5.0, reference_frame='ee'):
 
     try:
         if not node.shutdown_called:
-            timeout = duration + 10
+            timeout = (duration if duration is not None else node.duration) + 10
             start_time = time.time()
             while (rclpy.ok() and not node.trajectory_completed
                    and (time.time() - start_time) < timeout):
@@ -271,8 +305,8 @@ def main(args=None):
     parser.add_argument('--target-rpy', type=float, nargs=3, required=True,
                         metavar=('ROLL', 'PITCH', 'YAW'),
                         help='Target orientation [roll, pitch, yaw] in degrees')
-    parser.add_argument('--duration', type=float, default=5.0,
-                        help='Time to complete the movement in seconds (default: 5.0)')
+    parser.add_argument('--duration', type=float, default=None,
+                        help='Time to complete the movement in seconds (default: auto-computed)')
     parser.add_argument('--reference-frame', choices=['ee', 'gripper_center'], default='ee',
                         help='Reference frame for target position (default: ee)')
 

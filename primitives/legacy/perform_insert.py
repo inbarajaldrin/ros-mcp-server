@@ -42,7 +42,7 @@ import numpy as np
 import time
 import argparse
 from primitives.shared.ik import compute_cartesian_waypoints_ik
-from primitives.shared.velocity_profiles import trapezoidal_profile
+from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 from tf2_msgs.msg import TFMessage
 import json
 import os
@@ -573,7 +573,6 @@ class PerformInsertController(Node):
 
         # Compute IK waypoints using Jacobian-based differential IK
         num_waypoints = 60
-        total_duration = 5.0
 
         self.get_logger().info("Computing Cartesian IK waypoints...")
         ik_waypoints = compute_cartesian_waypoints_ik(
@@ -592,8 +591,12 @@ class PerformInsertController(Node):
         start_joints = np.array([float(x) for x in self.joints])
         all_joint_angles = [start_joints] + [np.array([float(x) for x in w]) for w in ik_waypoints]
 
+        joint_dist = float(np.max(np.abs(np.array(ik_waypoints[-1]) - start_joints)))
+        total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+
         # Trapezoidal velocity profile (arc-length parameterized)
-        profile = trapezoidal_profile(all_joint_angles, total_duration)
+        profile = s_curve_profile(all_joint_angles, total_duration)
         trajectory_points = []
         for positions, velocities, t_i in profile:
             point = {
@@ -605,7 +608,7 @@ class PerformInsertController(Node):
 
         self.get_logger().info(
             f"Trajectory created with {len(trajectory_points)} waypoints "
-            f"({total_duration:.1f}s, trapezoidal velocity profile)"
+            f"({total_duration:.1f}s, s-curve velocity profile)"
         )
 
         success = self.execute_trajectory_sim({"traj1": trajectory_points})

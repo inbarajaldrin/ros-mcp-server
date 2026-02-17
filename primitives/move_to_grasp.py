@@ -36,7 +36,7 @@ import json
 from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.ik import dh_params, forward_kinematics
-from primitives.shared.velocity_profiles import trapezoidal_profile, single_point
+from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
@@ -138,7 +138,7 @@ def output_result(result):
 
 
 class DirectObjectMove(Node):
-    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, movement_duration=5.0, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
+    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
         super().__init__('direct_object_move')
 
         # Mode must be explicitly specified - no default
@@ -173,7 +173,6 @@ class DirectObjectMove(Node):
         
         self.object_name = object_name
         self.height = height  # None means use offset, otherwise use exact height
-        self.movement_duration = movement_duration  # Duration for IK movement
         self.target_xyz = target_xyz  # Optional target position [x, y, z]
         self.target_xyzw = target_xyzw  # Optional target orientation [x, y, z, w]
         self.grasp_id = grasp_id  # Specific grasp point ID to use
@@ -375,7 +374,7 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"Using {mode_str} mode: Moving to object '{object_name}' (grasp_id: {grasp_id})")
         else:
             self.get_logger().info(f"Using {mode_str} mode: Moving to object '{object_name}'")
-        self.get_logger().info(f"Movement duration: {movement_duration}s")
+        self.get_logger().info(f"Duration: auto-computed per step")
         
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees"""
@@ -1212,8 +1211,7 @@ class DirectObjectMove(Node):
         yaw_degrees = ((yaw_degrees + 180) % 360) - 180
         target_rot = [0, 180, yaw_degrees]
 
-        # Use specified movement duration (same for both modes)
-        movement_duration = self.movement_duration
+        # Duration will be computed dynamically based on joint distance
 
         # Solve IK for both yaw and yaw+180 (gripper is symmetric),
         # then pick the solution requiring least joint movement.
@@ -1247,9 +1245,7 @@ class DirectObjectMove(Node):
             flange_target = current_flange_fk + gc_error
 
             num_waypoints = 60
-            step2_duration = max(movement_duration, 5.0)  # At least 5s for smooth descent
             step_label = "step 3" if step3_mode else "step 2"
-            self.get_logger().info(f"Computing {num_waypoints} Cartesian waypoints for {step_label} ({step2_duration:.1f}s)...")
 
             waypoints = compute_cartesian_waypoints_ik(
                 self.current_joint_angles, target_z=flange_target[2],
@@ -1265,11 +1261,13 @@ class DirectObjectMove(Node):
                 self.execute_trajectory({"traj1": []})
                 return
 
-            # Build trajectory with trapezoidal velocity profile
+            # Build trajectory with s-curve velocity profile
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
-            total_duration = step2_duration
+            joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"{step_label} duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
 
-            profile = trapezoidal_profile(all_joint_angles, total_duration)
+            profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
@@ -1279,7 +1277,7 @@ class DirectObjectMove(Node):
                 )
                 traj_points.append(point)
 
-            self.get_logger().info(f"Generated {len(traj_points)} Cartesian waypoints with trapezoidal velocity profile")
+            self.get_logger().info(f"Generated {len(traj_points)} Cartesian waypoints with s-curve velocity profile")
 
             # Send trajectory directly (bypass execute_trajectory dict format)
             traj_msg = JointTrajectory()
@@ -1333,6 +1331,9 @@ class DirectObjectMove(Node):
                 joint_angles = sol_a if sol_a is not None else sol_b
 
         if joint_angles is not None:
+            joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
+            movement_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Step 1 duration: {movement_duration:.2f}s (joint={joint_dist:.2f}rad)")
             positions, velocities, t = single_point(joint_angles, movement_duration)[0]
             trajectory = {"traj1": [{"positions": positions, "velocities": velocities, "duration": t}]}
         else:
@@ -1436,7 +1437,7 @@ class DirectObjectMove(Node):
 
         Uses the EE's current orientation (from FK) to get the local +Y direction
         projected onto the world XY plane, then moves 0.05m in that direction.
-        Uses trapezoidal velocity profile for smooth motion (same as step 2).
+        Uses s-curve velocity profile for smooth motion (same as step 2).
         """
         if self.current_ee_pose is None or self.current_joint_angles is None:
             self.get_logger().warn("Cannot perform retreat: current EE pose or joint angles not available")
@@ -1488,7 +1489,6 @@ class DirectObjectMove(Node):
         try:
 
             num_waypoints = 30
-            total_duration = 3.0
             waypoints = compute_cartesian_waypoints_ik(
                 self.current_joint_angles, target_z=target_flange[2],
                 num_waypoints=num_waypoints, target_pos=target_flange,
@@ -1500,10 +1500,14 @@ class DirectObjectMove(Node):
                 self.trajectory_in_progress = False
                 return
 
-            # Build trajectory with trapezoidal velocity profile (same as step 2)
+            # Build trajectory with s-curve velocity profile (same as step 2)
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
-            profile = trapezoidal_profile(all_joint_angles, total_duration)
+            joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Retreat duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+
+            profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:
                 point = JointTrajectoryPoint(
@@ -1861,6 +1865,14 @@ class DirectObjectMove(Node):
             # Check if step 2 completed
             if self.step1_completed and not self.step2_completed:
                 self.step2_completed = True
+                if self.mode == 'sim':
+                    # Sim mode: skip step 3 (ground truth poses, no refinement needed)
+                    self.get_logger().info("Step 2 completed. Skipping step 3 (sim mode)")
+                    self._print_final_object_pose()
+                    self.movement_completed = True
+                    self.should_exit = True
+                    self.get_logger().info("Movement completed successfully")
+                    return
                 self.get_logger().info("Step 2 completed. Attempting Step 3: final fine positioning")
                 # Don't exit yet - let timer callback attempt step 3
                 return
@@ -1905,8 +1917,6 @@ def main(args=None):
                        help='Name of the object to move to (e.g., blue_dot_0, red_dot_0)')
     parser.add_argument('--height', type=float, default=None,
                        help='Exact gripper center height in meters (if not specified, uses grasp point Z minus offset)')
-    parser.add_argument('--movement-duration', type=float, default=5.0,
-                       help='Duration for the movement in seconds (default: 3.0)')
     parser.add_argument('--target-xyz', type=float, nargs=3, default=None,
                        help='Optional target position [x, y, z] in meters')
     parser.add_argument('--target-xyzw', type=float, nargs=4, default=None,
@@ -1992,7 +2002,7 @@ def main(args=None):
     
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
-                      height=args.height, movement_duration=args.movement_duration,
+                      height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
                       offset=args.offset, mode=args.mode)

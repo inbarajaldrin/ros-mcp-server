@@ -11,7 +11,17 @@ ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if F
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # Base object orientation [x, y, z, w] quaternion (identity = no rotation)
 DEFAULT_BASE_POSITION = [0.0, -0.4, -0.0625]     # Default base object position [x, y, z] in robot base frame (meters)
 
-HOME_POSE = [0.065, -0.385, 0.481, 0, 180, 0]  # EE tool frame 
+# UR5e motion limits — two independent constraints, compute_duration takes the max.
+# Cartesian limits govern translation speed (reference: safe_height ↔ table = 0.32m → 5.0s).
+# Joint limits govern rotation speed independently (2 rad rotation → 5.0s).
+JOINT_VEL_LIMIT = 0.80      # rad/s  (hardware max: pi rad/s)
+JOINT_ACCEL_LIMIT = 0.80    # rad/s²
+CART_VEL_LIMIT = 0.0798     # m/s    (hardware max: 1.0 m/s)
+CART_ACCEL_LIMIT = 0.0798   # m/s²
+MIN_DURATION = 2.5          # seconds — floor to avoid jerky micro-moves
+MAX_DURATION = 10.0         # seconds — cap for very long moves
+
+HOME_POSE = [0.065, -0.385, 0.481, 0, 180, 0]  # EE tool frame
 PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame 
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)
