@@ -43,8 +43,156 @@ import argparse
 import threading
 import json
 import time
-import glob
+
 import logging
+
+
+# ---------------------------------------------------------------------------
+# Fast path for subprocess-only actions. These paths just spawn a child
+# process and forward its JSON output — they don't need rclpy, numpy, scipy,
+# IK solvers, collision checkers, rotate_object, etc.  By handling them here
+# we skip ~2-3s of import overhead.
+# ---------------------------------------------------------------------------
+
+def _subprocess_fast_path():
+    """Exit early for subprocess-only invocations (before heavy imports)."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--mode', type=str, default='sim')
+    pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
+    pre.add_argument('--move-away-from-base', action='store_true', dest='move_away_from_base')
+    pre.add_argument('--perform-insert', action='store_true', dest='perform_insert')
+    pre.add_argument('--object-name', type=str, default=None)
+    pre.add_argument('--base-name', type=str, default=None)
+    pre.add_argument('--grasp-id', type=int, default=None)
+    pre.add_argument('--final-base-pos', type=float, nargs=3, default=None)
+    pre.add_argument('--final-base-orientation', type=float, nargs=4, default=None)
+    pre.add_argument('--use-default-base-position', action='store_true', dest='use_default_base_position')
+    pre.add_argument('--current-object-orientation', type=float, nargs=4, default=None)
+    pre.add_argument('--insertion-type', type=str, default='prismatic')
+    args, _ = pre.parse_known_args()
+
+    is_fast = (
+        args.move_to_safe_height
+        or args.move_away_from_base
+        or (args.perform_insert and args.mode == 'real')
+    )
+    if not is_fast:
+        return  # Fall through to heavy imports and full main()
+
+    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    log = logging.getLogger('translate_object')
+
+    def _output(result):
+        print("__RESULT_JSON__")
+        print(json.dumps(result))
+        print("__END_RESULT_JSON__")
+
+    def _extract_json(text):
+        if "__RESULT_JSON__" in text and "__END_RESULT_JSON__" in text:
+            s = text.find("__RESULT_JSON__") + len("__RESULT_JSON__")
+            e = text.find("__END_RESULT_JSON__")
+            try:
+                return json.loads(text[s:e].strip())
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _make_env():
+        env = os.environ.copy()
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env['PYTHONPATH'] = f"{root}:{env['PYTHONPATH']}" if 'PYTHONPATH' in env else root
+        return env
+
+    def _stream(pipe, lines):
+        for line in iter(pipe.readline, ''):
+            line = line.rstrip()
+            if line:
+                lines.append(line)
+                log.info(line)
+        pipe.close()
+
+    def _run(script, cmd_args=None, timeout=None):
+        cmd = [sys.executable, script] + (cmd_args or [])
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=_make_env(),
+        )
+        lines = []
+        t = threading.Thread(target=_stream, args=(proc.stdout, lines), daemon=True)
+        t.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+            t.join(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            t.join(timeout=1.0)
+            return False, '\n'.join(lines)
+        return rc == 0, '\n'.join(lines)
+
+    def _finish(success, output_text, movement_type):
+        rj = _extract_json(output_text)
+        if rj:
+            rj["movement_type"] = movement_type
+            _output(rj)
+        else:
+            r = {"result": "success" if success else "failure", "mode": args.mode,
+                 "movement_type": movement_type}
+            if not success:
+                r["error"] = f"{movement_type} failed"
+            _output(r)
+        sys.exit(0 if success else 1)
+
+    pdir = os.path.dirname(os.path.abspath(__file__))
+
+    if args.move_to_safe_height:
+        log.info("Moving to safe height...")
+        ok, out = _run(os.path.join(pdir, 'core', 'move_to_safe_height.py'), timeout=40)
+        _finish(ok, out, "move_to_safe_height")
+
+    if args.move_away_from_base:
+        log.info("Moving object away from base to clear area")
+        ca = ['--move']
+        if args.object_name:
+            ca += ['--object-name', args.object_name]
+        ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca)
+        _finish(ok, out, "move_away_from_base")
+
+    if args.perform_insert:
+        itype = args.insertion_type
+        if itype == 'prismatic':
+            script = os.path.join(pdir, 'prismatic_peg_insertion.py')
+            log.info("Using prismatic peg insertion")
+        elif itype == 'legacy':
+            script = os.path.join(pdir, '_real_mode_stash', 'legacy', 'peg_in_hole_insert.py')
+            log.info("Using legacy peg_in_hole_insert")
+        else:
+            _output({"result": "failure", "error": f"Unknown insertion type: {itype}"})
+            sys.exit(1)
+        ca = []
+        if args.object_name:
+            ca += ['--object-name', args.object_name]
+        if args.base_name:
+            ca += ['--base-name', args.base_name]
+        if args.grasp_id is not None:
+            ca += ['--grasp-id', str(args.grasp_id)]
+        if args.final_base_pos:
+            ca += ['--final-base-pos'] + [str(x) for x in args.final_base_pos]
+        if args.final_base_orientation:
+            ca += ['--final-base-orientation'] + [str(x) for x in args.final_base_orientation]
+        if args.use_default_base_position:
+            ca.append('--use-default-base-position')
+        if args.current_object_orientation is not None:
+            ca += ['--current-object-orientation'] + [str(x) for x in args.current_object_orientation]
+        log.info("Moving down with passive compliance")
+        ok, out = _run(script, ca)
+        _finish(ok, out, "perform_insert")
+
+
+if __name__ == '__main__':
+    _subprocess_fast_path()
+    # If we reach here, it's a ROS-node path — continue to heavy imports below.
+
+
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -74,7 +222,7 @@ from primitives.shared.collision import (
 )
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 from primitives.rotate_object import ExtendedCardinalOrientations
-from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -82,6 +230,7 @@ BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 HOVER_HEIGHT = 0.15  # Height to hover above base before descending
+ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -93,31 +242,6 @@ def output_result(result):
     print("__RESULT_JSON__")
     print(json.dumps(result))
     print("__END_RESULT_JSON__")
-
-
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """Find the assembly JSON file that contains the given base name."""
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-            components = config.get('components', [])
-            for component in components:
-                if component.get('name', '') == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError):
-            continue
-
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
 
 
 def load_grasp_point_position(object_name, grasp_id, logger=None):
@@ -450,6 +574,33 @@ class TranslateObject(Node):
         T_object_current = self.transform_to_matrix(self.current_poses[object_name].transform)
         T_base_current = self.transform_to_matrix(self.current_poses[base_name].transform)
 
+        # Verify orientation before insertion (perform_insert only)
+        if not hover:
+            target_quat = self.get_object_target_orientation(object_name)
+            if target_quat is None:
+                self.error_message = f"No target orientation found for {object_name} in assembly config"
+                self.get_logger().error(self.error_message)
+                return False
+            R_object_current = R.from_matrix(T_object_current[:3, :3])
+            R_base = R.from_matrix(T_base_current[:3, :3])
+            R_relative = R.from_matrix(R_base.as_matrix().T @ R_object_current.as_matrix())
+            R_target_relative = R.from_quat(target_quat)
+            symmetry_dir = str(get_symmetry_dir())
+            fold_data = load_symmetry_data(object_name, symmetry_dir)
+            equivalents = equivalent_orientations(R_target_relative.as_matrix(), fold_data)
+            min_error_deg = min(
+                np.degrees((R_relative.inv() * R.from_matrix(R_eq)).magnitude())
+                for R_eq in equivalents
+            )
+            if min_error_deg > ORIENTATION_TOLERANCE_DEG:
+                self.error_message = (
+                    f"Object orientation error is {min_error_deg:.1f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°). "
+                    f"Call rotate_object before perform_insert."
+                )
+                self.get_logger().error(self.error_message)
+                return False
+            self.get_logger().info(f"Orientation verified: {min_error_deg:.1f}° error (tolerance: {ORIENTATION_TOLERANCE_DEG}°)")
+
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
 
@@ -526,8 +677,8 @@ class TranslateObject(Node):
                     or check_self_collision(wp_joints)
                     or check_ee_below_base(wp_joints)
                     or check_compact_configuration(wp_joints)):
-                self.error_message = f"Collision detected at waypoint {i + 1}/{num_waypoints}"
-                self.get_logger().error(self.error_message)
+                self.get_logger().error(f"Collision detected at waypoint {i + 1}/{num_waypoints}")
+                self.error_message = "IK rejected: couldn't find a collision-free path to the target position"
                 return False
 
         all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
@@ -662,11 +813,15 @@ class TranslateObject(Node):
             return False
 
         # Validate quaternion
-        quat_array = np.array(object_orientation)
-        quat_norm_sq = np.sum(quat_array ** 2)
-        if abs(quat_norm_sq - 1.0) > 0.1:
-            self.get_logger().error(f"Invalid quaternion: norm² = {quat_norm_sq:.2f}")
-            self.error_message = "Current object orientation quaternion is malformed"
+        quat_array = np.array(object_orientation, dtype=float)
+        if np.any(np.abs(quat_array) > 1.0):
+            self.get_logger().error(f"Invalid quaternion: component(s) outside [-1, 1]: {quat_array.tolist()}")
+            self.error_message = f"current_object_orientation has component(s) outside [-1, 1]: {quat_array.tolist()}"
+            return False
+        quat_norm_sq = float(np.sum(quat_array ** 2))
+        if abs(quat_norm_sq - 1.0) > 0.02:
+            self.get_logger().error(f"Invalid quaternion: norm² = {quat_norm_sq:.4f} (expected ~1.0): {quat_array.tolist()}")
+            self.error_message = f"current_object_orientation norm² = {quat_norm_sq:.4f} (expected ~1.0): {quat_array.tolist()}"
             return False
 
         # Fold symmetry: snap to closest equivalent orientation
@@ -946,11 +1101,14 @@ def run_move_to_safe_height():
     return run_subprocess(script_path, timeout=40)
 
 
-def run_move_to_clear_area():
+def run_move_to_clear_area(object_name=None):
     """Run move_to_clear_area subprocess."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_to_clear_area.py')
     logger.info("Moving object away from base to clear area")
-    return run_subprocess(script_path, ['--move'])
+    cmd_args = ['--move']
+    if object_name:
+        cmd_args += ['--object-name', object_name]
+    return run_subprocess(script_path, cmd_args)
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1180,7 @@ def main():
         sys.exit(0 if success else 1)
 
     if args.move_away_from_base:
-        success, output_text = run_move_to_clear_area()
+        success, output_text = run_move_to_clear_area(object_name=args.object_name)
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
             subprocess_json["movement_type"] = "move_away_from_base"

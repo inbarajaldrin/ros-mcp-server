@@ -44,10 +44,14 @@ class GripperController(Node):
         self.verification_complete = False
         self.verification_result = None
         self.final_stabilized_width = None  # Store the final stabilized width
-        
+        self.jammed = False  # Gripper fingers asymmetric (collision/jam)
+        self.blocked = False  # Gripper pressing against object (effort detected)
+        self.current_effort = 0.0  # Total measured joint effort
+        self.effort_threshold = 0.05  # Effort above this means gripper is pressing against something
+
         # Publisher for gripper commands
         self.gripper_pub = self.create_publisher(String, '/gripper_command', 10)
-        
+
         # Subscriber based on mode - both use width now
         if self.mode == 'sim':
             # Sim mode: use gripper width sim
@@ -57,7 +61,14 @@ class GripperController(Node):
                 self.width_callback,
                 10
             )
-            self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim")
+            # Effort topic for blocked detection
+            self.effort_sub = self.create_subscription(
+                Float64,
+                '/gripper_effort_sim',
+                self.effort_callback,
+                10
+            )
+            self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim + /gripper_effort_sim")
         else:
             # Real mode: use gripper width with fingertip offset (Float32)
             self.width_sub = self.create_subscription(
@@ -99,9 +110,15 @@ class GripperController(Node):
         self.get_logger().info(f"Target state: {self.target_state}, ROS command: {self.ros_command}, Mode: {self.mode}")
     
     def width_callback(self, msg):
-        """Callback for gripper width readings"""
+        """Callback for gripper width readings. -1=jammed (asymmetric)."""
+        self.jammed = msg.data == -1.0
         self.current_width = msg.data
         self.width_received = True
+
+    def effort_callback(self, msg):
+        """Callback for gripper effort readings. High effort = pressing against object."""
+        self.current_effort = msg.data
+        self.blocked = self.current_effort > self.effort_threshold
     
     def check_topic_available(self, topic_name, timeout=3.0):
         """Check if topic exists and has publishers"""
@@ -150,7 +167,7 @@ class GripperController(Node):
     
     def is_at_target_state(self, width, tolerance=3.0, close_tolerance=10.0):
         """Check if gripper is already at target state"""
-        if width is None:
+        if width is None or width < 0:
             return False
         
         if self.target_state == "open":
@@ -169,8 +186,16 @@ class GripperController(Node):
         if initial_value is None:
             initial_value = self.get_current_width(timeout=0.5)
 
-        # Check if already at target state
+        # Check if already at target state (but not if effort is high — means pressing against object)
         if initial_value is not None and self.is_at_target_state(initial_value):
+            # Spin a few times to ensure effort callback has fired
+            if self.mode == 'sim':
+                for _ in range(5):
+                    rclpy.spin_once(self, timeout_sec=0.05)
+            if self.blocked and self.target_state != "close":
+                self.get_logger().warn(f"Width near target ({initial_value:.2f}mm) but effort high ({self.current_effort:.3f}) — gripper is blocked")
+                self.final_stabilized_width = initial_value
+                return False
             state_str = "open" if self.target_state == "open" else "closed" if self.target_state == "close" else f"{self.numeric_value/10.0:.1f}mm"
             self.get_logger().info(f"✓ Gripper already at target state ({state_str}, width: {initial_value:.2f}mm)")
             return True
@@ -192,10 +217,39 @@ class GripperController(Node):
         no_movement_count = 0
         movement_detected = False
         baseline_value = initial_value
+        readings_count = 0
+        grace_readings = 10  # Wait this many readings before checking jammed (let command take effect)
 
         # Monitor indefinitely until gripper stabilizes
         while rclpy.ok():
             current_value = self.get_current_width(timeout=0.3)
+            readings_count += 1
+
+            # Check for jam (-1 signal from sim) — only after grace period so command has time to resolve it
+            if self.jammed and readings_count > grace_readings and no_change_count >= 5:
+                if self.target_state == "close":
+                    # Closing + asymmetric = gripping an object — this is success
+                    self.get_logger().info(f"✓ Gripper gripping object (fingers asymmetric)")
+                    self.final_stabilized_width = current_value if current_value is not None else initial_value
+                    return True
+                else:
+                    # Opening/half-open + asymmetric = jammed
+                    self.get_logger().error("✗ Gripper jammed: fingers are asymmetric (collision detected)")
+                    self.final_stabilized_width = -1.0
+                    return False
+
+            # Check for blocked (effort from /gripper_effort_sim) — only after grace period
+            if self.blocked and readings_count > grace_readings and no_change_count >= 5:
+                if self.target_state == "close":
+                    # Closing + effort = gripping an object — this is success
+                    self.get_logger().info(f"✓ Gripper gripping object (effort: {self.current_effort:.3f})")
+                    self.final_stabilized_width = current_value if current_value is not None else initial_value
+                    return True
+                else:
+                    # Opening/half-open + effort = blocked by object, can't release
+                    self.get_logger().error(f"✗ Gripper blocked: pressing against object (effort: {self.current_effort:.3f}). Open the gripper wider to release.")
+                    self.final_stabilized_width = current_value if current_value is not None else initial_value
+                    return False
 
             # Set baseline if we don't have one yet
             if baseline_value is None and current_value is not None:
@@ -418,7 +472,15 @@ def main(args=None):
         success = controller.control_with_verification(initial_value)
 
         if not success:
-            error = "Gripper verification failed after retries"
+            if controller.jammed:
+                error = "Gripper jammed: fingers are asymmetric due to collision. Reposition and retry."
+            elif controller.blocked:
+                if known_args.command == "close":
+                    error = "Gripper blocked: pressing against object, cannot reach target width."
+                else:
+                    error = "Gripper blocked: pressing against object, cannot reach target width. Open the gripper wider to release."
+            else:
+                error = "Gripper verification failed after retries"
 
         # Get final reading - use stored stabilized width from monitoring
         # If None (e.g., already at target), use initial value as final
@@ -447,14 +509,27 @@ def main(args=None):
             pass  # Ignore cleanup errors
 
     # Build structured result
+    is_jammed = controller is not None and controller.jammed
+    is_blocked = controller is not None and controller.blocked and not success
+    if is_jammed:
+        result_str = "jammed"
+    elif is_blocked:
+        result_str = "blocked"
+    elif success:
+        result_str = "success"
+    else:
+        result_str = "failure"
     result = {
-        "result": "success" if success else "failure",
+        "result": result_str,
         "command": known_args.command,
         "mode": known_args.mode,
-        "initial_width_mm": round(initial_value, 2) if initial_value is not None else None,
-        "final_width_mm": round(final_value, 2) if final_value is not None else None,
-        "change_mm": round(final_value - initial_value, 2) if (initial_value is not None and final_value is not None) else None
     }
+
+    # Include width fields only when meaningful (not for jammed)
+    if not is_jammed:
+        result["initial_width_mm"] = round(initial_value, 2) if initial_value is not None else None
+        result["final_width_mm"] = round(final_value, 2) if final_value is not None else None
+        result["change_mm"] = round(final_value - initial_value, 2) if (initial_value is not None and final_value is not None and final_value != -1.0) else None
 
     # Add error if failed
     if not success and error:

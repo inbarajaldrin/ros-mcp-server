@@ -13,29 +13,6 @@ Usage:
     python3 grasp_points_publisher.py [--mode sim|real|default]
 """
 
-# =============================================================================
-# GRASP DIRECTION CONFIGURATION
-# =============================================================================
-# Set these flags to True/False to enable/disable grasp points by approach direction.
-# Each grasp point in the JSON has grasp_validity.x_axis and grasp_validity.y_axis
-# indicating which directions are valid for grasping.
-#
-# X-AXIS GRASPS: Uses the object pose orientation as-is. The gripper aligns with
-#                the object's detected yaw angle.
-#
-# Y-AXIS GRASPS: NOT YET SUPPORTED. To enable Y-axis grasps, move_to_grasp.py needs
-#                to be modified to accept a parameter (e.g., --rotate-ee-90) that
-#                rotates the end-effector orientation by +90 degrees relative to
-#                the object pose. This allows the gripper to approach from the
-#                perpendicular direction.
-#
-# Example for fork_orange:
-#   X-axis valid: IDs 1, 3, 4, 6
-#   Y-axis valid: IDs 2, 5
-# =============================================================================
-ENABLE_X_AXIS_GRASPS = True   # Publish grasp points valid for X-axis approach
-ENABLE_Y_AXIS_GRASPS = False  # Publish grasp points valid for Y-axis approach (requires move_to_grasp modification)
-
 import sys
 from pathlib import Path
 
@@ -197,16 +174,6 @@ class GraspPointsPublisher(Node):
         self.get_logger().info(f"Loaded grasp data for {len(self.grasp_data)} objects")
         self.get_logger().info(f"Using standard ROS2 visualization_msgs/MarkerArray")
 
-        # Log grasp direction filtering configuration
-        directions_enabled = []
-        if ENABLE_X_AXIS_GRASPS:
-            directions_enabled.append("X-axis")
-        if ENABLE_Y_AXIS_GRASPS:
-            directions_enabled.append("Y-axis")
-        if directions_enabled:
-            self.get_logger().info(f"Grasp direction filter: {', '.join(directions_enabled)} enabled")
-        else:
-            self.get_logger().warn("WARNING: No grasp directions enabled! No grasp points will be published.")
     
     def load_grasp_data(self):
         """Load all grasp points JSON files from data directory"""
@@ -338,22 +305,9 @@ class GraspPointsPublisher(Node):
             grasp_points_local = self.grasp_data[object_name_json].get('grasp_points', [])
             
             # Transform and add each grasp point
+            # All grasp points are published regardless of axis validity.
+            # Axis-based gripper state filtering is handled by get_scene_info.py.
             for gp_local in grasp_points_local:
-                # Filter by grasp direction validity
-                grasp_validity = gp_local.get('grasp_validity', {})
-                x_axis_valid = len(grasp_validity.get('x_axis', [])) > 0
-                y_axis_valid = len(grasp_validity.get('y_axis', [])) > 0
-
-                # Check if this grasp point should be published based on configuration
-                should_publish = False
-                if ENABLE_X_AXIS_GRASPS and x_axis_valid:
-                    should_publish = True
-                if ENABLE_Y_AXIS_GRASPS and y_axis_valid:
-                    should_publish = True
-
-                if not should_publish:
-                    continue  # Skip this grasp point
-
                 try:
                     pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose)
                     

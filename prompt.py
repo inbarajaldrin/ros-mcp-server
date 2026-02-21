@@ -18,8 +18,8 @@ Save scene state.
 
 **Task**
 
-Your goal is to disassemble the assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly.
-You can refer the instruction manual to figure out the sequence in which you need to disassemble them.
+Your goal is to disassemble this top down assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly.
+You can refer the instruction manual that shows the assembly steps to figure out the sequence in which you need to disassemble them.
 The information you collect in this run will be used later to perform assembly.
 
 **Execution**
@@ -28,7 +28,8 @@ Use existing tools to perform disassembly one object at a time. Understand the c
 Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
 You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object.
 
-If an object can be grasped with just half open gripper, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can be grasped using a open gripper state and a half open gripper state, always use half open gripper state to access the object so as to not disturb other objects in the assembly when moving to grasp it from the assembly.
 
 **Verification**
 
@@ -66,7 +67,8 @@ Read the tool descriptions properly and understand the underlying logic and sequ
 Use available tools to perform assembly.
 DO NOT orchestrate the tools to perform a composed policy.
 
-If an object can be grasped with just half open gripper, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can be grasped using a open gripper state and a half open gripper state, then you can use either of the gripper states to grasp the object but after assembling it into the base, use half open gripper state in order to not damage the object or disturb other assembled objects.
 
 **Verification**
 
@@ -75,7 +77,7 @@ If an object can be grasped with just half open gripper, then make sure you half
 > 2.**FAILURE**: verify assembly returns failure. Figure out if there are any steps you can take to complete the assembly. If not then restore scene state and try a different sequence you haven't tried before. 
 
 **Post Execution**
-Signal the client you are done with the assembly. If the assembly was successful, the client will randomize the environment again so you can verify if the information you collected can be verified. 
+Signal the client you are done with the assembly with an action to randomize the environment. The client will randomize the environment again so you can verify if the information you collected can be verified. 
 Save scene state before you start the assembly again.
 Orchestrate the tools to perform a composed policy to perform the same assembly again. 
 If the assembly fails, then restore scene state to try again. Update your assembly log with the new tool calls that worked.
@@ -108,7 +110,8 @@ Don't orchestrate the tools to perform a composed policy. Perform the tasks usin
 
 IMPORTANT: Before moving to assembly make sure the current object orietnaion is close to the target orientation. If the object fell after placing down, you might want to fix it again.
 
-If an object can be grasped with just half open gripper, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
+If an object can be grasped using a open gripper state and a half open gripper state, then you can use either of the gripper states to grasp the object but after assembling it into the base, use half open gripper state in order to not damage the object or disturb other assembled objects.
 
 **Verification**
 

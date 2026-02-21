@@ -33,14 +33,14 @@ import argparse
 import time
 import sys
 import os
-import glob
+
 
 # Add project root to path
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
 
 # Configuration (auto-discovered)
@@ -57,34 +57,6 @@ GRIPPER_LENGTH = 0.200     # ~20cm total length (palm to fingertip)
 
 # Clearance margin for safety (meters)
 CLEARANCE_MARGIN = 0.01    # 1cm safety margin
-
-
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """Find the assembly JSON file that contains the given base name."""
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-
-            components = config.get('components', [])
-            for component in components:
-                comp_name = component.get('name', '')
-                if comp_name == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError) as e:
-            if logger:
-                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
-            continue
-
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
 
 
 def load_object_dimensions(object_name, assembly_config):

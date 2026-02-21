@@ -36,6 +36,7 @@ logger = logging.getLogger("RosMCPServer")
 
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
+TaskType = Literal["assembly", "disassembly"]
 GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
@@ -747,25 +748,42 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ## ############################################################################################## ##
 
 @mcp.tool()
-def get_scene_info(mode: Mode = "sim") -> Dict[str, Any]:
+def get_scene_info(task_type: TaskType = "assembly", mode: Mode = "sim") -> Dict[str, Any]:
     """Get scene information with objects and their available grasp points.
 
-    All objects are included; those without grasp points have an empty array.
+    All objects are included; those without grasp points have an empty grasps array.
+    Order is included based on task_type: assembly_order for assembly, disassembly_order for disassembly.
+    Boards (order 0) are excluded from disassembly_order.
 
     Args:
+        task_type: Task type - "assembly" or "disassembly"
         mode: Robot mode
 
     Returns:
-        JSON with format:
+        JSON with format (assembly):
         {
-            "object_name": [
-                {"id": 0, "gripper_states": ["open", "half-open"]},
-                {"id": 1, "gripper_states": ["open"]}
-            ],
-            "another_object": []
+            "object_name": {
+                "grasps": [{"id": 0, "gripper_states": ["open", "half-open"]}],
+                "assembly_order": 2
+            },
+            "base_name": {
+                "grasps": [],
+                "assembly_order": 0
+            }
+        }
+
+        JSON with format (disassembly):
+        {
+            "object_name": {
+                "grasps": [{"id": 0, "gripper_states": ["open", "half-open"]}],
+                "disassembly_order": 1
+            },
+            "base_name": {
+                "grasps": []
+            }
         }
     """
-    return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode}", timeout=10, error_prefix="Get scene info")
+    return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode} --task-type {task_type}", timeout=10, error_prefix="Get scene info")
 
 @mcp.tool()
 def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
@@ -864,17 +882,18 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
         - "result": "success" or "failure" for the verified object
         - "object_name": Name of the verified object
         - "base_name": Name of the base object
+        - "assembly_order": Assembly order of the verified object
         - "position_error_m": Position error metrics (x, y, z)
         - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
         - "within_tolerance": Boolean indicating if within tolerance
-        - "unassembled_objects": List of other objects in the same assembly that are NOT assembled (sim mode only)
+        - "unassembled_objects": List of {name, assembly_order} for unassembled objects, sorted by order (sim mode only)
 
         When check_all=True (sim mode only):
         - "result": "success" if all assembled, "failure" otherwise
         - "base_name": Name of the base object
         - "all_assembled": Boolean indicating if all objects are assembled
-        - "assembled_objects": List of objects that are correctly assembled
-        - "unassembled_objects": List of objects that are NOT assembled
+        - "assembled_objects": List of {name, assembly_order} for correctly assembled objects
+        - "unassembled_objects": List of {name, assembly_order} for unassembled objects
     """
     if check_all and mode == "real":
         return {"result": "failure", "error": "check_all is not supported in real mode. Verify one object at a time."}
@@ -925,24 +944,34 @@ async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mo
     return result
 
 @mcp.tool()
-def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False) -> Dict[str, Any]:
+def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
     """Verify if object(s) are NOT in assembly position relative to base.
 
     This tool checks if object(s) have been successfully disassembled by verifying they are NOT in the
-    target assembly position. Returns success if the object(s) are away from the assembly position.
+    target assembly position. Returns success if the object has been removed from the assembly.
+
+    When verifying a single object, also checks for order violations:
+    - skipped_objects: Objects with higher disassembly priority still assembled (agent removed out of order)
+    - disturbed_objects: Lower-order objects knocked out of place (collateral damage)
+    The result is still "success" (the object was removed) but "errors" contains the violations.
 
     Args:
         base_name: Name of the base object
         object_name: Name of the object to verify (optional if check_all is True)
         check_all: If True, check all objects in the assembly instead of a specific one
+        mode: Robot mode
 
     Returns:
         When check_all=False (single object):
-        - "result": "success" or "failure" for the verified object
+        - "result": "success" if object was removed, "failure" if still in assembly position
         - "object_name": Name of the verified object
         - "base_name": Name of the base object
+        - "disassembly_order": Disassembly order (1 = first to remove, reverse of assembly order)
         - "position_error_m": Position error metrics (x, y, z)
         - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
+        - "error": Present only if violations detected. Contains:
+            - "skipped_objects": Objects that should have been disassembled first
+            - "disturbed_objects": Lower-order objects knocked out of place
 
         When check_all=True:
         - "result": "success" if all disassembled, "failure" otherwise
@@ -952,9 +981,9 @@ def verify_disassembly(base_name: str, object_name: str = None, check_all: bool 
         - "still_assembled_objects": List of objects still in assembly position
     """
     if check_all:
-        return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --check-all", timeout=30, error_prefix="Verify disassembly")
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify disassembly")
     elif object_name:
-        return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\"", timeout=30, error_prefix="Verify disassembly")
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify disassembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
@@ -972,6 +1001,9 @@ def move_home() -> Dict[str, Any]:
 @mcp.tool()
 def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[str, Any]:
     """Control gripper.
+
+    Commands: open = open jaws fully; half-open = sets to 30 mm; close = close jaws to grasp.
+    Alternatively pass a numeric width in mm (0-100).
 
     Args:
         command: Gripper action or numeric width 0-100 mm
@@ -1107,7 +1139,7 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", object_name: O
         missing = []
         if not object_name:
             missing.append("object_name")
-        if not base_name:
+        if action != "move_away_from_base" and not base_name:
             missing.append("base_name")
         if missing:
             return {"result": "failure",
@@ -1152,6 +1184,7 @@ def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_
 
     Call this tool only if the object is already grasped.
     Rotates object from current to target orientation relative to base orientation.
+    Rotation is determined by fold symmetry of the object.
 
     In real mode, uses default base orientation [0, 0, 0, 1] automatically (same as translate_object).
 

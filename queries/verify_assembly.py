@@ -21,14 +21,13 @@ import argparse
 import time
 import sys
 import os
-import glob
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -40,47 +39,6 @@ EE_TOPIC = "/tcp_pose_broadcaster/pose"
 # Tolerance thresholds
 POSITION_TOLERANCE = 0.01  # 1cm tolerance for position
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
-
-
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """
-    Find the assembly JSON file that contains the given base name.
-    
-    Args:
-        base_name: Name of the base object to search for
-        data_dir: Directory to search for JSON files
-        logger: Optional logger for debug output
-        
-    Returns:
-        Path to the matching JSON file, or None if not found
-    """
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-    
-    # Search for all JSON files in the data directory
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-
-            components = config.get('components', [])
-            for component in components:
-                comp_name = component.get('name', '')
-                if comp_name == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError) as e:
-            # Skip invalid JSON files
-            if logger:
-                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
-            continue
-    
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
 
 
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
@@ -445,6 +403,13 @@ class VerifyAssembly(Node):
                 self.get_logger().error(f"[{original_object_name}] Orientation error ({orientation_error_deg:.2f}°) exceeds tolerance ({ORIENTATION_TOLERANCE_DEG}°)")
             return False, error_data
     
+    def get_assembly_order(self, object_name):
+        """Get the assembly_order for a component from the assembly config."""
+        for component in self.assembly_config.get('components', []):
+            if component.get('name') == object_name:
+                return component.get('assembly_order')
+        return None
+
     def get_unassembled_objects(self, base_name, exclude_object_name):
         """
         Check all other objects in the same assembly and return list of objects that are NOT assembled.
@@ -538,25 +503,32 @@ def main(args=None):
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
 
         if args.check_all:
-            # Check all objects in the assembly
+            # Check all objects in the assembly, sorted by assembly_order
             components = node.assembly_config.get('components', [])
+            # Sort by assembly_order (components without order go last)
+            sorted_components = sorted(components, key=lambda c: c.get('assembly_order', 999))
 
-            for component in components:
+            for component in sorted_components:
                 comp_name = component.get('name', '')
+                comp_order = component.get('assembly_order')
                 # Skip the board
                 if component.get('type') == 'board':
                     continue
+
+                entry = {"name": comp_name}
+                if comp_order is not None:
+                    entry["assembly_order"] = comp_order
 
                 # Verify this component
                 try:
                     is_assembled, _ = node.verify_assembly_pose(comp_name, args.base_name)
                     if is_assembled:
-                        assembled_objects.append(comp_name)
+                        assembled_objects.append(entry)
                     else:
-                        unassembled_objects.append(comp_name)
+                        unassembled_objects.append(entry)
                 except Exception as e:
                     node.get_logger().debug(f"Could not verify {comp_name}: {e}")
-                    unassembled_objects.append(comp_name)
+                    unassembled_objects.append(entry)
 
             # Success if all objects are assembled
             success = len(unassembled_objects) == 0
@@ -564,7 +536,8 @@ def main(args=None):
             if success:
                 node.get_logger().info(f"All {len(assembled_objects)} objects are assembled")
             else:
-                node.get_logger().error(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+                names = [e["name"] for e in unassembled_objects]
+                node.get_logger().error(f"Found {len(unassembled_objects)} unassembled objects: {names}")
         else:
             # Verify assembly pose for the specified object
             success, error_data = node.verify_assembly_pose(
@@ -579,14 +552,30 @@ def main(args=None):
 
             # Check other objects in the same assembly
             try:
-                unassembled_objects = node.get_unassembled_objects(args.base_name, args.object_name)
+                raw_unassembled = node.get_unassembled_objects(args.base_name, args.object_name)
 
-                # If the object being verified itself failed assembly, include it in the list
+                # Build entries with assembly_order
+                for name in raw_unassembled:
+                    entry = {"name": name}
+                    order = node.get_assembly_order(name)
+                    if order is not None:
+                        entry["assembly_order"] = order
+                    unassembled_objects.append(entry)
+
+                # If the object being verified itself failed assembly, include it
                 if not success:
-                    unassembled_objects.append(args.object_name)
+                    entry = {"name": args.object_name}
+                    order = node.get_assembly_order(args.object_name)
+                    if order is not None:
+                        entry["assembly_order"] = order
+                    unassembled_objects.append(entry)
+
+                # Sort by assembly_order
+                unassembled_objects.sort(key=lambda e: e.get("assembly_order", 999))
 
                 if unassembled_objects:
-                    node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {unassembled_objects}")
+                    names = [e["name"] for e in unassembled_objects]
+                    node.get_logger().info(f"Found {len(unassembled_objects)} unassembled objects: {names}")
                 else:
                     node.get_logger().info("All other objects in assembly are assembled")
             except Exception as e:
@@ -621,6 +610,11 @@ def main(args=None):
                 "object_name": args.object_name,
                 "base_name": args.base_name,
             }
+
+            # Add assembly order if available
+            target_order = node.get_assembly_order(args.object_name)
+            if target_order is not None:
+                result["assembly_order"] = target_order
 
             # Add error data if available (contains metrics for the verified object)
             if error_data:

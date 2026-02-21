@@ -26,10 +26,13 @@ from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
 
+GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
+
 class MoveToClearArea(Node):
-    def __init__(self, mode='move'):
+    def __init__(self, mode='move', object_name=None):
         super().__init__('move_to_clear_area')
         self.mode = mode  # 'move' or 'hover'
+        self.object_name = object_name  # If set, verify grasp before moving
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
@@ -56,11 +59,14 @@ class MoveToClearArea(Node):
         self.current_joint_angles = None
         self.joint_angles_received = False
 
+        # Object pose data (for grasp verification)
+        self.object_poses = {}
+
         # Success/failure tracking
         self.operation_success = False
         self.operation_complete = False
         self.error_message = None  # Track error for JSON output
-        
+
         # Subscriber for EE pose data
         # Use VOLATILE durability (default for most publishers) to avoid QoS incompatibility warnings
         qos_profile = QoSProfile(
@@ -68,14 +74,14 @@ class MoveToClearArea(Node):
             durability=DurabilityPolicy.VOLATILE,  # Changed from TRANSIENT_LOCAL to match most publishers
             depth=10
         )
-        
+
         self.ee_pose_sub = self.create_subscription(
             PoseStamped,
             '/tcp_pose_broadcaster/pose',
             self.ee_pose_callback,
             qos_profile
         )
-        
+
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
             JointState,
@@ -83,12 +89,23 @@ class MoveToClearArea(Node):
             self.joint_state_callback,
             10
         )
-        
+
+        # Subscribe to sim object poses if we need grasp verification
+        if self.object_name:
+            from tf2_msgs.msg import TFMessage
+            self.object_pose_sub = self.create_subscription(
+                TFMessage, '/objects_poses_sim', self._object_pose_cb, 10
+            )
+
         self.action_client.wait_for_server()
-        
+
         # Log mode
         self.get_logger().info(f"Using {self.mode.upper()} mode")
-        
+
+        # Verify grasp if object_name provided
+        if self.object_name and not self._verify_grasp():
+            return
+
         # Execute movement
         self.move_to_clear_space()
     
@@ -121,6 +138,66 @@ class MoveToClearArea(Node):
             if len(ordered_positions) == 6:
                 self.current_joint_angles = np.array(ordered_positions)
                 self.joint_angles_received = True
+
+    def _object_pose_cb(self, msg):
+        """Callback for sim object poses."""
+        for transform in msg.transforms:
+            self.object_poses[transform.child_frame_id] = transform
+
+    def _verify_grasp(self):
+        """Verify the robot is holding the object (gripper center within threshold of object)."""
+        from scipy.spatial.transform import Rotation as Rot
+
+        self.get_logger().info(f"Verifying grasp on '{self.object_name}'...")
+
+        # Wait for EE pose and object pose
+        timeout_count = 0
+        while rclpy.ok() and timeout_count < 50:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            timeout_count += 1
+            if self.ee_pose_received and self.object_name in self.object_poses:
+                break
+
+        if not self.ee_pose_received:
+            self.error_message = "Grasp verification failed: no EE pose received"
+            self.get_logger().error(self.error_message)
+            self.operation_success = False
+            self.operation_complete = True
+            rclpy.shutdown()
+            return False
+
+        if self.object_name not in self.object_poses:
+            self.error_message = f"Grasp verification failed: object '{self.object_name}' not found in sim poses"
+            self.get_logger().error(self.error_message)
+            self.operation_success = False
+            self.operation_complete = True
+            rclpy.shutdown()
+            return False
+
+        # Compute gripper center position
+        ee_rot = Rot.from_quat(self.ee_quat).as_matrix()
+        gripper_center = self.ee_position + ee_rot @ GRIPPER_CENTER_TOOL_OFFSET
+
+        # Get object position
+        obj_t = self.object_poses[self.object_name].transform.translation
+        object_pos = np.array([obj_t.x, obj_t.y, obj_t.z])
+
+        grasp_distance = np.linalg.norm(object_pos - gripper_center)
+        if grasp_distance > GRASP_DISTANCE_THRESHOLD:
+            self.error_message = (
+                f"Grasp check failed: {self.object_name} is {grasp_distance * 1000:.1f}mm "
+                f"from gripper center (threshold: {GRASP_DISTANCE_THRESHOLD * 1000:.0f}mm)."
+            )
+            self.get_logger().error(self.error_message)
+            self.operation_success = False
+            self.operation_complete = True
+            rclpy.shutdown()
+            return False
+
+        self.get_logger().info(
+            f"Grasp verified: {self.object_name} is {grasp_distance * 1000:.1f}mm from gripper center"
+        )
+        return True
 
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees - same as other primitives"""
@@ -444,11 +521,6 @@ class MoveToClearArea(Node):
                         s = q_guess.copy()
                         s[0] = sp
                         seeds.append(s)
-                    rng = np.random.default_rng()
-                    for _ in range(20):
-                        perturbed = q_guess + rng.normal(0, 0.1, 6)
-                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds], [b[1] for b in joint_bounds])
-                        seeds.append(perturbed)
                     return seeds
 
                 if is_face_down:
@@ -456,7 +528,6 @@ class MoveToClearArea(Node):
                     joint_bounds_cardinal[4] = (-np.pi/2, -np.pi/2)  # freeze w2 at -π/2
                     seeds_cardinal = [q_guess.copy()]
                     # Generate seeds satisfying lift+elbow+w1 ≈ -π/2 constraint
-                    rng = np.random.default_rng()
                     for sp in [q_guess[0], 0, np.pi/2, -np.pi/2, np.pi]:
                         for lift in [-1.9, -1.5, -1.3, -1.0]:
                             for elbow in [1.2, 1.5, 1.8, 2.0]:
@@ -469,11 +540,6 @@ class MoveToClearArea(Node):
                                     s[3] = w1
                                     s[4] = -np.pi/2
                                     seeds_cardinal.append(s)
-                    # Add random perturbations around current config
-                    for _ in range(20):
-                        perturbed = q_guess + rng.normal(0, 0.1, 6)
-                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_cardinal], [b[1] for b in joint_bounds_cardinal])
-                        seeds_cardinal.append(perturbed)
                 else:
                     # face_right cardinal: pan ≈ w2, w3 ≈ 0
                     joint_bounds_cardinal[5] = (w3_val, w3_val)  # freeze wrist_3
@@ -483,17 +549,11 @@ class MoveToClearArea(Node):
                         s[0] = sp
                         s[4] = sp  # w2 = pan
                         seeds_cardinal.append(s)
-                    rng = np.random.default_rng()
-                    for _ in range(20):
-                        perturbed = q_guess + rng.normal(0, 0.1, 6)
-                        perturbed = np.clip(perturbed, [b[0] for b in joint_bounds_cardinal], [b[1] for b in joint_bounds_cardinal])
-                        perturbed[4] = perturbed[0]  # enforce pan=w2
-                        seeds_cardinal.append(perturbed)
 
                 candidate_solutions = []
 
                 # First pass: face-specific cardinal wrist constraints
-                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_cardinal))
+                solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_cardinal, cost_threshold=0.01))
                 for yaw, rot_matrix in target_orientations:
                     gripper_z = rot_matrix[:, 2]
                     offset_vec = -rot_matrix @ self.tcp_to_gripper_center_offset
@@ -517,7 +577,7 @@ class MoveToClearArea(Node):
                 # Fallback: free wrist constraints if cardinal solve failed
                 if not candidate_solutions:
                     self.get_logger().info("Cardinal wrist IK failed, falling back to free wrist bounds")
-                    solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_base))
+                    solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_base, cost_threshold=0.01))
                     seeds_free = make_seeds_free(joint_bounds_base)
                     for yaw, rot_matrix in target_orientations:
                         gripper_z = rot_matrix[:, 2]
@@ -733,21 +793,23 @@ def output_result(result):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Move to clear space position')
-    parser.add_argument('--move', action='store_true', 
+    parser.add_argument('--move', action='store_true',
                        help='Move to target position keeping current EE orientation (default)')
     parser.add_argument('--hover', action='store_true',
                        help='Move to target position with top-down (face-down) EE orientation')
-    
+    parser.add_argument('--object-name', type=str, default=None,
+                       help='Object name for grasp verification (checks gripper is holding object)')
+
     args = parser.parse_args()
-    
+
     # Determine mode
     if args.hover:
         mode = 'hover'
     else:
         mode = 'move'  # Default mode
-    
+
     rclpy.init()
-    node = MoveToClearArea(mode=mode)
+    node = MoveToClearArea(mode=mode, object_name=args.object_name)
     try:
         # Spin until operation is complete with timeout
         import time

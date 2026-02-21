@@ -28,7 +28,7 @@ from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import MarkerArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import time
-from utils.data_path_finder import get_aruco_data_dir
+from utils.data_path_finder import get_aruco_data_dir, load_assembly_order_map, load_disassembly_order_map
 
 
 # =============================================================================
@@ -47,7 +47,7 @@ ENABLE_Y_AXIS_GRASPS = False  # Include gripper states valid for Y-axis approach
 # ambiguity for the robot. If a grasp supports both states, only "half-open"
 # will be reported.
 # =============================================================================
-PREFER_HALF_OPEN_GRIPPER = True  # Prefer half-open over open when both available
+PREFER_HALF_OPEN_GRIPPER = False  # Prefer half-open over open when both available
 
 
 def output_result(result, pretty=False):
@@ -56,17 +56,23 @@ def output_result(result, pretty=False):
         # Compact pretty print: one line per grasp, grouped by object
         print("{")
         objects = list(result.items())
-        for i, (obj_name, grasps) in enumerate(objects):
+        for i, (obj_name, obj_data) in enumerate(objects):
             comma = "," if i < len(objects) - 1 else ""
+            grasps = obj_data.get("grasps", [])
+            # Detect whichever order key is present
+            order_key = "disassembly_order" if "disassembly_order" in obj_data else "assembly_order"
+            order = obj_data.get(order_key)
+            order_str = f', "{order_key}": {order}' if order is not None else ""
             if not grasps:
-                print(f'  "{obj_name}": []{comma}')
+                print(f'  "{obj_name}": {{"grasps": []{order_str}}}{comma}')
             else:
-                print(f'  "{obj_name}": [')
+                print(f'  "{obj_name}": {{"grasps": [')
                 for j, g in enumerate(grasps):
                     g_comma = "," if j < len(grasps) - 1 else ""
                     states = json.dumps(g["gripper_states"])
-                    print(f'    {{"id": {g["id"]}, "gripper_states": {states}}}{g_comma}')
-                print(f'  ]{comma}')
+                    z_val = g.get("z_height", "N/A")
+                    print(f'    {{"id": {g["id"]}, "gripper_states": {states}, "z_height": {z_val}}}{g_comma}')
+                print(f'  ]{order_str}}}{comma}')
         print("}")
     else:
         print("__RESULT_JSON__")
@@ -77,9 +83,9 @@ def output_result(result, pretty=False):
 def load_grasp_validity_data():
     """Load grasp validity (gripper_states) from grasp points JSON files.
 
-    Only includes gripper states from enabled grasp axes (ENABLE_X_AXIS_GRASPS,
-    ENABLE_Y_AXIS_GRASPS). This ensures reported states match the approach
-    directions actually used by the publisher.
+    Only includes gripper states from enabled grasp axes (controlled by
+    ENABLE_X_AXIS_GRASPS, ENABLE_Y_AXIS_GRASPS). This ensures reported
+    states match the approach directions actually used by the publisher.
 
     Returns:
         Dict mapping object_name -> {grasp_id -> list of valid gripper states}
@@ -130,7 +136,7 @@ def load_grasp_validity_data():
 class SceneInfoReader(Node):
     """ROS2 node to read scene information from multiple topics"""
 
-    def __init__(self, objects_topic, grasp_points_topic):
+    def __init__(self, objects_topic, grasp_points_topic, task_type='assembly'):
         super().__init__('scene_info_reader')
 
         # Object tracking
@@ -143,6 +149,15 @@ class SceneInfoReader(Node):
 
         # Pre-load gripper state data from source JSON files
         self.validity_data = load_grasp_validity_data()
+
+        # Pre-load order data based on task type
+        self.task_type = task_type
+        if task_type == 'disassembly':
+            self.order_map = load_disassembly_order_map()
+            self.order_key = 'disassembly_order'
+        else:
+            self.order_map = load_assembly_order_map()
+            self.order_key = 'assembly_order'
 
         # Subscribe to objects topic
         self.objects_sub = self.create_subscription(
@@ -175,51 +190,39 @@ class SceneInfoReader(Node):
             self.objects_received = True
 
     def grasp_points_callback(self, msg):
-        """Callback for MarkerArray message - extract grasp IDs"""
-        grasp_ids_by_object = {}
-        seen = {}
+        """Callback for MarkerArray message - accumulate grasp IDs across messages.
 
+        The publisher may not have poses for all objects in every publish cycle,
+        so we merge new grasps into the running dict rather than replacing it.
+        """
         for marker in msg.markers:
             object_name = marker.ns
             grasp_id = marker.id
 
-            if object_name not in grasp_ids_by_object:
-                grasp_ids_by_object[object_name] = []
-                seen[object_name] = set()
+            if object_name not in self.grasp_ids_by_object:
+                self.grasp_ids_by_object[object_name] = {}
 
-            if grasp_id not in seen[object_name]:
-                seen[object_name].add(grasp_id)
-                # Look up valid gripper states from source data
+            if grasp_id not in self.grasp_ids_by_object[object_name]:
                 obj_validity = self.validity_data.get(object_name, {})
                 gripper_states = obj_validity.get(grasp_id, [])
-
-                grasp_ids_by_object[object_name].append({
+                if not gripper_states:
+                    continue  # Skip grasps with no valid states for enabled axes
+                self.grasp_ids_by_object[object_name][grasp_id] = {
                     "id": grasp_id,
-                    "gripper_states": gripper_states
-                })
+                    "gripper_states": gripper_states,
+                    "z_height": round(marker.pose.position.z, 4)
+                }
 
-        # Sort by grasp_id for each object
-        for object_name in grasp_ids_by_object:
-            grasp_ids_by_object[object_name].sort(key=lambda x: x["id"])
-
-        self.grasp_ids_by_object = grasp_ids_by_object
         self.grasps_received = True
 
     def get_scene_info(self, timeout=5.0):
         """Get combined scene information with timeout"""
         start_time = time.time()
 
-        # Wait for both topics to receive data (or timeout)
         while rclpy.ok() and (time.time() - start_time) < timeout:
             rclpy.spin_once(self, timeout_sec=0.1)
-            # We need at least objects; grasps are optional
-            if self.objects_received:
-                # Give a bit more time for grasps if we haven't received them
-                if self.grasps_received:
-                    break
-                # Wait a bit longer for grasps after objects are received
-                if (time.time() - start_time) > timeout * 0.8:
-                    break
+            if self.objects_received and self.grasps_received:
+                break
 
         if not self.objects_received or len(self.object_names) == 0:
             return None
@@ -227,7 +230,13 @@ class SceneInfoReader(Node):
         # Include all objects, empty array for those without grasp points
         scene = {}
         for object_name in sorted(self.object_names):
-            scene[object_name] = self.grasp_ids_by_object.get(object_name, [])
+            grasp_dict = self.grasp_ids_by_object.get(object_name, {})
+            grasps = sorted(grasp_dict.values(), key=lambda x: x["id"])
+
+            entry = {"grasps": grasps}
+            if object_name in self.order_map:
+                entry[self.order_key] = self.order_map[object_name]
+            scene[object_name] = entry
 
         return scene
 
@@ -236,6 +245,8 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='Get Scene Info')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
                        help='Mode: sim or real')
+    parser.add_argument('--task-type', type=str, default='assembly', choices=['assembly', 'disassembly'],
+                       help='Task type: assembly (show assembly_order) or disassembly (show disassembly_order)')
     parser.add_argument('--pretty', action='store_true',
                        help='Pretty print output for terminal readability')
 
@@ -252,7 +263,7 @@ def main(args=None):
     reader = None
     try:
         rclpy.init()
-        reader = SceneInfoReader(objects_topic, grasp_points_topic)
+        reader = SceneInfoReader(objects_topic, grasp_points_topic, task_type=args.task_type)
         scene_info = reader.get_scene_info(timeout=5.0)
 
         if scene_info is None:

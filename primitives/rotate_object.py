@@ -35,11 +35,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import argparse
 import time
-import glob
+
 
 from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params
 from primitives.shared.velocity_profiles import single_point, compute_duration
-from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
 
@@ -57,48 +57,6 @@ SYMMETRY_DIR = str(get_symmetry_dir())
 DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
 # DEFAULT_BASE_ORIENTATION is imported from config
-
-
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """
-    Find the assembly JSON file that contains the given base name.
-    
-    Args:
-        base_name: Name of the base object to search for
-        data_dir: Directory to search for JSON files
-        logger: Optional logger for debug output
-        
-    Returns:
-        Path to the matching JSON file, or None if not found
-    """
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-    
-    # Search for all JSON files in the data directory
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-
-            # Check if any component matches the base name
-            components = config.get('components', [])
-            for component in components:
-                comp_name = component.get('name', '')
-                if comp_name == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError) as e:
-            # Skip invalid JSON files
-            if logger:
-                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
-            continue
-    
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
 
 
 class ExtendedCardinalOrientations:
@@ -399,6 +357,18 @@ class ReorientForAssembly(Node):
                       transform.rotation.z, transform.rotation.w])
         return R.from_quat(q).as_matrix()
     
+    def validate_quaternion(self, quat, name="quaternion"):
+        """Validate that quat is a unit quaternion. Returns error string or None."""
+        arr = np.asarray(quat, dtype=float)
+        if arr.shape != (4,):
+            return f"{name} must have 4 components, got {arr.shape}"
+        if np.any(np.abs(arr) > 1.0):
+            return f"{name} has component(s) outside [-1, 1]: {arr.tolist()}"
+        norm_sq = float(np.sum(arr ** 2))
+        if abs(norm_sq - 1.0) > 0.02:
+            return f"{name} norm² = {norm_sq:.4f} (expected ~1.0): {arr.tolist()}"
+        return None
+
     def get_rotation_from_quat(self, quat):
         return R.from_quat(quat).as_matrix()
     
@@ -1137,6 +1107,20 @@ class ReorientForAssembly(Node):
         self.initial_ee_orientation_quat = initial_ee_quat
         initial_ee_rpy = R.from_quat(initial_ee_quat).as_euler('xyz', degrees=True)
         self.initial_ee_orientation_rpy_deg = self.canonicalize_euler(initial_ee_rpy)
+
+        # === Validate quaternion inputs ===
+        if current_object_orientation is not None:
+            err = self.validate_quaternion(current_object_orientation, "current_object_orientation")
+            if err:
+                self.error_message = err
+                self.get_logger().error(self.error_message)
+                return False
+        if target_base_orientation is not None:
+            err = self.validate_quaternion(target_base_orientation, "target_base_orientation")
+            if err:
+                self.error_message = err
+                self.get_logger().error(self.error_message)
+                return False
 
         # === Get current object orientation ===
         if current_object_orientation is not None:

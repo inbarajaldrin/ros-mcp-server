@@ -24,14 +24,14 @@ if _project_root not in sys.path:
 import json
 import numpy as np
 import argparse
-import glob
+
 import rclpy
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
 from scipy.spatial.transform import Rotation as R
 import time
 
-from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
+from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, find_assembly_json_by_base_name, load_assembly_config
 
 
 def output_result(result):
@@ -48,76 +48,6 @@ BASE_TOPIC = "/objects_poses_sim"
 # Default base position and orientation (used in real mode)
 DEFAULT_BASE_POSITION = [0.5, -0.37, 0.1882]  # [x, y, z] in meters
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] quaternion
-
-
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """
-    Find the assembly JSON file that contains the given base name.
-    
-    Args:
-        base_name: Name of the base object to search for
-        data_dir: Directory to search for JSON files
-        logger: Optional logger for debug output
-        
-    Returns:
-        Path to the matching JSON file, or None if not found
-    """
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-    
-    # Search for all JSON files in the data directory
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-
-            components = config.get('components', [])
-            for component in components:
-                comp_name = component.get('name', '')
-                if comp_name == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError) as e:
-            # Skip invalid JSON files
-            if logger:
-                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
-            continue
-    
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
-
-
-def load_assembly_config(base_name, data_dir=ASSEMBLY_DATA_DIR):
-    """
-    Load the assembly configuration from JSON file.
-    If base_name is provided, automatically finds the matching JSON file.
-
-    Args:
-        base_name: Base name to search for matching JSON file
-        data_dir: Directory to search for JSON files
-
-    Returns:
-        Assembly configuration dictionary
-    """
-    json_file = find_assembly_json_by_base_name(base_name, data_dir, None)
-    if json_file is None:
-        print(f"Error: Could not find assembly JSON for base '{base_name}' in {data_dir}")
-        return {}
-
-    try:
-        with open(json_file, 'r') as f:
-            config = json.load(f)
-            return config
-    except FileNotFoundError:
-        print(f"Error: Assembly file not found: {json_file}")
-        return {}
-    except json.JSONDecodeError as e:
-        print(f"Error: Error parsing assembly JSON: {e}")
-        return {}
 
 
 def get_object_target_position(assembly_config, object_name):

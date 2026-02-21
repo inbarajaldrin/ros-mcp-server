@@ -62,6 +62,7 @@ def _load_json(mode: str, assembly_id: str) -> dict:
 
 def _save_json(mode: str, assembly_id: str, data: dict) -> None:
     path = _results_file(mode, assembly_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2))
 
 
@@ -288,7 +289,9 @@ def write_assembly_results(assembly_id: str, base_name: str, object_name: str, a
         trial: Trial data with:
             - trial_id: integer (required)
             - grasp_id: integer (required)
-            - tool_sequence: list of strings (required) - ordered tool calls
+            - tool_sequence: list of strings (required) - the exact MCP tool calls
+              made during the trial, in order. Format each entry as
+              "server__tool_name(key = 'value', key2 = 'value2')"
             - result: "success" or "failure" (required)
             - comment: string (optional)
 

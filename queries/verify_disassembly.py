@@ -21,20 +21,19 @@ import argparse
 import time
 import sys
 import os
-import glob
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir
+from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
-BASE_TOPIC = "/objects_poses_sim"
-OBJECT_TOPIC = "/objects_poses_sim"
+OBJECT_TOPIC_SIM = "/objects_poses_sim"
+OBJECT_TOPIC_REAL = "/objects_poses_real"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Tolerance thresholds
@@ -42,64 +41,33 @@ POSITION_TOLERANCE = 0.07  # 7cm tolerance for position
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
 
 
-def find_assembly_json_by_base_name(base_name, data_dir=ASSEMBLY_DATA_DIR, logger=None):
-    """
-    Find the assembly JSON file that contains the given base name.
-    
-    Args:
-        base_name: Name of the base object to search for
-        data_dir: Directory to search for JSON files
-        logger: Optional logger for debug output
-        
-    Returns:
-        Path to the matching JSON file, or None if not found
-    """
-    if not os.path.exists(data_dir):
-        if logger:
-            logger.error(f"Data directory not found: {data_dir}")
-        return None
-    
-    # Search for all JSON files in the data directory
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                config = json.load(f)
-
-            components = config.get('components', [])
-            for component in components:
-                comp_name = component.get('name', '')
-                if comp_name == base_name:
-                    return json_file
-        except (json.JSONDecodeError, IOError) as e:
-            # Skip invalid JSON files
-            if logger:
-                logger.debug(f"Skipping invalid JSON file {json_file}: {e}")
-            continue
-    
-    if logger:
-        logger.warn(f"No assembly JSON found for base '{base_name}' in {data_dir}")
-    return None
-
-
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+
+# Tolerance for checking if other objects are still assembled (same as verify_assembly)
+ASSEMBLY_POSITION_TOLERANCE = 0.01  # 1cm
+ASSEMBLY_ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees
 
 
 class VerifyDisassembly(Node):
-    def __init__(self, base_name=None, base_topic=BASE_TOPIC, object_topic=OBJECT_TOPIC, ee_topic=EE_TOPIC):
+    def __init__(self, base_name=None, mode='sim', base_topic=None, object_topic=None, ee_topic=EE_TOPIC):
         super().__init__('verify_disassembly')
-        
+
+        # Determine topic based on mode
+        if object_topic is None:
+            object_topic = OBJECT_TOPIC_REAL if mode == 'real' else OBJECT_TOPIC_SIM
+        if base_topic is None:
+            base_topic = object_topic
+
         # Store base name and find assembly JSON file
         self.base_name = base_name
         self.assembly_json_file = None
         self.assembly_config = {}
         self.symmetry_dir = SYMMETRY_DIR
-        
+
         # Load assembly configuration if base_name is provided
         if base_name is not None:
             self.assembly_config = self.load_assembly_config(base_name)
-        
+
         # Subscribers for pose data
         self.base_sub = self.create_subscription(TFMessage, base_topic, self.base_callback, 10)
         self.object_sub = self.create_subscription(TFMessage, object_topic, self.object_callback, 10)
@@ -360,11 +328,235 @@ class VerifyDisassembly(Node):
             self.get_logger().info(f"Position error: [{position_error_vector[0]:.6f}, {position_error_vector[1]:.6f}, {position_error_vector[2]:.6f}]m (magnitude: {position_error:.6f}m) exceeds tolerance ({POSITION_TOLERANCE}m) - object moved away")
             return True, error_data
 
+    def get_assembly_order(self, object_name):
+        """Get the assembly_order for a component from the assembly config."""
+        for component in self.assembly_config.get('components', []):
+            if component.get('name') == object_name:
+                return component.get('assembly_order')
+        return None
+
+    def get_peg_free_axis(self, object_name):
+        """Check if component is a peg and get its free rotation axis.
+
+        Pegs are axisymmetric inserts where rotation around the insertion axis
+        doesn't matter for assembly verification.
+
+        Returns:
+            int or None: 0 (x), 1 (y), or 2 (z) for free rotation axis, None if not a peg
+        """
+        axis_map = {'x': 0, 'y': 1, 'z': 2}
+        for component in self.assembly_config.get('components', []):
+            if component.get('name') == object_name:
+                if component.get('subtype') == 'peg':
+                    axis_str = component.get('axis')
+                    return axis_map.get(axis_str)
+        return None
+
+    def compute_axis_alignment_error(self, R_current, R_target, axis_idx):
+        """Compute angular error between the specified axis of current and target orientations.
+
+        For pegs, we only care that the insertion axis points the right way,
+        not about rotation around that axis.
+        """
+        axis_current = R_current[:, axis_idx]
+        axis_target = R_target[:, axis_idx]
+        dot = np.clip(np.dot(axis_current, axis_target), -1.0, 1.0)
+        return np.degrees(np.arccos(dot))
+
+    def get_max_assembly_order(self):
+        """Get the highest assembly_order among non-board components."""
+        max_order = 0
+        for component in self.assembly_config.get('components', []):
+            if component.get('type') == 'board':
+                continue
+            order = component.get('assembly_order', 0)
+            max_order = max(max_order, order)
+        return max_order
+
+    def get_disassembly_order(self, object_name):
+        """Compute disassembly order (reverse of assembly order).
+
+        Assembly order 1..N maps to disassembly order N..1.
+        Board (order 0) returns None.
+        """
+        assembly_order = self.get_assembly_order(object_name)
+        if assembly_order is None or assembly_order == 0:
+            return None
+        max_order = self.get_max_assembly_order()
+        return max_order - assembly_order + 1
+
+    def check_lower_order_objects_assembled(self, object_name, base_name):
+        """
+        Check that all objects with a lower assembly_order than the target object
+        are still in their assembled positions. If any got disturbed, the robot
+        caused collateral damage during disassembly.
+
+        Args:
+            object_name: The object being disassembled
+            base_name: The base object
+
+        Returns:
+            Tuple: (all_intact: bool, disturbed_objects: list of str)
+        """
+        target_order = self.get_assembly_order(object_name)
+        if target_order is None:
+            self.get_logger().warn(f"No assembly_order found for {object_name}, skipping lower-order check")
+            return True, []
+
+        disturbed = []
+        components = self.assembly_config.get('components', [])
+
+        for component in components:
+            comp_name = component.get('name', '')
+            comp_order = component.get('assembly_order')
+
+            # Skip: the target object itself, the board, or components without order
+            if comp_name == object_name or comp_name == base_name or comp_order is None:
+                continue
+
+            # Only check objects that should still be assembled (lower order)
+            if comp_order >= target_order:
+                continue
+
+            # Check if this object is still in its assembled position
+            if comp_name not in self.current_poses:
+                self.get_logger().warn(f"[order check] {comp_name} (order {comp_order}) not found in poses")
+                disturbed.append(comp_name)
+                continue
+
+            T_obj = self.transform_to_matrix(self.current_poses[comp_name].transform)
+            T_base = self.transform_to_matrix(self.current_poses[base_name].transform)
+            T_relative = np.linalg.inv(T_base) @ T_obj
+
+            # Position check
+            target_pos = self.get_object_target_position(comp_name)
+            if target_pos is None:
+                continue
+            pos_error = np.linalg.norm(T_relative[:3, 3] - target_pos)
+
+            # Orientation check
+            target_quat = self.get_object_target_orientation(comp_name)
+            if target_quat is None:
+                continue
+            R_target = R.from_quat(target_quat).as_matrix()
+            R_current_mat = T_relative[:3, :3]
+
+            peg_free_axis = self.get_peg_free_axis(comp_name)
+            if peg_free_axis is not None:
+                # For pegs: only check axis alignment, ignore rotation around insertion axis
+                min_ori_error = self.compute_axis_alignment_error(R_current_mat, R_target, peg_free_axis)
+            else:
+                # For regular parts: use full orientation check with fold symmetry
+                R_current = R.from_matrix(R_current_mat)
+                fold_data = load_symmetry_data(comp_name, self.symmetry_dir)
+                equiv_targets = equivalent_orientations(R_target, fold_data)
+                min_ori_error = float('inf')
+                for R_equiv in equiv_targets:
+                    ori_error = np.degrees((R_current.inv() * R.from_matrix(R_equiv)).magnitude())
+                    min_ori_error = min(min_ori_error, ori_error)
+
+            pos_ok = pos_error <= ASSEMBLY_POSITION_TOLERANCE
+            ori_ok = min_ori_error <= ASSEMBLY_ORIENTATION_TOLERANCE_DEG
+
+            if not (pos_ok and ori_ok):
+                self.get_logger().error(
+                    f"[order check] {comp_name} (order {comp_order}) DISTURBED: "
+                    f"pos_error={pos_error:.4f}m, ori_error={min_ori_error:.2f}°"
+                )
+                disturbed.append(comp_name)
+            else:
+                self.get_logger().info(
+                    f"[order check] {comp_name} (order {comp_order}) still assembled"
+                )
+
+        return len(disturbed) == 0, disturbed
+
+    def check_skipped_objects(self, object_name, base_name):
+        """
+        Check if objects that should have been disassembled first (higher assembly_order)
+        are still in their assembled positions — meaning the agent skipped them.
+
+        Args:
+            object_name: The object being disassembled
+            base_name: The base object
+
+        Returns:
+            Tuple: (none_skipped: bool, skipped_objects: list of str)
+        """
+        target_order = self.get_assembly_order(object_name)
+        if target_order is None:
+            return True, []
+
+        skipped = []
+        components = self.assembly_config.get('components', [])
+
+        for component in components:
+            comp_name = component.get('name', '')
+            comp_order = component.get('assembly_order')
+
+            # Skip: the target object itself, the board, or components without order
+            if comp_name == object_name or comp_name == base_name or comp_order is None:
+                continue
+
+            # Only check objects with higher assembly_order (should be disassembled before this one)
+            if comp_order <= target_order:
+                continue
+
+            # Check if this object is still assembled (it shouldn't be)
+            if comp_name not in self.current_poses:
+                # Not in poses — could be already removed, not skipped
+                continue
+
+            T_obj = self.transform_to_matrix(self.current_poses[comp_name].transform)
+            T_base = self.transform_to_matrix(self.current_poses[base_name].transform)
+            T_relative = np.linalg.inv(T_base) @ T_obj
+
+            # Position check
+            target_pos = self.get_object_target_position(comp_name)
+            if target_pos is None:
+                continue
+            pos_error = np.linalg.norm(T_relative[:3, 3] - target_pos)
+
+            # Orientation check
+            target_quat = self.get_object_target_orientation(comp_name)
+            if target_quat is None:
+                continue
+            R_target = R.from_quat(target_quat).as_matrix()
+            R_current_mat = T_relative[:3, :3]
+
+            peg_free_axis = self.get_peg_free_axis(comp_name)
+            if peg_free_axis is not None:
+                min_ori_error = self.compute_axis_alignment_error(R_current_mat, R_target, peg_free_axis)
+            else:
+                R_current = R.from_matrix(R_current_mat)
+                fold_data = load_symmetry_data(comp_name, self.symmetry_dir)
+                equiv_targets = equivalent_orientations(R_target, fold_data)
+                min_ori_error = float('inf')
+                for R_equiv in equiv_targets:
+                    ori_error = np.degrees((R_current.inv() * R.from_matrix(R_equiv)).magnitude())
+                    min_ori_error = min(min_ori_error, ori_error)
+
+            pos_ok = pos_error <= ASSEMBLY_POSITION_TOLERANCE
+            ori_ok = min_ori_error <= ASSEMBLY_ORIENTATION_TOLERANCE_DEG
+
+            if pos_ok and ori_ok:
+                # Still assembled — this object should have been removed first
+                disassembly_order = self.get_disassembly_order(comp_name)
+                self.get_logger().error(
+                    f"[skip check] {comp_name} (disassembly_order {disassembly_order}) "
+                    f"still assembled — should have been disassembled first"
+                )
+                skipped.append(comp_name)
+
+        return len(skipped) == 0, skipped
+
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Verify Disassembly - Check if object is NOT in assembly position')
     parser.add_argument('--object-name', type=str, help='Name of the object to verify (optional if --check-all is used)')
     parser.add_argument('--base-name', type=str, required=True, help='Name of the base object')
+    parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
+                       help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
     parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are disassembled')
     parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
@@ -374,7 +566,7 @@ def main(args=None):
         parser.error("Either --object-name or --check-all must be specified")
 
     rclpy.init()
-    node = VerifyDisassembly(base_name=args.base_name)
+    node = VerifyDisassembly(base_name=args.base_name, mode=args.mode)
 
     success = False
     error_data = {}
@@ -435,14 +627,41 @@ def main(args=None):
                 node.get_logger().error(f"Found {len(still_assembled_objects)} objects still assembled: {still_assembled_objects}")
         else:
             # Verify disassembly (opposite of assembly verification)
-            success, error_data = node.verify_disassembly(
+            object_removed, error_data = node.verify_disassembly(
                 args.object_name,
                 args.base_name
             )
 
-            if success:
+            if object_removed:
                 node.get_logger().info("Disassembly verification: SUCCESS - Object is not in assembly position")
+                success = True
+
+                errors = {}
+
+                # Check if agent skipped higher-priority objects
+                none_skipped, skipped_objects = node.check_skipped_objects(
+                    args.object_name, args.base_name
+                )
+                if not none_skipped:
+                    node.get_logger().error(
+                        f"Disassembly order violation: Skipped objects that should be removed first: {skipped_objects}"
+                    )
+                    errors["skipped_objects"] = skipped_objects
+
+                # Check that lower-order objects were not disturbed
+                all_intact, disturbed_objects = node.check_lower_order_objects_assembled(
+                    args.object_name, args.base_name
+                )
+                if not all_intact:
+                    node.get_logger().error(
+                        f"Disassembly order violation: Robot disturbed other objects: {disturbed_objects}"
+                    )
+                    errors["disturbed_objects"] = disturbed_objects
+
+                if errors:
+                    error_data["error"] = errors
             else:
+                success = False
                 node.get_logger().error("Disassembly verification: FAILED - Object is still in assembly position")
 
     except KeyboardInterrupt:
@@ -471,6 +690,11 @@ def main(args=None):
                 "object_name": args.object_name,
                 "base_name": args.base_name,
             }
+
+            # Add disassembly order (reverse of assembly order)
+            disassembly_order = node.get_disassembly_order(args.object_name)
+            if disassembly_order is not None:
+                result["disassembly_order"] = disassembly_order
 
             # Add error data if available
             if error_data:
