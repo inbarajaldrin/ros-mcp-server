@@ -221,7 +221,7 @@ class MoveToSafeHeight(Node):
                 num_waypoints=num_waypoints
             )
             if waypoints is None:
-                self.error_message = "IK failed for Cartesian waypoints"
+                self.error_message = "Motion planning failed: no collision-free path to the safe height could be computed"
                 self.get_logger().error(self.error_message)
                 return
 

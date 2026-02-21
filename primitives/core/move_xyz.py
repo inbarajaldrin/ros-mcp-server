@@ -127,7 +127,7 @@ class PerformIKRunner(Node):
         joint_angles = solver.solve(seeds=[q_guess], target_pose=target_pose, perturbations=5, dx=0.001)
 
         if joint_angles is None:
-            self.error = "IK failed: couldn't find solution for target pose"
+            self.error = "Motion planning failed: target pose is unreachable with current joint constraints"
             self.get_logger().error(self.error)
             self.shutdown()
             return

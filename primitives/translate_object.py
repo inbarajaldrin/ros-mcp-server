@@ -455,7 +455,7 @@ class TranslateObject(Node):
         )
         if result is not None:
             return result
-        self.get_logger().error("IK failed: couldn't find solution")
+        self.get_logger().error("Motion planning failed: no reachable joint configuration exists for the target position")
         return None
 
     def execute_trajectory(self, trajectory):
@@ -667,7 +667,7 @@ class TranslateObject(Node):
             target_orientation=ee_target_rot_matrix if not hover else None,
         )
         if waypoints is None:
-            self.error_message = "IK failed for Cartesian waypoints"
+            self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
             self.get_logger().error(self.error_message)
             return False
 
@@ -887,7 +887,7 @@ class TranslateObject(Node):
             target_pos=hover_flange.tolist(),
         )
         if waypoints is None:
-            self.error_message = "IK failed for Cartesian waypoints"
+            self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
             self.get_logger().error(self.error_message)
             return False
 
@@ -963,7 +963,7 @@ class TranslateObject(Node):
                 target_pos=corrected_flange.tolist(),
             )
             if correction_waypoints is None:
-                self.get_logger().warn("Correction IK failed, skipping")
+                self.get_logger().warn("Motion planning failed for post-placement correction, skipping")
                 break
 
             corr_all = [self.current_joint_angles.copy()] + list(correction_waypoints)

@@ -320,7 +320,7 @@ class MoveToClearArea(Node):
                 )
 
                 if lift_joints is None:
-                    self.error_message = "IK failed for intermediate lift position"
+                    self.error_message = "Motion planning failed: intermediate lift position is unreachable"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
@@ -366,7 +366,7 @@ class MoveToClearArea(Node):
             )
 
             if hover_joints is None:
-                self.error_message = "IK failed for hover position"
+                self.error_message = "Motion planning failed: hover position above the target is unreachable"
                 self.get_logger().error(self.error_message)
                 self.operation_success = False
                 self.operation_complete = True
@@ -576,7 +576,7 @@ class MoveToClearArea(Node):
 
                 # Fallback: free wrist constraints if cardinal solve failed
                 if not candidate_solutions:
-                    self.get_logger().info("Cardinal wrist IK failed, falling back to free wrist bounds")
+                    self.get_logger().info("Motion planning failed for cardinal wrist orientation, falling back to free wrist bounds")
                     solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_base, cost_threshold=0.01))
                     seeds_free = make_seeds_free(joint_bounds_base)
                     for yaw, rot_matrix in target_orientations:
@@ -600,7 +600,7 @@ class MoveToClearArea(Node):
                             candidate_solutions.append((solver._best_result.cost, joint_angles, yaw))
 
                 if not candidate_solutions:
-                    self.error_message = "IK solver failed: no collision-free solution found for clear space move"
+                    self.error_message = "Motion planning failed: all candidate paths to the clear area result in collision"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
@@ -649,7 +649,7 @@ class MoveToClearArea(Node):
                             collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
 
                 if not collision_free_trajectories:
-                    self.error_message = "IK solution rejected: all candidate trajectories would cause collision"
+                    self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True

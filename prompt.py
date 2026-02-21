@@ -25,6 +25,7 @@ The information you collect in this run will be used later to perform assembly.
 **Execution**
 
 Use existing tools to perform disassembly one object at a time. Understand the capabilities of the tools and the limitations of the environment.
+Motion planning failed means no path to target was found — try a recovery strategy before restoring the scene.
 Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
 You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object.
 
@@ -64,6 +65,7 @@ The same tool sequence might not work for all objects.
 **Execution**
 
 Read the tool descriptions properly and understand the underlying logic and sequence of the tool calls.
+Motion planning failed means no path to target was found — try a recovery strategy before restoring the scene.
 Use available tools to perform assembly.
 DO NOT orchestrate the tools to perform a composed policy.
 

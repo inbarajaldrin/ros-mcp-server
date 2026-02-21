@@ -246,7 +246,7 @@ class ScanWorkspace(Node):
         joint_angles = solver.solve(seeds=[q_guess], target_pose=target_pose, perturbations=5, dx=0.001)
         
         if joint_angles is None:
-            self.get_logger().warn(f"IK failed for position {position}, skipping waypoint")
+            self.get_logger().warn(f"Motion planning failed: scan waypoint at {position} is outside the reachable workspace, skipping")
             return False
 
         # Compute duration dynamically based on joint distance
@@ -344,8 +344,8 @@ class ScanWorkspace(Node):
             self.movement_in_progress = True
             self.current_waypoint_index += 1
         else:
-            # If IK failed, skip this waypoint and try next
-            self.get_logger().warn(f"Skipping waypoint {self.current_waypoint_index + 1} due to IK failure")
+            # Motion planning failed, skip this waypoint and try next
+            self.get_logger().warn(f"Skipping waypoint {self.current_waypoint_index + 1} — position is outside the reachable workspace")
             self.current_waypoint_index += 1
             # Don't set movement_in_progress, allow next waypoint to be tried immediately
     

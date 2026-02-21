@@ -1543,9 +1543,9 @@ class DirectObjectMove(Node):
         """Execute trajectory using ROS2 action"""
         try:
             if 'traj1' not in trajectory or not trajectory['traj1']:
-                self.get_logger().error("No trajectory found (IK solver failed to find a solution)")
+                self.get_logger().error("Motion planning failed: no collision-free trajectory to the grasp pose could be computed")
                 self.trajectory_in_progress = False
-                self.error_message = "IK solver failed to find a solution for the target pose"
+                self.error_message = "Motion planning failed: no collision-free trajectory to the grasp pose could be computed"
                 self.movement_completed = True
                 self.should_exit = True
                 return

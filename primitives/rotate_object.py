@@ -843,9 +843,9 @@ class ReorientForAssembly(Node):
             return self.compute_ik_with_current_seed(target_position, yaw_flipped_quat.tolist(), max_tries, dx, try_yaw_flip=False)
 
         if self.mode == 'sim':
-            self.get_logger().error("IK failed: couldn't find collision-free solution even with multiple seeds")
+            self.get_logger().error("Motion planning failed: no collision-free joint configuration exists for the reorientation target")
         else:
-            self.get_logger().error("IK failed: couldn't find solution even with multiple seeds")
+            self.get_logger().error("Motion planning failed: reorientation target is unreachable with current joint constraints")
         return None
 
     def compute_ik_with_y_search(self, target_position, target_quat, dy=0.01, y_steps=5):
@@ -1542,7 +1542,7 @@ class ReorientForAssembly(Node):
                                 object_error = card_error
 
         if joint_angles is None:
-            self.error_message = "IK failed: couldn't find valid orientation for reorientation"
+            self.error_message = "Motion planning failed: no valid end-effector orientation for the reorientation could be solved"
             self.get_logger().error(self.error_message)
             return False
 
