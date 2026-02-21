@@ -911,11 +911,12 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
     return result
 
 @mcp.tool()
-async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mode: Mode = "real") -> Dict[str, Any]:
-    """Verify if assembly objects have sufficient clearance for gripper access.
+async def prepare_workspace(base_name: str, ctx: Context[ServerSession, None], mode: Mode = "real") -> Dict[str, Any]:
+    """Prepare and verify the real workspace for assembly.
 
-    Checks if all objects for assembly are present and have enough space for the gripper to operate.
-    If verification fails due to setup issues, automatically offers interactive elicitation.
+    First asks a human operator to confirm the scene is ready (objects placed, robot spawned),
+    then checks if all objects are present and have enough clearance for the gripper to operate.
+    If clearance verification fails, automatically offers interactive elicitation to fix issues.
 
     Args:
         base_name: Name of the base object
@@ -923,18 +924,43 @@ async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mo
         mode: Robot mode (default: "real")
 
     Returns:
-        Dictionary with clearance verification results:
+        Dictionary with workspace preparation results:
         - "result": "success" or "failure"
         - "ready_for_assembly": Boolean indicating if ready to proceed
         - "base_name": Name of the base object
+        - "scene_setup": Human response from scene setup elicitation (if applicable)
         - If failure:
           - "error": Description of the issue
           - "missing_objects": List of missing objects (if any)
           - "objects_with_clearance_issues": List of objects with clearance problems (if any)
     """
+    # Step 1: Scene setup elicitation — ask human to confirm objects are placed and robot is ready
+    scene_setup = await _invoke_scene_setup(ctx)
+    if scene_setup.get("action") == "decline" or scene_setup.get("action") == "cancel":
+        return {
+            "result": "failure",
+            "base_name": base_name,
+            "ready_for_assembly": False,
+            "error": "Scene setup was declined or cancelled by operator",
+            "scene_setup": scene_setup,
+        }
+    if scene_setup.get("status") == "error":
+        return {
+            "result": "failure",
+            "base_name": base_name,
+            "ready_for_assembly": False,
+            "error": f"Scene setup elicitation failed: {scene_setup.get('message', 'unknown error')}",
+            "scene_setup": scene_setup,
+        }
+
+    # Step 2: Run clearance verification query
     result = _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
 
-    # On failure, invoke human elicitation to fix setup issues
+    # Attach scene setup response to result
+    if isinstance(result, dict):
+        result["scene_setup"] = scene_setup
+
+    # Step 3: On failure, invoke human elicitation to fix setup issues
     if isinstance(result, dict) and result.get("result") == "failure":
         def retry_query(bn, m):
             return _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{bn}\" --mode {m}", timeout=30, error_prefix="Verify clearance")
@@ -942,6 +968,28 @@ async def verify_clearance(base_name: str, ctx: Context[ServerSession, None], mo
         result = await handle_clearance_failure(result, base_name, mode, ctx, _handle_elicitation, retry_query)
 
     return result
+
+
+async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, Any]:
+    """Invoke scene setup elicitation to confirm real workspace is ready.
+
+    Loads the setup_real_scene elicitation module and presents a form
+    asking the human to place objects and spawn the real robot.
+    """
+    try:
+        import importlib.util as _ilu
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        setup_path = os.path.join(script_dir, "elicitations", "setup_real_scene.py")
+
+        spec = _ilu.spec_from_file_location("elicitations.setup_real_scene", setup_path)
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        message = module.build_elicitation_message({"phase": 3})
+        return await _handle_elicitation(ctx, "setup_real_scene", message, {"phase": 3})
+
+    except Exception as e:
+        return {"status": "error", "message": f"Scene setup elicitation failed: {str(e)}"}
 
 @mcp.tool()
 def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
@@ -1253,12 +1301,15 @@ async def signal_phase_complete(
         status: Whether the phase succeeded or failed
         action: Phase 2 only - provide "randomize" to reset the scene and verify
                 the assembly sequence again, or "reverified" to confirm verification
-                is done and proceed to phase 3. Do not provide for phases 1 or 3.
+                is done and proceed to phase 3 (gates on assembly results being logged).
+                Do not provide for phases 1 or 3.
         comment: Optional comment (should explain failure reasons)
 
     Returns:
         Structured result with phase, status, and any verification data.
+        Phase 1 gates on disassembly results being logged.
         Phase 2 without action returns options for the agent to choose from.
+        Phase 2 with action="reverified" gates on assembly results being logged.
         For phase 3, includes human verification response.
     """
     return await handle_phase_signal(
@@ -1282,7 +1333,7 @@ async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_scr
     Dynamically loads schema from elicitation script and presents user with a form to fill.
 
     Args:
-        elicitation_script: Name of the elicitation script (e.g., "verify_clearance")
+        elicitation_script: Name of the elicitation script (e.g., "setup_real_scene")
         message: The message to display to the user
         context_data: Optional context passed to get_elicitation_schema for dynamic schema selection
 

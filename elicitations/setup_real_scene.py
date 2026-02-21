@@ -1,13 +1,13 @@
 """Setup Real Scene Elicitation - Ask a human operator to prepare the physical workspace.
 
-Related files (phase signal pipeline):
-  - triggers/signal_phase_complete.py — handles phase signals, invokes human for phase 2 reverified
-  - elicitations/setup_real_scene.py  (this file) — Pydantic schemas for real scene setup confirmation
+Related files (workspace preparation pipeline):
+  - server.py (prepare_workspace tool) — invokes this elicitation before clearance check
+  - elicitations/setup_real_scene.py   (this file) — Pydantic schemas for real scene setup confirmation
 
-Used by Phase 2 (action="reverified") to get human confirmation that:
+Used by the prepare_workspace tool at the start of Phase 3 to get human confirmation that:
   1. Physical objects are placed in the scene
   2. The real robot is spawned and ready
-before proceeding to Phase 3 (real-world execution).
+before running clearance verification and starting real-world execution.
 """
 
 from pydantic import BaseModel, Field
@@ -56,9 +56,9 @@ def build_elicitation_message(result: dict) -> str:
     Returns:
         Formatted message string for the human operator.
     """
-    message = "Phase 2 Verified — Prepare Real Scene\n\n"
+    message = "Phase 3 — Prepare Real Scene\n\n"
     message += "The assembly sequence has been verified in simulation.\n"
-    message += "Before proceeding to Phase 3 (real-world execution):\n\n"
+    message += "Before starting real-world assembly:\n\n"
     message += "1. Place all assembly objects in the physical workspace\n"
     message += "2. Spawn the real robot\n\n"
     message += "Confirm when ready to proceed."
