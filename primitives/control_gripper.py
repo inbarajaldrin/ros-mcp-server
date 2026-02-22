@@ -44,7 +44,8 @@ class GripperController(Node):
         self.verification_complete = False
         self.verification_result = None
         self.final_stabilized_width = None  # Store the final stabilized width
-        self.jammed = False  # Gripper fingers asymmetric (collision/jam)
+        self.asymmetry = 0.0  # Asymmetry between fingers in mm
+        self.asymmetry_threshold = 15.0  # mm - above this means fingers are asymmetric
         self.blocked = False  # Gripper pressing against object (effort detected)
         self.current_effort = 0.0  # Total measured joint effort
         self.effort_threshold = 0.05  # Effort above this means gripper is pressing against something
@@ -68,7 +69,14 @@ class GripperController(Node):
                 self.effort_callback,
                 10
             )
-            self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim + /gripper_effort_sim")
+            # Asymmetry topic for jam detection
+            self.asymmetry_sub = self.create_subscription(
+                Float64,
+                '/gripper_asymmetry_sim',
+                self.asymmetry_callback,
+                10
+            )
+            self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim + /gripper_effort_sim + /gripper_asymmetry_sim")
         else:
             # Real mode: use gripper width with fingertip offset (Float32)
             self.width_sub = self.create_subscription(
@@ -110,10 +118,13 @@ class GripperController(Node):
         self.get_logger().info(f"Target state: {self.target_state}, ROS command: {self.ros_command}, Mode: {self.mode}")
     
     def width_callback(self, msg):
-        """Callback for gripper width readings. -1=jammed (asymmetric)."""
-        self.jammed = msg.data == -1.0
+        """Callback for gripper width readings (always real average width)."""
         self.current_width = msg.data
         self.width_received = True
+
+    def asymmetry_callback(self, msg):
+        """Callback for gripper asymmetry readings (mm difference between fingers)."""
+        self.asymmetry = msg.data
 
     def effort_callback(self, msg):
         """Callback for gripper effort readings. High effort = pressing against object."""
@@ -188,10 +199,15 @@ class GripperController(Node):
 
         # Check if already at target state (but not if effort is high — means pressing against object)
         if initial_value is not None and self.is_at_target_state(initial_value):
-            # Spin a few times to ensure effort callback has fired
+            # Spin a few times to ensure effort/asymmetry callbacks have fired
             if self.mode == 'sim':
                 for _ in range(5):
                     rclpy.spin_once(self, timeout_sec=0.05)
+            is_asymmetric = self.asymmetry > self.asymmetry_threshold
+            if is_asymmetric:
+                self.get_logger().warn(f"✗ Gripper jammed: fingers are asymmetric (width: {initial_value:.2f}mm)")
+                self.final_stabilized_width = initial_value
+                return False
             if self.blocked and self.target_state != "close":
                 self.get_logger().warn(f"Width near target ({initial_value:.2f}mm) but effort high ({self.current_effort:.3f}) — gripper is blocked")
                 self.final_stabilized_width = initial_value
@@ -225,29 +241,30 @@ class GripperController(Node):
             current_value = self.get_current_width(timeout=0.3)
             readings_count += 1
 
-            # Check for jam (-1 signal from sim) — only after grace period so command has time to resolve it
-            if self.jammed and readings_count > grace_readings and no_change_count >= 5:
-                if self.target_state == "close":
-                    # Closing + asymmetric = gripping an object — this is success
-                    self.get_logger().info(f"✓ Gripper gripping object (fingers asymmetric)")
-                    self.final_stabilized_width = current_value if current_value is not None else initial_value
-                    return True
-                else:
-                    # Opening/half-open + asymmetric = jammed
-                    self.get_logger().error("✗ Gripper jammed: fingers are asymmetric (collision detected)")
-                    self.final_stabilized_width = -1.0
-                    return False
+            # Check for asymmetry and blocked — only after grace period so command has time to take effect
+            is_asymmetric = self.asymmetry > self.asymmetry_threshold
+            # Asymmetry = jammed
+            if is_asymmetric and readings_count > grace_readings and no_change_count >= 5:
+                self.get_logger().warn(f"✗ Gripper jammed: fingers are asymmetric")
+                self.final_stabilized_width = current_value if current_value is not None else initial_value
+                return False
 
-            # Check for blocked (effort from /gripper_effort_sim) — only after grace period
+            # Blocked (effort detected)
             if self.blocked and readings_count > grace_readings and no_change_count >= 5:
                 if self.target_state == "close":
-                    # Closing + effort = gripping an object — this is success
+                    movement_from_start = abs(initial_value - current_value) if (initial_value is not None and current_value is not None) else 0
+                    if movement_from_start < 3.0:
+                        # Already gripping — gripper didn't close further
+                        self.get_logger().warn(f"✗ Gripper already closed on object (effort: {self.current_effort:.3f})")
+                        self.final_stabilized_width = current_value if current_value is not None else initial_value
+                        return False
+                    # Significant movement + effort = freshly gripping
                     self.get_logger().info(f"✓ Gripper gripping object (effort: {self.current_effort:.3f})")
                     self.final_stabilized_width = current_value if current_value is not None else initial_value
                     return True
                 else:
-                    # Opening/half-open + effort = blocked by object, can't release
-                    self.get_logger().error(f"✗ Gripper blocked: pressing against object (effort: {self.current_effort:.3f}). Open the gripper wider to release.")
+                    # Opening/half-open + effort = blocked by object
+                    self.get_logger().error(f"✗ Gripper blocked: pressing against object (effort: {self.current_effort:.3f})")
                     self.final_stabilized_width = current_value if current_value is not None else initial_value
                     return False
 
@@ -472,11 +489,11 @@ def main(args=None):
         success = controller.control_with_verification(initial_value)
 
         if not success:
-            if controller.jammed:
-                error = "Gripper jammed: fingers are asymmetric due to collision. Reposition and retry."
+            if controller.asymmetry > controller.asymmetry_threshold:
+                error = "Gripper jammed: fingers are asymmetric. Reposition and retry."
             elif controller.blocked:
                 if known_args.command == "close":
-                    error = "Gripper blocked: pressing against object, cannot reach target width."
+                    error = "Gripper already closed on object. Open the gripper to release first."
                 else:
                     error = "Gripper blocked: pressing against object, cannot reach target width. Open the gripper wider to release."
             else:
@@ -489,12 +506,11 @@ def main(args=None):
         if final_value is not None:
             controller.get_logger().info(f"Final gripper width: {final_value:.2f}mm")
 
-        # Output gripper range and current width
+        # Output gripper range and width change (skip change for jammed/blocked/recovery — misleading)
         controller.get_logger().info(f"Gripper range: {GRIPPER_MIN_WIDTH:.1f} - {GRIPPER_MAX_WIDTH:.1f}mm")
-        if initial_value is not None and final_value is not None:
+        is_clean_success = success and not (controller.asymmetry > controller.asymmetry_threshold)
+        if is_clean_success and initial_value is not None and final_value is not None:
             controller.get_logger().info(f"Gripper width: {initial_value:.2f}mm → {final_value:.2f}mm (change: {final_value - initial_value:+.2f}mm)")
-        elif final_value is not None:
-            controller.get_logger().info(f"Current gripper width: {final_value:.2f}mm")
 
     except Exception as e:
         success = False
@@ -509,9 +525,9 @@ def main(args=None):
             pass  # Ignore cleanup errors
 
     # Build structured result
-    is_jammed = controller is not None and controller.jammed
+    is_asymmetric = controller is not None and controller.asymmetry > controller.asymmetry_threshold
     is_blocked = controller is not None and controller.blocked and not success
-    if is_jammed:
+    if is_asymmetric and not success:
         result_str = "jammed"
     elif is_blocked:
         result_str = "blocked"
@@ -525,11 +541,13 @@ def main(args=None):
         "mode": known_args.mode,
     }
 
-    # Include width fields only when meaningful (not for jammed)
-    if not is_jammed:
+    # Width fields: only final_width for jammed/blocked/recovery (initial and change are misleading)
+    if result_str == "blocked":
+        result["final_width_mm"] = round(final_value, 2) if final_value is not None else None
+    else:
         result["initial_width_mm"] = round(initial_value, 2) if initial_value is not None else None
         result["final_width_mm"] = round(final_value, 2) if final_value is not None else None
-        result["change_mm"] = round(final_value - initial_value, 2) if (initial_value is not None and final_value is not None and final_value != -1.0) else None
+        result["change_mm"] = round(final_value - initial_value, 2) if (initial_value is not None and final_value is not None) else None
 
     # Add error if failed
     if not success and error:
