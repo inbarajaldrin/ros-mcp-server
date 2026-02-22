@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 
 from pydantic import Field
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 mcp = FastMCP("Prompts")
 
