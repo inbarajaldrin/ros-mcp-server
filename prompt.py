@@ -1,3 +1,6 @@
+from typing import Annotated, Literal
+
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Prompts")
@@ -18,7 +21,7 @@ Save scene state.
 
 **Task**
 
-Your goal is to disassemble this top down assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly.
+Your goal is to disassemble this top down assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly and move them to clear space.
 You can refer the instruction manual that shows the assembly steps to figure out the sequence in which you need to disassemble them.
 The information you collect in this run will be used later to perform assembly.
 
@@ -88,21 +91,28 @@ Signal the client again once the assembly is done.
 """
 
 @mcp.prompt()
-def phase_3_perform_assembly_sequence() -> str:
+def phase_3_perform_assembly_sequence(mode: Annotated[Literal["sim", "real"], Field(description="Environment: sim or real")]) -> str:
     """
-    Phase 3: Performing Assembly in the real world.
+    Phase 3: Performing Assembly in simulation or real world.
     """
+    if mode == "real":
+        env_description = "You are an autonomous agent working in the real world."
+        setup_instruction = "Run prepare_workspace to ask a human operator to set up and verify the real workspace before starting assembly."
+    else:
+        env_description = "You are an autonomous agent working in a simulation."
+        setup_instruction = "Identify available objects and their grasp ids."
+
     return f"""**Initialization:**
 
-Phase 3: Performing Assembly in the real world.
+Phase 3: Performing Assembly ({mode} mode).
 
-You are an autonomous agent working in the real world.
-Run prepare_workspace to ask a human operator to set up and verify the real workspace before starting assembly.
+{env_description}
+{setup_instruction}
 Read the assembly sequence log to identify the tool call sequences for each object to perform assembly.
 
 **Task**
 
-You are to perform assembly of the objects onto a fixed base in the real world based on the data assembly sequence resource collected using a Digital twin from your previous runs.
+You are to perform assembly of the objects onto a fixed base based on the assembly sequence resource collected using a Digital twin from your previous runs.
 
 **Execution**
 
@@ -125,6 +135,16 @@ If an object can be grasped using a open gripper state and a half open gripper s
 **Post Execution**
 Signal the client you are done with the final assembly of all objects.
 """
+
+@mcp.prompt()
+def replace_defective_part(
+    object_name: Annotated[str, Field(description="Name of the defective object")],
+    base_name: Annotated[str, Field(description="Name of the base assembly")],
+) -> str:
+    """
+    An operator reports a defective part during assembly.
+    """
+    return f"""{object_name} assembled in {base_name} is defective. disassemble that object and place it in the clear space and notify me."""
 
 if __name__ == "__main__":
     mcp.run()

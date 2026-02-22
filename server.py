@@ -1321,6 +1321,50 @@ async def signal_phase_complete(
         elicit_user_fn=_handle_elicitation,
     )
 
+@mcp.tool()
+async def signal_operator(
+    message: str,
+    ctx: Context[ServerSession, None],
+    reason: str = "",
+    # TODO: Add optional context dict for structured metadata (e.g., object poses, error codes)
+) -> Dict[str, Any]:
+    """Signal a human operator and wait for confirmation.
+
+    Use this to notify the operator when you need them to perform a physical
+    action and wait for their confirmation before proceeding.
+
+    Args:
+        message: Description of what the robot has done and what the
+                 operator needs to do before the robot can continue.
+        reason: Short tag for the client to categorize the signal
+                (e.g., "part_replacement", "inspection", "workspace_setup").
+
+    Returns:
+        Dictionary with operator response:
+        - "result": "success" or "failure"
+        - "action": "proceed" or "abort"
+        - "reason": The reason tag passed by the agent
+        - "feedback": Optional operator notes
+    """
+    response = await _handle_elicitation(ctx, "signal_operator", message, {"message": message, "reason": reason})
+
+    if response.get("action") == "accept":
+        user_action = response.get("user_action", "proceed")
+        feedback = response.get("data", {}).get("feedback", "")
+        return {
+            "result": "success" if user_action == "proceed" else "failure",
+            "action": user_action,
+            "reason": reason,
+            "feedback": feedback,
+        }
+
+    return {
+        "result": "failure",
+        "action": response.get("action", "cancel"),
+        "reason": reason,
+        "feedback": response.get("message", "Operator declined or cancelled"),
+    }
+
 ## ############################################################################################## ##
 ##
 ##                      ELICITATION HANDLER
