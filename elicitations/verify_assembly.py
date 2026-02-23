@@ -1,10 +1,10 @@
 """Verify Assembly Elicitation - Ask a human operator to verify real-world assembly results.
 
 Related files (phase signal pipeline):
-  - triggers/signal_phase_complete.py — handles phase signals, invokes human for phase 3
+  - triggers/signal_phase_complete.py — handles phase signals, invokes human for phase 4
   - elicitations/verify_assembly.py   (this file) — Pydantic schemas for human verification of real-world assembly
 
-Used by Phase 3 (real-world execution) to get human confirmation that the
+Used by Phase 4 (real-world execution) to get human confirmation that the
 physical assembly was completed correctly before reporting final results.
 """
 
@@ -67,7 +67,7 @@ def get_elicitation_schema(result: dict = None):
 
 
 def build_elicitation_message(result: dict) -> str:
-    """Build a human-readable elicitation message from phase 3 results.
+    """Build a human-readable elicitation message from phase 4 results.
 
     Args:
         result: The phase completion result dict.
@@ -79,11 +79,11 @@ def build_elicitation_message(result: dict) -> str:
     comment = result.get("comment", "")
 
     if status == "success":
-        message = "Phase 3 (Real-World Execution) - Assembly Complete\n\n"
+        message = "Phase 4 (Real-World Execution) - Assembly Complete\n\n"
         message += "The robot reports the physical assembly is complete.\n"
         message += "Please verify the assembly is correct before confirming."
     else:
-        message = "Phase 3 (Real-World Execution) - Assembly Issue\n\n"
+        message = "Phase 4 (Real-World Execution) - Assembly Issue\n\n"
         message += "The robot reports a problem with the physical assembly."
 
     if comment:

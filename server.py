@@ -41,7 +41,7 @@ GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
-PhaseNumber = Literal[1, 2, 3]
+PhaseNumber = Literal[1, 2, 3, 4]
 PhaseStatus = Literal["success", "failure"]
 PhaseAction = Literal["randomize", "reverified"]
 
@@ -1117,13 +1117,16 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
     Purpose: After rotating an object, the EE may be in a non-optimal orientation causing IK failures.
     This tool places the rotated object down and enables regrasping with a top-down EE orientation.
 
-    Workflow: 
+    IMPORTANT: When regrasping for assembly, always use the grasp id from the disassembly results
+    for the final insert into the base. Any grasp id may be used during intermediate regrasp steps.
+
+    Workflow:
     1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
     2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
     3. Call move_down to place the object on the table
     4. Call control_gripper to release the object
     5. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
-    6. Call move_to_grasp to grasp the object again
+    6. Call move_to_grasp to grasp the object again using the grasp id from the disassembly results
     7. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
     8. Continue with what you were doing
 
@@ -1297,20 +1300,19 @@ async def signal_phase_complete(
 
     Args:
         phase: Which phase completed (1=disassembly discovery,
-               2=assembly discovery, 3=real-world execution)
+               2=assembly discovery, 3=sim reverification,
+               4=real-world execution)
         status: Whether the phase succeeded or failed
-        action: Phase 2 only - provide "randomize" to reset the scene and verify
-                the assembly sequence again, or "reverified" to confirm verification
-                is done and proceed to phase 3 (gates on assembly results being logged).
-                Do not provide for phases 1 or 3.
+        action: Phase 3 only - "randomize" to reset the scene and
+                reverify optimized sequences, then "reverified" to confirm
+                and exit the phase. "reverified" is required to complete
+                Phase 3.
         comment: Optional comment (should explain failure reasons)
 
     Returns:
         Structured result with phase, status, and any verification data.
-        Phase 1 gates on disassembly results being logged.
-        Phase 2 without action returns options for the agent to choose from.
-        Phase 2 with action="reverified" gates on assembly results being logged.
-        For phase 3, includes human verification response.
+        Phases 1-3 gate on results being logged.
+        Phase 4 includes human verification response.
     """
     return await handle_phase_signal(
         phase=phase,
