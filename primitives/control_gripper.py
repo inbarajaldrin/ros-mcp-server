@@ -525,24 +525,16 @@ def main(args=None):
             pass  # Ignore cleanup errors
 
     # Build structured result
-    is_asymmetric = controller is not None and controller.asymmetry > controller.asymmetry_threshold
-    is_blocked = controller is not None and controller.blocked and not success
-    if is_asymmetric and not success:
-        result_str = "jammed"
-    elif is_blocked:
-        result_str = "blocked"
-    elif success:
-        result_str = "success"
-    else:
-        result_str = "failure"
+    result_str = "success" if success else "failure"
     result = {
         "result": result_str,
         "command": known_args.command,
         "mode": known_args.mode,
     }
 
-    # Width fields: only final_width for jammed/blocked/recovery (initial and change are misleading)
-    if result_str == "blocked":
+    # Width fields: only final_width for jammed/blocked (initial and change are misleading)
+    is_blocked = controller is not None and controller.blocked and not success
+    if is_blocked:
         result["final_width_mm"] = round(final_value, 2) if final_value is not None else None
     else:
         result["initial_width_mm"] = round(initial_value, 2) if initial_value is not None else None

@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP, Image, Context
 from mcp.server.session import ServerSession
 from pydantic import BaseModel, Field
-from typing import List, Any, Optional, Union, Literal, Dict
+from typing import Annotated, List, Any, Optional, Union, Literal, Dict
 from pathlib import Path
 import json
 import base64
@@ -236,18 +236,11 @@ def _np_to_mcp_image(arr_rgb):
     return Image(data=img_byte_arr, format="jpeg")
 
 @mcp.tool()
-def read_topic(topic_name: str, timeout: int = 5):
-    """
-    Read data from any ROS topic using ros2 topic echo --once command.
-    Works with standard ROS2 message types like PoseStamped, Twist, JointState, etc.
-    
-    Args:
-        topic_name: The ROS topic to subscribe to (e.g., "/object_poses/jenga_2", "/cmd_vel")
-        timeout: Timeout in seconds for message capture (default: 5)
-    
-    Returns:
-        Dictionary containing the topic data or error information
-    """
+def read_topic(
+    topic_name: Annotated[str, Field(description='e.g. /topic_name')],
+    timeout: int = 5,
+):
+    """Read data from any ROS topic."""
     result = {
         "timestamp": datetime.now().isoformat(),
         "topic": topic_name,
@@ -309,21 +302,13 @@ def read_topic(topic_name: str, timeout: int = 5):
 ## ############################################################################################## ##
 
 @mcp.tool()
-def execute_python_code(code: str, timeout: int = 30) -> Dict[str, Any]:
+def execute_python_code(
+    code: str,
+    timeout: int = 30,
+) -> Dict[str, Any]:
     """Execute Python code for calculations and math operations.
 
-    This tool allows the agent to execute Python code for performing calculations,
-    math operations, data processing, or any other Python computations.
-
-    File saving: Use relative paths (e.g., "output.txt") instead of absolute paths like "/tmp/output.txt".
-
-    Args:
-        code: Python code to execute
-        timeout: Maximum execution time in seconds (default: 30)
-
-    Returns:
-        Dictionary with output from the executed Python code (stdout + stderr) and file information
-    """
+    File saving: Use relative paths (e.g., "output.txt") instead of absolute paths like "/tmp/output.txt"."""
     import subprocess
     import tempfile
     import os
@@ -394,127 +379,6 @@ import sys
         return {"output": f"Error: Code execution timed out after {timeout} seconds"}
     except Exception as e:
         return {"output": f"Error: Failed to execute Python code: {str(e)}"}
-
-# @mcp.tool()
-# def execute_policy_code(code: str, timeout: int = 3600) -> Dict[str, Any]:
-#     """Execute Python code with direct access to this server's primitives API.
-#
-#     Allows executable Python code that calls server primitives with complex control flow
-#     (loops, conditionals, result-based branching, etc.).
-#
-#     Available API: Import with 'from primitives.shared.primitives_api import *'
-#     All primitives return dictionaries with results for decision-making.
-#
-#     Example:
-#     ```python
-#     from primitives.shared.primitives_api import *
-#
-#     # Use any available primitives
-#     result = some_primitive(param1, param2)
-#
-#     # Make decisions based on results
-#     if result["status"] == "success":
-#         another_primitive()
-#     ```
-#
-#     Args:
-#         code: Python code (must import from primitives.shared.primitives_api)
-#         timeout: Maximum execution time in seconds (default: 3600)
-#
-#     Returns:
-#         Dictionary with output from code execution (stdout + stderr)
-#     """
-#     import subprocess
-#     import tempfile
-#     import os
-#     import sys
-#
-#     try:
-#         # Create python_executions directory if it doesn't exist
-#         os.makedirs(PYTHON_EXECUTIONS_DIR, exist_ok=True)
-#
-#         # Get the script directory for PYTHONPATH (need this before building template)
-#         script_dir = os.path.dirname(os.path.abspath(__file__))
-#
-#         # Create a temporary Python file
-#         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-#             # Add standard imports that policies typically need
-#             code_with_imports = f"""import sys
-# import os
-# from typing import Dict, Any, List, Optional
-#
-# # Add the parent directory to path so we can import primitives_api
-# sys.path.insert(0, '{script_dir}')
-#
-# # Standard imports for policies
-# import math
-# import numpy as np
-# from datetime import datetime, timedelta
-# import json
-#
-# # User's policy code:
-# {code}
-# """
-#             f.write(code_with_imports)
-#             temp_file = f.name
-#
-#         # Set up environment with PYTHONPATH
-#         env = os.environ.copy()
-#         if 'PYTHONPATH' in env:
-#             env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
-#         else:
-#             env['PYTHONPATH'] = script_dir
-#
-#         # Execute the code in the python_executions directory
-#         result = subprocess.run(
-#             [sys.executable, temp_file],
-#             capture_output=True,
-#             text=True,
-#             timeout=timeout,
-#             cwd=PYTHON_EXECUTIONS_DIR,
-#             env=env
-#         )
-#
-#         # Clean up
-#         try:
-#             os.unlink(temp_file)
-#         except:
-#             pass
-#
-#         # Return combined stdout and stderr
-#         output = result.stdout if result.stdout else ""
-#         if result.stderr:
-#             output += "\n" + result.stderr
-#
-#         result_dict = {
-#             "output": output,
-#             "returncode": result.returncode
-#         }
-#
-#         # Add success indicator
-#         if result.returncode == 0:
-#             result_dict["status"] = "success"
-#         else:
-#             result_dict["status"] = "failed"
-#             result_dict["message"] = f"Policy execution failed with return code {result.returncode}"
-#
-#         return result_dict
-#
-#     except subprocess.TimeoutExpired:
-#         # Clean up the temp file
-#         try:
-#             os.unlink(temp_file)
-#         except:
-#             pass
-#         return {
-#             "output": f"Error: Policy execution timed out after {timeout} seconds",
-#             "status": "timeout"
-#         }
-#     except Exception as e:
-#         return {
-#             "output": f"Error: Failed to execute policy code: {str(e)}",
-#             "status": "error"
-#         }
 
 def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
     """Helper function to run primitive scripts and return raw output.
@@ -747,77 +611,41 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ##
 ## ############################################################################################## ##
 
+class GraspPoint(BaseModel):
+    id: int
+    gripper_states: List[Literal["open", "half-open"]] = Field(description="Gripper state required before grasping this grasp point")
+    z_height: Optional[float] = Field(default=None, description="Z position of the grasp point in world frame relative to robot base")
+
+class SceneObject(BaseModel):
+    grasps: List[GraspPoint] = Field(description="Available grasp points. Empty if object has none")
+    assembly_order: Optional[int] = Field(default=None, description="Present when task_type=assembly")
+    disassembly_order: Optional[int] = Field(default=None, description="Present when task_type=disassembly. Boards excluded")
+
 @mcp.tool()
-def get_scene_info(task_type: TaskType = "assembly", mode: Mode = "sim") -> Dict[str, Any]:
-    """Get scene information with objects and their available grasp points.
-
-    All objects are included; those without grasp points have an empty grasps array.
-    Order is included based on task_type: assembly_order for assembly, disassembly_order for disassembly.
-    Boards (order 0) are excluded from disassembly_order.
-
-    Args:
-        task_type: Task type - "assembly" or "disassembly"
-        mode: Robot mode
-
-    Returns:
-        JSON with format (assembly):
-        {
-            "object_name": {
-                "grasps": [{"id": 0, "gripper_states": ["open", "half-open"]}],
-                "assembly_order": 2
-            },
-            "base_name": {
-                "grasps": [],
-                "assembly_order": 0
-            }
-        }
-
-        JSON with format (disassembly):
-        {
-            "object_name": {
-                "grasps": [{"id": 0, "gripper_states": ["open", "half-open"]}],
-                "disassembly_order": 1
-            },
-            "base_name": {
-                "grasps": []
-            }
-        }
-    """
+def get_scene_info(
+    task_type: TaskType = "assembly",
+    mode: Mode = "sim",
+) -> Dict[str, SceneObject]:
+    """Get scene information with objects and their available grasp points."""
     return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode} --task-type {task_type}", timeout=10, error_prefix="Get scene info")
 
 @mcp.tool()
-def get_target_object_pose(object_name: str, base_name: str, mode: Mode = "sim") -> Dict[str, Any]:
-    """Get target object pose in world frame from assembly configuration.
-
-    Calculates the target object pose in world frame by:
-    1. Loading assembly configuration from JSON
-    2. Reading base pose (from ROS topic in sim mode, or using default in real mode)
-    3. Extracting target position and orientation from JSON (relative to base)
-    4. Transforming target pose from base frame to world frame
-
-    Args:
-        object_name: Name of the object
-        base_name: Name of the base object
-        mode: Robot mode
-
-    Returns:
-        JSON output containing the target object pose in world frame (position and orientation)
-    """
+def get_target_object_pose(
+    object_name: str,
+    base_name: str,
+    mode: Mode = "sim",
+) -> Dict[str, Any]:
+    """Get target object pose relative to the base."""
     cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
     return _run_with_retry(_run_query, "get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
 
 @mcp.tool()
-def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim", all: bool = False) -> Dict[str, Any]:
-    """Get current object pose(s) from ROS topic.
-
-    Args:
-        object_name: Name of the object to get pose for (ignored if all=True)
-        mode: Robot mode
-        all: If True, returns poses for all objects
-
-    Returns:
-        JSON output containing the current object pose(s) (position and orientation)
-    """
+def get_current_object_pose(
+    object_name: Annotated[Optional[str], Field(description="Ignored if all=True")] = None,
+    mode: Mode = "sim",
+    all: Annotated[bool, Field(description="If True, returns poses for all objects")] = False,
+) -> Dict[str, Any]:
+    """Get current object pose(s)."""
     if all:
         cmd = f"--all --mode {mode}"
     elif object_name:
@@ -826,24 +654,20 @@ def get_current_object_pose(object_name: Optional[str] = None, mode: Mode = "sim
         return {"output": "Error: Either object_name or all=True must be provided"}
     return _run_with_retry(_run_query, "get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
 
+class GraspVerificationResult(BaseModel):
+    result: Literal["success", "failure"]
+    object_name: str
+    mode: Mode
+    error: Optional[str] = None
+
 @mcp.tool()
-def verify_grasp(object_name: str, mode: Mode = "sim", grasp_id: int = None, current_object_orientation: List[float] = None) -> Dict[str, Any]:
-    """Verify if object is within grasp radius from gripper center.
-
-    Sim mode: Checks if object position is within 6cm radius from gripper center.
-    Real mode: Verifies grasp point validity using gripper width and object orientation.
-
-    Only call this tool after moving to safe height.
-
-    Args:
-        object_name: Name of the object to verify
-        mode: "sim" for simulation mode (default), "real" for real mode
-        grasp_id: Grasp point ID to use (required for real mode)
-        current_object_orientation: Object orientation quaternion [x, y, z, w] (required for real mode)
-
-    Returns:
-        Dictionary with result (success or failure) and verification details
-    """
+def verify_grasp(
+    object_name: str,
+    mode: Mode = "sim",
+    grasp_id: Annotated[Optional[int], Field(description="Required for real mode")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] (required for real mode)")] = None,
+) -> GraspVerificationResult:
+    """Verify if object is within grasp radius from gripper center. Call this tool after moving to safe height."""
     # Build command based on mode
     if mode == "real":
         missing = []
@@ -867,34 +691,50 @@ def verify_grasp(object_name: str, mode: Mode = "sim", grasp_id: int = None, cur
 
     return _run_with_retry(_run_query, "verify_grasp.py", cmd, timeout=30, error_prefix="Verify grasp")
 
+
+class PositionError(BaseModel):
+    x: float
+    y: float
+    z: float
+
+class OrientationError(BaseModel):
+    roll: float
+    pitch: float
+    yaw: float
+
+class ObjectOrderEntry(BaseModel):
+    name: str
+    assembly_order: int
+
+class SingleAssemblyVerification(BaseModel):
+    """Return schema when verifying a single object."""
+    result: Literal["success", "failure"]
+    object_name: str
+    base_name: str
+    assembly_order: Optional[int] = None
+    position_error_m: Optional[PositionError] = None
+    orientation_error_deg: Optional[OrientationError] = None
+    within_tolerance: Optional[bool] = None
+    unassembled_objects: Optional[List[ObjectOrderEntry]] = Field(default=None, description="Sim mode only")
+    error: Optional[str] = None
+
+class CheckAllAssemblyVerification(BaseModel):
+    """Return schema when check_all=True (sim mode only)."""
+    result: Literal["success", "failure"]
+    base_name: str
+    all_assembled: bool
+    assembled_objects: Optional[List[ObjectOrderEntry]] = None
+    unassembled_objects: Optional[List[ObjectOrderEntry]] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-def verify_assembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
-    """Verify if object(s) are in correct assembly pose relative to base.
-
-    Args:
-        base_name: Name of the base object
-        object_name: Name of the object to verify (optional if check_all is True)
-        check_all: If True, check all objects in the assembly instead of a specific one (sim mode only)
-        mode: Robot mode
-
-    Returns:
-        When check_all=False (single object):
-        - "result": "success" or "failure" for the verified object
-        - "object_name": Name of the verified object
-        - "base_name": Name of the base object
-        - "assembly_order": Assembly order of the verified object
-        - "position_error_m": Position error metrics (x, y, z)
-        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
-        - "within_tolerance": Boolean indicating if within tolerance
-        - "unassembled_objects": List of {name, assembly_order} for unassembled objects, sorted by order (sim mode only)
-
-        When check_all=True (sim mode only):
-        - "result": "success" if all assembled, "failure" otherwise
-        - "base_name": Name of the base object
-        - "all_assembled": Boolean indicating if all objects are assembled
-        - "assembled_objects": List of {name, assembly_order} for correctly assembled objects
-        - "unassembled_objects": List of {name, assembly_order} for unassembled objects
-    """
+def verify_assembly(
+    base_name: str,
+    object_name: Annotated[Optional[str], Field(description="Optional if check_all is True")] = None,
+    check_all: Annotated[bool, Field(description="Check all objects instead of a specific one (sim mode only)")] = False,
+    mode: Mode = "sim",
+) -> SingleAssemblyVerification | CheckAllAssemblyVerification:
+    """Verify if object(s) are assembled into the base."""
     if check_all and mode == "real":
         return {"result": "failure", "error": "check_all is not supported in real mode. Verify one object at a time."}
     if check_all:
@@ -910,62 +750,93 @@ def verify_assembly(base_name: str, object_name: str = None, check_all: bool = F
 
     return result
 
+class DisassemblyViolations(BaseModel):
+    """Order violations detected during single-object disassembly verification."""
+    skipped_objects: Optional[List[str]] = Field(default=None, description="Objects that should have been disassembled first")
+    disturbed_objects: Optional[List[str]] = Field(default=None, description="Lower-order objects knocked out of place")
+
+class SingleDisassemblyVerification(BaseModel):
+    """Return schema when verifying a single object's disassembly."""
+    result: Literal["success", "failure"]
+    object_name: str
+    base_name: str
+    disassembly_order: Optional[int] = Field(default=None, description="1 = first to remove, reverse of assembly order")
+    position_error_m: Optional[PositionError] = None
+    orientation_error_deg: Optional[OrientationError] = None
+    error: Optional[DisassemblyViolations] = Field(default=None, description="Present only if order violations detected")
+
+class CheckAllDisassemblyVerification(BaseModel):
+    """Return schema when check_all=True."""
+    result: Literal["success", "failure"]
+    base_name: str
+    all_disassembled: bool
+    disassembled_objects: Optional[List[str]] = None
+    still_assembled_objects: Optional[List[str]] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-async def prepare_workspace(base_name: str, ctx: Context[ServerSession, None], mode: Mode = "real") -> Dict[str, Any]:
-    """Prepare and verify the real workspace for assembly.
+def verify_disassembly(
+    base_name: str,
+    object_name: Annotated[Optional[str], Field(description="Optional if check_all is True")] = None,
+    check_all: Annotated[bool, Field(description="Check all objects instead of a specific one")] = False,
+    mode: Mode = "sim",
+) -> SingleDisassemblyVerification | CheckAllDisassemblyVerification:
+    """Verify if object(s) have been disassembled from the base."""
+    if check_all:
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify disassembly")
+    elif object_name:
+        return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify disassembly")
+    else:
+        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
-    First asks a human operator to confirm the scene is ready (objects placed, robot spawned),
-    then checks if all objects are present and have enough clearance for the gripper to operate.
-    If clearance verification fails, automatically offers interactive elicitation to fix issues.
+class ClearanceResult(BaseModel):
+    result: Literal["success", "failure"]
+    base_name: str
+    ready_for_assembly: bool
+    error: Optional[str] = None
+    missing_objects: Optional[List[str]] = Field(default=None, description="Sim: never missing. Real: operator is prompted to fix.")
+    objects_with_clearance_issues: Optional[List[str]] = Field(default=None, description="Sim: agent must call restore scene. Real: operator is prompted to fix.")
 
-    Args:
-        base_name: Name of the base object
-        ctx: MCP context for elicitation support
-        mode: Robot mode (default: "real")
+@mcp.tool()
+async def verify_clearance(
+    base_name: str,
+    ctx: Context[ServerSession, None],
+    mode: Mode = "sim",
+) -> ClearanceResult:
+    """Verify all objects have enough clearance for the gripper to operate."""
+    # Real mode: ask human to confirm scene is ready before checking
+    if mode == "real":
+        scene_setup = await _invoke_scene_setup(ctx)
+        if scene_setup.get("action") == "decline" or scene_setup.get("action") == "cancel":
+            return {
+                "result": "failure",
+                "base_name": base_name,
+                "ready_for_assembly": False,
+                "error": "Scene setup was declined or cancelled by operator",
+                "scene_setup": scene_setup,
+            }
+        if scene_setup.get("status") == "error":
+            return {
+                "result": "failure",
+                "base_name": base_name,
+                "ready_for_assembly": False,
+                "error": f"Scene setup elicitation failed: {scene_setup.get('message', 'unknown error')}",
+                "scene_setup": scene_setup,
+            }
 
-    Returns:
-        Dictionary with workspace preparation results:
-        - "result": "success" or "failure"
-        - "ready_for_assembly": Boolean indicating if ready to proceed
-        - "base_name": Name of the base object
-        - "scene_setup": Human response from scene setup elicitation (if applicable)
-        - If failure:
-          - "error": Description of the issue
-          - "missing_objects": List of missing objects (if any)
-          - "objects_with_clearance_issues": List of objects with clearance problems (if any)
-    """
-    # Step 1: Scene setup elicitation — ask human to confirm objects are placed and robot is ready
-    scene_setup = await _invoke_scene_setup(ctx)
-    if scene_setup.get("action") == "decline" or scene_setup.get("action") == "cancel":
-        return {
-            "result": "failure",
-            "base_name": base_name,
-            "ready_for_assembly": False,
-            "error": "Scene setup was declined or cancelled by operator",
-            "scene_setup": scene_setup,
-        }
-    if scene_setup.get("status") == "error":
-        return {
-            "result": "failure",
-            "base_name": base_name,
-            "ready_for_assembly": False,
-            "error": f"Scene setup elicitation failed: {scene_setup.get('message', 'unknown error')}",
-            "scene_setup": scene_setup,
-        }
-
-    # Step 2: Run clearance verification query
+    # Run clearance verification query
     result = _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
 
-    # Attach scene setup response to result
-    if isinstance(result, dict):
-        result["scene_setup"] = scene_setup
+    # Real mode: attach scene setup response and offer elicitation to fix failures
+    if mode == "real":
+        if isinstance(result, dict):
+            result["scene_setup"] = scene_setup
 
-    # Step 3: On failure, invoke human elicitation to fix setup issues
-    if isinstance(result, dict) and result.get("result") == "failure":
-        def retry_query(bn, m):
-            return _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{bn}\" --mode {m}", timeout=30, error_prefix="Verify clearance")
+        if isinstance(result, dict) and result.get("result") == "failure":
+            def retry_query(bn, m):
+                return _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{bn}\" --mode {m}", timeout=30, error_prefix="Verify clearance")
 
-        result = await handle_clearance_failure(result, base_name, mode, ctx, _handle_elicitation, retry_query)
+            result = await handle_clearance_failure(result, base_name, mode, ctx, _handle_elicitation, retry_query)
 
     return result
 
@@ -991,49 +862,6 @@ async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, An
     except Exception as e:
         return {"status": "error", "message": f"Scene setup elicitation failed: {str(e)}"}
 
-@mcp.tool()
-def verify_disassembly(base_name: str, object_name: str = None, check_all: bool = False, mode: Mode = "sim") -> Dict[str, Any]:
-    """Verify if object(s) are NOT in assembly position relative to base.
-
-    This tool checks if object(s) have been successfully disassembled by verifying they are NOT in the
-    target assembly position. Returns success if the object has been removed from the assembly.
-
-    When verifying a single object, also checks for order violations:
-    - skipped_objects: Objects with higher disassembly priority still assembled (agent removed out of order)
-    - disturbed_objects: Lower-order objects knocked out of place (collateral damage)
-    The result is still "success" (the object was removed) but "errors" contains the violations.
-
-    Args:
-        base_name: Name of the base object
-        object_name: Name of the object to verify (optional if check_all is True)
-        check_all: If True, check all objects in the assembly instead of a specific one
-        mode: Robot mode
-
-    Returns:
-        When check_all=False (single object):
-        - "result": "success" if object was removed, "failure" if still in assembly position
-        - "object_name": Name of the verified object
-        - "base_name": Name of the base object
-        - "disassembly_order": Disassembly order (1 = first to remove, reverse of assembly order)
-        - "position_error_m": Position error metrics (x, y, z)
-        - "orientation_error_deg": Orientation error metrics (roll, pitch, yaw)
-        - "error": Present only if violations detected. Contains:
-            - "skipped_objects": Objects that should have been disassembled first
-            - "disturbed_objects": Lower-order objects knocked out of place
-
-        When check_all=True:
-        - "result": "success" if all disassembled, "failure" otherwise
-        - "base_name": Name of the base object
-        - "all_disassembled": Boolean indicating if all objects are disassembled
-        - "disassembled_objects": List of objects that are disassembled
-        - "still_assembled_objects": List of objects still in assembly position
-    """
-    if check_all:
-        return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify disassembly")
-    elif object_name:
-        return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify disassembly")
-    else:
-        return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
 ## ############################################################################################## ##
 ##
@@ -1046,101 +874,84 @@ def move_home() -> Dict[str, Any]:
     """Move robot to home position."""
     return _run_with_retry(_run_primitive, "move_home.py", timeout=45, error_prefix="Move home")
 
+class GripperResult(BaseModel):
+    result: Literal["success", "failure"]
+    command: GripperCommand
+    mode: Mode
+    initial_width_mm: Optional[float] = None
+    final_width_mm: Optional[float] = None
+    change_mm: Optional[float] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-def control_gripper(command: GripperCommand | int, mode: Mode = "sim") -> Dict[str, Any]:
-    """Control gripper.
-
-    Commands: open = open jaws fully; half-open = sets to 30 mm; close = close jaws to grasp.
-    Alternatively pass a numeric width in mm (0-100).
-
-    Args:
-        command: Gripper action or numeric width 0-100 mm
-        mode: Robot mode
-    """
+def control_gripper(
+    command: Annotated[GripperCommand, Field(description="open = open jaws fully, half-open = 30 mm, close = close jaws to grasp")],
+    mode: Mode = "sim",
+) -> GripperResult:
+    """Control gripper."""
     return _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 @mcp.tool()
-def scan_workspace(object_name: str) -> Dict[str, Any]:
-    """Scan workspace at fixed height to locate object.
-    
-    This tool scans the workspace by following a predefined path across x,y at a fixed z height.
-    The robot moves along the path and stops as soon as the object is detected.
-    Only works in real mode (not available for simulation).
-    
-    Args:
-        object_name: Name of the object to locate
-    
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure"
-        - "mode": "real"
-        - "object_name": Name of the object that was scanned for
-        - "error": Error message (only present if result is "failure")
-    """
+def scan_workspace(
+    object_name: str,
+) -> Dict[str, Any]:
+    """Scan workspace at fixed height to locate object. Follows a predefined path across x,y and stops as soon as the object is detected."""
     return _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
 
+class Quaternion(BaseModel):
+    x: float
+    y: float
+    z: float
+    w: float
+
+class RPY(BaseModel):
+    roll: float
+    pitch: float
+    yaw: float
+
+class Orientation(BaseModel):
+    quat: Quaternion
+    rpy: RPY
+
+class Position(BaseModel):
+    x: float
+    y: float
+    z: float
+
+class MoveToGraspResult(BaseModel):
+    result: Literal["success", "failure"]
+    object_name: str
+    grasp_id: int
+    mode: Mode
+    movement_type: MoveToGraspAction
+    current_object_position: Optional[Position] = None
+    current_object_orientation: Optional[Orientation] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-def move_to_grasp(object_name: str, grasp_id: int, action: MoveToGraspAction, mode: Mode = "sim") -> Dict[str, Any]:
-    """Move to grasp position.
-
-    Workflow:
-    1. Call move_to_object to move to the grasp point (make sure the gripper is open before this call)
-    2. Call control_gripper to grasp the object
-    3. Call move_to_safe_height to move to the safe height (z=0.3m)
-
-    Args:
-        object_name: Name of the object to grasp
-        grasp_id: ID of the grasp point to use
-        action: Which step to perform (move_to_object or move_to_safe_height)
-        mode: Robot mode
-
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure"
-        - "object_name": Name of the object
-        - "grasp_id": ID of the grasp point used
-        - "mode": Robot mode ("sim" or "real")
-        - "movement_type": The action that was performed (move_to_object or move_to_safe_height)
-        - "current_object_position": Object position after movement (x, y, z) - only on success
-        - "current_object_orientation": Object orientation quaternion (x, y, z, w) - only on success
-        - "current_object_orientation_rpy_deg": Object orientation in degrees (roll, pitch, yaw) - only on success
-        - "error": Error message (only present if result is "failure")
-    """
+def move_to_grasp(
+    object_name: str,
+    grasp_id: int,
+    action: MoveToGraspAction,
+    mode: Mode = "sim",
+) -> MoveToGraspResult:
+    """Move to grasp position."""
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     cmd += f" --{action.replace('_', '-')}"
     return _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
+class MoveToRegraspResult(BaseModel):
+    result: Literal["success", "failure"]
+    mode: Mode
+    movement_type: MoveToRegraspAction
+    error: Optional[str] = None
+
 @mcp.tool()
-def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str, Any]:
-    """Move to regrasp position.
-
-    Purpose: After rotating an object, the EE may be in a non-optimal orientation causing IK failures.
-    This tool places the rotated object down and enables regrasping with a top-down EE orientation.
-
-    IMPORTANT: When regrasping for assembly, always use the grasp id from the disassembly results
-    for the final insert into the base. Any grasp id may be used during intermediate regrasp steps.
-
-    Workflow:
-    1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
-    2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
-    3. Call move_down to place the object on the table
-    4. Call control_gripper to release the object
-    5. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
-    6. Call move_to_grasp to grasp the object again using the grasp id from the disassembly results
-    7. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
-    8. Continue with what you were doing
-
-    Args:
-        action: Which step to perform (move_to_clear_space, move_down, or move_ee_top_down)
-        mode: Robot mode
-
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure"
-        - "mode": Robot mode ("sim" or "real")
-        - "movement_type": The action that was performed (move_to_clear_space, move_down, or move_ee_top_down)
-        - "error": Error message (only present if result is "failure")
-    """
+def move_to_regrasp(
+    action: MoveToRegraspAction,
+    mode: Mode = "sim",
+) -> MoveToRegraspResult:
+    """Move to regrasp position. After rotating an object, the end effector may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down EE orientation."""
     # Verify object is grasped before moving to clear space
     if action == "move_to_clear_space":
         grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
@@ -1151,40 +962,24 @@ def move_to_regrasp(action: MoveToRegraspAction, mode: Mode = "sim") -> Dict[str
     cmd = f"--mode {mode} --{action.replace('_', '-')}"
     return _run_with_retry(_run_primitive, "move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
 
+class TranslateObjectResult(BaseModel):
+    result: Literal["success", "failure"]
+    mode: Mode
+    movement_type: TranslateAction
+    object_name: Optional[str] = None
+    base_name: Optional[str] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-def translate_object(action: TranslateAction, mode: Mode = "sim", object_name: Optional[str] = None, base_name: Optional[str] = None, grasp_id: Optional[int] = None, current_object_orientation: Optional[List[float]] = None) -> Dict[str, Any]:
-    """Translate object to target position.
-
-    Call this tool only if the object is already grasped.
-    Moves object to target position for assembly. Maintains object's current orientation.
-
-    Workflow for assembly:
-    1. Call move_to_base to move to the base
-    2. Call perform_insert to move down to the final position (Make sure the object orientation is correct before this call)
-    3. Call control_gripper to release the object
-    4. Call move_to_safe_height to move to the safe height (z=0.3m)
-
-    Workflow for disassembly:
-    1. Call move_away_from_base once you are holding the object and in safe height to move the object away from the base
-    2. Call control_gripper to release the object
-
-    Args:
-        action: Which step to perform (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
-        object_name: Name of the object being held
-        base_name: Name of the base object
-        grasp_id: Grasp point ID used when grasping the object
-        current_object_orientation: Current object orientation quaternion [x, y, z, w]
-        mode: Robot mode
-
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure"
-        - "mode": Robot mode ("sim" or "real")
-        - "movement_type": The action that was performed (move_to_base, perform_insert, move_to_safe_height, or move_away_from_base)
-        - "object_name": Name of the object
-        - "base_name": Name of the base object
-        - "error": Error message (only present if result is "failure")
-    """
+def translate_object(
+    action: TranslateAction,
+    mode: Mode = "sim",
+    object_name: Annotated[Optional[str], Field(description="The object being held by the gripper")] = None,
+    base_name: Annotated[Optional[str], Field(description="The assembly base to translate towards or away from")] = None,
+    grasp_id: Optional[int] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Required for real mode only")] = None,
+) -> TranslateObjectResult:
+    """Translate object to target position. Maintains object's current orientation."""
     # Validate required fields per action
     if action in ["move_to_base", "perform_insert", "move_away_from_base"]:
         missing = []
@@ -1229,51 +1024,28 @@ def translate_object(action: TranslateAction, mode: Mode = "sim", object_name: O
 
     return _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
 
+class RotateObjectResult(BaseModel):
+    result: Literal["success", "failure"]
+    object_name: str
+    base_name: str
+    mode: Mode
+    movement_type: Literal["rotate_object"] = "rotate_object"
+    initial_object_orientation: Optional[Orientation] = None
+    final_object_orientation: Optional[Orientation] = None
+    error: Optional[str] = None
+
 @mcp.tool()
-def rotate_object(object_name: str, base_name: str, mode: Mode = "sim", current_object_orientation: Optional[List[float]] = None, target_base_orientation: Optional[List[float]] = None, use_default_base_orientation: bool = False) -> Dict[str, Any]:
-    """Rotate object for assembly.
-
-    Call this tool only if the object is already grasped.
-    Rotates object from current to target orientation relative to base orientation.
-    Rotation is determined by fold symmetry of the object.
-
-    In real mode, uses default base orientation [0, 0, 0, 1] automatically (same as translate_object).
-
-    Args:
-        object_name: Name of the object to rotate (required)
-        base_name: Name of the base object (required)
-        mode: Robot mode (default: "sim")
-        current_object_orientation: Current object orientation quaternion [x, y, z, w]. Required in real mode, optional in sim mode (reads from ROS topic if not provided)
-        target_base_orientation: Target base orientation quaternion [x, y, z, w]. Optional in sim mode (reads from ROS topic if not provided). Ignored in real mode (always uses default [0, 0, 0, 1])
-        use_default_base_orientation: Force use of default base orientation [0, 0, 0, 1]. In real mode, this is automatic and does not need to be set. In sim mode, set to True to use default instead of target_base_orientation
-
-    Returns:
-        Dictionary containing:
-        - "result": "success" or "failure"
-        - "object_name": Name of the object
-        - "base_name": Name of the base object
-        - "mode": Robot mode ("sim" or "real")
-        - "movement_type": "rotate_object"
-        - "initial_object_orientation": Initial object orientation quaternion (x, y, z, w) - only on success
-        - "initial_object_orientation_rpy_deg": Initial object orientation in degrees (roll, pitch, yaw) - only on success
-        - "final_object_orientation": Final object orientation quaternion (x, y, z, w) - only on success
-        - "final_object_orientation_rpy_deg": Final object orientation in degrees (roll, pitch, yaw) - only on success
-        - "initial_end_effector_orientation": Initial end-effector orientation quaternion (x, y, z, w) - only on success
-        - "initial_end_effector_orientation_rpy_deg": Initial end-effector orientation in degrees (roll, pitch, yaw) - only on success
-        - "final_end_effector_orientation": Final end-effector orientation quaternion (x, y, z, w) - only on success
-        - "final_end_effector_orientation_rpy_deg": Final end-effector orientation in degrees (roll, pitch, yaw) - only on success
-        - "error": Error message (only present if result is "failure")
-    """
+def rotate_object(
+    object_name: Annotated[str, Field(description="The object being held by the gripper")],
+    base_name: Annotated[str, Field(description="The assembly base to rotate relative to")],
+    mode: Mode = "sim",
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Required for real mode only")] = None,
+) -> RotateObjectResult:
+    """Rotates object from current to target orientation relative to base orientation based on fold symmetry of the object."""
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
         # Format numbers to avoid scientific notation which can confuse argument parser
         cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
-    # In real mode, use default base orientation unless explicitly overridden
-    if use_default_base_orientation or mode == "real":
-        cmd += " --use-default-base-orientation"
-    elif target_base_orientation is not None:
-        # Format numbers to avoid scientific notation which can confuse argument parser
-        cmd += f" --target-base-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in target_base_orientation)}"
     return _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
 
 ## ############################################################################################## ##
@@ -1287,33 +1059,13 @@ from triggers.pre_assembly_check import handle_clearance_failure
 
 @mcp.tool()
 async def signal_phase_complete(
-    phase: PhaseNumber,
+    phase: Annotated[PhaseNumber, Field(description="1=disassembly discovery, 2=assembly discovery, 3=sim reverification, 4=real-world execution")],
     status: PhaseStatus,
     ctx: Context[ServerSession, None],
-    action: Optional[PhaseAction] = None,
-    comment: str = "",
+    action: Annotated[Optional[PhaseAction], Field(description='Phase 3 only - "randomize" to reset the scene and reverify optimized sequences, then "reverified" to confirm and exit the phase. "reverified" is required to complete Phase 3.')] = None,
+    comment: Annotated[str, Field(description="Should explain failure reasons")] = "",
 ) -> Dict[str, Any]:
-    """Signal completion of an assembly phase to the MCP client.
-
-    Called by the agent at the end of each phase to report results
-    and trigger the next phase.
-
-    Args:
-        phase: Which phase completed (1=disassembly discovery,
-               2=assembly discovery, 3=sim reverification,
-               4=real-world execution)
-        status: Whether the phase succeeded or failed
-        action: Phase 3 only - "randomize" to reset the scene and
-                reverify optimized sequences, then "reverified" to confirm
-                and exit the phase. "reverified" is required to complete
-                Phase 3.
-        comment: Optional comment (should explain failure reasons)
-
-    Returns:
-        Structured result with phase, status, and any verification data.
-        Phases 1-3 gate on results being logged.
-        Phase 4 includes human verification response.
-    """
+    """Signal completion of an assembly phase to the MCP client."""
     return await handle_phase_signal(
         phase=phase,
         status=status,
@@ -1323,31 +1075,20 @@ async def signal_phase_complete(
         elicit_user_fn=_handle_elicitation,
     )
 
+class SignalOperatorResult(BaseModel):
+    result: Literal["success", "failure"]
+    action: str = Field(description="Operator decision: 'proceed' or 'abort'")
+    reason: str
+    feedback: Optional[str] = None
+
 @mcp.tool()
 async def signal_operator(
-    message: str,
+    message: Annotated[str, Field(description="Description of what the robot has done and what the operator needs to do before the robot can continue.")],
     ctx: Context[ServerSession, None],
-    reason: str = "",
+    reason: Annotated[str, Field(description='Short tag for the client to categorize the signal.')] = "",
     # TODO: Add optional context dict for structured metadata (e.g., object poses, error codes)
-) -> Dict[str, Any]:
-    """Signal a human operator and wait for confirmation.
-
-    Use this to notify the operator when you need them to perform a physical
-    action and wait for their confirmation before proceeding.
-
-    Args:
-        message: Description of what the robot has done and what the
-                 operator needs to do before the robot can continue.
-        reason: Short tag for the client to categorize the signal
-                (e.g., "part_replacement", "inspection", "workspace_setup").
-
-    Returns:
-        Dictionary with operator response:
-        - "result": "success" or "failure"
-        - "action": "proceed" or "abort"
-        - "reason": The reason tag passed by the agent
-        - "feedback": Optional operator notes
-    """
+) -> SignalOperatorResult:
+    """Signal a human operator and wait for confirmation before proceeding."""
     response = await _handle_elicitation(ctx, "signal_operator", message, {"message": message, "reason": reason})
 
     if response.get("action") == "accept":

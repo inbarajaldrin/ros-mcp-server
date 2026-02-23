@@ -124,7 +124,7 @@ Your goal is to execute the assembly sequences discovered in Phase 2 and verify 
 **Execution**
 
 Follow the assembly log and execute the tool call sequences for each object in order.
-You may orchestrate the tools to perform a composed policy to efficiently verify the sequences.
+You may orchestrate the tools to perform a composed policy to efficiently verify the sequences but print the tool outputs so you can go through them later.
 If orchestration is unreliable, fall back to individual tool calls.
 
 If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
@@ -143,9 +143,8 @@ Run verify assembly once you've ran all tools required to move one object into t
 2. Figure out why it failed and see if you can fix it. 
 
 **Post Execution**
-If the assembly logs had any errors, then fix them by updatign the assembly log with the corrected tool call sequence.
-Once all objects are assembled, analyze the tool call sequences you executed. Look for patterns across objects and identify if you can minimize the number of tool calls to perform the same assembly.
-You may optionally signal with action="randomize" to have the scene reset so you can reverify the optimized sequences. If you do, perform the assembly again with the optimized sequences.
+If the assembly logs had any errors, then fix them by updating the assembly log with the corrected tool call sequence.
+Once all objects are assembled, analyze the tool call sequences you executed. Look for patterns across objects and identify if you can minimize the number of tool calls to perform the same assembly. If you wish to test something, you can signal the client with action="test" to have the scene reset so you can reverify the optimized sequences. 
 Signal the client with action="reverified" when you are done.
 """
 
@@ -156,7 +155,7 @@ def phase_4_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(descr
     """
     if mode == "real":
         env_description = "You are an autonomous agent working in the real world."
-        setup_instruction = "Run prepare_workspace to ask a human operator to set up and verify the real workspace before starting assembly."
+        setup_instruction = "Run verify_clearance to ask a human operator to set up and verify the real workspace before starting assembly."
     else:
         env_description = "You are an autonomous agent working in a simulation."
         setup_instruction = "Identify available objects and their grasp ids."
@@ -207,6 +206,43 @@ def replace_defective_part(
     An operator reports a defective part during assembly.
     """
     return f"""{object_name} assembled in {base_name} is defective. Disassemble that object and place it in the clear space and notify me. I'll replace the defective component with a new one and then you can continue the assembly."""
+
+@mcp.prompt()
+def grasp_workflow() -> str:
+    """Workflow for grasping an object."""
+    return """Grasp Workflow:
+1. Call move_to_object to move to the grasp point (make sure the gripper is open before this call)
+2. Call control_gripper to grasp the object
+3. Call move_to_safe_height to move to the safe height (z=0.3m)"""
+
+@mcp.prompt()
+def regrasp_workflow() -> str:
+    """Workflow for regrasping an object with a top-down EE orientation."""
+    return """Regrasp Workflow:
+1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
+2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
+3. Call move_down to place the object on the table
+4. Call control_gripper to release the object
+5. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
+6. Call move_to_grasp to grasp the object again using the grasp id from the disassembly results
+7. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
+8. Continue with what you were doing"""
+
+@mcp.prompt()
+def assembly_workflow() -> str:
+    """Workflow for assembling an object onto the base."""
+    return """Assembly Workflow:
+1. Call move_to_base to move to the base
+2. Call perform_insert to move down to the final position (Make sure the object orientation is correct before this call)
+3. Call control_gripper to release the object
+4. Call move_to_safe_height to move to the safe height (z=0.3m)"""
+
+@mcp.prompt()
+def disassembly_workflow() -> str:
+    """Workflow for disassembling an object from the base."""
+    return """Disassembly Workflow:
+1. Call move_away_from_base once you are holding the object and in safe height to move the object away from the base
+2. Call control_gripper to release the object"""
 
 if __name__ == "__main__":
     mcp.run()

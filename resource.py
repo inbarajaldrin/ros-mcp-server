@@ -4,9 +4,12 @@ from pydantic import BaseModel, Field
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Annotated, Dict, Any, Literal, Optional, List
 
 mcp = FastMCP("FMB Assembly and Disassembly Logbook")
+
+
+
 
 # ========== DIRECTORY CONFIGURATION ==========
 BASE_OUTPUT_DIR = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
@@ -296,130 +299,111 @@ def _validate_task_type(task_type: str) -> Optional[dict]:
     return None
 
 
+class AssemblyEntry(BaseModel):
+    """A single object entry in the assembly order list."""
+    assembly_order: int = Field(description="The sequence position in the assembly")
+    object_name: str
+    tool_sequence: List[str] = Field(description="MCP tool calls made in order")
+    comment: Optional[str] = None
+    previous: List[dict] = Field(default_factory=list, description="Archived older versions of this entry")
+
+class DisassemblyEntry(BaseModel):
+    """A single object entry in the disassembly order list."""
+    disassembly_order: int = Field(description="The sequence position in the disassembly")
+    object_name: str
+    grasp_id: int
+    gripper_state: Literal["open", "half-open"]
+    comment: Optional[str] = None
+    previous: List[dict] = Field(default_factory=list, description="Archived older versions of this entry")
+
+class AssemblyResults(BaseModel):
+    """Return schema for reading assembly results."""
+    assembly_id: str
+    base_name: str
+    assembly_order: List[AssemblyEntry] = Field(default_factory=list, description="Ordered list of assembly results")
+
+class DisassemblyResults(BaseModel):
+    """Return schema for reading disassembly results."""
+    assembly_id: str
+    base_name: str
+    disassembly_order: List[DisassemblyEntry] = Field(default_factory=list, description="Ordered list of disassembly results")
+
 @mcp.tool()
-def read_results(task_type: str, assembly_id: str) -> dict:
-    """
-    Read assembly or disassembly results for a specific assembly.
-
-    Args:
-        task_type: "assembly" or "disassembly"
-        assembly_id: The ID of the assembly
-
-    Returns:
-        Dictionary containing assembly_id, base_name, and the ordered list of
-        successful results per object. Each object entry contains the active
-        (latest) result. A "previous" array retains older versions if the
-        result was updated.
-    """
+def read_results(
+    task_type: Literal["assembly", "disassembly"],
+    assembly_id: str,
+) -> AssemblyResults | DisassemblyResults:
+    """Read assembly or disassembly results for a specific assembly."""
     if err := _validate_task_type(task_type):
         return err
     return _read_results(task_type, assembly_id)
 
 
 @mcp.tool()
-def write_assembly_results(assembly_id: str, base_name: str, object_name: str,
-                           assembly_order: int,
-                           tool_sequence: List[str],
-                           comment: str = "") -> dict:
-    """
-    Log a successful assembly result for an object.
-    Only call this when assembly verification succeeds.
-
-    Args:
-        assembly_id: The ID of the assembly
-        base_name: The name of the base object being assembled into
-        object_name: The name of the object being assembled
-        assembly_order: The fixed sequence position (assembly order)
-        tool_sequence: The exact MCP tool calls made in order. Format each
-            entry as "server__tool_name(key = 'value', key2 = 'value2')"
-            The grasp_id is captured within the tool calls themselves.
-        comment: Optional notes about the assembly
-
-    Returns:
-        Dictionary with confirmation or error message
-    """
+def write_assembly_results(
+    assembly_id: str,
+    base_name: str,
+    object_name: str,
+    assembly_order: int,
+    tool_sequence: Annotated[List[str], Field(description='The exact MCP tool calls made in order. Format each entry as "server__tool_name(key = \'value\', key2 = \'value2\')". The grasp_id is captured within the tool calls themselves.')],
+    comment: str = "",
+) -> dict:
+    """Log a successful assembly result for an object. Only call this when assembly verification succeeds."""
     return _write_results("assembly", assembly_id, base_name, object_name,
                           assembly_order, comment=comment or None,
                           tool_sequence=tool_sequence)
 
 
 @mcp.tool()
-def update_assembly_results(assembly_id: str, object_name: str,
-                            tool_sequence: List[str],
-                            comment: str = "") -> dict:
-    """
-    Update an existing object's assembly result with a corrected sequence.
-    The previous result is retained in the "previous" array.
-    Use this when reverification finds a better or corrected tool sequence.
-
-    Args:
-        assembly_id: The ID of the assembly
-        object_name: The name of the object to update
-        tool_sequence: The corrected tool call sequence
-        comment: Optional notes about why the update was made
-
-    Returns:
-        Dictionary with confirmation or error message
-    """
+def update_assembly_results(
+    assembly_id: str,
+    object_name: str,
+    tool_sequence: List[str],
+    comment: str = "",
+) -> dict:
+    """Update an existing object's assembly result with a corrected sequence. Use this when reverification finds a better or corrected tool sequence."""
     return _update_results("assembly", assembly_id, object_name,
                            comment=comment or None,
                            tool_sequence=tool_sequence)
 
 
 @mcp.tool()
-def write_disassembly_results(assembly_id: str, base_name: str, object_name: str,
-                              disassembly_order: int, grasp_id: int,
-                              gripper_state: str,
-                              comment: str = "") -> dict:
-    """
-    Log a successful disassembly result for an object.
-    Only call this when disassembly verification succeeds.
-
-    Args:
-        assembly_id: The ID of the assembly
-        base_name: The name of the base object being disassembled from
-        object_name: The name of the object being disassembled
-        disassembly_order: The disassembly order position
-        grasp_id: The grasp ID used for disassembly
-        gripper_state: "open" or "half-open" — the gripper state used
-        comment: Optional notes about the disassembly
-
-    Returns:
-        Dictionary with confirmation or error message
-    """
+def write_disassembly_results(
+    assembly_id: str,
+    base_name: str,
+    object_name: str,
+    disassembly_order: int,
+    grasp_id: int,
+    gripper_state: Annotated[Literal["open", "half-open"], Field(description="Gripper state required before accessing the grasp point")],
+    comment: str = "",
+) -> dict:
+    """Log a successful disassembly result for an object. Only call this when disassembly verification succeeds."""
     return _write_results("disassembly", assembly_id, base_name, object_name,
                           disassembly_order, comment=comment or None,
                           grasp_id=grasp_id, gripper_state=gripper_state)
 
 
 @mcp.tool()
-def clear_results(task_type: str, assembly_id: str) -> dict:
-    """
-    Clear/delete all results for an assembly.
-
-    Args:
-        task_type: "assembly" or "disassembly"
-        assembly_id: The ID of the assembly to clear
-
-    Returns:
-        Dictionary with confirmation or error message
-    """
+def clear_results(
+    task_type: Literal["assembly", "disassembly"],
+    assembly_id: str,
+) -> dict:
+    """Clear all results for an assembly."""
     if err := _validate_task_type(task_type):
         return err
     return _clear_results(task_type, assembly_id)
 
 
+class ResultListResponse(BaseModel):
+    """Return schema for listing assemblies."""
+    assembly_ids: List[str] = Field(description="IDs of assemblies that have results")
+    count: int
+
 @mcp.tool()
-def list_results(task_type: str) -> dict:
-    """
-    List all assemblies that have results.
-
-    Args:
-        task_type: "assembly" or "disassembly"
-
-    Returns:
-        Dictionary containing all assembly IDs with results
-    """
+def list_results(
+    task_type: Literal["assembly", "disassembly"],
+) -> ResultListResponse:
+    """List all assemblies that have results."""
     if err := _validate_task_type(task_type):
         return err
     return _list_results(task_type)
@@ -436,15 +420,7 @@ class ClearLogsConfirmation(BaseModel):
 
 @mcp.tool()
 async def clear_all_logs(ctx: Context[ServerSession, None]) -> dict:
-    """
-    Clear/delete all log files with user confirmation via elicitation.
-
-    Shows the user a list of existing log files and asks for confirmation before deleting.
-    This includes disassembly results and assembly results.
-
-    Returns:
-        Dictionary with deletion result
-    """
+    """Clear all log files with user confirmation via elicitation. Shows existing log files and asks for confirmation before deleting."""
     # Get all log files
     log_patterns = [
         "Disassembly_*_results.json",

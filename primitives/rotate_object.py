@@ -1071,7 +1071,7 @@ class ReorientForAssembly(Node):
         return distance <= radius, distance
 
     def reorient_for_target(self, object_name, base_name,
-                            current_object_orientation=None, target_base_orientation=None):
+                            current_object_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
 
         # Store for JSON output
@@ -1115,12 +1115,6 @@ class ReorientForAssembly(Node):
                 self.error_message = err
                 self.get_logger().error(self.error_message)
                 return False
-        if target_base_orientation is not None:
-            err = self.validate_quaternion(target_base_orientation, "target_base_orientation")
-            if err:
-                self.error_message = err
-                self.get_logger().error(self.error_message)
-                return False
 
         # === Get current object orientation ===
         if current_object_orientation is not None:
@@ -1138,8 +1132,11 @@ class ReorientForAssembly(Node):
         self.initial_object_orientation_rpy_deg = R.from_quat(initial_quat).as_euler('xyz', degrees=True)
 
         # === Get base orientation ===
-        if target_base_orientation is not None:
-            R_base = self.get_rotation_from_quat(target_base_orientation)
+        # Real mode: always use default [0, 0, 0, 1]
+        # Sim mode: read from ROS topic
+        if self.mode == 'real':
+            R_base = self.get_rotation_from_quat(DEFAULT_BASE_ORIENTATION)
+            self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
         else:
             if base_name not in self.current_poses:
                 self.error_message = f"Base {base_name} not found"
@@ -1805,21 +1802,12 @@ def main(args=None):
     # In real mode, orientations are required; in sim mode, they're optional (read from topic)
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
-    parser.add_argument('--target-base-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
-                       help='Target base orientation quaternion [x, y, z, w] (required in real mode unless --use-default-base-orientation is used)')
-    parser.add_argument('--use-default-base-orientation', action='store_true',
-                       help=f'Use default base orientation ({DEFAULT_BASE_ORIENTATION}) (for real mode)')
-    
     args = parser.parse_args()
-    
+
     # Validate arguments based on mode
     if args.mode == 'real':
         if args.current_object_orientation is None:
             parser.error("--current-object-orientation is required in real mode")
-        if not args.use_default_base_orientation and args.target_base_orientation is None:
-            parser.error("In real mode, either --target-base-orientation or --use-default-base-orientation must be provided")
-        if args.use_default_base_orientation and args.target_base_orientation is not None:
-            parser.error("Cannot use both --target-base-orientation and --use-default-base-orientation")
     
     # === Verify grasp before starting ===
     grasp_verified = run_verify_grasp(
@@ -1844,21 +1832,14 @@ def main(args=None):
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
 
-        # In sim mode, wait for poses from topic if not provided
-        # In real mode, orientations should be provided via arguments
-        if args.mode == 'sim' and (args.current_object_orientation is None or args.target_base_orientation is None):
+        # In sim mode, wait for poses from topic if not provided via arguments
+        if args.mode == 'sim' and args.current_object_orientation is None:
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
 
-        # Use default base orientation if flag is set
-        target_base_orientation = args.target_base_orientation
-        if args.use_default_base_orientation:
-            target_base_orientation = DEFAULT_BASE_ORIENTATION
-            node.get_logger().info(f"Using default base orientation: {target_base_orientation}")
-
         success = node.reorient_for_target(
             args.object_name, args.base_name,
-            args.current_object_orientation, target_base_orientation
+            args.current_object_orientation
         )
 
         if success:
