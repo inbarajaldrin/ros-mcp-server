@@ -682,8 +682,8 @@ class DirectObjectMove(Node):
                 else:
                     self.get_logger().warn("Gripper width topic not available. Proceeding without gripper check.")
                     self.gripper_check_done = True
-            elif self.current_gripper_width < 1.0:
-                self.error_message = f"Gripper is closed ({self.current_gripper_width:.1f}mm). Open gripper before running move_to_grasp."
+            elif self.current_gripper_width < 30.0:
+                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm). Open or half-open gripper before calling move_to_grasp."
                 self.get_logger().error(self.error_message)
                 self.should_exit = True
                 return
@@ -2010,7 +2010,112 @@ def main(args=None):
     # Only proceed with object movement if --move-to-object flag is set
     if not args.move_to_object:
         parser.error("Must specify --move-to-object to move to an object")
-    
+
+    # --- Auto fix-orientation: if EE is not face-down, reorient before proceeding ---
+    # Quick rclpy cycle to read current EE pose + gripper width
+    rclpy.init(args=None)
+    _check_node = rclpy.create_node('_ee_orientation_check')
+    _ee_pose = [None, None]  # [position, quaternion]
+    _gripper_width = [None]
+
+    def _ee_cb(msg):
+        _ee_pose[0] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        _ee_pose[1] = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
+                                 msg.pose.orientation.z, msg.pose.orientation.w])
+    def _gripper_cb(msg):
+        _gripper_width[0] = msg.data
+
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+    _qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE, depth=10)
+    _check_node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', _ee_cb, _qos)
+    _gripper_topic = '/gripper_width_sim' if args.mode == 'sim' else '/gripper_width_offset'
+    _gripper_msg = Float64 if args.mode == 'sim' else Float32
+    _check_node.create_subscription(_gripper_msg, _gripper_topic, _gripper_cb, 10)
+    _timeout = 0
+    while (_ee_pose[1] is None or _gripper_width[0] is None) and rclpy.ok() and _timeout < 50:
+        rclpy.spin_once(_check_node, timeout_sec=0.1)
+        _timeout += 1
+    _check_node.destroy_node()
+    rclpy.shutdown()
+
+    # Verify gripper is open before proceeding (half-open ≈ 33-35mm, use 30mm threshold for margin)
+    if _gripper_width[0] is not None and _gripper_width[0] < 30.0:
+        res = {
+            "result": "failure",
+            "object_name": args.object_name,
+            "grasp_id": args.grasp_id,
+            "mode": args.mode,
+            "movement_type": "move_to_object",
+            "error": f"Gripper is not open ({_gripper_width[0]:.1f}mm). Open or half-open gripper before calling move_to_grasp."
+        }
+        output_result(res)
+        return
+
+    if _ee_pose[1] is not None:
+        _rot = R.from_quat(_ee_pose[1])
+        _tool_z = _rot.as_matrix()[:, 2]
+        _is_face_down = _tool_z[2] < -0.707  # cos(45°), same threshold as move_to_clear_area.py
+
+        if not _is_face_down:
+            print("[INFO] EE is not face-down — auto-reorienting before move_to_object")
+            _gripper_center = _ee_pose[0] + _rot.as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+            _gx, _gy = float(_gripper_center[0]), float(_gripper_center[1])
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            env = os.environ.copy()
+            project_root = os.path.dirname(script_dir)
+            if 'PYTHONPATH' in env:
+                env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+            else:
+                env['PYTHONPATH'] = project_root
+
+            # Step 1: Lift to safe height (handles any orientation)
+            print("[INFO] Step 1/2: Moving to safe height")
+            safe_cmd = f"cd {script_dir} && timeout 30 /usr/bin/python3 core/move_to_safe_height.py --height 0.15"
+            safe_result = subprocess.run(
+                safe_cmd, shell=True, executable='/bin/bash',
+                capture_output=True, text=True, timeout=40, env=env
+            )
+            if safe_result.returncode != 0:
+                res = {
+                    "result": "failure",
+                    "object_name": args.object_name,
+                    "grasp_id": args.grasp_id,
+                    "mode": args.mode,
+                    "movement_type": "move_to_object",
+                    "error": "Auto fix-orientation failed: move_to_safe_height failed"
+                }
+                output_result(res)
+                return
+
+            # Step 2: Fix orientation to face-down at current gripper XY
+            print(f"[INFO] Step 2/2: Fixing orientation to face-down at XY=({_gx:.3f}, {_gy:.3f})")
+            fix_cmd = (
+                f"cd {script_dir} && timeout 45 /usr/bin/python3 core/move_to_clear_area.py"
+                f" --fix-orientation --target-xy {_gx} {_gy} --mode {args.mode}"
+            )
+            fix_result = subprocess.run(
+                fix_cmd, shell=True, executable='/bin/bash',
+                capture_output=True, text=True, timeout=55, env=env
+            )
+            if fix_result.returncode != 0:
+                res = {
+                    "result": "failure",
+                    "object_name": args.object_name,
+                    "grasp_id": args.grasp_id,
+                    "mode": args.mode,
+                    "movement_type": "move_to_object",
+                    "error": "Auto fix-orientation failed before move_to_object"
+                }
+                output_result(res)
+                return
+            print("[INFO] Fix-orientation completed successfully")
+        else:
+            print("[INFO] EE is face-down, no reorientation needed")
+    else:
+        print("[WARN] Could not read EE orientation, skipping fix-orientation check")
+
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height,

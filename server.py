@@ -42,8 +42,7 @@ Mode = Literal["sim", "real"]
 TaskType = Literal["assembly", "disassembly"]
 GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
-MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
-TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
+TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "place_down"]
 PhaseNumber = Literal[0, 1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
 
@@ -946,33 +945,6 @@ def move_to_grasp(
     cmd += f" --{action.replace('_', '-')}"
     return _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
 
-class MoveToRegraspResult(BaseModel):
-    result: Literal["success", "failure"]
-    mode: Mode
-    movement_type: MoveToRegraspAction
-    error: Optional[str] = None
-
-@mcp.tool()
-def move_to_regrasp(
-    action: Annotated[MoveToRegraspAction, Field(description=(
-        "move_to_clear_space: Move grasped object to a clear area on the table. Call after rotate_object when robotic arm orientation is non-optimal. Object must be grasped. "
-        "move_down: Lower the object onto the table to release it. Call after move_to_clear_space. "
-        "move_ee_top_down: Move robotic arm to top-down orientation at z=0.3m (no object held). Call after releasing the object, before re-grasping."
-    ))],
-    mode: Mode = "sim",
-) -> MoveToRegraspResult:
-    """Move to regrasp position. After rotating an object, the robotic arm may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down robotic arm orientation.
-    Rotate the object after regrasping to restore the object's orientation. Releasing the object on the table typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing."""
-    # Verify object is grasped before moving to clear space
-    if action == "move_to_clear_space":
-        grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
-        if isinstance(grasp_result, dict) and grasp_result.get("result") == "failure":
-            return {"result": "failure", "mode": mode, "movement_type": "move_to_clear_space",
-                    "error": f"Grasp check failed: {grasp_result.get('error', 'gripper not holding object')}"}
-
-    cmd = f"--mode {mode} --{action.replace('_', '-')}"
-    return _run_with_retry(_run_primitive, "move_to_regrasp.py", cmd, timeout=60, error_prefix="Move to regrasp")
-
 class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
     mode: Mode
@@ -987,7 +959,7 @@ def translate_object(
         "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
         "perform_insert: Insert the object downward into the base. Call after move_to_base. Verify object orientation is correct before calling. "
         "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Call after releasing the object post-insertion. "
-        "move_away_from_base: Move grasped object laterally away from the base. Used during disassembly after lifting the object."
+        "place_down: Place grasped object on the table in a clear area. Moves laterally then lowers. Used during disassembly or regrasp."
     ))],
     mode: Mode = "sim",
     object_name: Annotated[Optional[str], Field(description="The object being held by the gripper")] = None,
@@ -997,17 +969,24 @@ def translate_object(
 ) -> TranslateObjectResult:
     """Translate object to target position. Maintains object's current orientation."""
     # Validate required fields per action
-    if action in ["move_to_base", "perform_insert", "move_away_from_base"]:
+    if action in ["move_to_base", "perform_insert"]:
         missing = []
         if not object_name:
             missing.append("object_name")
-        if action != "move_away_from_base" and not base_name:
+        if not base_name:
             missing.append("base_name")
         if missing:
             return {"result": "failure",
                     "error": f"Action '{action}' requires: {', '.join(missing)}"}
 
-    if mode == "real":
+    # Verify object is grasped before placing on clear area
+    if action == "place_down":
+        grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
+        if isinstance(grasp_result, dict) and grasp_result.get("result") == "failure":
+            return {"result": "failure", "mode": mode, "movement_type": "place_down",
+                    "error": f"Grasp check failed: {grasp_result.get('error', 'gripper not holding object')}"}
+
+    if mode == "real" and action not in ["place_down", "move_to_safe_height"]:
         missing = []
         if grasp_id is None:
             missing.append("grasp_id")
@@ -1033,7 +1012,7 @@ def translate_object(
     # Adjust timeout based on action
     if action == "perform_insert":
         timeout = 300
-    elif action in ["move_to_safe_height", "move_away_from_base"]:
+    elif action in ["move_to_safe_height", "place_down"]:
         timeout = 60
     else:
         timeout = 90

@@ -39,7 +39,7 @@ def assembly_workflow() -> str:
 def disassembly_workflow() -> str:
     """Workflow for disassembling an object from the base."""
     return """Disassembly Workflow:
-1. Call move_away_from_base once you are holding the object and in safe height to move the object away from the base
+1. Call place_down once you are holding the object and at safe height to move the object to a clear area and lower it onto the table
 2. Call control_gripper to release the object"""
 
 if __name__ == "__main__":

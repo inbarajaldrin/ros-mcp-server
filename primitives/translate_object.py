@@ -6,9 +6,9 @@ Modes:
 - --move-to-base: Move to hover position above base (sim: topics, real: provided args)
 - --perform-insert: Sim = move to final position, Real = subprocess to prismatic_peg_insertion.py
 - --move-to-safe-height: Subprocess to move_to_safe_height.py
-- --move-away-from-base: Subprocess to move_to_clear_area.py
+- --place-down: Move laterally to clear area then lower onto table
 
-Note: --move-to-base, --perform-insert, --move-to-safe-height, and --move-away-from-base are mutually exclusive.
+Note: --move-to-base, --perform-insert, --move-to-safe-height, and --place-down are mutually exclusive.
 
 Usage:
     # Sim mode - move to hover above base
@@ -26,8 +26,8 @@ Usage:
     # Move to safe height
     python3 translate_object.py --mode sim --move-to-safe-height
 
-    # Move away from base
-    python3 translate_object.py --mode real --move-away-from-base
+    # Place on clear area (lateral move + lower)
+    python3 translate_object.py --mode real --place-down
 """
 
 import sys
@@ -59,7 +59,7 @@ def _subprocess_fast_path():
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--mode', type=str, default='sim')
     pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
-    pre.add_argument('--move-away-from-base', action='store_true', dest='move_away_from_base')
+    pre.add_argument('--place-down', action='store_true', dest='place_down')
     pre.add_argument('--perform-insert', action='store_true', dest='perform_insert')
     pre.add_argument('--object-name', type=str, default=None)
     pre.add_argument('--base-name', type=str, default=None)
@@ -73,7 +73,7 @@ def _subprocess_fast_path():
 
     is_fast = (
         args.move_to_safe_height
-        or args.move_away_from_base
+        or args.place_down
         or (args.perform_insert and args.mode == 'real')
     )
     if not is_fast:
@@ -150,13 +150,15 @@ def _subprocess_fast_path():
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_safe_height.py'), timeout=40)
         _finish(ok, out, "move_to_safe_height")
 
-    if args.move_away_from_base:
-        log.info("Moving object away from base to clear area")
-        ca = ['--move']
-        if args.object_name:
-            ca += ['--object-name', args.object_name]
+    if args.place_down:
+        log.info("Placing object on clear area")
+        ca = ['--move', '--mode', args.mode]
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca)
-        _finish(ok, out, "move_away_from_base")
+        if not ok:
+            _finish(ok, out, "place_down")
+        log.info("Lowering object onto table")
+        ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
+        _finish(ok, out, "place_down")
 
     if args.perform_insert:
         itype = args.insertion_type
@@ -575,32 +577,31 @@ class TranslateObject(Node):
         T_object_current = self.transform_to_matrix(self.current_poses[object_name].transform)
         T_base_current = self.transform_to_matrix(self.current_poses[base_name].transform)
 
-        # Verify orientation before insertion (perform_insert only)
-        if not hover:
-            target_quat = self.get_object_target_orientation(object_name)
-            if target_quat is None:
-                self.error_message = f"No target orientation found for {object_name} in assembly config"
-                self.get_logger().error(self.error_message)
-                return False
-            R_object_current = R.from_matrix(T_object_current[:3, :3])
-            R_base = R.from_matrix(T_base_current[:3, :3])
-            R_relative = R.from_matrix(R_base.as_matrix().T @ R_object_current.as_matrix())
-            R_target_relative = R.from_quat(target_quat)
-            symmetry_dir = str(get_symmetry_dir())
-            fold_data = load_symmetry_data(object_name, symmetry_dir)
-            equivalents = equivalent_orientations(R_target_relative.as_matrix(), fold_data)
-            min_error_deg = min(
-                np.degrees((R_relative.inv() * R.from_matrix(R_eq)).magnitude())
-                for R_eq in equivalents
+        # Verify orientation before moving to base or inserting
+        target_quat = self.get_object_target_orientation(object_name)
+        if target_quat is None:
+            self.error_message = f"No target orientation found for {object_name} in assembly config"
+            self.get_logger().error(self.error_message)
+            return False
+        R_object_current = R.from_matrix(T_object_current[:3, :3])
+        R_base = R.from_matrix(T_base_current[:3, :3])
+        R_relative = R.from_matrix(R_base.as_matrix().T @ R_object_current.as_matrix())
+        R_target_relative = R.from_quat(target_quat)
+        symmetry_dir = str(get_symmetry_dir())
+        fold_data = load_symmetry_data(object_name, symmetry_dir)
+        equivalents = equivalent_orientations(R_target_relative.as_matrix(), fold_data)
+        min_error_deg = min(
+            np.degrees((R_relative.inv() * R.from_matrix(R_eq)).magnitude())
+            for R_eq in equivalents
+        )
+        if min_error_deg > ORIENTATION_TOLERANCE_DEG:
+            self.error_message = (
+                f"Object orientation error is {min_error_deg:.1f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°). "
+                f"Call rotate_object before perform_insert."
             )
-            if min_error_deg > ORIENTATION_TOLERANCE_DEG:
-                self.error_message = (
-                    f"Object orientation error is {min_error_deg:.1f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°). "
-                    f"Call rotate_object before perform_insert."
-                )
-                self.get_logger().error(self.error_message)
-                return False
-            self.get_logger().info(f"Orientation verified: {min_error_deg:.1f}° error (tolerance: {ORIENTATION_TOLERANCE_DEG}°)")
+            self.get_logger().error(self.error_message)
+            return False
+        self.get_logger().info(f"Orientation verified: {min_error_deg:.1f}° error (tolerance: {ORIENTATION_TOLERANCE_DEG}°)")
 
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
@@ -1102,14 +1103,24 @@ def run_move_to_safe_height():
     return run_subprocess(script_path, timeout=40)
 
 
-def run_move_to_clear_area(object_name=None):
+def run_move_to_clear_area(object_name=None, mode=None):
     """Run move_to_clear_area subprocess."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_to_clear_area.py')
-    logger.info("Moving object away from base to clear area")
+    logger.info("Moving object to clear area")
     cmd_args = ['--move']
     if object_name:
         cmd_args += ['--object-name', object_name]
+    if mode:
+        cmd_args += ['--mode', mode]
     return run_subprocess(script_path, cmd_args)
+
+
+def run_move_down(mode=None):
+    """Run move_down subprocess."""
+    script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_down.py')
+    logger.info("Lowering object onto table")
+    cmd_args = ['--mode', mode] if mode else []
+    return run_subprocess(script_path, cmd_args, timeout=310)
 
 
 # ---------------------------------------------------------------------------
@@ -1130,7 +1141,7 @@ def main():
     parser.add_argument('--move-to-base', action='store_true')
     parser.add_argument('--perform-insert', action='store_true', dest='perform_insert')
     parser.add_argument('--move-to-safe-height', action='store_true')
-    parser.add_argument('--move-away-from-base', action='store_true')
+    parser.add_argument('--place-down', action='store_true')
 
     # Real mode arguments
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
@@ -1143,14 +1154,14 @@ def main():
     args = parser.parse_args()
 
     # Validate flags
-    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.move_away_from_base])
+    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.place_down])
     if flags_set == 0:
-        parser.error("Specify one of --move-to-base, --perform-insert, --move-to-safe-height, --move-away-from-base")
+        parser.error("Specify one of --move-to-base, --perform-insert, --move-to-safe-height, --place-down")
     if flags_set > 1:
         parser.error("Cannot use multiple movement flags together")
 
     # Validate sim mode requirements
-    if args.mode == 'sim' and not args.move_to_safe_height and not args.move_away_from_base:
+    if args.mode == 'sim' and not args.move_to_safe_height and not args.place_down:
         if args.object_name is None:
             parser.error("--object-name is required in sim mode")
         if args.base_name is None:
@@ -1181,19 +1192,34 @@ def main():
             })
         sys.exit(0 if success else 1)
 
-    if args.move_away_from_base:
-        success, output_text = run_move_to_clear_area(object_name=args.object_name)
+    if args.place_down:
+        success, output_text = run_move_to_clear_area(mode=args.mode)
+        if not success:
+            subprocess_json = extract_json_from_output(output_text)
+            if subprocess_json:
+                subprocess_json["movement_type"] = "place_down"
+                subprocess_json["mode"] = args.mode
+                output_result(subprocess_json)
+            else:
+                output_result({
+                    "result": "failure", "mode": args.mode,
+                    "movement_type": "place_down",
+                    "error": "move_to_clear_area failed",
+                })
+            sys.exit(1)
+        # Step 2: lower onto table
+        success, output_text = run_move_down(mode=args.mode)
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
-            subprocess_json["movement_type"] = "move_away_from_base"
+            subprocess_json["movement_type"] = "place_down"
             subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             output_result({
                 "result": "success" if success else "failure",
                 "mode": args.mode,
-                "movement_type": "move_away_from_base",
-                **({"error": "move_to_clear_area failed"} if not success else {}),
+                "movement_type": "place_down",
+                **({"error": "move_down failed"} if not success else {}),
             })
         sys.exit(0 if success else 1)
 

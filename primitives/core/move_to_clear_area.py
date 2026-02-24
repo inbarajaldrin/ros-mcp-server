@@ -29,10 +29,11 @@ from primitives.shared.collision import compute_all_joint_positions, check_colli
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
 
 class MoveToClearArea(Node):
-    def __init__(self, mode='move', object_name=None):
+    def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None):
         super().__init__('move_to_clear_area')
-        self.mode = mode  # 'move' or 'hover'
+        self.mode = mode  # 'move' or 'fix_orientation'
         self.object_name = object_name  # If set, verify grasp before moving
+        self.robot_mode = robot_mode  # 'sim' or 'real'
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
@@ -46,7 +47,13 @@ class MoveToClearArea(Node):
         )
 
         # Target position for clear space (gripper center position, not TCP)
-        self.target_gripper_center_position = [-0.320, -0.5, SAFE_HEIGHT]  # [x, y, z] - gripper center position
+        # In sim mode, this gets overridden after reading current EE position
+        self.target_gripper_center_position = [-0.320, -0.6, SAFE_HEIGHT]  # [x, y, z] - gripper center position
+
+        # Apply target_xy override (before sim collision avoidance logic)
+        if target_xy is not None:
+            self.target_gripper_center_position[0] = target_xy[0]
+            self.target_gripper_center_position[1] = target_xy[1]
         # TCP to gripper center offset (24cm along gripper Z-axis, from TCP to gripper center)
         self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
 
@@ -90,8 +97,8 @@ class MoveToClearArea(Node):
             10
         )
 
-        # Subscribe to sim object poses if we need grasp verification
-        if self.object_name:
+        # Subscribe to sim object poses for grasp verification or sim placement collision check
+        if self.object_name or self.robot_mode == 'sim':
             from tf2_msgs.msg import TFMessage
             self.object_pose_sub = self.create_subscription(
                 TFMessage, '/objects_poses_sim', self._object_pose_cb, 10
@@ -271,13 +278,44 @@ class MoveToClearArea(Node):
             
         current_pos = pose_data['position']
         current_quat = pose_data['orientation']
-        
+
+        # In sim mode, check if hardcoded clear space is occupied; if so, step +Y until clear
+        if self.robot_mode == 'sim':
+            # Collect sim object poses (spin briefly to receive messages)
+            for _ in range(20):
+                rclpy.spin_once(self, timeout_sec=0.05)
+
+            occupy_threshold = 0.085  # m — if any object XY is within this radius, spot is occupied
+            step = 0.085  # m — Y increment per attempt
+            x_target = self.target_gripper_center_position[0]
+            y_candidate = self.target_gripper_center_position[1]
+
+            for attempt in range(20):
+                blocker_y = None
+                for name, tf in self.object_poses.items():
+                    ox = tf.transform.translation.x
+                    oy = tf.transform.translation.y
+                    dist_xy = np.sqrt((x_target - ox) ** 2 + (y_candidate - oy) ** 2)
+                    if dist_xy < occupy_threshold:
+                        blocker_y = oy
+                        break
+                if blocker_y is None:
+                    break
+                # Step from the blocking object's actual Y, not from the candidate
+                y_candidate = blocker_y + step
+
+            self.target_gripper_center_position = [x_target, y_candidate, SAFE_HEIGHT]
+            self.get_logger().info(
+                f"Sim mode: target=[{x_target:.3f}, {y_candidate:.3f}, {SAFE_HEIGHT:.3f}] "
+                f"({len(self.object_poses)} objects checked)"
+            )
+
         # Convert quaternion directly to rotation matrix to avoid precision loss from RPY conversion
         from scipy.spatial.transform import Rotation as Rot
         from scipy.optimize import minimize
         
         # Determine target orientation based on mode
-        if self.mode == 'hover':
+        if self.mode == 'fix_orientation':
             from scipy.spatial.transform import Rotation as Rot
             from primitives.shared.ik import IKSolverConfig, IKSolver
 
@@ -795,21 +833,26 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='Move to clear space position')
     parser.add_argument('--move', action='store_true',
                        help='Move to target position keeping current EE orientation (default)')
-    parser.add_argument('--hover', action='store_true',
+    parser.add_argument('--fix-orientation', action='store_true',
                        help='Move to target position with top-down (face-down) EE orientation')
+    parser.add_argument('--target-xy', type=float, nargs=2, metavar=('X', 'Y'),
+                       help='Override target XY position (gripper center coords)')
     parser.add_argument('--object-name', type=str, default=None,
                        help='Object name for grasp verification (checks gripper is holding object)')
+    parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'],
+                       help='Robot mode: sim varies placement Y to avoid stacking (default: real)')
 
     args = parser.parse_args()
 
     # Determine mode
-    if args.hover:
-        mode = 'hover'
+    if args.fix_orientation:
+        mode = 'fix_orientation'
     else:
         mode = 'move'  # Default mode
 
     rclpy.init()
-    node = MoveToClearArea(mode=mode, object_name=args.object_name)
+    node = MoveToClearArea(mode=mode, object_name=args.object_name,
+                           robot_mode=args.mode, target_xy=args.target_xy)
     try:
         # Spin until operation is complete with timeout
         import time
