@@ -340,7 +340,7 @@ class VerifyAssembly(Node):
             orientation_error_deg = self.compute_axis_alignment_error(
                 R_current_relative, R_target_relative, peg_free_axis
             )
-            orientation_error_rpy_deg = object_relative_rpy_deg - target_rpy_deg
+            orientation_error_rpy_deg = (object_relative_rpy_deg - target_rpy_deg + 180) % 360 - 180
             axis_names = ['x', 'y', 'z']
             self.get_logger().info(
                 f"Peg verification: {axis_names[peg_free_axis]}-axis alignment error = {orientation_error_deg:.2f}°"
@@ -367,10 +367,11 @@ class VerifyAssembly(Node):
                     min_orientation_error_deg = error_deg
                     equiv_rpy_rad = R_equiv_rotation.as_euler('xyz')
                     equiv_rpy_deg = np.degrees(equiv_rpy_rad)
-                    best_match_error_rpy_deg = object_relative_rpy_deg - equiv_rpy_deg
+                    best_match_error_rpy_deg = (object_relative_rpy_deg - equiv_rpy_deg + 180) % 360 - 180
 
             orientation_error_deg = min_orientation_error_deg
-            orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else object_relative_rpy_deg - target_rpy_deg
+            fallback_rpy_deg = (object_relative_rpy_deg - target_rpy_deg + 180) % 360 - 180
+            orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else fallback_rpy_deg
 
         # Check if within tolerance
         position_ok = bool(position_error <= POSITION_TOLERANCE)

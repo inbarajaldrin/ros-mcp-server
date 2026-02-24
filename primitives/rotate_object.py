@@ -1819,6 +1819,8 @@ def main(args=None):
             "result": "failure",
             "object_name": args.object_name,
             "base_name": args.base_name,
+            "mode": args.mode,
+            "movement_type": "rotate_object",
             "error": "Grasp verification failed - object may not be grasped"
         })
         sys.exit(1)

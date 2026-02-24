@@ -9,6 +9,9 @@ from utils.websocket_manager import WebSocketManager
 import subprocess
 import sys
 import logging
+import re
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 #camera
 import time
@@ -483,10 +486,10 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         # Get return code
         returncode = process.returncode
         
-        # Combine all output
+        # Combine all output and strip ANSI color codes from ROS2 logging
         with output_lock:
-            output = "".join(output_lines)
-        
+            output = _ANSI_RE.sub("", "".join(output_lines))
+
         # Check if output contains JSON markers (parse even on timeout)
         if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
             # Extract JSON portion - use rfind to get the LAST occurrence
@@ -571,10 +574,11 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
             timeout=timeout + 5  # Add buffer for subprocess timeout
         )
 
-        # Return combined stdout and stderr
+        # Return combined stdout and stderr, strip ANSI color codes from ROS2 logging
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
+        output = _ANSI_RE.sub("", output)
 
         # Check if output contains JSON markers (parse JSON if present)
         if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
@@ -931,7 +935,10 @@ class MoveToGraspResult(BaseModel):
 def move_to_grasp(
     object_name: str,
     grasp_id: int,
-    action: MoveToGraspAction,
+    action: Annotated[MoveToGraspAction, Field(description=(
+        "move_to_object: Move robotic arm down to the object's grasp point. Gripper must be open before calling. "
+        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after grasping. Call after closing the gripper."
+    ))],
     mode: Mode = "sim",
 ) -> MoveToGraspResult:
     """Move to grasp position."""
@@ -947,10 +954,14 @@ class MoveToRegraspResult(BaseModel):
 
 @mcp.tool()
 def move_to_regrasp(
-    action: MoveToRegraspAction,
+    action: Annotated[MoveToRegraspAction, Field(description=(
+        "move_to_clear_space: Move grasped object to a clear area on the table. Call after rotate_object when robotic arm orientation is non-optimal. Object must be grasped. "
+        "move_down: Lower the object onto the table to release it. Call after move_to_clear_space. "
+        "move_ee_top_down: Move robotic arm to top-down orientation at z=0.3m (no object held). Call after releasing the object, before re-grasping."
+    ))],
     mode: Mode = "sim",
 ) -> MoveToRegraspResult:
-    """Move to regrasp position. After rotating an object, the end effector may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down EE orientation.
+    """Move to regrasp position. After rotating an object, the robotic arm may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down robotic arm orientation.
     Rotate the object after regrasping to restore the object's orientation. Releasing the object on the table typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing."""
     # Verify object is grasped before moving to clear space
     if action == "move_to_clear_space":
@@ -972,7 +983,12 @@ class TranslateObjectResult(BaseModel):
 
 @mcp.tool()
 def translate_object(
-    action: TranslateAction,
+    action: Annotated[TranslateAction, Field(description=(
+        "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
+        "perform_insert: Insert the object downward into the base. Call after move_to_base. Verify object orientation is correct before calling. "
+        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Call after releasing the object post-insertion. "
+        "move_away_from_base: Move grasped object laterally away from the base. Used during disassembly after lifting the object."
+    ))],
     mode: Mode = "sim",
     object_name: Annotated[Optional[str], Field(description="The object being held by the gripper")] = None,
     base_name: Annotated[Optional[str], Field(description="The assembly base to translate towards or away from")] = None,

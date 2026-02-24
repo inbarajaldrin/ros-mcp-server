@@ -1948,6 +1948,8 @@ def main(args=None):
     if args.move_to_safe_height:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         print("[INFO] Moving to safe height...")
+        success = False
+        error_msg = None
         try:
             # Set PYTHONPATH to include project root for imports
             env = os.environ.copy()
@@ -1956,13 +1958,13 @@ def main(args=None):
                 env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
             else:
                 env['PYTHONPATH'] = project_root
-            
+
             cmd_parts = [
                 f"cd {script_dir}",
                 f"timeout 30 /usr/bin/python3 core/move_to_safe_height.py"
             ]
             cmd = "\n".join(cmd_parts)
-            
+
             result = subprocess.run(
                 cmd,
                 shell=True,
@@ -1972,29 +1974,38 @@ def main(args=None):
                 timeout=40,
                 env=env
             )
-            
-            # Log output
+
+            # Log output (without relaying __RESULT_JSON__ markers)
             if result.stdout:
-                print(f"[INFO] Move to safe height output: {result.stdout}")
+                for line in result.stdout.splitlines():
+                    if "__RESULT_JSON__" not in line and "__END_RESULT_JSON__" not in line:
+                        print(f"[INFO] {line}")
             if result.stderr:
                 print(f"[WARN] Move to safe height stderr: {result.stderr}")
-            
-            if result.returncode != 0:
-                print(f"[ERROR] Move to safe height failed with return code: {result.returncode}")
-                return
+
+            if result.returncode == 0:
+                success = True
             else:
-                print("[INFO] Successfully moved to safe height")
-                return  # Exit after safe height movement
-                
+                error_msg = f"move_to_safe_height failed with return code: {result.returncode}"
+
         except subprocess.TimeoutExpired:
-            print("[ERROR] Move to safe height timed out")
-            return
+            error_msg = "move_to_safe_height timed out"
         except KeyboardInterrupt:
-            print("\n[INFO] Move to safe height stopped by user")
-            return
+            error_msg = "move_to_safe_height stopped by user"
         except Exception as e:
-            print(f"[ERROR] Failed to execute move to safe height: {e}")
-            return
+            error_msg = f"Failed to execute move_to_safe_height: {e}"
+
+        res = {
+            "result": "success" if success else "failure",
+            "object_name": args.object_name,
+            "grasp_id": args.grasp_id,
+            "mode": args.mode,
+            "movement_type": "move_to_safe_height",
+        }
+        if error_msg:
+            res["error"] = error_msg
+        output_result(res)
+        return
     
     # Only proceed with object movement if --move-to-object flag is set
     if not args.move_to_object:

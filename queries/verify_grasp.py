@@ -579,9 +579,9 @@ def main(args=None):
         success, result = node.verify_grasp_dispatch(width_only=parsed_args.width_only)
 
     except KeyboardInterrupt:
-        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'error': 'Interrupted'}
+        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'mode': parsed_args.mode, 'error': 'Interrupted'}
     except Exception as e:
-        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'error': str(e)}
+        result = {'result': 'failure', 'object_name': parsed_args.object_name, 'mode': parsed_args.mode, 'error': str(e)}
     finally:
         try:
             if node is not None:

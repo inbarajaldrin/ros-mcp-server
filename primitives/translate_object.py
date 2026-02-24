@@ -133,6 +133,7 @@ def _subprocess_fast_path():
         rj = _extract_json(output_text)
         if rj:
             rj["movement_type"] = movement_type
+            rj["mode"] = args.mode  # Subprocess mode may differ from MCP mode
             _output(rj)
         else:
             r = {"result": "success" if success else "failure", "mode": args.mode,
@@ -1169,6 +1170,7 @@ def main():
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
             subprocess_json["movement_type"] = "move_to_safe_height"
+            subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             output_result({
@@ -1184,6 +1186,7 @@ def main():
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
             subprocess_json["movement_type"] = "move_away_from_base"
+            subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             output_result({
@@ -1199,6 +1202,7 @@ def main():
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
             subprocess_json["movement_type"] = "perform_insert"
+            subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             result = {
