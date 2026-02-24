@@ -1,0 +1,40 @@
+name: fmb1_orchestrator_without
+description: "Capability Demo: Grasp discovery without orchestrator (fmb1, sonnet)"
+created: 2026-02-23T00:00:00.000Z
+runs: 3
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: -1
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home()"
+phases:
+  - name: Disassembly sequence discovery (orchestrator disabled)
+    onStart:
+      - "@tool-exec:ros-mcp-server__move_home()"
+      - "@tool-exec:isaac-sim__delete_objects()"
+      - "@tool-exec:isaac-sim__play_scene()"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb1')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
+    commands:
+      - "@insert-prompt:Prompts__grasp_point_discovery(orchestrator='disabled')"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_disassembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: failure
+        run: "@abort"

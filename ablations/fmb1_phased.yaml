@@ -1,0 +1,81 @@
+name: fmb1_phased
+description: "Ablation 1: Phased execution Phase 1-3 sim (fmb1, sonnet)"
+created: 2026-02-23T00:00:00.000Z
+runs: 5
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: -1
+  clearContextBetweenPhases: true
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home()"
+phases:
+  - name: Disassembly sequence discovery
+    onStart:
+      - "@tool-exec:ros-mcp-server__move_home()"
+      - "@tool-exec:isaac-sim__delete_objects()"
+      - "@tool-exec:isaac-sim__play_scene()"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb1')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
+    commands:
+      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_disassembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: failure
+        run: "@abort"
+
+  - name: Assembly sequence discovery
+    onStart:
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+    commands:
+      - "@insert-prompt:Prompts__phase_2_assembly_sequence_discovery"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: failure
+        run: "@abort"
+
+  - name: Assembly execution (sim)
+    onStart:
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+        run: "@abort"

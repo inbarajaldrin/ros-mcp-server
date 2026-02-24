@@ -4,7 +4,7 @@ Related files (workspace preparation pipeline):
   - server.py (prepare_workspace tool) — invokes this elicitation before clearance check
   - elicitations/setup_real_scene.py   (this file) — Pydantic schemas for real scene setup confirmation
 
-Used by the prepare_workspace tool at the start of Phase 4 to get human confirmation that:
+Used by the prepare_workspace tool at the start of Phase 3 (real mode) to get human confirmation that:
   1. Physical objects are placed in the scene
   2. The real robot is spawned and ready
 before running clearance verification and starting real-world execution.
@@ -56,7 +56,7 @@ def build_elicitation_message(result: dict) -> str:
     Returns:
         Formatted message string for the human operator.
     """
-    message = "Phase 4 — Prepare Real Scene\n\n"
+    message = "Phase 3 — Prepare Real Scene\n\n"
     message += "The assembly sequence has been verified in simulation.\n"
     message += "Before starting real-world assembly:\n\n"
     message += "1. Place all assembly objects in the physical workspace\n"

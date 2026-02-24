@@ -41,9 +41,8 @@ GripperCommand = Literal["open", "close", "half-open"]
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 MoveToRegraspAction = Literal["move_to_clear_space", "move_down", "move_ee_top_down"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
-PhaseNumber = Literal[1, 2, 3, 4]
+PhaseNumber = Literal[0, 1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
-PhaseAction = Literal["randomize", "reverified"]
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -951,7 +950,8 @@ def move_to_regrasp(
     action: MoveToRegraspAction,
     mode: Mode = "sim",
 ) -> MoveToRegraspResult:
-    """Move to regrasp position. After rotating an object, the end effector may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down EE orientation."""
+    """Move to regrasp position. After rotating an object, the end effector may be in a non-optimal orientation causing motion planning failures due to potential collisions. This tool enables regrasping with a top-down EE orientation.
+    Rotate the object after regrasping to restore the object's orientation. Releasing the object on the table typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing."""
     # Verify object is grasped before moving to clear space
     if action == "move_to_clear_space":
         grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
@@ -1057,22 +1057,34 @@ def rotate_object(
 from triggers.signal_phase_complete import handle_phase_signal
 from triggers.pre_assembly_check import handle_clearance_failure
 
+def _verify_all_disassembled(base_name: str, mode: str) -> Dict[str, Any]:
+    """Run verify_disassembly with check_all for gating phase completion."""
+    return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify disassembly")
+
+def _verify_all_assembled(base_name: str, mode: str) -> Dict[str, Any]:
+    """Run verify_assembly with check_all for gating phase completion."""
+    return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
+
 @mcp.tool()
 async def signal_phase_complete(
-    phase: Annotated[PhaseNumber, Field(description="1=disassembly discovery, 2=assembly discovery, 3=sim reverification, 4=real-world execution")],
+    phase: Annotated[PhaseNumber, Field(description="0=grasp point discovery, 1=disassembly discovery, 2=assembly discovery, 3=assembly execution (sim/real)")],
     status: PhaseStatus,
     ctx: Context[ServerSession, None],
-    action: Annotated[Optional[PhaseAction], Field(description='Phase 3 only - "randomize" to reset the scene and reverify optimized sequences, then "reverified" to confirm and exit the phase. "reverified" is required to complete Phase 3.')] = None,
     comment: Annotated[str, Field(description="Should explain failure reasons")] = "",
+    mode: Mode = "sim",
+    base_name: Annotated[str, Field(description="Assembly base name")] = "",
 ) -> Dict[str, Any]:
     """Signal completion of an assembly phase to the MCP client."""
     return await handle_phase_signal(
         phase=phase,
         status=status,
-        action=action,
         comment=comment,
         ctx=ctx,
         elicit_user_fn=_handle_elicitation,
+        mode=mode,
+        base_name=base_name,
+        verify_disassembly_fn=_verify_all_disassembled,
+        verify_assembly_fn=_verify_all_assembled,
     )
 
 class SignalOperatorResult(BaseModel):
@@ -1086,9 +1098,16 @@ async def signal_operator(
     message: Annotated[str, Field(description="Description of what the robot has done and what the operator needs to do before the robot can continue.")],
     ctx: Context[ServerSession, None],
     reason: Annotated[str, Field(description='Short tag for the client to categorize the signal.')] = "",
-    # TODO: Add optional context dict for structured metadata (e.g., object poses, error codes)
+    mode: Mode = "sim",
 ) -> SignalOperatorResult:
     """Signal a human operator and wait for confirmation before proceeding."""
+    if mode == "sim":
+        return {
+            "result": "success",
+            "action": "proceed",
+            "reason": reason,
+        }
+
     response = await _handle_elicitation(ctx, "signal_operator", message, {"message": message, "reason": reason})
 
     if response.get("action") == "accept":

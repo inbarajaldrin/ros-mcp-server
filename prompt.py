@@ -6,16 +6,11 @@ from fastmcp import FastMCP
 mcp = FastMCP("Prompts")
 
 @mcp.prompt()
-def phase_1_disassembly_sequence_discovery(orchestrator: Annotated[Literal["enabled", "disabled"], Field(description="Whether tool orchestration is enabled or disabled")] = "enabled") -> str:
+def phase_1_disassembly_sequence_discovery() -> str:
     """
     Phase 1: Disassembly sequence discovery in a simulated environment.
     """
-    if orchestrator == "enabled":
-        orchestrator_instruction = "You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object."
-    else:
-        orchestrator_instruction = "DO NOT orchestrate the tools to perform a composed policy. Perform all disassembly using individual tool calls."
-
-    return f"""**Initialization:**
+    return """**Initialization:**
 
 Phase 1: Disassembly sequence discovery in a simulated environment.
 
@@ -35,7 +30,7 @@ The information you collect in this run will be used later to perform assembly.
 Use existing tools to perform disassembly one object at a time. Understand the capabilities of the tools and the limitations of the environment.
 Motion planning failed means no path to target was found — try a recovery strategy before restoring the scene.
 Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
-{orchestrator_instruction}
+You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object.
 
 If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
 If an object can be grasped using a open gripper state and a half open gripper state, always use half open gripper state to access the object so as to not disturb other objects in the assembly when moving to grasp it from the assembly.
@@ -104,54 +99,9 @@ Signal the client you are done with the assembly of all objects.
 """
 
 @mcp.prompt()
-def phase_3_sim_reverification() -> str:
+def phase_3_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(description="Environment: sim or real")]) -> str:
     """
-    Phase 3: Reverification of assembly sequences in simulation.
-    """
-    return """**Initialization:**
-
-Phase 3: Reverification of assembly sequences in simulation.
-
-You are an autonomous agent working in a simulation.
-Identify available objects and their grasp ids.
-Save scene state.
-Read the assembly results from previous phases to identify the tool call sequences for each object.
-
-**Task**
-
-Your goal is to execute the assembly sequences discovered in Phase 2 and verify they produce correct assemblies. If any sequence fails, update the log with a corrected working sequence.
-
-**Execution**
-
-Follow the assembly log and execute the tool call sequences for each object in order.
-You may orchestrate the tools to perform a composed policy to efficiently verify the sequences but print the tool outputs so you can go through them later.
-If orchestration is unreliable, fall back to individual tool calls.
-
-If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
-If an object can be grasped using a open gripper state and a half open gripper state, then you can use either of the gripper states to grasp the object but after assembling it into the base, use half open gripper state in order to not damage the object or disturb other assembled objects.
-
-**Verification**
-
-Run verify assembly once you've ran all tools required to move one object into the fixed base.
-
-**SUCCESS** — verify assembly returns success:
-1. Save scene state.
-2. Move on to the next object.
-
-**FAILURE** — verify assembly returns failure:
-1. Restore scene state.
-2. Figure out why it failed and see if you can fix it. 
-
-**Post Execution**
-If the assembly logs had any errors, then fix them by updating the assembly log with the corrected tool call sequence.
-Once all objects are assembled, analyze the tool call sequences you executed. Look for patterns across objects and identify if you can minimize the number of tool calls to perform the same assembly. If you wish to test something, you can signal the client with action="test" to have the scene reset so you can reverify the optimized sequences. 
-Signal the client with action="reverified" when you are done.
-"""
-
-@mcp.prompt()
-def phase_4_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(description="Environment: sim or real")]) -> str:
-    """
-    Phase 4: Performing Assembly in simulation or real world.
+    Phase 3: Performing Assembly in simulation or real world.
     """
     if mode == "real":
         env_description = "You are an autonomous agent working in the real world."
@@ -162,7 +112,7 @@ def phase_4_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(descr
 
     return f"""**Initialization:**
 
-Phase 4: Performing Assembly ({mode} mode).
+Phase 3: Performing Assembly ({mode} mode).
 
 {env_description}
 {setup_instruction}
@@ -208,41 +158,48 @@ def replace_defective_part(
     return f"""{object_name} assembled in {base_name} is defective. Disassemble that object and place it in the clear space and notify me. I'll replace the defective component with a new one and then you can continue the assembly."""
 
 @mcp.prompt()
-def grasp_workflow() -> str:
-    """Workflow for grasping an object."""
-    return """Grasp Workflow:
-1. Call move_to_object to move to the grasp point (make sure the gripper is open before this call)
-2. Call control_gripper to grasp the object
-3. Call move_to_safe_height to move to the safe height (z=0.3m)"""
+def grasp_point_discovery(orchestrator: Annotated[Literal["enabled", "disabled"], Field(description="Whether tool orchestration is enabled or disabled")] = "disabled") -> str:
+    """
+    Grasp point discovery: Identify accessible grasp IDs per object in a simulated environment.
+    Used for the orchestrator ablation study.
+    """
+    if orchestrator == "enabled":
+        orchestrator_instruction = "You can orchestrate the tools to perform a composed policy to test the remaining grasp ids once you have verified a working sequence for one object."
+    else:
+        orchestrator_instruction = "DO NOT orchestrate the tools to perform a composed policy. Test each grasp id using individual tool calls."
 
-@mcp.prompt()
-def regrasp_workflow() -> str:
-    """Workflow for regrasping an object with a top-down EE orientation."""
-    return """Regrasp Workflow:
-1. Call rotate_object to move the object to the target orientation relative to base orientation (which results in a non-optimal end effector orientation)
-2. Call move_to_clear_space to move to the clear space (make sure the objects is already grasped and rotated)
-3. Call move_down to place the object on the table
-4. Call control_gripper to release the object
-5. Call move_ee_top_down to move the EE to the top-down orientation at z=0.3m
-6. Call move_to_grasp to grasp the object again using the grasp id from the disassembly results
-7. IMPORTANT: Call rotate_object again to restore the object's orientation. Opening the gripper to drop the object typically causes minor orientation changes, so this step is REQUIRED to correct the orientation back to the target before continuing.
-8. Continue with what you were doing"""
+    return f"""**Initialization:**
 
-@mcp.prompt()
-def assembly_workflow() -> str:
-    """Workflow for assembling an object onto the base."""
-    return """Assembly Workflow:
-1. Call move_to_base to move to the base
-2. Call perform_insert to move down to the final position (Make sure the object orientation is correct before this call)
-3. Call control_gripper to release the object
-4. Call move_to_safe_height to move to the safe height (z=0.3m)"""
+Phase 0: Grasp point discovery in a simulated environment.
 
-@mcp.prompt()
-def disassembly_workflow() -> str:
-    """Workflow for disassembling an object from the base."""
-    return """Disassembly Workflow:
-1. Call move_away_from_base once you are holding the object and in safe height to move the object away from the base
-2. Call control_gripper to release the object"""
+You are an autonomous agent working in a simulation.
+Identify available objects and their grasp ids.
+You will be provided the fully assembled assembly in the environment.
+Save scene state.
+
+**Task**
+
+Your goal is to find which grasp ids are accessible per object and whether the gripper needs to be half open or open before moving to grasp.
+
+**Execution**
+
+Use the tools to test each grasp id of each object.
+{orchestrator_instruction}
+Verify if the object is actually grasped by moving to safe height and using verify_grasp.
+
+**SUCCESS** — verify_grasp returns success (object within grasp radius):
+1. Save scene state.
+2. Log the grasp id and gripper state as successful.
+3. Restore scene state and move to the next grasp id or object.
+
+**FAILURE** — verify_grasp returns failure (object not grasped):
+1. Restore scene state.
+2. If gripper was open, try half-open for the same grasp id.
+3. If both fail, log as inaccessible and move on.
+
+**Post Execution**
+Signal the client you are done with grasp point discovery for all objects.
+"""
 
 if __name__ == "__main__":
     mcp.run()

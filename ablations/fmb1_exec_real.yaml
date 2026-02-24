@@ -1,0 +1,43 @@
+name: fmb1_exec_real
+description: "Real World Validation: Phase 3 real-world execution (fmb1, all 6 models)"
+created: 2026-02-23T00:00:00.000Z
+runs: 3
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+  - provider: openai
+    model: gpt-5-mini
+  - provider: google
+    model: gemini-2.5-flash
+  - provider: anthropic
+    model: claude-haiku-4-5
+  - provider: google
+    model: gemini-2.5-pro
+  - provider: openai
+    model: gpt-5
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: -1
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home()"
+phases:
+  - name: Assembly execution (real)
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='real')"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+      - "@insert-attachment:Disassembly_fmb_assembly_1_results.json"
+      - "@insert-attachment:Assembly_fmb_assembly_1_results.json"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_real')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+        run: "@abort"
