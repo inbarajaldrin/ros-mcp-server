@@ -225,7 +225,7 @@ class GripperController(Node):
         check_interval = 0.1  # How often to check for new readings
         no_change_threshold = 0.3  # mm - values within this range are considered stable
         movement_threshold = 0.5  # mm - minimum change to consider as movement
-        required_stable_readings = 10  # Number of consecutive stable readings to confirm stopped
+        required_stable_readings = 5  # Number of consecutive stable readings to confirm stopped
         max_no_movement_readings = 20  # If no movement for this many readings, retry command
 
         last_value = initial_value
@@ -435,15 +435,16 @@ def main(args=None):
 
         controller = GripperController(known_args.command, known_args.mode)
 
-        # Wait a moment for subscriptions to establish
-        time.sleep(0.5)
+        # Brief spin for subscriptions to establish (replaces fixed sleep)
+        for _ in range(3):
+            rclpy.spin_once(controller, timeout_sec=0.05)
 
         # Check if topic exists and has publishers
         topic_name = '/gripper_width' if known_args.mode == 'real' else '/gripper_width_sim'
         controller.get_logger().info(f"Checking if topic {topic_name} is available...")
         
         # First check if topic exists and has publishers
-        if not controller.check_topic_available(topic_name, timeout=3.0):
+        if not controller.check_topic_available(topic_name, timeout=0.5):
             error_msg = f"Topic {topic_name} not found or has no publishers. Cannot proceed with gripper control."
             controller.get_logger().error(error_msg)
             error = error_msg

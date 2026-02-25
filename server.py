@@ -872,9 +872,9 @@ async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, An
 ## ############################################################################################## ##
 
 @mcp.tool()
-def move_home() -> Dict[str, Any]:
-    """Move robot to home position."""
-    return _run_with_retry(_run_primitive, "move_home.py", timeout=45, error_prefix="Move home")
+def move_home(mode: Mode = "sim") -> Dict[str, Any]:
+    """Move robot to home position. Rejected if the robot is currently holding an object (sim mode only)."""
+    return _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
 
 class GripperResult(BaseModel):
     result: Literal["success", "failure"]
@@ -959,7 +959,7 @@ def translate_object(
         "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
         "perform_insert: Insert the object downward into the base. Call after move_to_base. Verify object orientation is correct before calling. "
         "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Call after releasing the object post-insertion. "
-        "place_down: Moves laterally to clear region, lowers the arm, and places the object on the table. Used during disassembly or regrasp. Will have to open gripper to release the object."
+        "place_down: Used during disassembly or regrasp. Moves laterally to clear region, lowers the arm, and places the object on the table. Must open gripper to release the object. Rotate the object after regrasping to restore the target orientation as placing the object down will cause minor orientation changes."
     ))],
     mode: Mode = "sim",
     object_name: Annotated[Optional[str], Field(description="The object being held. Required for move_to_base and perform_insert only.")] = None,

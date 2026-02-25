@@ -728,7 +728,7 @@ class MoveDown(Node):
         # Compute inverse kinematics
         try:
             if self.current_joint_angles is None:
-                self.error_message = "Current joint angles not available! Cannot compute IK."
+                self.error_message = "Current joint angles not available for motion planning"
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
@@ -787,7 +787,7 @@ class MoveDown(Node):
             self._send_goal_future.add_done_callback(self.goal_response)
             
         except Exception as e:
-            self.error_message = f"Failed to compute IK: {e}"
+            self.error_message = f"Motion planning failed: {e}"
             self.get_logger().error(self.error_message)
             rclpy.shutdown()
 

@@ -10,11 +10,11 @@ settings:
   maxIterations: -1
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home()"
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Disassembly sequence discovery (orchestrator enabled)
     onStart:
-      - "@tool-exec:ros-mcp-server__move_home()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
@@ -37,4 +37,5 @@ phases:
         whenOutput:
           phase: 1
           status: failure
+          requires_response: false
         run: "@abort"

@@ -21,11 +21,11 @@ settings:
   clearContextBetweenPhases: true
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home()"
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Disassembly sequence discovery
     onStart:
-      - "@tool-exec:ros-mcp-server__move_home()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
@@ -48,6 +48,7 @@ phases:
         whenOutput:
           phase: 1
           status: failure
+          requires_response: false
         run: "@abort"
 
   - name: Assembly sequence discovery
@@ -68,6 +69,7 @@ phases:
         whenOutput:
           phase: 2
           status: failure
+          requires_response: false
         run: "@abort"
 
   - name: Assembly execution (sim)
@@ -88,4 +90,5 @@ phases:
         whenOutput:
           phase: 3
           status: failure
+          requires_response: false
         run: "@abort"

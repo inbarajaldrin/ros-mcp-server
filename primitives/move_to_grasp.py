@@ -14,6 +14,119 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+import argparse
+import subprocess
+import json
+import threading
+import logging
+
+
+# ---------------------------------------------------------------------------
+# Fast path for subprocess-only actions and pre-checks. Runs before heavy
+# imports (rclpy, numpy, scipy, IK) to avoid ~2-3s of import overhead.
+# ---------------------------------------------------------------------------
+
+def _fast_path():
+    """Handle subprocess-only actions and pre-flight checks before heavy imports."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--mode', type=str, default='sim')
+    pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
+    pre.add_argument('--move-to-object', action='store_true', dest='move_to_object')
+    pre.add_argument('--object-name', type=str, default=None)
+    pre.add_argument('--grasp-id', type=int, default=None)
+    args, _ = pre.parse_known_args()
+
+    pdir = os.path.dirname(os.path.abspath(__file__))
+
+    def _make_env():
+        env = os.environ.copy()
+        root = os.path.dirname(pdir)
+        env['PYTHONPATH'] = f"{root}:{env['PYTHONPATH']}" if 'PYTHONPATH' in env else root
+        return env
+
+    def _output(result):
+        print("__RESULT_JSON__")
+        print(json.dumps(result))
+        print("__END_RESULT_JSON__")
+
+    def _stream(pipe, lines):
+        for line in iter(pipe.readline, ''):
+            line = line.rstrip()
+            if line:
+                lines.append(line)
+                print(f"[INFO] {line}")
+        pipe.close()
+
+    def _run(script, cmd_args=None, timeout=None):
+        cmd = [sys.executable, script] + (cmd_args or [])
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=_make_env(),
+        )
+        lines = []
+        t = threading.Thread(target=_stream, args=(proc.stdout, lines), daemon=True)
+        t.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+            t.join(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            t.join(timeout=1.0)
+            return False, '\n'.join(lines)
+        return rc == 0, '\n'.join(lines)
+
+    def _extract_json(text):
+        if "__RESULT_JSON__" in text and "__END_RESULT_JSON__" in text:
+            s = text.find("__RESULT_JSON__") + len("__RESULT_JSON__")
+            e = text.find("__END_RESULT_JSON__")
+            try:
+                return json.loads(text[s:e].strip())
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _fail(error, movement_type="move_to_object"):
+        _output({
+            "result": "failure",
+            "object_name": args.object_name,
+            "grasp_id": args.grasp_id,
+            "mode": args.mode,
+            "movement_type": movement_type,
+            "error": error,
+        })
+        sys.exit(1)
+
+    # --- Fast path: --move-to-safe-height (pure subprocess, no rclpy needed) ---
+    if args.move_to_safe_height:
+        script = os.path.join(pdir, 'core', 'move_to_safe_height.py')
+        ok, out = _run(script, timeout=40)
+        rj = _extract_json(out)
+        if rj:
+            rj["movement_type"] = "move_to_safe_height"
+            rj["object_name"] = args.object_name
+            rj["grasp_id"] = args.grasp_id
+            rj["mode"] = args.mode
+            _output(rj)
+        else:
+            _output({
+                "result": "success" if ok else "failure",
+                "object_name": args.object_name,
+                "grasp_id": args.grasp_id,
+                "mode": args.mode,
+                "movement_type": "move_to_safe_height",
+                **({"error": "move_to_safe_height failed"} if not ok else {}),
+            })
+        sys.exit(0 if ok else 1)
+
+    # --move-to-object: gripper check is in DirectObjectMove node (line ~842).
+    # Orientation check + fix-orientation moved to main() after ee_pose available.
+    # Fall through to heavy imports and full main()
+
+
+if __name__ == '__main__':
+    _fast_path()
+
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -29,10 +142,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from controller_manager_msgs.srv import ListControllers
 import math
-import argparse
 import numpy as np
-import subprocess
-import json
 from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.ik import dh_params, forward_kinematics
@@ -40,7 +150,7 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
-from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
@@ -108,7 +218,7 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
             (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
             (0, np.pi),          # elbow: positive only (elbow down)
             (-np.pi, np.pi),     # wrist_1: full range
-            (-np.pi, 0),         # wrist_2: negative only (wrist-down)
+            (-np.pi, np.pi),     # wrist_2: full range
             (-2*np.pi, 2*np.pi)  # wrist_3: extended range
         ]
     else:
@@ -128,6 +238,178 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
         perturbations=max_tries,
         dx=dx,
     )
+
+
+def fix_orientation_inprocess(node, target_xy, logger):
+    """Fix EE orientation to face-down using the node's existing action client.
+
+    Runs IK + trajectory in-process, eliminating subprocess startup and
+    rclpy lifecycle overhead (~2-5s per call).
+
+    Args:
+        node: DirectObjectMove node with warm action_client, current_joint_angles, current_ee_pose
+        target_xy: (x, y) gripper center target position
+        logger: ROS logger for output
+
+    Returns:
+        True on success, False on failure
+    """
+    from primitives.shared.ik import IKSolverConfig, IKSolver
+
+    current_joints = node.current_joint_angles
+    if current_joints is None:
+        logger.error("fix_orientation_inprocess: no joint angles available")
+        return False
+
+    ee_pose = node.current_ee_pose
+    if ee_pose is None:
+        logger.error("fix_orientation_inprocess: no EE pose available")
+        return False
+
+    current_pos = np.array([
+        ee_pose.pose.position.x,
+        ee_pose.pose.position.y,
+        ee_pose.pose.position.z,
+    ])
+    current_quat = np.array([
+        ee_pose.pose.orientation.x,
+        ee_pose.pose.orientation.y,
+        ee_pose.pose.orientation.z,
+        ee_pose.pose.orientation.w,
+    ])
+
+    trajectory_points = []
+    current_height = current_pos[2]
+
+    ik_bounds = [
+        (-np.pi, np.pi),     # shoulder_pan
+        (-np.pi, 0),         # shoulder_lift
+        (0, np.pi),          # elbow
+        (-np.pi, np.pi),     # wrist_1
+        (-np.pi, np.pi),     # wrist_2
+        (-2*np.pi, 2*np.pi)  # wrist_3
+    ]
+
+    # Waypoint 1: Lift to 0.15m if below that
+    if current_height < 0.15:
+        logger.info(f"fix-orient: lifting from {current_height:.3f}m to 0.15m")
+        target_rot = R.from_quat(current_quat).as_matrix()
+        lift_pos = current_pos.copy()
+        lift_pos[2] = 0.15
+
+        lift_pose = np.eye(4)
+        lift_pose[:3, 3] = lift_pos
+        lift_pose[:3, :3] = target_rot
+
+        solver = IKSolver(IKSolverConfig(joint_bounds=ik_bounds))
+        lift_joints = solver.solve(
+            seeds=[current_joints.copy()],
+            target_pose=lift_pose,
+            perturbations=5,
+            dx=0.001,
+        )
+        if lift_joints is None:
+            logger.error("fix-orient: lift IK failed")
+            return False
+
+        logger.info(f"fix-orient: lift IK cost={solver._best_result.cost:.6f}")
+        trajectory_points.append(JointTrajectoryPoint(
+            positions=[float(x) for x in lift_joints],
+            velocities=[0.0] * 6,
+            time_from_start=Duration(sec=3)
+        ))
+
+    # Waypoint 2: Face-down hover at target XY, SAFE_HEIGHT
+    logger.info("fix-orient: computing hover IK (face-down)")
+    hover_rot = R.from_euler('xyz', [0, 180, 0], degrees=True).as_matrix()
+
+    # Convert gripper center XY to flange XY
+    offset_3d = hover_rot @ GRIPPER_CENTER_TOOL_OFFSET
+    hover_flange = np.array([target_xy[0], target_xy[1], SAFE_HEIGHT])
+    hover_flange[0] -= offset_3d[0]
+    hover_flange[1] -= offset_3d[1]
+
+    hover_pose = np.eye(4)
+    hover_pose[:3, 3] = hover_flange
+    hover_pose[:3, :3] = hover_rot
+
+    hover_solver = IKSolver(IKSolverConfig(joint_bounds=ik_bounds))
+    hover_joints = hover_solver.solve(
+        seeds=[
+            np.radians([85, -80, 90, -90, -90, 0]),
+            np.radians([90, -90, 90, -90, -90, 0]),
+            np.radians([0, -90, 90, -90, -90, 0]),
+        ],
+        target_pose=hover_pose,
+        perturbations=5,
+        dx=0.001,
+    )
+    if hover_joints is None:
+        logger.error("fix-orient: hover IK failed")
+        return False
+
+    logger.info(f"fix-orient: hover IK cost={hover_solver._best_result.cost:.6f}")
+    lift_duration = 3 if trajectory_points else 0
+    trajectory_points.append(JointTrajectoryPoint(
+        positions=[float(x) for x in hover_joints],
+        velocities=[0.0] * 6,
+        time_from_start=Duration(sec=lift_duration + 5)
+    ))
+
+    # Send trajectory via existing action client
+    goal = FollowJointTrajectory.Goal()
+    traj = JointTrajectory()
+    traj.joint_names = [
+        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
+    ]
+    traj.points = trajectory_points
+    goal.trajectory = traj
+    goal.goal_time_tolerance = Duration(sec=1)
+
+    n_wp = len(trajectory_points)
+    logger.info(f"fix-orient: sending trajectory ({n_wp} waypoint{'s' if n_wp > 1 else ''})")
+
+    # Simple closure-based callbacks (don't interfere with DirectObjectMove's callbacks)
+    fix_done = [False]
+    fix_success = [False]
+    fix_error = [None]
+
+    def _on_goal_response(future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            fix_error[0] = "fix-orient: trajectory goal rejected"
+            fix_done[0] = True
+            return
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(_on_goal_result)
+
+    def _on_goal_result(future):
+        result = future.result()
+        if result.status == 4:  # SUCCEEDED
+            fix_success[0] = True
+        else:
+            fix_error[0] = f"fix-orient: trajectory failed (status={result.status})"
+        fix_done[0] = True
+
+    send_future = node.action_client.send_goal_async(goal)
+    send_future.add_done_callback(_on_goal_response)
+
+    import time
+    start = time.time()
+    timeout = 30.0
+    while not fix_done[0] and rclpy.ok():
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if time.time() - start > timeout:
+            fix_error[0] = f"fix-orient: timed out after {timeout:.0f}s"
+            break
+
+    if fix_error[0]:
+        logger.error(fix_error[0])
+    if fix_success[0]:
+        logger.info("fix-orient: completed successfully")
+
+    return fix_success[0]
 
 
 def output_result(result):
@@ -1943,160 +2225,14 @@ def main(args=None):
     # Check that at least one mode flag is specified
     if not args.move_to_object and not args.move_to_safe_height:
         parser.error("Must specify either --move-to-object or --move-to-safe-height")
-    
-    # If move-to-safe-height flag is set, only call move_to_safe_height and exit
+
+    # move-to-safe-height and pre-checks are handled by _fast_path() before heavy imports.
+    # If we reach here with --move-to-safe-height, it means _fast_path wasn't called (e.g. imported as module).
     if args.move_to_safe_height:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        print("[INFO] Moving to safe height...")
-        success = False
-        error_msg = None
-        try:
-            # Set PYTHONPATH to include project root for imports
-            env = os.environ.copy()
-            project_root = os.path.dirname(script_dir)
-            if 'PYTHONPATH' in env:
-                env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
-            else:
-                env['PYTHONPATH'] = project_root
+        parser.error("--move-to-safe-height should be handled by fast path")
 
-            cmd_parts = [
-                f"cd {script_dir}",
-                f"timeout 30 /usr/bin/python3 core/move_to_safe_height.py"
-            ]
-            cmd = "\n".join(cmd_parts)
-
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                executable='/bin/bash',
-                capture_output=True,
-                text=True,
-                timeout=40,
-                env=env
-            )
-
-            # Log output (without relaying __RESULT_JSON__ markers)
-            if result.stdout:
-                for line in result.stdout.splitlines():
-                    if "__RESULT_JSON__" not in line and "__END_RESULT_JSON__" not in line:
-                        print(f"[INFO] {line}")
-            if result.stderr:
-                print(f"[WARN] Move to safe height stderr: {result.stderr}")
-
-            if result.returncode == 0:
-                success = True
-            else:
-                error_msg = f"move_to_safe_height failed with return code: {result.returncode}"
-
-        except subprocess.TimeoutExpired:
-            error_msg = "move_to_safe_height timed out"
-        except KeyboardInterrupt:
-            error_msg = "move_to_safe_height stopped by user"
-        except Exception as e:
-            error_msg = f"Failed to execute move_to_safe_height: {e}"
-
-        res = {
-            "result": "success" if success else "failure",
-            "object_name": args.object_name,
-            "grasp_id": args.grasp_id,
-            "mode": args.mode,
-            "movement_type": "move_to_safe_height",
-        }
-        if error_msg:
-            res["error"] = error_msg
-        output_result(res)
-        return
-    
-    # Only proceed with object movement if --move-to-object flag is set
     if not args.move_to_object:
         parser.error("Must specify --move-to-object to move to an object")
-
-    # --- Auto fix-orientation: if EE is not face-down, reorient before proceeding ---
-    # Quick rclpy cycle to read current EE pose + gripper width
-    rclpy.init(args=None)
-    _check_node = rclpy.create_node('_ee_orientation_check')
-    _ee_pose = [None, None]  # [position, quaternion]
-    _gripper_width = [None]
-
-    def _ee_cb(msg):
-        _ee_pose[0] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
-        _ee_pose[1] = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
-                                 msg.pose.orientation.z, msg.pose.orientation.w])
-    def _gripper_cb(msg):
-        _gripper_width[0] = msg.data
-
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-    _qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
-                       durability=DurabilityPolicy.VOLATILE, depth=10)
-    _check_node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', _ee_cb, _qos)
-    _gripper_topic = '/gripper_width_sim' if args.mode == 'sim' else '/gripper_width_offset'
-    _gripper_msg = Float64 if args.mode == 'sim' else Float32
-    _check_node.create_subscription(_gripper_msg, _gripper_topic, _gripper_cb, 10)
-    _timeout = 0
-    while (_ee_pose[1] is None or _gripper_width[0] is None) and rclpy.ok() and _timeout < 50:
-        rclpy.spin_once(_check_node, timeout_sec=0.1)
-        _timeout += 1
-    _check_node.destroy_node()
-    rclpy.shutdown()
-
-    # Verify gripper is open before proceeding (half-open ≈ 33-35mm, use 30mm threshold for margin)
-    if _gripper_width[0] is not None and _gripper_width[0] < 30.0:
-        res = {
-            "result": "failure",
-            "object_name": args.object_name,
-            "grasp_id": args.grasp_id,
-            "mode": args.mode,
-            "movement_type": "move_to_object",
-            "error": f"Gripper is not open ({_gripper_width[0]:.1f}mm). Open or half-open gripper before calling move_to_grasp."
-        }
-        output_result(res)
-        return
-
-    if _ee_pose[1] is not None:
-        _rot = R.from_quat(_ee_pose[1])
-        _tool_z = _rot.as_matrix()[:, 2]
-        _is_face_down = _tool_z[2] < -0.707  # cos(45°), same threshold as move_to_clear_area.py
-
-        if not _is_face_down:
-            print("[INFO] EE is not face-down — auto-reorienting before move_to_object")
-            _gripper_center = _ee_pose[0] + _rot.as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
-            _gx, _gy = float(_gripper_center[0]), float(_gripper_center[1])
-
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            env = os.environ.copy()
-            project_root = os.path.dirname(script_dir)
-            if 'PYTHONPATH' in env:
-                env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
-            else:
-                env['PYTHONPATH'] = project_root
-
-            # Fix orientation to face-down at current gripper XY
-            # fix_orientation mode handles lift internally (lifts to 0.15m if needed, then reorients)
-            print(f"[INFO] Fixing orientation to face-down at XY=({_gx:.3f}, {_gy:.3f})")
-            fix_cmd = (
-                f"cd {script_dir} && timeout 45 /usr/bin/python3 core/move_to_clear_area.py"
-                f" --fix-orientation --target-xy {_gx} {_gy} --mode {args.mode}"
-            )
-            fix_result = subprocess.run(
-                fix_cmd, shell=True, executable='/bin/bash',
-                capture_output=True, text=True, timeout=55, env=env
-            )
-            if fix_result.returncode != 0:
-                res = {
-                    "result": "failure",
-                    "object_name": args.object_name,
-                    "grasp_id": args.grasp_id,
-                    "mode": args.mode,
-                    "movement_type": "move_to_object",
-                    "error": "Auto fix-orientation failed before move_to_object"
-                }
-                output_result(res)
-                return
-            print("[INFO] Fix-orientation completed successfully")
-        else:
-            print("[INFO] EE is face-down, no reorientation needed")
-    else:
-        print("[WARN] Could not read EE orientation, skipping fix-orientation check")
 
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
@@ -2118,6 +2254,48 @@ def main(args=None):
     # Wait for joint states
     while node.current_joint_angles is None and rclpy.ok() and not node.should_exit:
         rclpy.spin_once(node, timeout_sec=0.1)
+
+    # --- Orientation check: fix-orientation if not face-down (in-process) ---
+    if node.current_ee_pose is not None and not node.should_exit:
+        ee_quat = np.array([
+            node.current_ee_pose.pose.orientation.x,
+            node.current_ee_pose.pose.orientation.y,
+            node.current_ee_pose.pose.orientation.z,
+            node.current_ee_pose.pose.orientation.w,
+        ])
+        rot = R.from_quat(ee_quat)
+        tool_z = rot.as_matrix()[:, 2]
+        is_face_down = tool_z[2] < -0.707
+
+        if not is_face_down:
+            ee_pos = np.array([
+                node.current_ee_pose.pose.position.x,
+                node.current_ee_pose.pose.position.y,
+                node.current_ee_pose.pose.position.z,
+            ])
+            gripper_center = ee_pos + rot.as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+            gx, gy = float(gripper_center[0]), float(gripper_center[1])
+            node.get_logger().info(f"EE is not face-down — auto-reorienting at XY=({gx:.3f}, {gy:.3f})")
+
+            # Pause the movement timer so it doesn't send step-1 trajectory during fix-orient
+            node.update_timer.cancel()
+
+            if not fix_orientation_inprocess(node, (gx, gy), node.get_logger()):
+                node.error_message = "Auto fix-orientation failed before move_to_object"
+                node.get_logger().error(node.error_message)
+                node.should_exit = True
+            else:
+                # Re-read ee_pose + joint angles after fix-orientation (pose has changed)
+                node.current_ee_pose = None
+                node.ee_pose_received = False
+                node.current_joint_angles = None
+                while (node.current_ee_pose is None or node.current_joint_angles is None) and rclpy.ok() and not node.should_exit:
+                    rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Restore the movement timer
+            node.update_timer = node.create_timer(node.timer_period_step1, node.timer_callback)
+        else:
+            node.get_logger().info("EE is face-down, no reorientation needed")
 
     try:
         while rclpy.ok() and not node.should_exit:

@@ -682,7 +682,7 @@ class TranslateObject(Node):
                     or check_ee_below_base(wp_joints)
                     or check_compact_configuration(wp_joints)):
                 self.get_logger().error(f"Collision detected at waypoint {i + 1}/{num_waypoints}")
-                self.error_message = "IK rejected: couldn't find a collision-free path to the target position"
+                self.error_message = "Motion planning failed: couldn't find a collision-free path to the target position"
                 return False
 
         all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
@@ -1257,13 +1257,11 @@ def main():
         # Wait for EE pose (always needed)
         while node.current_ee_pose is None:
             rclpy.spin_once(node, timeout_sec=0.1)
-            time.sleep(0.1)
 
         # In sim mode, wait for object and base poses
         if args.mode == 'sim':
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
-                time.sleep(0.1)
 
         if args.move_to_base:
             if args.mode == 'sim':

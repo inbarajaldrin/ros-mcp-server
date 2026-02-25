@@ -20,7 +20,7 @@ settings:
   maxIterations: -1
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home()"
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Assembly execution (real)
     commands:
@@ -40,4 +40,5 @@ phases:
         whenOutput:
           phase: 3
           status: failure
+          requires_response: false
         run: "@abort"

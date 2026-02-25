@@ -92,7 +92,7 @@ def _handle_phase_1(
       2. verify_disassembly(check_all) confirms all objects are actually disassembled.
     """
     if status != "success":
-        return {}
+        return {"requires_response": False}
 
     # Gate 1: results file must exist
     logs_dir = _get_logs_dir()
@@ -137,7 +137,7 @@ def _handle_phase_2(
       2. verify_assembly(check_all) confirms all objects are actually assembled.
     """
     if status != "success":
-        return {}
+        return {"requires_response": False}
 
     # Gate 1: results file must exist
     if not _has_assembly_results():

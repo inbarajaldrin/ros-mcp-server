@@ -679,7 +679,7 @@ class ReorientForAssembly(Node):
             (-np.pi, np.pi),     # shoulder_pan: full range
             (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
             (0, np.pi),          # elbow: positive only (elbow down)
-            (-np.pi, 0),         # wrist_1: negative only
+            (-np.pi, np.pi),     # wrist_1: full range
             (-np.pi, np.pi),     # wrist_2: full range
             (-2*np.pi, 2*np.pi)  # wrist_3: extended range to avoid wrapping
         ]

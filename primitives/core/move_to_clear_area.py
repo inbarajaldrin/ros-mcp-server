@@ -398,12 +398,12 @@ class MoveToClearArea(Node):
                 lift_pose[:3, :3] = target_rot_matrix
 
                 lift_bounds = [
-                    (-np.pi, np.pi),     # shoulder_pan
-                    (-np.pi, np.pi),     # shoulder_lift
-                    (-np.pi, np.pi),     # elbow
-                    (-np.pi, np.pi),     # wrist_1
-                    (-np.pi, np.pi),     # wrist_2
-                    (-2*np.pi, 2*np.pi)  # wrist_3
+                    (-np.pi, np.pi),     # shoulder_pan: full range
+                    (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
+                    (0, np.pi),          # elbow: positive only (elbow down)
+                    (-np.pi, np.pi),     # wrist_1: full range
+                    (-np.pi, np.pi),     # wrist_2: full range
+                    (-2*np.pi, 2*np.pi)  # wrist_3: extended range
                 ]
                 lift_solver = IKSolver(IKSolverConfig(joint_bounds=lift_bounds))
                 lift_joints = lift_solver.solve(
@@ -445,11 +445,11 @@ class MoveToClearArea(Node):
             hover_pose[:3, :3] = hover_rot
 
             hover_bounds = [
-                (-np.pi, np.pi),     # shoulder_pan
+                (-np.pi, np.pi),     # shoulder_pan: full range
                 (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
                 (0, np.pi),          # elbow: positive only (elbow down)
-                (-np.pi, np.pi),     # wrist_1
-                (-np.pi, 0),         # wrist_2: negative only (wrist-down)
+                (-np.pi, np.pi),     # wrist_1: full range
+                (-np.pi, np.pi),     # wrist_2: full range
                 (-2*np.pi, 2*np.pi)  # wrist_3: extended range
             ]
             hover_solver = IKSolver(IKSolverConfig(joint_bounds=hover_bounds))
@@ -598,11 +598,11 @@ class MoveToClearArea(Node):
                             or check_self_collision(joint_angles))
 
                 joint_bounds_base = [
-                    (-np.pi, np.pi),     # shoulder_pan
+                    (-np.pi, np.pi),     # shoulder_pan: full range
                     (-np.pi, 0),         # shoulder_lift: negative only (reaching forward/down)
                     (0, np.pi),          # elbow: positive only (elbow down)
-                    (-np.pi, 0),         # wrist_1: negative only
-                    (-np.pi, np.pi),     # wrist_2
+                    (-np.pi, np.pi),     # wrist_1: full range
+                    (-np.pi, np.pi),     # wrist_2: full range
                     (-2*np.pi, 2*np.pi)  # wrist_3: extended range
                 ]
 
@@ -705,9 +705,7 @@ class MoveToClearArea(Node):
                 candidate_solutions.sort(key=lambda x: x[0])
                 self.get_logger().info(f"Found {len(candidate_solutions)} candidate IK solutions")
 
-                # Try each candidate solution with different joint wrapping options
-                # Collect ALL collision-free trajectories, then pick shortest path
-                num_waypoints = 10
+                # Check each candidate for collision-free trajectory (no joint wrapping)
                 collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
 
                 for cost, candidate_joints, yaw in candidate_solutions:
@@ -715,33 +713,15 @@ class MoveToClearArea(Node):
                     joints_str = ' '.join(f'{v:.6f}' for v in target_joints)
                     self.get_logger().info(f"Candidate IK (cost={cost:.4f}): {joints_str}")
 
-                    # Generate wrapping variants (±2π) for joints 1-5 only (skip wrist_3/joint 6)
-                    wrapping_variants = [target_joints.copy()]
-                    for joint_idx in range(5):  # joints 0-4 only
-                        diff = target_joints[joint_idx] - start_joints[joint_idx]
-                        new_variants = []
-                        for variant in wrapping_variants:
-                            new_variants.append(variant.copy())
-                            if diff < -np.pi/2:
-                                v = variant.copy()
-                                v[joint_idx] += 2 * np.pi
-                                new_variants.append(v)
-                            if diff > np.pi/2:
-                                v = variant.copy()
-                                v[joint_idx] -= 2 * np.pi
-                                new_variants.append(v)
-                        wrapping_variants = new_variants
+                    if check_collision_with_table(target_joints):
+                        continue
+                    if check_self_collision(target_joints):
+                        continue
 
-                    for variant in wrapping_variants:
-                        if check_collision_with_table(variant):
-                            continue
-                        if check_self_collision(variant):
-                            continue
-
-                        traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
-                        if not check_trajectory_collision(start_joints, variant, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
-                            travel_distance = np.sum(np.abs(variant - start_joints))
-                            collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
+                    traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+                    if not check_trajectory_collision(start_joints, target_joints, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
+                        travel_distance = np.sum(np.abs(target_joints - start_joints))
+                        collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw))
 
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
