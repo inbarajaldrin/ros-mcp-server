@@ -2070,27 +2070,9 @@ def main(args=None):
             else:
                 env['PYTHONPATH'] = project_root
 
-            # Step 1: Lift to safe height (handles any orientation)
-            print("[INFO] Step 1/2: Moving to safe height")
-            safe_cmd = f"cd {script_dir} && timeout 30 /usr/bin/python3 core/move_to_safe_height.py --height 0.15"
-            safe_result = subprocess.run(
-                safe_cmd, shell=True, executable='/bin/bash',
-                capture_output=True, text=True, timeout=40, env=env
-            )
-            if safe_result.returncode != 0:
-                res = {
-                    "result": "failure",
-                    "object_name": args.object_name,
-                    "grasp_id": args.grasp_id,
-                    "mode": args.mode,
-                    "movement_type": "move_to_object",
-                    "error": "Auto fix-orientation failed: move_to_safe_height failed"
-                }
-                output_result(res)
-                return
-
-            # Step 2: Fix orientation to face-down at current gripper XY
-            print(f"[INFO] Step 2/2: Fixing orientation to face-down at XY=({_gx:.3f}, {_gy:.3f})")
+            # Fix orientation to face-down at current gripper XY
+            # fix_orientation mode handles lift internally (lifts to 0.15m if needed, then reorients)
+            print(f"[INFO] Fixing orientation to face-down at XY=({_gx:.3f}, {_gy:.3f})")
             fix_cmd = (
                 f"cd {script_dir} && timeout 45 /usr/bin/python3 core/move_to_clear_area.py"
                 f" --fix-orientation --target-xy {_gx} {_gy} --mode {args.mode}"

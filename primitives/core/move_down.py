@@ -22,7 +22,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import JointState
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from std_msgs.msg import Bool
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
 import re
 import json
@@ -32,7 +33,7 @@ import threading
 import time
 import subprocess
 
-from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, TABLE_COLLISION_MARGIN_FACEDOWN, TABLE_COLLISION_MARGIN_SIDEWAYS
 from primitives.shared.ik import compute_cartesian_waypoints_ik
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision
@@ -47,7 +48,7 @@ from primitives.shared.collision import compute_all_joint_positions, check_colli
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
 # Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
 SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
-SIM_Z_FORCE_THRESHOLD = 10.0  # Z force threshold (positive = contact pushback in sim)
+SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from descent baseline = contact
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
@@ -103,6 +104,16 @@ class MoveDown(Node):
         self.force_check_grace_period = 0.5  # Wait 0.5 seconds after movement starts
         self.force_threshold_reached = False
         self.error_message = None  # Track error for JSON output
+        # Orientation-aware contact axis (set in _execute_move_down)
+        # Wrench is in tool frame: gravity/contact appears on the tool axis aligned with world Z
+        self.contact_axis = 2  # Default: Fz (index into [Fx, Fy, Fz])
+        self.contact_direction = 1.0  # Sign correction so positive delta = contact
+        self.contact_axis_name = 'Fz'
+
+        # Robot safety monitoring (detect protective stop during execution)
+        self.safety_mode = None
+        self.robot_program_running = None
+        self.trajectory_sent = False
 
         # Current goal handle for cancellation
         self._current_goal_handle = None
@@ -167,8 +178,32 @@ class MoveDown(Node):
             10
         )
         
+        # Monitor robot safety mode and program running state to detect protective stop
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        try:
+            from ur_dashboard_msgs.msg import SafetyMode
+            self.safety_mode_sub = self.create_subscription(
+                SafetyMode,
+                '/io_and_status_controller/safety_mode',
+                self._safety_mode_cb,
+                latched_qos
+            )
+        except ImportError:
+            self.safety_mode_sub = None
+        self.program_running_sub = self.create_subscription(
+            Bool,
+            '/io_and_status_controller/robot_program_running',
+            self._program_running_cb,
+            latched_qos
+        )
+
         self.action_client.wait_for_server()
-        
+
         # Log mode
         self.get_logger().info(f"Using {self.mode.upper()} mode")
         
@@ -320,20 +355,27 @@ class MoveDown(Node):
         """Start monitoring force during trajectory execution (non-blocking)"""
         import time
 
-        # NON-BLOCKING calibration: Use brief sleep to get instant baseline
-        # This avoids blocking the ROS event loop which prevents goal_result from being called
-        time.sleep(0.1)  # Brief wait to ensure we have current readings
-
-        # Use current values as baseline (same approach for both sim and real)
-        self.baseline_force_x = self.current_force_x
-        self.baseline_force_y = self.current_force_y
-        self.baseline_force_z = self.current_force_z
-        self.baseline_torque_x = self.current_torque_x
-        self.baseline_torque_y = self.current_torque_y
-        self.baseline_torque_z = self.current_torque_z
-
         # Record movement start time for grace period
         self.movement_start_time = time.time()
+
+        if self.mode == 'sim':
+            # Sim mode: take baseline AFTER grace period (during motion) so it captures
+            # descent forces, not stationary forces. Baseline is set in check_force_during_execution.
+            self.baseline_force_x = None
+            self.baseline_force_y = None
+            self.baseline_force_z = None
+            self.baseline_torque_x = None
+            self.baseline_torque_y = None
+            self.baseline_torque_z = None
+        else:
+            # Real mode: take baseline at start (stationary)
+            time.sleep(0.1)
+            self.baseline_force_x = self.current_force_x
+            self.baseline_force_y = self.current_force_y
+            self.baseline_force_z = self.current_force_z
+            self.baseline_torque_x = self.current_torque_x
+            self.baseline_torque_y = self.current_torque_y
+            self.baseline_torque_z = self.current_torque_z
 
         if self.force_monitor_timer is None:
             self.force_monitor_timer = self.create_timer(FORCE_CHECK_INTERVAL, self.check_force_during_execution)
@@ -375,6 +417,22 @@ class MoveDown(Node):
             if elapsed_since_start < self.force_check_grace_period:
                 return  # Skip force check during grace period
 
+        # Sim mode: capture baseline at end of grace period (during descent)
+        if self.mode == 'sim' and self.baseline_force_z is None:
+            self.baseline_force_x = self.current_force_x
+            self.baseline_force_y = self.current_force_y
+            self.baseline_force_z = self.current_force_z
+            self.baseline_torque_x = self.current_torque_x
+            self.baseline_torque_y = self.current_torque_y
+            self.baseline_torque_z = self.current_torque_z
+            baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
+            self.get_logger().info(
+                f"Sim baseline captured during motion: {self.contact_axis_name}="
+                f"{baseline_values[self.contact_axis]:.2f}N "
+                f"(Fx={self.baseline_force_x:.2f}, Fy={self.baseline_force_y:.2f}, "
+                f"Fz={self.baseline_force_z:.2f})")
+            return  # Skip this check, start detecting from next sample
+
         # Check if we have baseline values set
         if (self.baseline_force_x is None or
             self.baseline_force_y is None or
@@ -397,20 +455,32 @@ class MoveDown(Node):
         t_y = self.current_torque_y - self.baseline_torque_y
         t_z = self.current_torque_z - self.baseline_torque_z
 
-        # Check Z force with directional threshold
-        # Real mode: negative delta (upward resistance from F/T sensor)
-        # Sim mode: positive delta (contact pushback from joint forces)
+        # Check contact force with directional threshold
+        # Sim mode: orientation-aware — monitor the tool-frame axis aligned with world Z
+        # Real mode: uses Fz with negative delta (upward resistance from F/T sensor)
         if self.mode == 'sim':
-            z_triggered = f_z >= z_threshold  # Sim: positive delta on contact
+            force_deltas = [f_x, f_y, f_z]
+            # Project onto contact axis with sign correction: positive = contact
+            f_contact = force_deltas[self.contact_axis] * self.contact_direction
+            z_triggered = f_contact > z_threshold
         else:
             z_triggered = f_z <= z_threshold  # Real: negative delta on contact
 
         if z_triggered:
-            self.get_logger().info(
-                f"Contact detected: Z force threshold reached. "
-                f"Z force (after baseline): {f_z:.2f}N (threshold: {z_threshold}N, "
-                f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)"
-            )
+            if self.mode == 'sim':
+                current_values = [self.current_force_x, self.current_force_y, self.current_force_z]
+                baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
+                self.get_logger().info(
+                    f"Contact detected: {self.contact_axis_name} threshold reached. "
+                    f"{self.contact_axis_name} delta={force_deltas[self.contact_axis]:.2f}N "
+                    f"(normalized={f_contact:.2f}N, threshold={z_threshold}N, "
+                    f"current={current_values[self.contact_axis]:.2f}N, "
+                    f"baseline={baseline_values[self.contact_axis]:.2f}N)")
+            else:
+                self.get_logger().info(
+                    f"Contact detected: Z force threshold reached. "
+                    f"Z force (after baseline): {f_z:.2f}N (threshold: {z_threshold}N, "
+                    f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)")
             self.force_threshold_reached = True
             self.contact_detected_stop()
             return  # Exit immediately after contact detected
@@ -598,15 +668,26 @@ class MoveDown(Node):
         target_rotation = Rot.from_quat(current_quat)
         target_rot_matrix = target_rotation.as_matrix()
 
-        # Compute dynamic minimum flange Z based on current gripper orientation.
-        # The gripper center is GRIPPER_CENTER_TOOL_OFFSET along the tool Z-axis from the flange.
-        # The vertical component depends on how much the tool Z-axis projects onto world Z.
-        #   face-down (z_tool_z=-1): TABLE_HEIGHT + MARGIN + 0.23
-        #   sideways  (z_tool_z= 0): TABLE_HEIGHT + MARGIN
-        #   face-up   (z_tool_z=+1): TABLE_HEIGHT + MARGIN - 0.23
-        z_tool_z = target_rot_matrix[2, 2]  # Z-component of tool Z-axis in world frame
-        margin = TABLE_COLLISION_MARGIN_FACEDOWN if z_tool_z < -0.5 else TABLE_COLLISION_MARGIN_SIDEWAYS
-        min_flange_z = TABLE_HEIGHT + margin - GRIPPER_CENTER_TOOL_OFFSET[2] * z_tool_z
+        # Orientation-aware force monitoring axis (sim mode)
+        # Wrench is in tool frame, so gravity/contact signal appears on the tool axis
+        # most aligned with world Z. Compute which axis and sign correction.
+        world_z_in_tool = target_rot_matrix.T @ np.array([0.0, 0.0, 1.0])
+        self.contact_axis = int(np.argmax(np.abs(world_z_in_tool)))
+        # Sign: contact delta = -sign(wz[axis]) * positive_force, so multiply by -sign
+        self.contact_direction = float(-np.sign(world_z_in_tool[self.contact_axis]))
+        axis_names = ['Fx', 'Fy', 'Fz']
+        self.contact_axis_name = axis_names[self.contact_axis]
+        self.get_logger().info(
+            f"Contact monitoring axis: {self.contact_axis_name} "
+            f"(world_z_in_tool={world_z_in_tool}, direction={self.contact_direction:+.0f})")
+
+        # Compute minimum flange Z based on EE orientation.
+        # Face-down: gripper + object extend below flange — go low, force detection stops us.
+        # Sideways: gripper is parallel to table — flange itself is near the lowest point.
+        gc_vertical_offset = (target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET)[2]
+        is_face_down = target_rot_matrix[2, 2] < -0.5  # tool Z points down
+        margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+        min_flange_z = TABLE_HEIGHT + margin - gc_vertical_offset
         self._min_flange_z = min_flange_z  # Store for convergence check
 
         target_position = list(current_pos)
@@ -701,6 +782,7 @@ class MoveDown(Node):
             self._get_result_future = None
             
             self.get_logger().info("Trajectory sent and accepted")
+            self.trajectory_sent = True
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
@@ -708,6 +790,30 @@ class MoveDown(Node):
             self.error_message = f"Failed to compute IK: {e}"
             self.get_logger().error(self.error_message)
             rclpy.shutdown()
+
+    def _safety_mode_cb(self, msg):
+        self.safety_mode = msg.mode
+
+    def _program_running_cb(self, msg):
+        self.robot_program_running = msg.data
+
+    SAFETY_MODE_NAMES = {
+        1: "NORMAL", 2: "REDUCED", 3: "PROTECTIVE_STOP", 4: "RECOVERY",
+        5: "SAFEGUARD_STOP", 6: "SYSTEM_EMERGENCY_STOP", 7: "ROBOT_EMERGENCY_STOP",
+        8: "VIOLATION", 9: "FAULT",
+    }
+
+    def check_robot_health(self):
+        """Check safety mode and program running state. Returns error string or None."""
+        if self.safety_mode is not None and self.safety_mode != 1:  # Not NORMAL
+            name = self.SAFETY_MODE_NAMES.get(self.safety_mode, f"UNKNOWN({self.safety_mode})")
+            return (f"Robot entered {name} (safety_mode={self.safety_mode}) — "
+                    "trajectory likely hit joint limits. "
+                    "Fix via ursim_cli: unlock -> play")
+        if self.robot_program_running is not None and not self.robot_program_running:
+            return ("External control program stopped (robot_program_running=False). "
+                    "Fix via ursim_cli: stop -> close_popup -> play")
+        return None
 
     def goal_response(self, future):
         """Handle goal response"""
@@ -824,8 +930,17 @@ def main(args=None):
     node = MoveDown(known_args.height, known_args.mode)
     
     try:
-        # Use regular spin() - rclpy.shutdown() will cause spin to exit
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Check for robot safety issues (protective stop, program stopped)
+            health_err = node.trajectory_sent and node.check_robot_health()
+            if health_err:
+                node.error_message = health_err
+                node.get_logger().error(node.error_message)
+                node.stop_force_monitoring()
+                node.moving = False
+                break
     except KeyboardInterrupt:
         node.get_logger().info("Move down interrupted by user")
     except Exception as e:

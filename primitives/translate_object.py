@@ -153,7 +153,9 @@ def _subprocess_fast_path():
     if args.place_down:
         log.info("Placing object on clear area")
         ca = ['--move', '--mode', args.mode]
-        ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca)
+        if args.object_name:
+            ca += ['--object-name', args.object_name]
+        ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
         if not ok:
             _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
@@ -1193,7 +1195,7 @@ def main():
         sys.exit(0 if success else 1)
 
     if args.place_down:
-        success, output_text = run_move_to_clear_area(mode=args.mode)
+        success, output_text = run_move_to_clear_area(object_name=args.object_name, mode=args.mode)
         if not success:
             subprocess_json = extract_json_from_output(output_text)
             if subprocess_json:

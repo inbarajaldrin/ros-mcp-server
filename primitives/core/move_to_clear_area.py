@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import subprocess
+import time
 
 # Add project root to path so primitives package can be imported when running directly
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,14 +17,15 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from std_msgs.msg import Bool
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
 
 from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
 
 from primitives.shared.velocity_profiles import single_point, compute_duration
-from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS
+from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
 
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
@@ -46,16 +48,13 @@ class MoveToClearArea(Node):
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
 
-        # Target position for clear space (gripper center position, not TCP)
-        # In sim mode, this gets overridden after reading current EE position
-        self.target_gripper_center_position = [-0.320, -0.6, SAFE_HEIGHT]  # [x, y, z] - gripper center position
+        # Target gripper center position — converted to flange for IK via: flange = gc - R @ offset
+        self.target_gripper_center_position = [-0.320, -0.5, SAFE_HEIGHT]
 
         # Apply target_xy override (before sim collision avoidance logic)
         if target_xy is not None:
             self.target_gripper_center_position[0] = target_xy[0]
             self.target_gripper_center_position[1] = target_xy[1]
-        # TCP to gripper center offset (24cm along gripper Z-axis, from TCP to gripper center)
-        self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
 
         # EE pose data storage
         self.ee_pose_received = False
@@ -68,6 +67,11 @@ class MoveToClearArea(Node):
 
         # Object pose data (for grasp verification)
         self.object_poses = {}
+
+        # Robot safety monitoring (detect protective stop during execution)
+        self.safety_mode = None  # Last received safety mode
+        self.robot_program_running = None  # Last received program running state
+        self.trajectory_sent = False  # Only check health after trajectory is dispatched
 
         # Success/failure tracking
         self.operation_success = False
@@ -95,6 +99,30 @@ class MoveToClearArea(Node):
             '/joint_states',
             self.joint_state_callback,
             10
+        )
+
+        # Monitor robot safety mode and program running state to detect protective stop
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        try:
+            from ur_dashboard_msgs.msg import SafetyMode
+            self.safety_mode_sub = self.create_subscription(
+                SafetyMode,
+                '/io_and_status_controller/safety_mode',
+                self._safety_mode_cb,
+                latched_qos
+            )
+        except ImportError:
+            self.safety_mode_sub = None
+        self.program_running_sub = self.create_subscription(
+            Bool,
+            '/io_and_status_controller/robot_program_running',
+            self._program_running_cb,
+            latched_qos
         )
 
         # Subscribe to sim object poses for grasp verification or sim placement collision check
@@ -280,10 +308,35 @@ class MoveToClearArea(Node):
         current_quat = pose_data['orientation']
 
         # In sim mode, check if hardcoded clear space is occupied; if so, step +Y until clear
-        if self.robot_mode == 'sim':
-            # Collect sim object poses (spin briefly to receive messages)
-            for _ in range(20):
-                rclpy.spin_once(self, timeout_sec=0.05)
+        # Skip collision avoidance in fix_orientation mode — goal is to reorient in place, not find a clear spot
+        if self.robot_mode == 'sim' and self.mode != 'fix_orientation':
+            # Wait for sim object poses to arrive
+            self.get_logger().info("Waiting for sim object poses...")
+            wait_start = time.time()
+            while not self.object_poses and (time.time() - wait_start) < 10.0:
+                rclpy.spin_once(self, timeout_sec=0.1)
+            if self.object_poses:
+                self.get_logger().info(f"Received {len(self.object_poses)} object poses ({time.time() - wait_start:.1f}s)")
+            else:
+                self.get_logger().warning("No object poses received after 10s — collision check will be skipped")
+
+            # Auto-detect held object if not provided — find object closest to gripper center
+            if not self.object_name and self.object_poses:
+                from scipy.spatial.transform import Rotation as Rot
+                ee_rot = Rot.from_quat(np.array(current_quat)).as_matrix()
+                gripper_center = np.array(current_pos) + ee_rot @ GRIPPER_CENTER_TOOL_OFFSET
+                best_name, best_dist = None, GRASP_DISTANCE_THRESHOLD
+                for name, tf in self.object_poses.items():
+                    obj_pos = np.array([tf.transform.translation.x,
+                                        tf.transform.translation.y,
+                                        tf.transform.translation.z])
+                    d = np.linalg.norm(obj_pos - gripper_center)
+                    if d < best_dist:
+                        best_name, best_dist = name, d
+                if best_name:
+                    self.object_name = best_name
+                    self.get_logger().info(
+                        f"Auto-detected held object: '{best_name}' ({best_dist*1000:.1f}mm from gripper)")
 
             occupy_threshold = 0.085  # m — if any object XY is within this radius, spot is occupied
             step = 0.085  # m — Y increment per attempt
@@ -293,6 +346,9 @@ class MoveToClearArea(Node):
             for attempt in range(20):
                 blocker_y = None
                 for name, tf in self.object_poses.items():
+                    # Skip the held object — its sim pose follows the gripper
+                    if self.object_name and name == self.object_name:
+                        continue
                     ox = tf.transform.translation.x
                     oy = tf.transform.translation.y
                     dist_xy = np.sqrt((x_target - ox) ** 2 + (y_candidate - oy) ** 2)
@@ -376,11 +432,16 @@ class MoveToClearArea(Node):
 
             # Waypoint 2: Hover position (face-down at clear area)
             self.get_logger().info("Computing hover position IK...")
-            hover_target = np.array(self.target_gripper_center_position)
             hover_rot = Rot.from_euler('xyz', [0, 180, 0], degrees=True).as_matrix()
 
+            # Convert gripper center XY to flange XY; Z is already flange height
+            offset_3d = hover_rot @ GRIPPER_CENTER_TOOL_OFFSET
+            hover_flange = np.array(self.target_gripper_center_position)
+            hover_flange[0] -= offset_3d[0]
+            hover_flange[1] -= offset_3d[1]
+
             hover_pose = np.eye(4)
-            hover_pose[:3, 3] = hover_target
+            hover_pose[:3, 3] = hover_flange
             hover_pose[:3, :3] = hover_rot
 
             hover_bounds = [
@@ -432,6 +493,7 @@ class MoveToClearArea(Node):
             self.get_logger().info(f"Sending hover trajectory ({num_waypoints} waypoint{'s' if num_waypoints > 1 else ''})")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
+            self.trajectory_sent = True
             return  # Exit early for hover mode
         else:
             # Move mode: Check EE face direction and fix if needed
@@ -499,20 +561,18 @@ class MoveToClearArea(Node):
             # Only one target orientation now (the best roll-preserving one)
             target_orientations = [(target_rpy[2], target_rot_matrix)]
 
-            # Calculate TCP position from gripper center position
-            # The gripper Z-axis points from TCP to gripper center
-            # Apply offset only to X and Y, keep Z constant
-            gripper_z_axis = target_rot_matrix[:, 2]  # Z-axis of gripper frame in world frame
-            offset_vector = -target_rot_matrix @ self.tcp_to_gripper_center_offset
-            tcp_position = np.array(self.target_gripper_center_position) + offset_vector
-            tcp_position[2] = self.target_gripper_center_position[2]  # Keep Z constant
-            
+            # Convert gripper center XY to flange XY; Z is already flange height
+            offset_3d = target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+            flange_position = np.array(self.target_gripper_center_position)
+            flange_position[0] -= offset_3d[0]
+            flange_position[1] -= offset_3d[1]
+
             # Compute inverse kinematics for target pose
             # Use quaternion directly converted to rotation matrix for more accurate orientation preservation
             try:
                 # Create target pose with quaternion-derived rotation matrix
                 target_pose = np.eye(4)
-                target_pose[:3, 3] = tcp_position
+                target_pose[:3, 3] = flange_position
                 target_pose[:3, :3] = target_rot_matrix
                 
                 # Use quaternion-based IK directly - no RPY conversion at all!
@@ -549,7 +609,7 @@ class MoveToClearArea(Node):
                 # Cardinal wrist configurations differ by face direction:
                 #   face_right: pan ≈ w2, w3 ≈ 0 (freeze w3, couple pan=w2)
                 #   face_down:  w2 ≈ -π/2, lift+elbow+w1 ≈ -π/2 (freeze w2, seed kinematic constraint)
-                w3_val = q_guess[5]
+                w3_val = np.clip(q_guess[5], -np.pi + 0.05, np.pi - 0.05)
                 w2_val = q_guess[4]
                 joint_bounds_cardinal = list(joint_bounds_base)
 
@@ -593,13 +653,11 @@ class MoveToClearArea(Node):
                 # First pass: face-specific cardinal wrist constraints
                 solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_cardinal, cost_threshold=0.01))
                 for yaw, rot_matrix in target_orientations:
-                    gripper_z = rot_matrix[:, 2]
-                    offset_vec = -rot_matrix @ self.tcp_to_gripper_center_offset
-                    tcp_pos = np.array(self.target_gripper_center_position) + offset_vec
-                    tcp_pos[2] = self.target_gripper_center_position[2]
-
+                    off = rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+                    fp = np.array(self.target_gripper_center_position)
+                    fp[0] -= off[0]; fp[1] -= off[1]
                     pose = np.eye(4)
-                    pose[:3, 3] = tcp_pos
+                    pose[:3, 3] = fp
                     pose[:3, :3] = rot_matrix
 
                     joint_angles = solver.solve(
@@ -618,13 +676,11 @@ class MoveToClearArea(Node):
                     solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds_base, cost_threshold=0.01))
                     seeds_free = make_seeds_free(joint_bounds_base)
                     for yaw, rot_matrix in target_orientations:
-                        gripper_z = rot_matrix[:, 2]
-                        offset_vec = -rot_matrix @ self.tcp_to_gripper_center_offset
-                        tcp_pos = np.array(self.target_gripper_center_position) + offset_vec
-                        tcp_pos[2] = self.target_gripper_center_position[2]
-
+                        off = rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+                        fp = np.array(self.target_gripper_center_position)
+                        fp[0] -= off[0]; fp[1] -= off[1]
                         pose = np.eye(4)
-                        pose[:3, 3] = tcp_pos
+                        pose[:3, 3] = fp
                         pose[:3, :3] = rot_matrix
 
                         joint_angles = solver.solve(
@@ -682,7 +738,8 @@ class MoveToClearArea(Node):
                         if check_self_collision(variant):
                             continue
 
-                        if not check_trajectory_collision(start_joints, variant, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, num_samples=20, logger=self.get_logger()):
+                        traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+                        if not check_trajectory_collision(start_joints, variant, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
                             travel_distance = np.sum(np.abs(variant - start_joints))
                             collision_free_trajectories.append((travel_distance, variant.copy(), cost, yaw))
 
@@ -729,6 +786,7 @@ class MoveToClearArea(Node):
                     feedback_callback=self.feedback_callback
                 )
                 self._send_goal_future.add_done_callback(self.goal_response)
+                self.trajectory_sent = True
 
             except Exception as e:
                 self.error_message = f"Failed to compute IK: {e}"
@@ -736,6 +794,30 @@ class MoveToClearArea(Node):
                 self.operation_success = False
                 self.operation_complete = True
                 rclpy.shutdown()
+
+    def _safety_mode_cb(self, msg):
+        self.safety_mode = msg.mode
+
+    def _program_running_cb(self, msg):
+        self.robot_program_running = msg.data
+
+    SAFETY_MODE_NAMES = {
+        1: "NORMAL", 2: "REDUCED", 3: "PROTECTIVE_STOP", 4: "RECOVERY",
+        5: "SAFEGUARD_STOP", 6: "SYSTEM_EMERGENCY_STOP", 7: "ROBOT_EMERGENCY_STOP",
+        8: "VIOLATION", 9: "FAULT",
+    }
+
+    def check_robot_health(self):
+        """Check safety mode and program running state. Returns error string or None."""
+        if self.safety_mode is not None and self.safety_mode != 1:  # Not NORMAL
+            name = self.SAFETY_MODE_NAMES.get(self.safety_mode, f"UNKNOWN({self.safety_mode})")
+            return (f"Robot entered {name} (safety_mode={self.safety_mode}) — "
+                    "trajectory likely hit joint limits. "
+                    "Fix via ursim_cli: unlock -> play")
+        if self.robot_program_running is not None and not self.robot_program_running:
+            return ("External control program stopped (robot_program_running=False). "
+                    "Fix via ursim_cli: stop -> close_popup -> play")
+        return None
 
     def feedback_callback(self, feedback_msg):
         """Handle trajectory execution feedback"""
@@ -768,33 +850,40 @@ class MoveToClearArea(Node):
 
     def goal_result(self, future):
         """Handle goal result"""
-        result = future.result()
-        if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("Movement completed successfully")
-            self.operation_success = True
-        else:
-            result_msg = result.result
-            # Handle various error codes
-            error_code = result_msg.error_code
-            if error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
-                self.error_message = "PATH_TOLERANCE_VIOLATED: Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits."
-            elif error_code == FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED:
-                self.error_message = "GOAL_TOLERANCE_VIOLATED: Final position tolerance exceeded."
-            elif error_code == FollowJointTrajectory.Result.INVALID_GOAL:
-                self.error_message = "INVALID_GOAL: The trajectory goal is invalid."
-            elif error_code == FollowJointTrajectory.Result.INVALID_JOINTS:
-                self.error_message = "INVALID_JOINTS: Invalid joint names in trajectory."
-            elif error_code == FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP:
-                self.error_message = "OLD_HEADER_TIMESTAMP: Trajectory header timestamp is too old."
+        try:
+            result = future.result()
+            if result.status == 4:  # SUCCEEDED
+                self.get_logger().info("Movement completed successfully")
+                self.operation_success = True
             else:
-                # Status codes: 1=ACCEPTED, 2=EXECUTING, 3=CANCELING, 4=SUCCEEDED, 5=CANCELED, 6=ABORTED
-                status_names = {1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING", 4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
-                status_name = status_names.get(result.status, f"UNKNOWN({result.status})")
-                self.error_message = f"Trajectory failed: status={status_name}, error_code={error_code}"
+                try:
+                    result_msg = result.result
+                    error_code = result_msg.error_code
+                    if error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                        self.error_message = "PATH_TOLERANCE_VIOLATED: Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits."
+                    elif error_code == FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED:
+                        self.error_message = "GOAL_TOLERANCE_VIOLATED: Final position tolerance exceeded."
+                    elif error_code == FollowJointTrajectory.Result.INVALID_GOAL:
+                        self.error_message = "INVALID_GOAL: The trajectory goal is invalid."
+                    elif error_code == FollowJointTrajectory.Result.INVALID_JOINTS:
+                        self.error_message = "INVALID_JOINTS: Invalid joint names in trajectory."
+                    elif error_code == FollowJointTrajectory.Result.OLD_HEADER_TIMESTAMP:
+                        self.error_message = "OLD_HEADER_TIMESTAMP: Trajectory header timestamp is too old."
+                    else:
+                        status_names = {1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING", 4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
+                        status_name = status_names.get(result.status, f"UNKNOWN({result.status})")
+                        self.error_message = f"Trajectory failed: status={status_name}, error_code={error_code}"
+                except Exception as e:
+                    status_names = {1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING", 4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
+                    status_name = status_names.get(result.status, f"UNKNOWN({result.status})")
+                    self.error_message = f"Trajectory failed: status={status_name} ({e})"
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+        except Exception as e:
+            self.error_message = f"Goal result callback error: {e}"
             self.get_logger().error(self.error_message)
             self.operation_success = False
         self.operation_complete = True
-        # Destroy node before shutdown to ensure clean exit
         try:
             self.destroy_node()
         except:
@@ -861,6 +950,15 @@ def main(args=None):
 
         while rclpy.ok() and not node.operation_complete:
             rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Check for robot safety issues (protective stop, program stopped)
+            health_err = node.trajectory_sent and node.check_robot_health()
+            if health_err:
+                node.error_message = health_err
+                node.get_logger().error(node.error_message)
+                node.operation_success = False
+                node.operation_complete = True
+                break
 
             # Check for timeout
             elapsed = time.time() - start_time

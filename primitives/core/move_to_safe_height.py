@@ -15,7 +15,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from std_msgs.msg import Bool
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
 import re
 
@@ -58,6 +59,11 @@ class MoveToSafeHeight(Node):
         self.current_position = None
         self.current_orientation = None
 
+        # Robot safety monitoring (detect protective stop during execution)
+        self.safety_mode = None
+        self.robot_program_running = None
+        self.trajectory_sent = False
+
         # Subscriber for EE pose data
         # Use VOLATILE durability (default for most publishers) to avoid QoS incompatibility warnings
         qos_profile = QoSProfile(
@@ -81,8 +87,32 @@ class MoveToSafeHeight(Node):
             10
         )
         
+        # Monitor robot safety mode and program running state to detect protective stop
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        try:
+            from ur_dashboard_msgs.msg import SafetyMode
+            self.safety_mode_sub = self.create_subscription(
+                SafetyMode,
+                '/io_and_status_controller/safety_mode',
+                self._safety_mode_cb,
+                latched_qos
+            )
+        except ImportError:
+            self.safety_mode_sub = None
+        self.program_running_sub = self.create_subscription(
+            Bool,
+            '/io_and_status_controller/robot_program_running',
+            self._program_running_cb,
+            latched_qos
+        )
+
         self.action_client.wait_for_server()
-        
+
         # Execute movement
         self.move_to_safe_height()
     
@@ -256,12 +286,37 @@ class MoveToSafeHeight(Node):
             goal.goal_time_tolerance = Duration(sec=1)
             
             self.get_logger().info("Trajectory sent and accepted")
+            self.trajectory_sent = True
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
 
         except Exception as e:
             self.error_message = f"Failed to compute IK: {e}"
             self.get_logger().error(self.error_message)
+
+    def _safety_mode_cb(self, msg):
+        self.safety_mode = msg.mode
+
+    def _program_running_cb(self, msg):
+        self.robot_program_running = msg.data
+
+    SAFETY_MODE_NAMES = {
+        1: "NORMAL", 2: "REDUCED", 3: "PROTECTIVE_STOP", 4: "RECOVERY",
+        5: "SAFEGUARD_STOP", 6: "SYSTEM_EMERGENCY_STOP", 7: "ROBOT_EMERGENCY_STOP",
+        8: "VIOLATION", 9: "FAULT",
+    }
+
+    def check_robot_health(self):
+        """Check safety mode and program running state. Returns error string or None."""
+        if self.safety_mode is not None and self.safety_mode != 1:  # Not NORMAL
+            name = self.SAFETY_MODE_NAMES.get(self.safety_mode, f"UNKNOWN({self.safety_mode})")
+            return (f"Robot entered {name} (safety_mode={self.safety_mode}) — "
+                    "trajectory likely hit joint limits. "
+                    "Fix via ursim_cli: unlock -> play")
+        if self.robot_program_running is not None and not self.robot_program_running:
+            return ("External control program stopped (robot_program_running=False). "
+                    "Fix via ursim_cli: stop -> close_popup -> play")
+        return None
 
     def goal_response(self, future):
         """Handle goal response"""
@@ -277,15 +332,19 @@ class MoveToSafeHeight(Node):
 
     def goal_result(self, future):
         """Handle goal result"""
-        result = future.result()
-        if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("Movement completed successfully")
-        else:
-            result_msg = result.result
-            if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
-                self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
+        try:
+            result = future.result()
+            if result.status == 4:  # SUCCEEDED
+                self.get_logger().info("Movement completed successfully")
             else:
-                self.error_message = f"Trajectory failed with status code {result.status}"
+                result_msg = result.result
+                if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
+                    self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
+                else:
+                    self.error_message = f"Trajectory failed with status code {result.status}"
+                self.get_logger().error(self.error_message)
+        except Exception as e:
+            self.error_message = f"Goal result callback error: {e}"
             self.get_logger().error(self.error_message)
         rclpy.shutdown()
 
@@ -339,7 +398,15 @@ def main(args=None):
             # Don't spin — just output the result and clean up.
             pass
         else:
-            rclpy.spin(node)
+            while rclpy.ok():
+                rclpy.spin_once(node, timeout_sec=0.1)
+
+                # Check for robot safety issues (protective stop, program stopped)
+                health_err = node.trajectory_sent and node.check_robot_health()
+                if health_err:
+                    node.error_message = health_err
+                    node.get_logger().error(node.error_message)
+                    break
     finally:
         try:
             node.output_result_json(movement_type="move_to_safe_height")

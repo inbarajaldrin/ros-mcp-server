@@ -204,6 +204,18 @@ class URSimCLI(Node):
             'answer': response.answer
         }
 
+    def recover(self) -> dict:
+        """Unlock protective stop, wait for release, then play. Returns combined result."""
+        import time
+        r = self.call_trigger('unlock_protective_stop')
+        if not r.get('success'):
+            return r
+        time.sleep(2)
+        r = self.call_trigger('play')
+        if not r.get('success'):
+            return r
+        return {'success': True, 'message': 'Protective stop unlocked and program started'}
+
     def execute(self, user_input: str) -> dict:
         """Parse and execute a command."""
         parts = user_input.strip().split(maxsplit=1)
@@ -215,6 +227,10 @@ class URSimCLI(Node):
 
         # Resolve aliases
         cmd = self.ALIASES.get(cmd, cmd)
+
+        # Combo commands
+        if cmd == 'recover':
+            return self.recover()
 
         # Execute based on command type
         if cmd in self.TRIGGER_SERVICES:
@@ -246,6 +262,7 @@ Commands:
 
   Safety:
     unlock                Unlock protective stop
+    recover               Unlock protective stop + play (one-shot fix)
     restart_safety        Restart the safety controller
     close_popup           Close popup dialog (like clicking "Continue")
     close_safety_popup    Close safety popup
@@ -281,6 +298,11 @@ Workflow Examples:
 
   # Handle "External Control error" dialog:
     stop -> close_popup -> on -> release -> play
+
+  # Handle "Protective Stop" (safety_mode=3):
+  # Occurs when UR rejects a trajectory position too close to joint
+  # limits. Robot freezes, program stops, subsequent play fails.
+    unlock -> play
 """)
 
 
@@ -299,11 +321,24 @@ def print_result(result: dict):
 
 
 def main():
-    print("URSim CLI - Interactive dashboard control")
-    print("Type 'help' for commands, 'exit' to quit\n")
+    import argparse
+    parser = argparse.ArgumentParser(description='URSim dashboard CLI')
+    parser.add_argument('--recover', action='store_true',
+                        help='Unlock protective stop and play (non-interactive)')
+    cli_args = parser.parse_args()
 
     rclpy.init()
     node = URSimCLI()
+
+    if cli_args.recover:
+        result = node.recover()
+        print_result(result)
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(0 if result.get('success') else 1)
+
+    print("URSim CLI - Interactive dashboard control")
+    print("Type 'help' for commands, 'exit' to quit\n")
 
     try:
         while True:
