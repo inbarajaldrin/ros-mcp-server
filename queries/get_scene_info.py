@@ -5,7 +5,7 @@ Get Scene Info
 Combines object detection and grasp point information into a single query by:
 1. Subscribing to /objects_poses_sim or /objects_poses_real (TFMessage) for object names
 2. Subscribing to /grasp_points_sim or /grasp_points_real (MarkerArray) for grasp IDs
-3. Loading grasp validity data from source JSON files (gripper_states per grasp ID)
+3. Loading grasp validity data from source JSON files (gripper_width_mm per grasp ID)
 4. Returning combined scene information with all objects and their available grasps
 
 Output: JSON containing all objects with their grasp information
@@ -35,19 +35,10 @@ from utils.data_path_finder import get_aruco_data_dir, load_assembly_order_map, 
 # GRASP DIRECTION CONFIGURATION
 # =============================================================================
 # Must match the configuration in grasp_points_publisher.py.
-# Only gripper states from enabled axes are reported.
+# Only gripper widths from enabled axes are reported.
 # =============================================================================
-ENABLE_X_AXIS_GRASPS = True   # Include gripper states valid for X-axis approach
-ENABLE_Y_AXIS_GRASPS = False  # Include gripper states valid for Y-axis approach
-
-# =============================================================================
-# GRIPPER STATE PREFERENCE CONFIGURATION
-# =============================================================================
-# When enabled, prefer "half-open" gripper state over "open" to reduce
-# ambiguity for the robot. If a grasp supports both states, only "half-open"
-# will be reported.
-# =============================================================================
-PREFER_HALF_OPEN_GRIPPER = False  # Prefer half-open over open when both available
+ENABLE_X_AXIS_GRASPS = True   # Include gripper width for X-axis approach
+ENABLE_Y_AXIS_GRASPS = False  # Include gripper width for Y-axis approach
 
 
 def output_result(result, pretty=False):
@@ -69,9 +60,9 @@ def output_result(result, pretty=False):
                 print(f'  "{obj_name}": {{"grasps": [')
                 for j, g in enumerate(grasps):
                     g_comma = "," if j < len(grasps) - 1 else ""
-                    states = json.dumps(g["gripper_states"])
+                    width = g["gripper_width_mm"]
                     z_val = g.get("z_height", "N/A")
-                    print(f'    {{"id": {g["id"]}, "gripper_states": {states}, "z_height": {z_val}}}{g_comma}')
+                    print(f'    {{"id": {g["id"]}, "gripper_width_mm": {width}, "z_height": {z_val}}}{g_comma}')
                 print(f'  ]{order_str}}}{comma}')
         print("}")
     else:
@@ -81,14 +72,14 @@ def output_result(result, pretty=False):
 
 
 def load_grasp_validity_data():
-    """Load grasp validity (gripper_states) from grasp points JSON files.
+    """Load grasp validity (gripper_width_mm) from grasp points JSON files.
 
-    Only includes gripper states from enabled grasp axes (controlled by
-    ENABLE_X_AXIS_GRASPS, ENABLE_Y_AXIS_GRASPS). This ensures reported
-    states match the approach directions actually used by the publisher.
+    Reads numeric gripper widths from enabled grasp axes (controlled by
+    ENABLE_X_AXIS_GRASPS, ENABLE_Y_AXIS_GRASPS). When multiple axes are
+    enabled, picks the minimum valid width (tightest fit).
 
     Returns:
-        Dict mapping object_name -> {grasp_id -> list of valid gripper states}
+        Dict mapping object_name -> {grasp_id -> gripper_width_mm or None}
     """
     validity_data = {}
     try:
@@ -107,26 +98,26 @@ def load_grasp_validity_data():
                 topic_name = object_name_json
 
                 grasp_points = data.get('grasp_points', [])
-                id_to_states = {}
+                id_to_width = {}
                 for gp in grasp_points:
                     gp_id = gp.get('id', 0)
                     grasp_validity = gp.get('grasp_validity', {})
-                    # Only collect states from enabled axes
-                    states = set()
+                    # Collect widths from enabled axes
+                    widths = []
                     if ENABLE_X_AXIS_GRASPS:
-                        states.update(grasp_validity.get('x_axis', []))
+                        w = grasp_validity.get('x_axis_gripper_width_mm')
+                        if w is not None:
+                            widths.append(w)
                     if ENABLE_Y_AXIS_GRASPS:
-                        states.update(grasp_validity.get('y_axis', []))
+                        w = grasp_validity.get('y_axis_gripper_width_mm')
+                        if w is not None:
+                            widths.append(w)
 
-                    # Apply gripper state preference
-                    if PREFER_HALF_OPEN_GRIPPER and 'half-open' in states:
-                        states = {'half-open'}
+                    # Use minimum width (tightest clearance) if multiple axes valid
+                    id_to_width[gp_id] = min(widths) if widths else None
 
-                    id_to_states[gp_id] = sorted(states)
-
-                # Map both the topic name and JSON name
-                validity_data[topic_name] = id_to_states
-                validity_data[object_name_json] = id_to_states
+                validity_data[topic_name] = id_to_width
+                validity_data[object_name_json] = id_to_width
         except Exception:
             continue
 
@@ -204,12 +195,12 @@ class SceneInfoReader(Node):
 
             if grasp_id not in self.grasp_ids_by_object[object_name]:
                 obj_validity = self.validity_data.get(object_name, {})
-                gripper_states = obj_validity.get(grasp_id, [])
-                if not gripper_states:
-                    continue  # Skip grasps with no valid states for enabled axes
+                gripper_width = obj_validity.get(grasp_id)
+                if gripper_width is None:
+                    continue  # Skip grasps with no valid width for enabled axes
                 self.grasp_ids_by_object[object_name][grasp_id] = {
                     "id": grasp_id,
-                    "gripper_states": gripper_states,
+                    "gripper_width_mm": gripper_width,
                     "z_height": round(marker.pose.position.z, 4)
                 }
 

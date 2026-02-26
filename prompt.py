@@ -21,7 +21,7 @@ Save scene state.
 
 **Task**
 
-Your goal is to disassemble this top down assembly thereby figuring out which grasp ids and gripper states let you perform the disassembly and move them to clear space.
+Your goal is to disassemble this top down assembly thereby figuring out which grasp ids let you perform the disassembly and move them to clear space.
 You can refer the instruction manual that shows the assembly steps to figure out the sequence in which you need to disassemble them.
 The information you collect in this run will be used later to perform assembly.
 
@@ -32,16 +32,13 @@ Motion planning failed means no path to target was found — try a recovery stra
 Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
 You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object.
 
-If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object.
-If an object can be grasped using a open gripper state and a half open gripper state, always use half open gripper state to access the object so as to not disturb other objects in the assembly when moving to grasp it from the assembly.
-
 **Verification**
 
 Run verify disassembly once you've ran all tools required to move one object away from the fixed base.
 
 **SUCCESS** — verify disassembly returns success:
 1. Save scene state.
-2. Log the grasp id and gripper state used to disassemble that object.
+2. Log the grasp id used to disassemble that object.
 3. Move on to the next object.
 
 **FAILURE** — verify disassembly returns failure:
@@ -78,16 +75,13 @@ Read the tool descriptions properly and understand the underlying logic and sequ
 Motion planning failed means no path to target was found — try a recovery strategy before restoring the scene as the robot hasnt moved yet.
 DO NOT orchestrate the tools to perform a composed policy.
 
-If an object can only be grasped using half open gripper state, then make sure you half open the gripper before moving to grasp that object. Use the same gripper state when releasing the object in order to not damage the object.
-If an object can be grasped using a open gripper state and a half open gripper state, then you can use either of the gripper states to grasp the object but after assembling it into the base, use half open gripper state to release the object in order to not disturb other assembled objects.
-
 **Verification**
 
 Run verify assembly once you've ran all tools required to move one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
 1. Save scene state.
-2. Log the tools and arguments executed in sequence that worked for that object including the gripper state used.
+2. Log the tools and arguments executed in sequence that worked for that object.
 3. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure:
@@ -179,7 +173,7 @@ Save scene state.
 
 **Task**
 
-Your goal is to find which grasp ids are accessible per object and whether the gripper needs to be half open or open before moving to grasp.
+Your goal is to find which grasp ids are accessible per object.
 
 **Execution**
 
@@ -189,13 +183,12 @@ Verify if the object is actually grasped by moving to safe height and using veri
 
 **SUCCESS** — verify_grasp returns success (object within grasp radius):
 1. Save scene state.
-2. Log the grasp id and gripper state as successful.
+2. Log the grasp id as successful.
 3. Restore scene state and move to the next grasp id or object.
 
 **FAILURE** — verify_grasp returns failure (object not grasped):
 1. Restore scene state.
-2. If gripper was open, try half-open for the same grasp id.
-3. If both fail, log as inaccessible and move on.
+2. Log as inaccessible and move on.
 
 **Post Execution**
 Signal the client you are done with grasp point discovery for all objects.

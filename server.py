@@ -40,7 +40,7 @@ logger = logging.getLogger("RosMCPServer")
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
 TaskType = Literal["assembly", "disassembly"]
-GripperCommand = Literal["open", "close", "half-open"]
+GripperCommand = str  # "close" or numeric mm value (e.g. "35")
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "place_down"]
 PhaseNumber = Literal[0, 1, 2, 3]
@@ -615,7 +615,7 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 
 class GraspPoint(BaseModel):
     id: int
-    gripper_states: List[Literal["open", "half-open"]] = Field(description="Gripper state required before grasping this grasp point")
+    gripper_width_mm: float = Field(description="Required gripper width in mm. Set gripper to this width before grasping and when releasing.")
     z_height: Optional[float] = Field(default=None, description="Z position of the grasp point in world frame relative to robot base")
 
 class SceneObject(BaseModel):
@@ -887,10 +887,10 @@ class GripperResult(BaseModel):
 
 @mcp.tool()
 def control_gripper(
-    command: Annotated[GripperCommand, Field(description="open = open jaws fully, half-open = 30 mm, close = close jaws to grasp")],
+    command: Annotated[GripperCommand, Field(description="close = close jaws to grasp object. Numeric value (e.g. 35) = set gripper width in mm for approach/release clearance. Use the gripper_width_mm from get_scene_info.")],
     mode: Mode = "sim",
 ) -> GripperResult:
-    """Control gripper."""
+    """Control gripper width for grasping or releasing objects."""
     return _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
 
 @mcp.tool()
@@ -935,7 +935,7 @@ def move_to_grasp(
     object_name: str,
     grasp_id: int,
     action: Annotated[MoveToGraspAction, Field(description=(
-        "move_to_object: Move robotic arm down to the object's grasp point. Gripper must be open before calling. "
+        "move_to_object: Move robotic arm down to the object's grasp point. Gripper must be set to gripper_width_mm before calling. "
         "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after grasping. Call after closing the gripper."
     ))],
     mode: Mode = "sim",

@@ -965,7 +965,7 @@ class DirectObjectMove(Node):
                     self.get_logger().warn("Gripper width topic not available. Proceeding without gripper check.")
                     self.gripper_check_done = True
             elif self.current_gripper_width < 30.0:
-                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm). Open or half-open gripper before calling move_to_grasp."
+                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm). Set gripper to the required gripper_width_mm before calling move_to_grasp."
                 self.get_logger().error(self.error_message)
                 self.should_exit = True
                 return

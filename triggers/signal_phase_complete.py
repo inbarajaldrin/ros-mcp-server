@@ -105,7 +105,7 @@ def _handle_phase_1(
         return {
             "status": "failure",
             "requires_response": True,
-            "message": "You have not logged any disassembly results. Use write_disassembly_results to log the grasp_id and gripper_state for each object you disassembled, then signal phase 1 complete again.",
+            "message": "You have not logged any disassembly results. Use write_disassembly_results to log the grasp_id for each object you disassembled, then signal phase 1 complete again.",
         }
 
     # Gate 2: verify all objects are actually disassembled

@@ -33,7 +33,7 @@ MODES = {
     "disassembly": {
         "prefix": "Disassembly",
         "order_key": "disassembly_order",
-        "extra_fields": {"gripper_state"},
+        "extra_fields": set(),
         "has_grasp_id": True,
     },
 }
@@ -107,10 +107,8 @@ def _validate_assembly_extras(tool_sequence) -> Optional[dict]:
     return None
 
 
-def _validate_disassembly_extras(gripper_state) -> Optional[dict]:
+def _validate_disassembly_extras() -> Optional[dict]:
     """Validate disassembly-specific fields. Returns error dict or None."""
-    if gripper_state not in ("open", "half-open"):
-        return _err(f"Invalid gripper_state: {gripper_state}. Must be 'open' or 'half-open'")
     return None
 
 
@@ -165,10 +163,6 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
     if mode == "assembly":
         if err := _validate_assembly_extras(extra_fields.get("tool_sequence")):
             return err
-    elif mode == "disassembly":
-        if err := _validate_disassembly_extras(extra_fields.get("gripper_state")):
-            return err
-
     data["base_name"] = base_name
     data["assembly_id"] = assembly_id
 
@@ -233,10 +227,6 @@ def _update_results(mode: str, assembly_id: str, object_name: str,
     if mode == "assembly" and "tool_sequence" in extra_fields:
         if err := _validate_assembly_extras(extra_fields["tool_sequence"]):
             return err
-    elif mode == "disassembly" and "gripper_state" in extra_fields:
-        if err := _validate_disassembly_extras(extra_fields["gripper_state"]):
-            return err
-
     # Archive current to previous
     prev = existing.get("previous", [])
     archived = {k: v for k, v in existing.items() if k not in ("previous",)}
@@ -312,7 +302,6 @@ class DisassemblyEntry(BaseModel):
     disassembly_order: int = Field(description="The sequence position in the disassembly")
     object_name: str
     grasp_id: int
-    gripper_state: Literal["open", "half-open"]
     comment: Optional[str] = None
     previous: List[dict] = Field(default_factory=list, description="Archived older versions of this entry")
 
@@ -374,13 +363,12 @@ def write_disassembly_results(
     object_name: str,
     disassembly_order: int,
     grasp_id: int,
-    gripper_state: Annotated[Literal["open", "half-open"], Field(description="Gripper state required before accessing the grasp point")],
     comment: str = "",
 ) -> dict:
     """Log a successful disassembly result for an object. Only call this when disassembly verification succeeds."""
     return _write_results("disassembly", assembly_id, base_name, object_name,
                           disassembly_order, comment=comment or None,
-                          grasp_id=grasp_id, gripper_state=gripper_state)
+                          grasp_id=grasp_id)
 
 
 @mcp.tool()
