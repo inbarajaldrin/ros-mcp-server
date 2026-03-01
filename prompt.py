@@ -6,11 +6,31 @@ from fastmcp import FastMCP
 mcp = FastMCP("Prompts")
 
 @mcp.prompt()
-def phase_1_disassembly_sequence_discovery() -> str:
+def phase_1_disassembly_sequence_discovery(
+    orchestrator: Annotated[Literal["enabled", "disabled", "permissive"], Field(description="Orchestration mode: permissive (default, may orchestrate), enabled (must orchestrate, fallback to individual on failure), disabled (individual calls only)")] = "permissive"
+) -> str:
     """
     Phase 1: Disassembly sequence discovery in a simulated environment.
+    Discovers accessible grasp IDs and disassembly sequence.
     """
-    return """**Initialization:**
+    if orchestrator == "enabled":
+        orchestrator_instruction = (
+            "Once you have verified a working sequence of tool calls for one object, "
+            "orchestrate the tools to perform a composed policy for the remaining objects. "
+            "If orchestration fails for an object, fall back to individual tool calls for that object."
+        )
+    elif orchestrator == "disabled":
+        orchestrator_instruction = (
+            "DO NOT orchestrate the tools to perform a composed policy. "
+            "Perform each step using individual tool calls for every object."
+        )
+    else:
+        orchestrator_instruction = (
+            "You can orchestrate the tools to perform a composed policy to disassemble "
+            "the remaining objects once you have verified a working sequence for one object."
+        )
+
+    return f"""**Initialization:**
 
 Phase 1: Disassembly sequence discovery in a simulated environment.
 
@@ -30,7 +50,7 @@ The information you collect in this run will be used later to perform assembly.
 Use existing tools to perform disassembly one object at a time. Understand the capabilities of the tools and the limitations of the environment.
 Motion planning failed means no path to target was found — try a recovery strategy before restoring the scene.
 Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
-You can orchestrate the tools to perform a composed policy to disassemble the remaining objects once you have verified a working sequence for one object.
+{orchestrator_instruction}
 
 **Verification**
 
@@ -150,49 +170,6 @@ def replace_defective_part(
     An operator reports a defective part during assembly.
     """
     return f"""{object_name} assembled in {base_name} is defective. Disassemble that object and place it in the clear space and notify me. I'll replace the defective component with a new one and then you can continue the assembly."""
-
-@mcp.prompt()
-def grasp_point_discovery(orchestrator: Annotated[Literal["enabled", "disabled"], Field(description="Whether tool orchestration is enabled or disabled")] = "disabled") -> str:
-    """
-    Grasp point discovery: Identify accessible grasp IDs per object in a simulated environment.
-    Used for the orchestrator ablation study.
-    """
-    if orchestrator == "enabled":
-        orchestrator_instruction = "You can orchestrate the tools to perform a composed policy to test the remaining grasp ids once you have verified a working sequence for one object."
-    else:
-        orchestrator_instruction = "DO NOT orchestrate the tools to perform a composed policy. Test each grasp id using individual tool calls."
-
-    return f"""**Initialization:**
-
-Phase 0: Grasp point discovery in a simulated environment.
-
-You are an autonomous agent working in a simulated environment with a 6 DOF robotic arm and a parallel gripper.
-Identify available objects and their grasp ids.
-You will be provided the fully assembled assembly in the environment.
-Save scene state.
-
-**Task**
-
-Your goal is to find which grasp ids are accessible per object.
-
-**Execution**
-
-Use the tools to test each grasp id of each object.
-{orchestrator_instruction}
-Verify if the object is actually grasped by moving to safe height and using verify_grasp.
-
-**SUCCESS** — verify_grasp returns success (object within grasp radius):
-1. Save scene state.
-2. Log the grasp id as successful.
-3. Restore scene state and move to the next grasp id or object.
-
-**FAILURE** — verify_grasp returns failure (object not grasped):
-1. Restore scene state.
-2. Log as inaccessible and move on.
-
-**Post Execution**
-Signal the client you are done with grasp point discovery for all objects.
-"""
 
 if __name__ == "__main__":
     mcp.run()

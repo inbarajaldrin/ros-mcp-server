@@ -1,5 +1,5 @@
 name: fmb1_orchestrator_without
-description: "Capability Demo: Grasp discovery without orchestrator (fmb1, sonnet)"
+description: "Ablation 2: Disassembly without orchestrator (fmb1, sonnet)"
 created: 2026-02-23T00:00:00.000Z
 runs: 3
 models:
@@ -23,7 +23,7 @@ phases:
       - "@wait:1"
       - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
     commands:
-      - "@insert-prompt:Prompts__grasp_point_discovery(orchestrator='disabled')"
+      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery(orchestrator='disabled')"
       - "@insert-attachment:fmb_assembly1_manual.png"
     hooks:
       - after: ros-mcp-server__verify_disassembly
