@@ -48,7 +48,7 @@ from primitives.shared.collision import compute_all_joint_positions, check_colli
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
 # Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
 SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
-SIM_Z_FORCE_THRESHOLD = 2.0  # Z force threshold — small positive delta from descent baseline = contact (>0 filters noise)
+SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from descent baseline = contact
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
@@ -103,10 +103,6 @@ class MoveDown(Node):
         self.movement_start_time = None
         self.force_check_grace_period = 0.5  # Wait 0.5 seconds after movement starts
         self.force_threshold_reached = False
-        # Consecutive trigger counter — require multiple consecutive checks above threshold
-        # to filter transient noise/spikes that cause false contact detection
-        self.consecutive_contact_count = 0
-        self.consecutive_contact_required = 3  # 3 consecutive checks @ 20ms = 60ms sustained contact
         self.error_message = None  # Track error for JSON output
         # Orientation-aware contact axis (set in _execute_move_down)
         # Wrench is in tool frame: gravity/contact appears on the tool axis aligned with world Z
@@ -359,9 +355,6 @@ class MoveDown(Node):
         """Start monitoring force during trajectory execution (non-blocking)"""
         import time
 
-        # Reset consecutive contact counter for new movement segment
-        self.consecutive_contact_count = 0
-
         # Record movement start time for grace period
         self.movement_start_time = time.time()
 
@@ -473,10 +466,26 @@ class MoveDown(Node):
         else:
             z_triggered = f_z <= z_threshold  # Real: negative delta on contact
 
+        if z_triggered:
+            if self.mode == 'sim':
+                current_values = [self.current_force_x, self.current_force_y, self.current_force_z]
+                baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
+                self.get_logger().info(
+                    f"Contact detected: {self.contact_axis_name} threshold reached. "
+                    f"{self.contact_axis_name} delta={force_deltas[self.contact_axis]:.2f}N "
+                    f"(normalized={f_contact:.2f}N, threshold={z_threshold}N, "
+                    f"current={current_values[self.contact_axis]:.2f}N, "
+                    f"baseline={baseline_values[self.contact_axis]:.2f}N)")
+            else:
+                self.get_logger().info(
+                    f"Contact detected: Z force threshold reached. "
+                    f"Z force (after baseline): {f_z:.2f}N (threshold: {z_threshold}N, "
+                    f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)")
+            self.force_threshold_reached = True
+            self.contact_detected_stop()
+            return  # Exit immediately after contact detected
+
         # Check other axes (Fx, Fy, Tx, Ty, Tz) with magnitude thresholds
-        lateral_triggered = False
-        lateral_axis_name = None
-        lateral_detail = None
         axes = [
             (abs(f_x), "Fx", f_x, self.current_force_x, self.baseline_force_x),
             (abs(f_y), "Fy", f_y, self.current_force_y, self.baseline_force_y),
@@ -484,54 +493,19 @@ class MoveDown(Node):
             (abs(t_y), "Ty", t_y, self.current_torque_y, self.baseline_torque_y),
             (abs(t_z), "Tz", t_z, self.current_torque_z, self.baseline_torque_z),
         ]
+
+        # Check each axis
         for magnitude, axis_name, force_value, current_value, baseline_value in axes:
             if magnitude > force_threshold:
-                lateral_triggered = True
-                lateral_axis_name = axis_name
-                lateral_detail = (force_value, magnitude, current_value, baseline_value)
-                break
-
-        # Require consecutive triggers to filter transient noise/spikes
-        any_triggered = z_triggered or lateral_triggered
-        if any_triggered:
-            self.consecutive_contact_count += 1
-        else:
-            self.consecutive_contact_count = 0
-            return  # No contact this check, reset and continue
-
-        # Not enough consecutive triggers yet — log but keep monitoring
-        if self.consecutive_contact_count < self.consecutive_contact_required:
-            return
-
-        # Sustained contact confirmed — stop
-        if z_triggered:
-            if self.mode == 'sim':
-                current_values = [self.current_force_x, self.current_force_y, self.current_force_z]
-                baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
                 self.get_logger().info(
-                    f"Contact detected: {self.contact_axis_name} threshold reached "
-                    f"({self.consecutive_contact_count} consecutive). "
-                    f"{self.contact_axis_name} delta={force_deltas[self.contact_axis]:.2f}N "
-                    f"(normalized={f_contact:.2f}N, threshold={z_threshold}N, "
-                    f"current={current_values[self.contact_axis]:.2f}N, "
-                    f"baseline={baseline_values[self.contact_axis]:.2f}N)")
-            else:
-                self.get_logger().info(
-                    f"Contact detected: Z force threshold reached "
-                    f"({self.consecutive_contact_count} consecutive). "
-                    f"Z force (after baseline): {f_z:.2f}N (threshold: {z_threshold}N, "
-                    f"current: {self.current_force_z:.2f}N, baseline: {self.baseline_force_z:.2f}N)")
-        elif lateral_triggered and lateral_detail:
-            force_value, magnitude, current_value, baseline_value = lateral_detail
-            self.get_logger().info(
-                f"Contact detected: {lateral_axis_name} force/torque threshold reached "
-                f"({self.consecutive_contact_count} consecutive). "
-                f"{lateral_axis_name} (after baseline): {force_value:.2f}N (magnitude: {magnitude:.2f}N, "
-                f"current: {current_value:.2f}N, baseline: {baseline_value:.2f}N, "
-                f"threshold: {force_threshold}N)")
-
-        self.force_threshold_reached = True
-        self.contact_detected_stop()
+                    f"Contact detected: {axis_name} force/torque threshold reached. "
+                    f"{axis_name} (after baseline): {force_value:.2f}N (magnitude: {magnitude:.2f}N, "
+                    f"current: {current_value:.2f}N, baseline: {baseline_value:.2f}N, "
+                    f"threshold: {force_threshold}N)"
+                )
+                self.force_threshold_reached = True
+                self.contact_detected_stop()
+                return  # Exit immediately after contact detected
 
     def contact_detected_stop(self):
         """Graceful stop when contact is detected - this is SUCCESS, not failure.
