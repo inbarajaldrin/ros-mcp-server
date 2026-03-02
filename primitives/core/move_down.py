@@ -403,10 +403,11 @@ class MoveDown(Node):
     def check_force_during_execution(self):
         """Check force during trajectory execution and cancel if threshold exceeded.
 
-        Both sim and real modes use the same WrenchStamped-based detection:
-        - Sim: /force_torque_sensor_broadcaster/wrench_sim - uses SIM_* thresholds
-        - Real: /force_torque_sensor_broadcaster/wrench - uses real thresholds
+        Sim mode: force sensing disabled — hover offset prevents ground contact.
+        Real mode: uses WrenchStamped delta-based detection with real thresholds.
         """
+        if self.mode == 'sim':
+            return
         if not self.moving:
             return
 
