@@ -325,7 +325,12 @@ def read_results(
     task_type: Literal["assembly", "disassembly"],
     assembly_id: AssemblyId,
 ) -> AssemblyResults | DisassemblyResults:
-    """Read assembly or disassembly results for a specific assembly."""
+    """Read assembly or disassembly results for a specific assembly.
+
+    Returns:
+        assembly_id: the assembly identifier
+        base_name: the assembly base
+        assembly_order or disassembly_order: list of entries, each with object_name, order position, grasp_id (disassembly only), tool_sequence (assembly only), comment, and previous (archived versions)"""
     if err := _validate_task_type(task_type):
         return err
     return _read_results(task_type, assembly_id)
@@ -340,7 +345,11 @@ def write_assembly_results(
     tool_sequence: Annotated[List[str], Field(description='The exact MCP tool calls made in order. Format each entry as "server__tool_name(key = \'value\', key2 = \'value2\')". The grasp_id is captured within the tool calls themselves.')],
     comment: str = "",
 ) -> dict:
-    """Log a successful assembly result for an object. Only call this when assembly verification succeeds."""
+    """Log a successful assembly result for an object. Only call this when assembly verification succeeds.
+
+    Returns:
+        success: True if logged successfully, False on validation error
+        error: validation error message (only on failure)"""
     return _write_results("assembly", assembly_id, base_name, object_name,
                           assembly_order, comment=comment or None,
                           tool_sequence=tool_sequence)
@@ -353,7 +362,11 @@ def update_assembly_results(
     tool_sequence: List[str],
     comment: str = "",
 ) -> dict:
-    """Update an existing object's assembly result with a corrected sequence. Use this when reverification finds a better or corrected tool sequence."""
+    """Update an existing object's assembly result with a corrected sequence. Use this when reverification finds a better or corrected tool sequence.
+
+    Returns:
+        success: True if updated successfully, False on validation error
+        error: validation error message (only on failure)"""
     return _update_results("assembly", assembly_id, object_name,
                            comment=comment or None,
                            tool_sequence=tool_sequence)
@@ -368,7 +381,11 @@ def write_disassembly_results(
     grasp_id: int,
     comment: str = "",
 ) -> dict:
-    """Log a successful disassembly result for an object. Only call this when disassembly verification succeeds."""
+    """Log a successful disassembly result for an object. Only call this when disassembly verification succeeds.
+
+    Returns:
+        success: True if logged successfully, False on validation error
+        error: validation error message (only on failure)"""
     return _write_results("disassembly", assembly_id, base_name, object_name,
                           disassembly_order, comment=comment or None,
                           grasp_id=grasp_id)
@@ -379,7 +396,11 @@ def clear_results(
     task_type: Literal["assembly", "disassembly"],
     assembly_id: AssemblyId,
 ) -> dict:
-    """Clear all results for an assembly."""
+    """Clear all results for an assembly.
+
+    Returns:
+        success: True if cleared, False if log not found or deletion failed
+        error: failure reason (only on failure)"""
     if err := _validate_task_type(task_type):
         return err
     return _clear_results(task_type, assembly_id)
@@ -394,7 +415,11 @@ class ResultListResponse(BaseModel):
 def list_results(
     task_type: Literal["assembly", "disassembly"],
 ) -> ResultListResponse:
-    """List all assemblies that have results."""
+    """List all assemblies that have results.
+
+    Returns:
+        assembly_ids: list of assembly IDs that have results
+        count: number of assemblies found"""
     if err := _validate_task_type(task_type):
         return err
     return _list_results(task_type)
@@ -411,7 +436,14 @@ class ClearLogsConfirmation(BaseModel):
 
 @mcp.tool()
 async def clear_all_logs(ctx: Context[ServerSession, None]) -> dict:
-    """Clear all log files with user confirmation via elicitation. Shows existing log files and asks for confirmation before deleting."""
+    """Clear all log files with user confirmation via elicitation. Shows existing log files and asks for confirmation before deleting.
+
+    Returns:
+        status: "success", "partial", "cancelled", "info", or "error"
+        message: description of what happened
+        deleted_files: list of filenames deleted (on success)
+        errors: list of deletion errors (on partial failure)
+        files_found: list of log files found (on cancel/error)"""
     # Get all log files
     log_patterns = [
         "Disassembly_*_results.json",
