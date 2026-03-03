@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 from typing import Annotated, Dict, Any, Literal, Optional, List
 
+# Assembly IDs available in the FMB benchmark
+AssemblyId = Literal["fmb_assembly_1", "fmb_assembly_2", "fmb_assembly_3"]
+
 mcp = FastMCP("FMB Assembly and Disassembly Logbook")
 
 
@@ -320,7 +323,7 @@ class DisassemblyResults(BaseModel):
 @mcp.tool()
 def read_results(
     task_type: Literal["assembly", "disassembly"],
-    assembly_id: str,
+    assembly_id: AssemblyId,
 ) -> AssemblyResults | DisassemblyResults:
     """Read assembly or disassembly results for a specific assembly."""
     if err := _validate_task_type(task_type):
@@ -330,7 +333,7 @@ def read_results(
 
 @mcp.tool()
 def write_assembly_results(
-    assembly_id: str,
+    assembly_id: AssemblyId,
     base_name: str,
     object_name: str,
     assembly_order: int,
@@ -345,7 +348,7 @@ def write_assembly_results(
 
 @mcp.tool()
 def update_assembly_results(
-    assembly_id: str,
+    assembly_id: AssemblyId,
     object_name: str,
     tool_sequence: List[str],
     comment: str = "",
@@ -358,7 +361,7 @@ def update_assembly_results(
 
 @mcp.tool()
 def write_disassembly_results(
-    assembly_id: str,
+    assembly_id: AssemblyId,
     base_name: str,
     object_name: str,
     disassembly_order: int,
@@ -374,7 +377,7 @@ def write_disassembly_results(
 @mcp.tool()
 def clear_results(
     task_type: Literal["assembly", "disassembly"],
-    assembly_id: str,
+    assembly_id: AssemblyId,
 ) -> dict:
     """Clear all results for an assembly."""
     if err := _validate_task_type(task_type):
