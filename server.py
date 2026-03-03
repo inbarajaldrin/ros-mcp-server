@@ -43,7 +43,7 @@ TaskType = Literal["assembly", "disassembly"]
 GripperCommand = str  # "close" or numeric mm value (e.g. "35")
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "place_down"]
-PhaseNumber = Literal[0, 1, 2, 3]
+PhaseNumber = Literal[1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
 
 # Configuration using environment variables with defaults (similar to newer version)
@@ -302,14 +302,17 @@ def read_topic(
 ##
 ## ############################################################################################## ##
 
+class ExecutePythonResult(BaseModel):
+    output: str = Field(description="Combined stdout and stderr from execution")
+    files_created: Optional[List[str]] = Field(default=None, description="Filenames created during execution")
+    files_location: Optional[str] = Field(default=None, description="Directory where created files are saved")
+
 @mcp.tool()
 def execute_python_code(
-    code: str,
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    """Execute Python code for calculations and math operations.
-
-    File saving: Use relative paths (e.g., "output.txt") instead of absolute paths like "/tmp/output.txt"."""
+    code: Annotated[str, Field(description="Python code to execute. Has access to math, numpy, datetime, json, sys.")],
+    timeout: Annotated[int, Field(description="Max execution time in seconds")] = 30,
+) -> ExecutePythonResult:
+    """Execute Python code for calculations, data processing, and math operations. Use relative paths for file saving."""
     import subprocess
     import tempfile
     import os
@@ -614,21 +617,21 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ## ############################################################################################## ##
 
 class GraspPoint(BaseModel):
-    id: int
+    id: int = Field(description="Grasp point ID. Pass to move_to_grasp, verify_grasp, and translate_object.")
     gripper_width_mm: float = Field(description="Required gripper width in mm. Set gripper to this width before grasping and when releasing.")
-    z_height: Optional[float] = Field(default=None, description="Z position of the grasp point in world frame relative to robot base")
+    z_height: Optional[float] = Field(default=None, description="Z coordinates of the grasp point in world frame.")
 
 class SceneObject(BaseModel):
-    grasps: List[GraspPoint] = Field(description="Available grasp points. Empty if object has none")
-    assembly_order: Optional[int] = Field(default=None, description="Present when task_type=assembly")
-    disassembly_order: Optional[int] = Field(default=None, description="Present when task_type=disassembly. Boards excluded")
+    grasps: List[GraspPoint] = Field(description="Available grasp points. Empty for base objects (they are not grasped).")
+    assembly_order: Optional[int] = Field(default=None, description="Assembly sequence position (1=first to assemble). Present when task_type='assembly'.")
+    disassembly_order: Optional[int] = Field(default=None, description="Disassembly sequence position (1=first to remove). Present when task_type='disassembly'. Boards excluded.")
 
 @mcp.tool()
 def get_scene_info(
-    task_type: TaskType = "assembly",
+    task_type: Annotated[TaskType, Field(description="'assembly' returns assembly_order per object. 'disassembly' returns disassembly_order (boards excluded).")],
     mode: Mode = "sim",
 ) -> Dict[str, SceneObject]:
-    """Get scene information with objects and their available grasp points."""
+    """Get all objects in the scene with accessible grasp points and assembly/disassembly ordering."""
     return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode} --task-type {task_type}", timeout=10, error_prefix="Get scene info")
 
 @mcp.tool()
@@ -666,10 +669,10 @@ class GraspVerificationResult(BaseModel):
 def verify_grasp(
     object_name: str,
     mode: Mode = "sim",
-    grasp_id: Annotated[Optional[int], Field(description="Required for real mode")] = None,
-    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] (required for real mode)")] = None,
+    grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode.")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] from get_current_object_pose. Ignored in sim mode. Required in real mode.")] = None,
 ) -> GraspVerificationResult:
-    """Verify if object is within grasp radius from gripper center. Call this tool after moving to safe height."""
+    """Verify if object is within grasp radius from gripper center. Call after move_to_grasp(action='move_to_safe_height')."""
     # Build command based on mode
     if mode == "real":
         missing = []
@@ -895,10 +898,11 @@ def control_gripper(
 
 @mcp.tool()
 def scan_workspace(
-    object_name: str,
+    object_name: Annotated[str, Field(description="Name of the object to locate")],
+    mode: Annotated[Literal["real"], Field(description="Must be 'real'. Scanning is a physical-only operation.")] = "real",
 ) -> Dict[str, Any]:
-    """Scan workspace at fixed height to locate object. Follows a predefined path across x,y and stops as soon as the object is detected."""
-    return _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode real", timeout=300, error_prefix="Scan workspace")
+    """Scan workspace at fixed height to locate an object. Follows a predefined path across x,y and stops when the object is detected."""
+    return _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
 
 class Quaternion(BaseModel):
     x: float
@@ -964,8 +968,8 @@ def translate_object(
     mode: Mode = "sim",
     object_name: Annotated[Optional[str], Field(description="The object being held. Required for move_to_base and perform_insert only.")] = None,
     base_name: Annotated[Optional[str], Field(description="The assembly base. Required for move_to_base and perform_insert only.")] = None,
-    grasp_id: Optional[int] = None,
-    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Required for real mode only")] = None,
+    grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
 ) -> TranslateObjectResult:
     """Translate object to target position. Maintains object's current orientation."""
     # Validate required fields per action
@@ -1062,7 +1066,7 @@ def _verify_all_assembled(base_name: str, mode: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def signal_phase_complete(
-    phase: Annotated[PhaseNumber, Field(description="0=grasp point discovery, 1=disassembly discovery, 2=assembly discovery, 3=assembly execution (sim/real)")],
+    phase: Annotated[PhaseNumber, Field(description="1=disassembly sequence discovery, 2=assembly sequence discovery, 3=assembly execution (sim/real)")],
     status: PhaseStatus,
     ctx: Context[ServerSession, None],
     comment: Annotated[str, Field(description="Should explain failure reasons")] = "",
