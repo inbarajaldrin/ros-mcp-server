@@ -216,7 +216,7 @@ from primitives.shared.ik import (
     forward_kinematics, dh_params, compute_cartesian_waypoints_ik,
     IKSolverConfig, IKSolver,
 )
-from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
+from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 from primitives.shared.config import (
     TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET,
     DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION,
@@ -660,49 +660,73 @@ class TranslateObject(Node):
                 self.get_logger().error(self.error_message)
                 return False
 
-        # Jacobian-based differential IK
-        num_waypoints = 60
-        self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
-        waypoints = compute_cartesian_waypoints_ik(
-            self.current_joint_angles,
-            target_z=target_flange[2],
-            num_waypoints=num_waypoints,
-            target_pos=target_flange.tolist() if hasattr(target_flange, 'tolist') else list(target_flange),
-            target_orientation=ee_target_rot_matrix if not hover else None,
-        )
-        if waypoints is None:
-            self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
-            self.get_logger().error(self.error_message)
-            return False
-
-        # Post-hoc collision check
-        for i, wp_joints in enumerate(waypoints):
-            if (check_collision_with_table(wp_joints)
-                    or check_self_collision(wp_joints)
-                    or check_ee_below_base(wp_joints)
-                    or check_compact_configuration(wp_joints)):
-                self.get_logger().error(f"Collision detected at waypoint {i + 1}/{num_waypoints}")
-                self.error_message = "Motion planning failed: couldn't find a collision-free path to the target position"
+        if hover:
+            # move_to_base: single-point joint-space move — let UR controller
+            # handle interpolation to avoid protective stops from Jacobian IK
+            # velocity spikes on long lateral moves.
+            target_quat = R.from_matrix(ee_target_rot_matrix).as_quat()
+            ik_result = self.compute_ik_with_current_seed(target_flange, target_quat)
+            if ik_result is None:
+                self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
+                self.get_logger().error(self.error_message)
                 return False
 
-        all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
+            joint_dist = float(np.max(np.abs(np.array(ik_result) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
 
-        joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
-        total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-        self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+            profile = single_point(ik_result, total_duration)
+            trajectory_points = []
+            for positions, velocities, t_i in profile:
+                trajectory_points.append({
+                    "positions": positions,
+                    "velocities": velocities,
+                    "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+                })
+        else:
+            # perform_insert: Cartesian Jacobian IK for precise straight-line descent
+            num_waypoints = 60
+            self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
+            waypoints = compute_cartesian_waypoints_ik(
+                self.current_joint_angles,
+                target_z=target_flange[2],
+                num_waypoints=num_waypoints,
+                target_pos=target_flange.tolist() if hasattr(target_flange, 'tolist') else list(target_flange),
+                target_orientation=ee_target_rot_matrix,
+            )
+            if waypoints is None:
+                self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
+                self.get_logger().error(self.error_message)
+                return False
 
-        profile = s_curve_profile(all_joint_angles, total_duration)
-        trajectory_points = []
-        for positions, velocities, t_i in profile:
-            trajectory_points.append({
-                "positions": positions,
-                "velocities": velocities,
-                "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
-            })
+            # Post-hoc collision check
+            for i, wp_joints in enumerate(waypoints):
+                if (check_collision_with_table(wp_joints)
+                        or check_self_collision(wp_joints)
+                        or check_ee_below_base(wp_joints)
+                        or check_compact_configuration(wp_joints)):
+                    self.get_logger().error(f"Collision detected at waypoint {i + 1}/{num_waypoints}")
+                    self.error_message = "Motion planning failed: couldn't find a collision-free path to the target position"
+                    return False
 
-        self.get_logger().info(
-            f"Generated {len(trajectory_points)} Cartesian waypoints with s-curve velocity profile"
-        )
+            all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
+
+            joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
+            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+            self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+
+            profile = s_curve_profile(all_joint_angles, total_duration)
+            trajectory_points = []
+            for positions, velocities, t_i in profile:
+                trajectory_points.append({
+                    "positions": positions,
+                    "velocities": velocities,
+                    "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
+                })
+
+            self.get_logger().info(
+                f"Generated {len(trajectory_points)} Cartesian waypoints with s-curve velocity profile"
+            )
 
         success = self.execute_trajectory({"traj1": trajectory_points})
         if not success:
