@@ -1165,7 +1165,7 @@ def _verify_all_assembled(base_name: str, mode: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def signal_phase_complete(
-    phase: Annotated[PhaseNumber, Field(description="1=disassembly sequence discovery, 2=assembly sequence discovery, 3=assembly execution (sim/real)")],
+    phase: Annotated[PhaseNumber, Field(description="Phase number")],
     status: PhaseStatus,
     ctx: Context[ServerSession, None],
     comment: Annotated[str, Field(description="Should explain failure reasons")] = "",
