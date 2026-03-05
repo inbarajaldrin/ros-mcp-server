@@ -146,15 +146,40 @@ def _subprocess_fast_path():
     pdir = os.path.dirname(os.path.abspath(__file__))
 
     if args.move_to_safe_height:
+        if not args.object_name:
+            _output({"result": "failure", "mode": args.mode, "movement_type": "move_to_safe_height",
+                     "error": "object_name is required for move_to_safe_height"})
+            sys.exit(1)
+        log.info(f"Verifying object {args.object_name} is released before moving to safe height")
+        qdir = os.path.join(os.path.dirname(pdir), 'queries')
+        ok, out = _run(os.path.join(qdir, 'verify_grasp.py'),
+                       ['--object-name', args.object_name, '--mode', args.mode], timeout=15)
+        vj = _extract_json(out)
+        if vj and vj.get('result') == 'success':
+            _output({"result": "failure", "mode": args.mode, "movement_type": "move_to_safe_height",
+                     "error": f"Object {args.object_name} is still grasped — release it before move_to_safe_height"})
+            sys.exit(1)
         log.info("Moving to safe height...")
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_safe_height.py'), timeout=40)
         _finish(ok, out, "move_to_safe_height")
 
     if args.place_down:
+        if not args.object_name:
+            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
+                     "error": "object_name is required for place_down"})
+            sys.exit(1)
+        log.info(f"Verifying grasp on {args.object_name} before placing down")
+        qdir = os.path.join(os.path.dirname(pdir), 'queries')
+        ok, out = _run(os.path.join(qdir, 'verify_grasp.py'),
+                       ['--object-name', args.object_name, '--mode', args.mode], timeout=15)
+        vj = _extract_json(out)
+        if not ok or (vj and vj.get('result') == 'failure'):
+            err = vj.get('error', 'grasp check failed') if vj else 'grasp check failed'
+            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
+                     "error": f"Grasp check failed before place_down: {err}"})
+            sys.exit(1)
         log.info("Placing object on clear area")
-        ca = ['--move', '--mode', args.mode]
-        if args.object_name:
-            ca += ['--object-name', args.object_name]
+        ca = ['--move', '--mode', args.mode, '--object-name', args.object_name]
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
         if not ok:
             _finish(ok, out, "place_down")

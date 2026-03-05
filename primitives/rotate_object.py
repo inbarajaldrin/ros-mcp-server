@@ -1021,7 +1021,7 @@ class ReorientForAssembly(Node):
 
             # Reject cardinals with bad world-frame directions (sort to end)
             if facing_robot or camera_bad:
-                return (2, 0, ee_rotation)
+                return (999, 0, ee_rotation)
 
             # PRIMARY: Object error bucket (low error is best)
             # Round to 1 decimal to avoid floating point boundary issues (e.g., 44.999° vs 45.001°)

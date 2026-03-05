@@ -22,11 +22,11 @@ settings:
 systemPrompt: "@insert-prompt:Prompts__system_context"
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home()"
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Disassembly sequence discovery
     onStart:
-      - "@tool-exec:ros-mcp-server__move_home()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
@@ -34,7 +34,7 @@ phases:
       - "@tool-exec:isaac-sim__setup_pose_publisher()"
       - "@wait:1"
       - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb3')"
-      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_3/objects"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
     commands:
       - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery"
       - "@insert-attachment:fmb_assembly3_manual.png"
@@ -55,7 +55,8 @@ phases:
   - name: Assembly sequence discovery
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
-      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_3/results/disassembly"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_3', task_type='disassembly')"
     commands:
       - "@insert-prompt:Prompts__phase_2_assembly_sequence_discovery"
       - "@insert-attachment:fmb_assembly3_manual.png"
@@ -76,7 +77,8 @@ phases:
   - name: Assembly execution (sim)
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
-      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_3/results/assembly"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_3', task_type='assembly')"
     commands:
       - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
       - "@insert-attachment:fmb_assembly3_manual.png"

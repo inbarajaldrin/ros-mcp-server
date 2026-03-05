@@ -10,16 +10,17 @@ settings:
   maxIterations: -1
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home()"
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Assembly execution (sim) + defective part replacement (early)
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
     commands:
       - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
       - "@insert-attachment:fmb_assembly1_manual.png"
-      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_1/results/disassembly"
-      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_1/results/assembly"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='disassembly')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='assembly')"
     hooks:
       - after: ros-mcp-server__verify_assembly
         run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"

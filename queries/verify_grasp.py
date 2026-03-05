@@ -35,6 +35,7 @@ from std_msgs.msg import Float32, Float64
 # Gripper specifications
 GRIPPER_HALF_OPEN_WIDTH_MM = 35.0
 GRIPPER_MAX_WIDTH_MM = 100.0
+GRIPPER_WIDTH_MATCH_TOLERANCE_MM = 2.0  # If width is within this of approach width, gripper hasn't closed
 
 
 def output_result(result):
@@ -446,6 +447,27 @@ class VerifyGrasp(Node):
         if self.mode == 'real':
             return self.verify_grasp_real()
         elif self.mode == 'sim':
+            # Check gripper width against approach width — if still at approach width, gripper hasn't closed
+            if self.gripper_width_received and self.grasp_id is not None:
+                _, grasp_validity = load_grasp_point_and_validity(
+                    self.object_name, self.grasp_id, logger=self.get_logger()
+                )
+                if grasp_validity:
+                    approach_widths = [
+                        v for k, v in grasp_validity.items()
+                        if k.endswith('_gripper_width_mm') and v is not None
+                    ]
+                    for aw in approach_widths:
+                        if abs(self.gripper_width - aw) <= GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
+                            result = {
+                                'result': 'failure',
+                                'object_name': self.object_name,
+                                'mode': 'sim',
+                                'error': f"Gripper width ({self.gripper_width:.1f}mm) matches approach width ({aw:.1f}mm) - call control_gripper with 'close' before verifying grasp",
+                            }
+                            self.get_logger().error(result['error'])
+                            return False, result
+
             success, distance, object_pos, ref_pos = self.verify_grasp()
             result = {
                 'result': 'success' if success else 'failure',
@@ -539,7 +561,7 @@ def main(args=None):
             start_time = time.time()
             last_log_time = start_time
 
-            while not (node.object_pose_received and node.ee_pose_received):
+            while not (node.object_pose_received and node.ee_pose_received and node.gripper_width_received):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 time.sleep(0.1)
 
@@ -551,6 +573,8 @@ def main(args=None):
                         missing.append("object")
                     if not node.ee_pose_received:
                         missing.append("end-effector")
+                    if not node.gripper_width_received:
+                        missing.append("gripper_width")
                     node.get_logger().info(f"Waiting for ({', '.join(missing)})... ({elapsed:.1f}s)")
                     last_log_time = current_time
 

@@ -376,10 +376,14 @@ import sys
         files_after = set(os.listdir(PYTHON_EXECUTIONS_DIR))
         created_files = files_after - files_before
 
-        # Return combined stdout and stderr
+        # Return combined stdout and stderr (truncated to prevent context overflow)
+        MAX_OUTPUT_CHARS = 8000
         output = result.stdout if result.stdout else ""
         if result.stderr:
             output += result.stderr
+
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + f"\n     ...(truncated at {MAX_OUTPUT_CHARS} chars, total was {len(output)})"
 
         result_dict = {"output": output}
 
@@ -643,9 +647,9 @@ def get_scene_info(
     Call once per object before manipulating it. Re-call after rotation or placement to get updated z_heights and pose.
 
     Returns:
-        grasps: list of grasp points, each with id (int, pass to move_to_grasp/verify_grasp/translate_object), gripper_width_mm (float, set gripper to this before grasping), z_height (float, live Z in world frame)
-        current_pose: position {x, y, z} and orientation {rpy: {roll, pitch, yaw}} in degrees
-        target_pose: position {x, y, z} and valid_orientations (list of {rpy: {roll, pitch, yaw}}) — all fold-symmetric equivalents"""
+        grasps: list of grasp points, each with id (int, pass to move_to_grasp/verify_grasp/translate_object), position {x, y, z}, orientation {x, y, z, w} — live poses in world frame
+        current_pose: position {x, y, z} and orientation {quat: {x, y, z, w}}
+        target_pose: position {x, y, z} and valid_orientations (list of {quat: {x, y, z, w}}) — all fold-symmetric equivalents"""
     cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
     return _run_with_retry(_run_query, "get_scene_info.py", cmd, timeout=10, error_prefix="Get scene info")
 
@@ -660,7 +664,7 @@ def verify_grasp(
     object_name: str,
     mode: Mode = "sim",
     grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode.")] = None,
-    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] from get_current_object_pose. Ignored in sim mode. Required in real mode.")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] from get_scene_info current_pose. Ignored in sim mode. Required in real mode.")] = None,
 ) -> GraspVerificationResult:
     """Verify if object is within grasp radius from gripper center. Call after move_to_grasp(action='move_to_safe_height').
 
@@ -675,7 +679,7 @@ def verify_grasp(
         if grasp_id is None:
             missing.append("grasp_id (get from get_scene_info)")
         if current_object_orientation is None:
-            missing.append("current_object_orientation [x,y,z,w] (get from get_current_object_pose)")
+            missing.append("current_object_orientation [x,y,z,w] (get from get_scene_info current_pose)")
         if missing:
             return {"result": "failure", "object_name": object_name, "mode": "real",
                    "error": f"Real mode requires: {', '.join(missing)}"}
@@ -899,14 +903,11 @@ class GripperResult(BaseModel):
     result: Literal["success", "failure"]
     command: GripperCommand
     mode: Mode
-    initial_width_mm: Optional[float] = None
-    final_width_mm: Optional[float] = None
-    change_mm: Optional[float] = None
     error: Optional[str] = None
 
 @mcp.tool()
 def control_gripper(
-    command: Annotated[GripperCommand, Field(description="close = close jaws to grasp object. Numeric value (e.g. 35) = set gripper width in mm for approach/release clearance. Use the gripper_width_mm from get_scene_info.")],
+    command: Annotated[GripperCommand, Field(description="close = close jaws on object. Numeric value (e.g. 35) = open to that width in mm. Three steps per object: (1) gripper_width_mm before move_to_object (approach), (2) close to grasp the object, (3) gripper_width_mm after place_down or perform_insert (release). Always use gripper_width_mm from the resource provided for both approach and release — some objects have narrow grasp regions, so opening beyond gripper_width_mm risks damaging the object or the gripper.")],
     mode: Mode = "sim",
 ) -> GripperResult:
     """Control gripper width for grasping or releasing objects.
@@ -915,11 +916,9 @@ def control_gripper(
         result: "success" or "failure"
         command: the gripper command issued
         mode: "sim" or "real"
-        initial_width_mm: gripper width before the command
-        final_width_mm: gripper width after the command
-        change_mm: width change in mm
         error: failure reason (only on failure)"""
-    return _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
+    raw = _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
+    return GripperResult(**{k: v for k, v in raw.items() if k in GripperResult.model_fields}).model_dump(exclude_none=True)
 
 @mcp.tool()
 def scan_workspace(
@@ -941,14 +940,8 @@ class Quaternion(BaseModel):
     z: float
     w: float
 
-class RPY(BaseModel):
-    roll: float
-    pitch: float
-    yaw: float
-
 class Orientation(BaseModel):
     quat: Quaternion
-    rpy: RPY
 
 class Position(BaseModel):
     x: float
@@ -984,7 +977,7 @@ def move_to_grasp(
         mode: "sim" or "real"
         movement_type: the action performed
         current_object_position: {x, y, z} after movement
-        current_object_orientation: {quat: {x,y,z,w}, rpy: {roll,pitch,yaw}} after movement
+        current_object_orientation: {quat: {x, y, z, w}} after movement
         error: failure reason (only on failure)"""
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     cmd += f" --{action.replace('_', '-')}"
@@ -1003,11 +996,11 @@ def translate_object(
     action: Annotated[TranslateAction, Field(description=(
         "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
         "perform_insert: Insert the object downward into the base. Call after move_to_base. Verify object orientation is correct before calling. "
-        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Call after releasing the object post-insertion. "
-        "place_down: Used during disassembly or regrasp. Moves laterally to clear region, lowers the arm, and places the object on the table. Must open gripper to release the object. Rotate the object after regrasping to restore the target orientation as placing the object down will cause minor orientation changes."
+        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after releasing the object. Call after opening the gripper post-insertion. "
+        "place_down: Used during disassembly or regrasp. Moves laterally to clear region, lowers the arm, and places the object on the table. Rotate the object after regrasping to restore the target orientation as placing the object down will cause minor orientation changes."
     ))],
+    object_name: str,
     mode: Mode = "sim",
-    object_name: Annotated[Optional[str], Field(description="The object being held. Required for move_to_base and perform_insert only.")] = None,
     base_name: Annotated[Optional[str], Field(description="The assembly base. Required for move_to_base and perform_insert only.")] = None,
     grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
     current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
@@ -1022,22 +1015,9 @@ def translate_object(
         base_name: the assembly base (if applicable)
         error: failure reason (only on failure)"""
     # Validate required fields per action
-    if action in ["move_to_base", "perform_insert"]:
-        missing = []
-        if not object_name:
-            missing.append("object_name")
-        if not base_name:
-            missing.append("base_name")
-        if missing:
-            return {"result": "failure",
-                    "error": f"Action '{action}' requires: {', '.join(missing)}"}
-
-    # Verify object is grasped before placing on clear area
-    if action == "place_down":
-        grasp_result = _run_query("verify_grasp.py", f"--object-name check --mode {mode} --width-only", timeout=15)
-        if isinstance(grasp_result, dict) and grasp_result.get("result") == "failure":
-            return {"result": "failure", "mode": mode, "movement_type": "place_down",
-                    "error": f"Grasp check failed: {grasp_result.get('error', 'gripper not holding object')}"}
+    if action in ["move_to_base", "perform_insert"] and not base_name:
+        return {"result": "failure",
+                "error": f"Action '{action}' requires: base_name"}
 
     if mode == "real" and action not in ["place_down", "move_to_safe_height"]:
         missing = []
@@ -1049,9 +1029,7 @@ def translate_object(
             return {"result": "failure",
                     "error": f"Real mode requires: {', '.join(missing)}"}
 
-    cmd = f"--mode {mode}"
-    if object_name:
-        cmd += f" --object-name \"{object_name}\""
+    cmd = f"--mode {mode} --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
     cmd += f" --{action.replace('_', '-')}"
@@ -1097,8 +1075,8 @@ def rotate_object(
         base_name: the assembly base
         mode: "sim" or "real"
         movement_type: "rotate_object"
-        initial_object_orientation: {quat: {x,y,z,w}, rpy: {roll,pitch,yaw}} before rotation
-        final_object_orientation: {quat: {x,y,z,w}, rpy: {roll,pitch,yaw}} after rotation
+        initial_object_orientation: {quat: {x, y, z, w}} before rotation
+        final_object_orientation: {quat: {x, y, z, w}} after rotation
         error: failure reason (only on failure)"""
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
