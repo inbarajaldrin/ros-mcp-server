@@ -2060,11 +2060,6 @@ class DirectObjectMove(Node):
                         "z": round(self.final_orientation_quat[2], 6),
                         "w": round(self.final_orientation_quat[3], 6)
                     },
-                    "rpy": {
-                        "roll": round(self.final_orientation_rpy_deg[0], 4),
-                        "pitch": round(self.final_orientation_rpy_deg[1], 4),
-                        "yaw": round(self.final_orientation_rpy_deg[2], 4)
-                    }
                 }
             }
         else:

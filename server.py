@@ -39,7 +39,6 @@ logger = logging.getLogger("RosMCPServer")
 
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
-TaskType = Literal["assembly", "disassembly"]
 GripperCommand = str  # "close" or numeric mm value (e.g. "35")
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
 TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "place_down"]
@@ -633,61 +632,22 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ##
 ## ############################################################################################## ##
 
-class GraspPoint(BaseModel):
-    id: int = Field(description="Grasp point ID. Pass to move_to_grasp, verify_grasp, and translate_object.")
-    gripper_width_mm: float = Field(description="Required gripper width in mm. Set gripper to this width before grasping and when releasing.")
-    z_height: Optional[float] = Field(default=None, description="Z coordinates of the grasp point in world frame.")
-
-class SceneObject(BaseModel):
-    grasps: List[GraspPoint] = Field(description="Available grasp points. Empty for base objects (they are not grasped).")
-    assembly_order: Optional[int] = Field(default=None, description="Assembly sequence position (1=first to assemble). Present when task_type='assembly'.")
-    disassembly_order: Optional[int] = Field(default=None, description="Disassembly sequence position (1=first to remove). Present when task_type='disassembly'. Boards excluded.")
-
 @mcp.tool()
 def get_scene_info(
-    task_type: Annotated[TaskType, Field(description="'assembly' returns assembly_order per object. 'disassembly' returns disassembly_order (boards excluded).")],
-    mode: Mode = "sim",
-) -> Dict[str, SceneObject]:
-    """Get all objects in the scene with accessible grasp points and assembly/disassembly ordering.
-
-    Returns:
-        Dict keyed by object name. Each object contains:
-            grasps: list of grasp points, each with id (int, pass to move_to_grasp/verify_grasp/translate_object), gripper_width_mm (float, set gripper to this before grasping), z_height (float, Z in world frame). Empty for base objects.
-            assembly_order: sequence position (1=first to assemble). Present when task_type='assembly'.
-            disassembly_order: sequence position (1=first to remove). Present when task_type='disassembly'. Boards excluded."""
-    return _run_with_retry(_run_query, "get_scene_info.py", f"--mode {mode} --task-type {task_type}", timeout=10, error_prefix="Get scene info")
-
-@mcp.tool()
-def get_target_object_pose(
     object_name: str,
     base_name: str,
     mode: Mode = "sim",
 ) -> Dict[str, Any]:
-    """Get target object pose relative to the base.
+    """Get complete info for one object: live grasp points, current pose, and target pose with all valid orientations.
+
+    Call once per object before manipulating it. Re-call after rotation or placement to get updated z_heights and pose.
 
     Returns:
-        target_object_pose: dict with position {x, y, z} and orientation {quat: {x, y, z, w}, rpy: {roll, pitch, yaw}} in world frame"""
+        grasps: list of grasp points, each with id (int, pass to move_to_grasp/verify_grasp/translate_object), gripper_width_mm (float, set gripper to this before grasping), z_height (float, live Z in world frame)
+        current_pose: position {x, y, z} and orientation {rpy: {roll, pitch, yaw}} in degrees
+        target_pose: position {x, y, z} and valid_orientations (list of {rpy: {roll, pitch, yaw}}) — all fold-symmetric equivalents"""
     cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
-    return _run_with_retry(_run_query, "get_target_object_pose.py", cmd, timeout=10, error_prefix="Get target object pose")
-
-@mcp.tool()
-def get_current_object_pose(
-    object_name: Annotated[Optional[str], Field(description="Ignored if all=True")] = None,
-    mode: Mode = "sim",
-    all: Annotated[bool, Field(description="If True, returns poses for all objects")] = False,
-) -> Dict[str, Any]:
-    """Get current object pose(s).
-
-    Returns:
-        When all=False: single object dict with position {x, y, z} and orientation {quat: {x, y, z, w}, rpy: {roll, pitch, yaw}}
-        When all=True: dict keyed by object name, each with position and orientation as above"""
-    if all:
-        cmd = f"--all --mode {mode}"
-    elif object_name:
-        cmd = f"--object-name \"{object_name}\" --mode {mode}"
-    else:
-        return {"output": "Error: Either object_name or all=True must be provided"}
-    return _run_with_retry(_run_query, "get_current_object_pose.py", cmd, timeout=10, error_prefix="Get current object pose")
+    return _run_with_retry(_run_query, "get_scene_info.py", cmd, timeout=10, error_prefix="Get scene info")
 
 class GraspVerificationResult(BaseModel):
     result: Literal["success", "failure"]

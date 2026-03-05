@@ -9,13 +9,14 @@ settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: -1
   clearContextBetweenPhases: true
+systemPrompt: "@insert-prompt:Prompts__system_context"
 hooks:
   - before: isaac-sim__restore_scene_state
-    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+    run: "@tool-exec:ros-mcp-server__move_home()"
 phases:
   - name: Disassembly sequence discovery
     onStart:
-      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:ros-mcp-server__move_home()"
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
@@ -23,6 +24,7 @@ phases:
       - "@tool-exec:isaac-sim__setup_pose_publisher()"
       - "@wait:1"
       - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
+      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_1/objects"
     commands:
       - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery"
       - "@insert-attachment:fmb_assembly1_manual.png"
@@ -38,12 +40,12 @@ phases:
         whenOutput:
           phase: 1
           status: failure
-          requires_response: false
         run: "@abort"
 
   - name: Assembly sequence discovery
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_1/results/disassembly"
     commands:
       - "@insert-prompt:Prompts__phase_2_assembly_sequence_discovery"
       - "@insert-attachment:fmb_assembly1_manual.png"
@@ -59,12 +61,12 @@ phases:
         whenOutput:
           phase: 2
           status: failure
-          requires_response: false
         run: "@abort"
 
   - name: Assembly execution (sim)
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:FMB Assembly Resources__assembly://fmb_assembly_1/results/assembly"
     commands:
       - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
       - "@insert-attachment:fmb_assembly1_manual.png"

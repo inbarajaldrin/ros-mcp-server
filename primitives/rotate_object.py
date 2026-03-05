@@ -1665,11 +1665,6 @@ class ReorientForAssembly(Node):
                         "z": round(float(self.initial_object_orientation_quat[2]), 6),
                         "w": round(float(self.initial_object_orientation_quat[3]), 6)
                     },
-                    "rpy": {
-                        "roll": round(float(self.initial_object_orientation_rpy_deg[0]), 4),
-                        "pitch": round(float(self.initial_object_orientation_rpy_deg[1]), 4),
-                        "yaw": round(float(self.initial_object_orientation_rpy_deg[2]), 4)
-                    }
                 }
             if self.final_object_orientation_quat is not None and self.final_object_orientation_rpy_deg is not None:
                 result["final_object_orientation"] = {
@@ -1679,11 +1674,6 @@ class ReorientForAssembly(Node):
                         "z": round(float(self.final_object_orientation_quat[2]), 6),
                         "w": round(float(self.final_object_orientation_quat[3]), 6)
                     },
-                    "rpy": {
-                        "roll": round(float(self.final_object_orientation_rpy_deg[0]), 4),
-                        "pitch": round(float(self.final_object_orientation_rpy_deg[1]), 4),
-                        "yaw": round(float(self.final_object_orientation_rpy_deg[2]), 4)
-                    }
                 }
             # if self.initial_ee_orientation_quat is not None and self.initial_ee_orientation_rpy_deg is not None:
             #     result["initial_end_effector_orientation"] = {

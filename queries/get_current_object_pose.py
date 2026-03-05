@@ -186,11 +186,6 @@ def main(args=None):
                             "z": round(float(pose_data['orientation'][2]), 6),
                             "w": round(float(pose_data['orientation'][3]), 6)
                         },
-                        "rpy": {
-                            "roll": round(float(rpy[0]), 4),
-                            "pitch": round(float(rpy[1]), 4),
-                            "yaw": round(float(rpy[2]), 4)
-                        }
                     }
                 }
         else:
@@ -220,11 +215,6 @@ def main(args=None):
                             "z": round(float(object_quaternion[2]), 6),
                             "w": round(float(object_quaternion[3]), 6)
                         },
-                        "rpy": {
-                            "roll": round(float(rpy[0]), 4),
-                            "pitch": round(float(rpy[1]), 4),
-                            "yaw": round(float(rpy[2]), 4)
-                        }
                     }
                 }
             }

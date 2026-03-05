@@ -1,15 +1,16 @@
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.server.session import ServerSession
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Dict, Any, Literal, Optional, List
+from typing import Annotated, Literal, Optional, List
+
+from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir
 
 # Assembly IDs available in the FMB benchmark
 AssemblyId = Literal["fmb_assembly_1", "fmb_assembly_2", "fmb_assembly_3"]
 
-mcp = FastMCP("FMB Assembly and Disassembly Logbook")
+mcp = FastMCP("FMB Assembly Resources")
 
 
 
@@ -40,6 +41,116 @@ MODES = {
         "has_grasp_id": True,
     },
 }
+
+
+# ========== ASSEMBLY CONFIG HELPERS ==========
+
+def _assembly_id_to_filename(assembly_id: str) -> str:
+    """Convert assembly_id (e.g. 'fmb_assembly_1') to JSON filename (e.g. 'fmb_assembly1.json').
+
+    Convention: strip the underscore before the trailing digit(s).
+    """
+    # "fmb_assembly_1" → "fmb_assembly" + "1" → "fmb_assembly1"
+    parts = assembly_id.rsplit("_", 1)
+    return f"{''.join(parts)}.json"
+
+
+def _load_assembly_config(assembly_id: str) -> dict:
+    """Load assembly config JSON for an assembly_id. Returns {} on failure."""
+    try:
+        data_dir = get_assembly_data_dir()
+    except FileNotFoundError:
+        return {}
+    path = data_dir / _assembly_id_to_filename(assembly_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _assembly_id_to_base_name(assembly_id: str) -> Optional[str]:
+    """Find the base (board) component name for an assembly_id."""
+    config = _load_assembly_config(assembly_id)
+    for comp in config.get("components", []):
+        if comp.get("type") == "board":
+            return comp["name"]
+    return None
+
+
+def _load_grasp_points(object_name: str) -> list:
+    """Load grasp IDs and gripper widths for an object from grasp points JSON.
+
+    Returns list of {id, gripper_width_mm} dicts.
+    """
+    try:
+        data_dir = get_aruco_data_dir() / "grasp_points"
+    except FileNotFoundError:
+        return []
+
+    grasp_file = data_dir / f"{object_name}_grasp_points.json"
+    if not grasp_file.exists():
+        matches = list(data_dir.glob(f"{object_name}*_grasp_points.json"))
+        if matches:
+            grasp_file = matches[0]
+        else:
+            return []
+
+    try:
+        with open(grasp_file, 'r') as f:
+            data = json.load(f)
+
+        points = []
+        for gp in data.get('grasp_points', []):
+            gp_id = gp.get('id', 0)
+            grasp_validity = gp.get('grasp_validity', {})
+            w_x = grasp_validity.get('x_axis_gripper_width_mm')
+            # w_y = grasp_validity.get('y_axis_gripper_width_mm')
+            if w_x is not None:
+                points.append({"id": gp_id, "gripper_width_mm": w_x})
+        return points
+    except Exception:
+        return []
+
+
+# ========== MCP RESOURCES ==========
+
+@mcp.resource("assembly://{assembly_id}/objects")
+def assembly_objects(assembly_id: str) -> str:
+    """Objects in this assembly with their assembly order and subtypes."""
+    config = _load_assembly_config(assembly_id)
+    if not config:
+        return json.dumps({"error": f"Assembly config not found for '{assembly_id}'"})
+
+    base_name = None
+    objects = []
+    for comp in config.get("components", []):
+        if comp.get("type") == "board":
+            base_name = comp["name"]
+            continue
+        obj_name = comp["name"]
+        objects.append({
+            "name": obj_name,
+            "subtype": comp.get("subtype", ""),
+            "assembly_order": comp.get("assembly_order"),
+            "grasp_points": _load_grasp_points(obj_name),
+        })
+
+    objects.sort(key=lambda o: o.get("assembly_order", 0))
+    return json.dumps({
+        "assembly_id": assembly_id,
+        "base_name": base_name,
+        "objects": objects,
+    }, indent=2)
+
+
+@mcp.resource("assembly://{assembly_id}/results/{task_type}")
+def results_resource(assembly_id: str, task_type: str) -> str:
+    """Assembly or disassembly results for this assembly."""
+    if task_type not in MODES:
+        return json.dumps({"error": f"Invalid task_type: '{task_type}'. Must be one of: {sorted(MODES.keys())}"})
+    return json.dumps(_read_results(task_type, assembly_id), indent=2)
 
 
 # ========== GENERIC HELPERS ==========
@@ -271,17 +382,6 @@ def _clear_results(mode: str, assembly_id: str) -> dict:
         return _err(str(e))
 
 
-def _list_results(mode: str) -> dict:
-    """Shared list logic."""
-    prefix = MODES[mode]["prefix"]
-    pattern = f"{prefix}_*_results.json"
-    assembly_ids = []
-    for f in LOGS_DIR.glob(pattern):
-        name = f.stem
-        if name.startswith(f"{prefix}_") and name.endswith("_results"):
-            assembly_ids.append(name[len(prefix) + 1 : -len("_results")])
-    return {"assembly_ids": assembly_ids, "count": len(assembly_ids)}
-
 
 # ========== UNIFIED MCP TOOLS ==========
 
@@ -319,21 +419,6 @@ class DisassemblyResults(BaseModel):
     assembly_id: str
     base_name: str
     disassembly_order: List[DisassemblyEntry] = Field(default_factory=list, description="Ordered list of disassembly results")
-
-@mcp.tool()
-def read_results(
-    task_type: Literal["assembly", "disassembly"],
-    assembly_id: AssemblyId,
-) -> AssemblyResults | DisassemblyResults:
-    """Read assembly or disassembly results for a specific assembly.
-
-    Returns:
-        assembly_id: the assembly identifier
-        base_name: the assembly base
-        assembly_order or disassembly_order: list of entries, each with object_name, order position, grasp_id (disassembly only), tool_sequence (assembly only), comment, and previous (archived versions)"""
-    if err := _validate_task_type(task_type):
-        return err
-    return _read_results(task_type, assembly_id)
 
 
 @mcp.tool()
@@ -405,102 +490,6 @@ def clear_results(
         return err
     return _clear_results(task_type, assembly_id)
 
-
-class ResultListResponse(BaseModel):
-    """Return schema for listing assemblies."""
-    assembly_ids: List[str] = Field(description="IDs of assemblies that have results")
-    count: int
-
-@mcp.tool()
-def list_results(
-    task_type: Literal["assembly", "disassembly"],
-) -> ResultListResponse:
-    """List all assemblies that have results.
-
-    Returns:
-        assembly_ids: list of assembly IDs that have results
-        count: number of assemblies found"""
-    if err := _validate_task_type(task_type):
-        return err
-    return _list_results(task_type)
-
-
-# ========== ELICITATION TOOL FOR LOG MANAGEMENT ==========
-
-class ClearLogsConfirmation(BaseModel):
-    """Schema for confirming log deletion."""
-    confirm_delete: bool = Field(
-        default=False,
-        description="Delete ALL listed log files? This cannot be undone."
-    )
-
-@mcp.tool()
-async def clear_all_logs(ctx: Context[ServerSession, None]) -> dict:
-    """Clear all log files with user confirmation via elicitation. Shows existing log files and asks for confirmation before deleting.
-
-    Returns:
-        status: "success", "partial", "cancelled", "info", or "error"
-        message: description of what happened
-        deleted_files: list of filenames deleted (on success)
-        errors: list of deletion errors (on partial failure)
-        files_found: list of log files found (on cancel/error)"""
-    # Get all log files
-    log_patterns = [
-        "Disassembly_*_results.json",
-        "Assembly_*_results.json",
-    ]
-
-    all_files = []
-    for pattern in log_patterns:
-        files = list(LOGS_DIR.glob(pattern))
-        all_files.extend([f.name for f in files])
-
-    all_files.sort()
-
-    if not all_files:
-        return {"status": "info", "message": "No log files found in logs directory", "logs_dir": str(LOGS_DIR)}
-
-    file_list = "\n".join(f"  - {f}" for f in all_files)
-
-    try:
-        result = await ctx.elicit(
-            message=f"Found {len(all_files)} log file(s):\n{file_list}\n\nWould you like to delete them all?",
-            schema=ClearLogsConfirmation
-        )
-
-        if result.action == "accept" and result.data:
-            if not result.data.confirm_delete:
-                return {"status": "cancelled", "message": "Deletion cancelled by user"}
-
-            deleted_files = []
-            errors = []
-            for filename in all_files:
-                try:
-                    (LOGS_DIR / filename).unlink()
-                    deleted_files.append(filename)
-                except Exception as e:
-                    errors.append(f"{filename}: {str(e)}")
-
-            return {
-                "status": "success" if not errors else "partial",
-                "deleted_files": deleted_files,
-                "errors": errors if errors else None,
-                "message": f"Deleted {len(deleted_files)} file(s)",
-            }
-
-        else:
-            return {"status": "cancelled", "message": "Elicitation declined or cancelled", "files_found": all_files}
-
-    except Exception as e:
-        error_msg = str(e)
-        if "Method not found" in error_msg:
-            return {
-                "status": "error",
-                "message": "Elicitation not supported by this client",
-                "files_found": all_files,
-                "hint": "Use clear_results tool directly",
-            }
-        return {"status": "error", "message": f"Elicitation failed: {error_msg}", "files_found": all_files}
 
 
 if __name__ == "__main__":
