@@ -209,29 +209,6 @@ class MoveToClearArea(Node):
             rclpy.shutdown()
             return False
 
-        # Compute gripper center position
-        ee_rot = Rot.from_quat(self.ee_quat).as_matrix()
-        gripper_center = self.ee_position + ee_rot @ GRIPPER_CENTER_TOOL_OFFSET
-
-        # Get object position
-        obj_t = self.object_poses[self.object_name].transform.translation
-        object_pos = np.array([obj_t.x, obj_t.y, obj_t.z])
-
-        grasp_distance = np.linalg.norm(object_pos - gripper_center)
-        if grasp_distance > GRASP_DISTANCE_THRESHOLD:
-            self.error_message = (
-                f"Grasp check failed: {self.object_name} is {grasp_distance * 1000:.1f}mm "
-                f"from gripper center (threshold: {GRASP_DISTANCE_THRESHOLD * 1000:.0f}mm)."
-            )
-            self.get_logger().error(self.error_message)
-            self.operation_success = False
-            self.operation_complete = True
-            rclpy.shutdown()
-            return False
-
-        self.get_logger().info(
-            f"Grasp verified: {self.object_name} is {grasp_distance * 1000:.1f}mm from gripper center"
-        )
         return True
 
     def quaternion_to_rpy(self, x, y, z, w):

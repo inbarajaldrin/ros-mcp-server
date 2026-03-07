@@ -6,9 +6,9 @@ Modes:
 - --move-to-base: Move to hover position above base (sim: topics, real: provided args)
 - --perform-insert: Sim = move to final position, Real = subprocess to prismatic_peg_insertion.py
 - --move-to-safe-height: Subprocess to move_to_safe_height.py
-- --place-down: Move laterally to clear area then lower onto table
+- --move-away-from-base: Move laterally to clear area then lower onto table
 
-Note: --move-to-base, --perform-insert, --move-to-safe-height, and --place-down are mutually exclusive.
+Note: --move-to-base, --perform-insert, --move-to-safe-height, and --move-away-from-base are mutually exclusive.
 
 Usage:
     # Sim mode - move to hover above base
@@ -27,7 +27,7 @@ Usage:
     python3 translate_object.py --mode sim --move-to-safe-height
 
     # Place on clear area (lateral move + lower)
-    python3 translate_object.py --mode real --place-down
+    python3 translate_object.py --mode real --move-away-from-base
 """
 
 import sys
@@ -59,7 +59,7 @@ def _subprocess_fast_path():
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--mode', type=str, default='sim')
     pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
-    pre.add_argument('--place-down', action='store_true', dest='place_down')
+    pre.add_argument('--move-away-from-base', action='store_true', dest='move_away_from_base')
     pre.add_argument('--perform-insert', action='store_true', dest='perform_insert')
     pre.add_argument('--object-name', type=str, default=None)
     pre.add_argument('--base-name', type=str, default=None)
@@ -73,7 +73,7 @@ def _subprocess_fast_path():
 
     is_fast = (
         args.move_to_safe_height
-        or args.place_down
+        or args.move_away_from_base
         or (args.perform_insert and args.mode == 'real')
     )
     if not is_fast:
@@ -146,27 +146,14 @@ def _subprocess_fast_path():
     pdir = os.path.dirname(os.path.abspath(__file__))
 
     if args.move_to_safe_height:
-        if not args.object_name:
-            _output({"result": "failure", "mode": args.mode, "movement_type": "move_to_safe_height",
-                     "error": "object_name is required for move_to_safe_height"})
-            sys.exit(1)
-        log.info(f"Verifying object {args.object_name} is released before moving to safe height")
-        qdir = os.path.join(os.path.dirname(pdir), 'queries')
-        ok, out = _run(os.path.join(qdir, 'verify_grasp.py'),
-                       ['--object-name', args.object_name, '--mode', args.mode], timeout=15)
-        vj = _extract_json(out)
-        if vj and vj.get('result') == 'success':
-            _output({"result": "failure", "mode": args.mode, "movement_type": "move_to_safe_height",
-                     "error": f"Object {args.object_name} is still grasped — release it before move_to_safe_height"})
-            sys.exit(1)
         log.info("Moving to safe height...")
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_safe_height.py'), timeout=40)
         _finish(ok, out, "move_to_safe_height")
 
-    if args.place_down:
+    if args.move_away_from_base:
         if not args.object_name:
-            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
-                     "error": "object_name is required for place_down"})
+            _output({"result": "failure", "mode": args.mode, "movement_type": "move_away_from_base",
+                     "error": "object_name is required for move_away_from_base"})
             sys.exit(1)
         log.info(f"Verifying grasp on {args.object_name} before placing down")
         qdir = os.path.join(os.path.dirname(pdir), 'queries')
@@ -175,17 +162,17 @@ def _subprocess_fast_path():
         vj = _extract_json(out)
         if not ok or (vj and vj.get('result') == 'failure'):
             err = vj.get('error', 'grasp check failed') if vj else 'grasp check failed'
-            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
-                     "error": f"Grasp check failed before place_down: {err}"})
+            _output({"result": "failure", "mode": args.mode, "movement_type": "move_away_from_base",
+                     "error": f"Grasp check failed before move_away_from_base: {err}"})
             sys.exit(1)
         log.info("Placing object on clear area")
         ca = ['--move', '--mode', args.mode, '--object-name', args.object_name]
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
         if not ok:
-            _finish(ok, out, "place_down")
+            _finish(ok, out, "move_away_from_base")
         log.info("Lowering object onto table")
         ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
-        _finish(ok, out, "place_down")
+        _finish(ok, out, "move_away_from_base")
 
     if args.perform_insert:
         itype = args.insertion_type
@@ -580,24 +567,6 @@ class TranslateObject(Node):
             self.error_message = f"Base {base_name} not found"
             self.get_logger().error(self.error_message)
             return False
-
-        # Verify grasp
-        tcp_pos = np.array([self.current_ee_pose.pose.position.x,
-                            self.current_ee_pose.pose.position.y,
-                            self.current_ee_pose.pose.position.z])
-        tcp_quat = np.array([self.current_ee_pose.pose.orientation.x,
-                             self.current_ee_pose.pose.orientation.y,
-                             self.current_ee_pose.pose.orientation.z,
-                             self.current_ee_pose.pose.orientation.w])
-        gripper_center = tcp_pos + R.from_quat(tcp_quat).as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
-        obj_transform = self.current_poses[object_name].transform
-        object_pos = np.array([obj_transform.translation.x, obj_transform.translation.y, obj_transform.translation.z])
-        grasp_distance = np.linalg.norm(object_pos - gripper_center)
-        if grasp_distance > 0.06:
-            self.error_message = f"Grasp check failed: {object_name} is {grasp_distance * 1000:.1f}mm from gripper center."
-            self.get_logger().error(self.error_message)
-            return False
-        self.get_logger().info(f"Grasp verified: {object_name} is {grasp_distance * 1000:.1f}mm from gripper center")
 
         # Convert poses to matrices
         T_EE_current = self.pose_to_matrix(self.current_ee_pose.pose)
@@ -1192,7 +1161,7 @@ def main():
     parser.add_argument('--move-to-base', action='store_true')
     parser.add_argument('--perform-insert', action='store_true', dest='perform_insert')
     parser.add_argument('--move-to-safe-height', action='store_true')
-    parser.add_argument('--place-down', action='store_true')
+    parser.add_argument('--move-away-from-base', action='store_true')
 
     # Real mode arguments
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
@@ -1205,14 +1174,14 @@ def main():
     args = parser.parse_args()
 
     # Validate flags
-    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.place_down])
+    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.move_away_from_base])
     if flags_set == 0:
-        parser.error("Specify one of --move-to-base, --perform-insert, --move-to-safe-height, --place-down")
+        parser.error("Specify one of --move-to-base, --perform-insert, --move-to-safe-height, --move-away-from-base")
     if flags_set > 1:
         parser.error("Cannot use multiple movement flags together")
 
     # Validate sim mode requirements
-    if args.mode == 'sim' and not args.move_to_safe_height and not args.place_down:
+    if args.mode == 'sim' and not args.move_to_safe_height and not args.move_away_from_base:
         if args.object_name is None:
             parser.error("--object-name is required in sim mode")
         if args.base_name is None:
@@ -1243,18 +1212,18 @@ def main():
             })
         sys.exit(0 if success else 1)
 
-    if args.place_down:
+    if args.move_away_from_base:
         success, output_text = run_move_to_clear_area(object_name=args.object_name, mode=args.mode)
         if not success:
             subprocess_json = extract_json_from_output(output_text)
             if subprocess_json:
-                subprocess_json["movement_type"] = "place_down"
+                subprocess_json["movement_type"] = "move_away_from_base"
                 subprocess_json["mode"] = args.mode
                 output_result(subprocess_json)
             else:
                 output_result({
                     "result": "failure", "mode": args.mode,
-                    "movement_type": "place_down",
+                    "movement_type": "move_away_from_base",
                     "error": "move_to_clear_area failed",
                 })
             sys.exit(1)
@@ -1262,14 +1231,14 @@ def main():
         success, output_text = run_move_down(mode=args.mode)
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
-            subprocess_json["movement_type"] = "place_down"
+            subprocess_json["movement_type"] = "move_away_from_base"
             subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             output_result({
                 "result": "success" if success else "failure",
                 "mode": args.mode,
-                "movement_type": "place_down",
+                "movement_type": "move_away_from_base",
                 **({"error": "move_down failed"} if not success else {}),
             })
         sys.exit(0 if success else 1)
@@ -1293,6 +1262,31 @@ def main():
         sys.exit(0 if success else 1)
 
     # --- ROS node paths (sim move-to-base, sim perform-insert, real move-to-base) ---
+
+    # Verify grasp before move_to_base or perform_insert
+    if args.mode == 'sim' and args.object_name:
+        movement_type = "move_to_base" if args.move_to_base else "perform_insert"
+        logger.info(f"Verifying grasp on {args.object_name} before {movement_type}")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        vg_script = os.path.join(os.path.dirname(script_dir), 'queries', 'verify_grasp.py')
+        vg_result = subprocess.run(
+            [sys.executable, vg_script, '--object-name', args.object_name, '--mode', args.mode],
+            capture_output=True, text=True, timeout=15
+        )
+        vg_out = (vg_result.stdout or '') + (vg_result.stderr or '')
+        if '__RESULT_JSON__' in vg_out:
+            json_str = vg_out[vg_out.rfind('__RESULT_JSON__') + len('__RESULT_JSON__'):vg_out.rfind('__END_RESULT_JSON__')].strip()
+            try:
+                vj = json.loads(json_str)
+            except json.JSONDecodeError:
+                vj = None
+        else:
+            vj = None
+        if vg_result.returncode != 0 or (vj and vj.get('result') == 'failure'):
+            err = vj.get('error', 'grasp check failed') if vj else 'grasp check failed'
+            output_result({"result": "failure", "mode": args.mode, "movement_type": movement_type,
+                     "error": f"Grasp check failed before {movement_type}: {err}"})
+            sys.exit(1)
 
     rclpy.init()
     node = None

@@ -489,10 +489,11 @@ def main(args=None):
         # Control with verification
         success = controller.control_with_verification(initial_value)
 
-        if not success:
-            if controller.asymmetry > controller.asymmetry_threshold:
-                error = "Gripper jammed: fingers are asymmetric. Reposition and retry."
-            elif controller.blocked:
+        if controller.asymmetry > controller.asymmetry_threshold:
+            success = False
+            error = "Gripper jammed: fingers are asymmetric."
+        elif not success:
+            if controller.blocked:
                 if known_args.command == "close":
                     error = "Gripper already closed on object. Open the gripper to release first."
                 else:

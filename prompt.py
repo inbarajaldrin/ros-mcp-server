@@ -20,6 +20,9 @@ This means the robotic arm hasnt moved yet and is still holding the object.
 
 2. It's important to keep a track of what state the gripper is when manipulating an object.
 Open and close the gripper to attach or detach the object to the robotic arm.
+Always use gripper_width_mm from the resource provided for both approach and release — it already includes tolerance for the grasp region, so opening beyond gripper_width_mm risks damaging the object or the gripper.
+
+3. Gripper failures (jam, asymmetry) indicate collisions between the gripper and the object — the current grasp point is not accessible.
 
 Use the tools provided to you in order as per requirement to complete a given task"""
 
@@ -59,7 +62,7 @@ Save scene state at the start before beginning disassembly.
 
 **Task**
 
-Your goal is to disassemble this top down assembly thereby figuring out which grasp ids let you perform the disassembly.
+Your goal is to disassemble this top down assembly by moving each object away from the base and placing it on the clear region in the workspace, thereby figuring out which grasp ids let you perform the disassembly.
 Disassemble in reverse assembly order. The information you collect in this run will be used later to perform assembly.
 
 **Execution**
@@ -79,7 +82,7 @@ Run verify disassembly once you've ran all tools required to move one object awa
 
 **FAILURE** — verify disassembly returns failure:
 1. Restore scene state.
-2. Try disassembling the object using a different grasp id.
+2. Try disassembling the object using a different grasp id. Not all grasp points are accessible from every object orientation.
 
 **Post Execution**
 Signal the client you are done with the disassembly of all objects.

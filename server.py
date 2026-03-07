@@ -41,7 +41,7 @@ logger = logging.getLogger("RosMCPServer")
 Mode = Literal["sim", "real"]
 GripperCommand = str  # "close" or numeric mm value (e.g. "35")
 MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
-TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "place_down"]
+TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
 PhaseNumber = Literal[1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
 
@@ -663,10 +663,10 @@ class GraspVerificationResult(BaseModel):
 def verify_grasp(
     object_name: str,
     mode: Mode = "sim",
-    grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode.")] = None,
+    grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Required for both sim and real mode.")] = None,
     current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] from get_scene_info current_pose. Ignored in sim mode. Required in real mode.")] = None,
 ) -> GraspVerificationResult:
-    """Verify if object is within grasp radius from gripper center. Call after move_to_grasp(action='move_to_safe_height').
+    """Verify if the object is grasped.
 
     Returns:
         result: "success" or "failure"
@@ -689,7 +689,10 @@ def verify_grasp(
         quat_str = " ".join(str(v) for v in current_object_orientation)
         cmd = f"--object-name \"{object_name}\" --mode real --grasp-id {grasp_id} --current-object-orientation {quat_str}"
     elif mode == "sim":
-        cmd = f"--object-name \"{object_name}\" --mode sim --radius 0.06"
+        if grasp_id is None:
+            return {"result": "failure", "object_name": object_name, "mode": "sim",
+                   "error": "grasp_id is required — pass the grasp point ID used during move_to_grasp"}
+        cmd = f"--object-name \"{object_name}\" --mode sim --radius 0.06 --grasp-id {grasp_id}"
     else:
         return {"result": "failure", "object_name": object_name,
                 "error": f"Invalid mode '{mode}'. Must be 'sim' or 'real'."}
@@ -891,7 +894,7 @@ async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, An
 ## ############################################################################################## ##
 
 @mcp.tool()
-def move_home(mode: Mode = "sim") -> Dict[str, Any]:
+def move_home(mode: Mode = "real") -> Dict[str, Any]:
     """Move robot to home position. Rejected if the robot is currently holding an object (sim mode only).
 
     Returns:
@@ -907,7 +910,7 @@ class GripperResult(BaseModel):
 
 @mcp.tool()
 def control_gripper(
-    command: Annotated[GripperCommand, Field(description="close = close jaws on object. Numeric value (e.g. 35) = open to that width in mm. Three steps per object: (1) gripper_width_mm before move_to_object (approach), (2) close to grasp the object, (3) gripper_width_mm after place_down or perform_insert (release). Always use gripper_width_mm from the resource provided for both approach and release — some objects have narrow grasp regions, so opening beyond gripper_width_mm risks damaging the object or the gripper.")],
+    command: Annotated[GripperCommand, Field(description="close = close jaws on object. Numeric value (e.g. 35) = open to that width in mm. Three steps per object: (1) gripper_width_mm before move_to_object (approach), (2) close to grasp the object, (3) gripper_width_mm after move_away_from_base or perform_insert (release).")],
     mode: Mode = "sim",
 ) -> GripperResult:
     """Control gripper width for grasping or releasing objects.
@@ -995,9 +998,9 @@ class TranslateObjectResult(BaseModel):
 def translate_object(
     action: Annotated[TranslateAction, Field(description=(
         "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
-        "perform_insert: Insert the object downward into the base. Call after move_to_base. Verify object orientation is correct before calling. "
-        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after releasing the object. Call after opening the gripper post-insertion. "
-        "place_down: Used during disassembly or regrasp. Moves laterally to clear region, lowers the arm, and places the object on the table. Rotate the object after regrasping to restore the target orientation as placing the object down will cause minor orientation changes."
+        "perform_insert: Insert the object downward into the base. Call after move_to_base. Call move_to_safe_height after opening the gripper post-insertion. "
+        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). "
+        "move_away_from_base: Moves laterally away from base to clear region, lowers the arm, and places the object on the table. Call move_to_safe_height before move_away_from_base. Control gripper to release the object. Can also be used when the object needs regrasping when motion planning fails for current arm orientation. When regrasping, move_to_grasp fixes the orientation but the object remains in its new orientation. Minor orientation changes may occur when the object was placed down — call rotate_object after regrasping to correct."
     ))],
     object_name: str,
     mode: Mode = "sim",
@@ -1019,7 +1022,7 @@ def translate_object(
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
 
-    if mode == "real" and action not in ["place_down", "move_to_safe_height"]:
+    if mode == "real" and action not in ["move_away_from_base", "move_to_safe_height"]:
         missing = []
         if grasp_id is None:
             missing.append("grasp_id")
@@ -1029,10 +1032,11 @@ def translate_object(
             return {"result": "failure",
                     "error": f"Real mode requires: {', '.join(missing)}"}
 
+    cli_action = action
     cmd = f"--mode {mode} --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
-    cmd += f" --{action.replace('_', '-')}"
+    cmd += f" --{cli_action.replace('_', '-')}"
     if grasp_id is not None:
         cmd += f" --grasp-id {grasp_id}"
     if current_object_orientation is not None:
@@ -1043,12 +1047,13 @@ def translate_object(
     # Adjust timeout based on action
     if action == "perform_insert":
         timeout = 300
-    elif action in ["move_to_safe_height", "place_down"]:
+    elif action in ["move_to_safe_height", "move_away_from_base"]:
         timeout = 60
     else:
         timeout = 90
 
-    return _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+    result = _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+    return result
 
 class RotateObjectResult(BaseModel):
     result: Literal["success", "failure"]

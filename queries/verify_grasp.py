@@ -185,12 +185,16 @@ class VerifyGrasp(Node):
         # Gripper width (both modes, different topics)
         self.gripper_width = None
         self.gripper_width_received = False
+        self.gripper_asymmetry = 0.0
+        self.gripper_asymmetry_received = False
         if mode == 'real':
             self.width_sub = self.create_subscription(
                 Float32, '/gripper_width_offset', self.width_callback, 10)
         else:
             self.width_sub = self.create_subscription(
                 Float64, '/gripper_width_sim', self.width_callback_sim, 10)
+            self.asymmetry_sub = self.create_subscription(
+                Float64, '/gripper_asymmetry_sim', self.asymmetry_callback_sim, 10)
 
         # Store current poses
         self.current_poses = {}
@@ -220,6 +224,11 @@ class VerifyGrasp(Node):
         """Callback for gripper width (sim mode, Float64 in mm)"""
         self.gripper_width = msg.data
         self.gripper_width_received = True
+
+    def asymmetry_callback_sim(self, msg):
+        """Callback for gripper asymmetry (sim mode, Float64 in mm)"""
+        self.gripper_asymmetry = msg.data
+        self.gripper_asymmetry_received = True
 
     def compute_gripper_center_from_tcp(self, tcp_position, tcp_quaternion):
         """Compute the gripper center pose from TCP pose using the same logic as move_to_grasp.
@@ -447,27 +456,97 @@ class VerifyGrasp(Node):
         if self.mode == 'real':
             return self.verify_grasp_real()
         elif self.mode == 'sim':
-            # Check gripper width against approach width — if still at approach width, gripper hasn't closed
-            if self.gripper_width_received and self.grasp_id is not None:
-                _, grasp_validity = load_grasp_point_and_validity(
-                    self.object_name, self.grasp_id, logger=self.get_logger()
-                )
-                if grasp_validity:
-                    approach_widths = [
-                        v for k, v in grasp_validity.items()
-                        if k.endswith('_gripper_width_mm') and v is not None
-                    ]
-                    for aw in approach_widths:
-                        if abs(self.gripper_width - aw) <= GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
-                            result = {
-                                'result': 'failure',
-                                'object_name': self.object_name,
-                                'mode': 'sim',
-                                'error': f"Gripper width ({self.gripper_width:.1f}mm) matches approach width ({aw:.1f}mm) - call control_gripper with 'close' before verifying grasp",
-                            }
-                            self.get_logger().error(result['error'])
-                            return False, result
+            # Sim mode: use gripper width as the primary grasp signal.
+            # The distance-based check is unreliable for large objects whose
+            # center can be far from gripper center even when properly grasped.
+            if self.gripper_width_received:
+                self.get_logger().info(f"Gripper width: {self.gripper_width:.1f}mm")
 
+                # Asymmetric gripper = jammed, not a valid grasp
+                ASYMMETRY_THRESHOLD_MM = 15.0
+                if self.gripper_asymmetry_received and self.gripper_asymmetry > ASYMMETRY_THRESHOLD_MM:
+                    result = {
+                        'result': 'failure',
+                        'object_name': self.object_name,
+                        'mode': 'sim',
+                        'error': "Grasp verification failed - gripper is asymmetric (jammed)",
+                    }
+                    self.get_logger().info(f"Gripper asymmetry: {self.gripper_asymmetry:.1f}mm (threshold: {ASYMMETRY_THRESHOLD_MM}mm) — jammed")
+                    return False, result
+
+                # Fully open gripper = definitely not grasping
+                if self.gripper_width >= GRIPPER_MAX_WIDTH_MM - GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
+                    result = {
+                        'result': 'failure',
+                        'object_name': self.object_name,
+                        'mode': 'sim',
+                        'error': "Grasp verification failed - object is not grasped",
+                    }
+                    self.get_logger().info(f"Gripper fully open ({self.gripper_width:.1f}mm) — not grasping")
+                    return False, result
+
+                # Gripper fully closed (~0mm) = missed the object
+                if self.gripper_width <= GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
+                    result = {
+                        'result': 'failure',
+                        'object_name': self.object_name,
+                        'mode': 'sim',
+                        'error': "Grasp verification failed - object is not grasped",
+                    }
+                    self.get_logger().info(f"Gripper fully closed ({self.gripper_width:.1f}mm) — nothing between fingers")
+                    return False, result
+
+                # Check approach widths — if gripper is still at approach width,
+                # it hasn't closed on anything (pre-grasp or re-opened).
+                approach_widths = []
+                if self.grasp_id is not None:
+                    # Known grasp_id: check its specific approach width
+                    _, grasp_validity = load_grasp_point_and_validity(
+                        self.object_name, self.grasp_id, logger=self.get_logger()
+                    )
+                    if grasp_validity:
+                        aw = grasp_validity.get('x_axis_gripper_width_mm')
+                        if aw is not None:
+                            approach_widths = [aw]
+                else:
+                    # No grasp_id: check all grasp points' approach widths
+                    try:
+                        data_dir = get_aruco_data_dir() / "grasp_points"
+                        json_path = data_dir / f"{self.object_name}_grasp_points.json"
+                        if json_path.exists():
+                            with open(json_path, 'r') as f:
+                                data = json.load(f)
+                            for gp in data.get('grasp_points', []):
+                                gv = gp.get('grasp_validity', {})
+                                aw = gv.get('x_axis_gripper_width_mm')
+                                if aw is not None and aw not in approach_widths:
+                                    approach_widths.append(aw)
+                            if approach_widths:
+                                self.get_logger().info(f"No grasp_id — checking all approach widths: {approach_widths}")
+                    except Exception:
+                        pass
+                for aw in approach_widths:
+                    if abs(self.gripper_width - aw) <= GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
+                        result = {
+                            'result': 'failure',
+                            'object_name': self.object_name,
+                            'mode': 'sim',
+                            'error': "Grasp verification failed - object is not grasped",
+                        }
+                        self.get_logger().info(f"Gripper at approach width ({self.gripper_width:.1f}mm ≈ {aw:.1f}mm) — not grasping")
+                        return False, result
+
+                # Gripper is between 0 and approach/max width → holding something
+                self.get_logger().info(f"Gripper holding object (width: {self.gripper_width:.1f}mm)")
+                result = {
+                    'result': 'success',
+                    'object_name': self.object_name,
+                    'mode': 'sim',
+                }
+                return True, result
+
+            # Fallback: no gripper width data, use distance-based check
+            self.get_logger().warning("No gripper width data — falling back to distance check")
             success, distance, object_pos, ref_pos = self.verify_grasp()
             result = {
                 'result': 'success' if success else 'failure',
@@ -561,7 +640,7 @@ def main(args=None):
             start_time = time.time()
             last_log_time = start_time
 
-            while not (node.object_pose_received and node.ee_pose_received and node.gripper_width_received):
+            while not (node.object_pose_received and node.ee_pose_received and node.gripper_width_received and node.gripper_asymmetry_received):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 time.sleep(0.1)
 
@@ -575,6 +654,8 @@ def main(args=None):
                         missing.append("end-effector")
                     if not node.gripper_width_received:
                         missing.append("gripper_width")
+                    if not node.gripper_asymmetry_received:
+                        missing.append("gripper_asymmetry")
                     node.get_logger().info(f"Waiting for ({', '.join(missing)})... ({elapsed:.1f}s)")
                     last_log_time = current_time
 

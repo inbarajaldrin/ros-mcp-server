@@ -7,7 +7,7 @@ models:
     model: claude-sonnet-4-6
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
-  maxIterations: -1
+  maxIterations: 150
   clearContextBetweenPhases: true
 systemPrompt: "@insert-prompt:Prompts__system_context"
 hooks:
@@ -40,6 +40,7 @@ phases:
         whenOutput:
           phase: 1
           status: failure
+          requires_response: false
         run: "@abort"
 
   - name: Assembly sequence discovery
@@ -62,6 +63,7 @@ phases:
         whenOutput:
           phase: 2
           status: failure
+          requires_response: false
         run: "@abort"
 
   - name: Assembly execution (sim)
@@ -84,4 +86,5 @@ phases:
         whenOutput:
           phase: 3
           status: failure
+          requires_response: false
         run: "@abort"

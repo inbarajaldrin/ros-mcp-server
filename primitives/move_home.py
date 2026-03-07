@@ -100,7 +100,7 @@ def check_holding_object_sim():
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Move robot to home position')
-    parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'])
+    parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'])
     parsed = parser.parse_args()
 
     # In sim mode, check if the robot is holding an object before moving home

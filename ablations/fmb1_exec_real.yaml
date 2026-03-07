@@ -17,7 +17,7 @@ models:
     model: gpt-5
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
-  maxIterations: -1
+  maxIterations: 150
 hooks:
   - before: isaac-sim__restore_scene_state
     run: "@tool-exec:ros-mcp-server__move_home(mode='real')"
