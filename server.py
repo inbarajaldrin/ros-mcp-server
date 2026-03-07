@@ -640,7 +640,7 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 def get_scene_info(
     object_name: str,
     base_name: str,
-    mode: Mode = "sim",
+    mode: Mode,
 ) -> Dict[str, Any]:
     """Get complete info for one object: live grasp points, current pose, and target pose with all valid orientations.
 
@@ -662,7 +662,7 @@ class GraspVerificationResult(BaseModel):
 @mcp.tool()
 def verify_grasp(
     object_name: str,
-    mode: Mode = "sim",
+    mode: Mode,
     grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Required for both sim and real mode.")] = None,
     current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w] from get_scene_info current_pose. Ignored in sim mode. Required in real mode.")] = None,
 ) -> GraspVerificationResult:
@@ -738,9 +738,9 @@ class CheckAllAssemblyVerification(BaseModel):
 @mcp.tool()
 def verify_assembly(
     base_name: str,
+    mode: Mode,
     object_name: Annotated[Optional[str], Field(description="Optional if check_all is True")] = None,
     check_all: Annotated[bool, Field(description="Check all objects instead of a specific one (sim mode only)")] = False,
-    mode: Mode = "sim",
 ) -> SingleAssemblyVerification | CheckAllAssemblyVerification:
     """Verify if object(s) are assembled into the base.
 
@@ -789,9 +789,9 @@ class CheckAllDisassemblyVerification(BaseModel):
 @mcp.tool()
 def verify_disassembly(
     base_name: str,
+    mode: Mode,
     object_name: Annotated[Optional[str], Field(description="Optional if check_all is True")] = None,
     check_all: Annotated[bool, Field(description="Check all objects instead of a specific one")] = False,
-    mode: Mode = "sim",
 ) -> SingleDisassemblyVerification | CheckAllDisassemblyVerification:
     """Verify if object(s) have been disassembled from the base.
 
@@ -817,7 +817,7 @@ class ClearanceResult(BaseModel):
 async def verify_clearance(
     base_name: str,
     ctx: Context[ServerSession, None],
-    mode: Mode = "sim",
+    mode: Mode,
 ) -> ClearanceResult:
     """Verify all objects have enough clearance for the gripper to operate.
 
@@ -894,7 +894,7 @@ async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, An
 ## ############################################################################################## ##
 
 @mcp.tool()
-def move_home(mode: Mode = "real") -> Dict[str, Any]:
+def move_home(mode: Mode) -> Dict[str, Any]:
     """Move robot to home position. Rejected if the robot is currently holding an object (sim mode only).
 
     Returns:
@@ -911,7 +911,7 @@ class GripperResult(BaseModel):
 @mcp.tool()
 def control_gripper(
     command: Annotated[GripperCommand, Field(description="close = close jaws on object. Numeric value (e.g. 35) = open to that width in mm. Three steps per object: (1) gripper_width_mm before move_to_object (approach), (2) close to grasp the object, (3) gripper_width_mm after move_away_from_base or perform_insert (release).")],
-    mode: Mode = "sim",
+    mode: Mode,
 ) -> GripperResult:
     """Control gripper width for grasping or releasing objects.
 
@@ -969,7 +969,7 @@ def move_to_grasp(
         "move_to_object: Move robotic arm down to the object's grasp point. Gripper must be set to gripper_width_mm before calling. "
         "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after grasping. Call after closing the gripper."
     ))],
-    mode: Mode = "sim",
+    mode: Mode,
 ) -> MoveToGraspResult:
     """Move to grasp position.
 
@@ -1003,7 +1003,7 @@ def translate_object(
         "move_away_from_base: Moves laterally away from base to clear region, lowers the arm, and places the object on the table. Call move_to_safe_height before move_away_from_base. Control gripper to release the object. Can also be used when the object needs regrasping when motion planning fails for current arm orientation. When regrasping, move_to_grasp fixes the orientation but the object remains in its new orientation. Minor orientation changes may occur when the object was placed down — call rotate_object after regrasping to correct."
     ))],
     object_name: str,
-    mode: Mode = "sim",
+    mode: Mode,
     base_name: Annotated[Optional[str], Field(description="The assembly base. Required for move_to_base and perform_insert only.")] = None,
     grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
     current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
@@ -1069,7 +1069,7 @@ class RotateObjectResult(BaseModel):
 def rotate_object(
     object_name: Annotated[str, Field(description="The object being held by the gripper")],
     base_name: Annotated[str, Field(description="The assembly base to rotate relative to")],
-    mode: Mode = "sim",
+    mode: Mode,
     current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Required for real mode only")] = None,
 ) -> RotateObjectResult:
     """Rotates object from current to target orientation relative to base orientation based on fold symmetry of the object.
@@ -1111,8 +1111,8 @@ async def signal_phase_complete(
     phase: Annotated[PhaseNumber, Field(description="Phase number")],
     status: PhaseStatus,
     ctx: Context[ServerSession, None],
+    mode: Mode,
     comment: Annotated[str, Field(description="Should explain failure reasons")] = "",
-    mode: Mode = "sim",
     base_name: Annotated[str, Field(description="Assembly base name")] = "",
 ) -> Dict[str, Any]:
     """Signal completion of an assembly phase to the MCP client.
@@ -1144,8 +1144,8 @@ class SignalOperatorResult(BaseModel):
 async def signal_operator(
     message: Annotated[str, Field(description="Description of what the robot has done and what the operator needs to do before the robot can continue.")],
     ctx: Context[ServerSession, None],
+    mode: Mode,
     reason: Annotated[str, Field(description='Short tag for the client to categorize the signal.')] = "",
-    mode: Mode = "sim",
 ) -> SignalOperatorResult:
     """Signal a human operator and wait for confirmation before proceeding.
 

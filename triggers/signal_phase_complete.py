@@ -42,8 +42,8 @@ async def handle_phase_signal(
     status: Literal["success", "failure"],
     comment: str,
     ctx: Context[ServerSession, None],
+    mode: Literal["sim", "real"],
     elicit_user_fn=None,
-    mode: Literal["sim", "real"] = "sim",
     base_name: Optional[str] = None,
     verify_disassembly_fn: Optional[Callable] = None,
     verify_assembly_fn: Optional[Callable] = None,
@@ -81,7 +81,7 @@ async def handle_phase_signal(
 def _handle_phase_1(
     status: Literal["success", "failure"],
     comment: str,
-    mode: Literal["sim", "real"] = "sim",
+    mode: Literal["sim", "real"],
     base_name: Optional[str] = None,
     verify_disassembly_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
@@ -126,7 +126,7 @@ def _handle_phase_1(
 def _handle_phase_2(
     status: Literal["success", "failure"],
     comment: str,
-    mode: Literal["sim", "real"] = "sim",
+    mode: Literal["sim", "real"],
     base_name: Optional[str] = None,
     verify_assembly_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
@@ -167,7 +167,7 @@ async def _handle_phase_3(
     comment: str,
     ctx: Context[ServerSession, None],
     elicit_user_fn,
-    mode: Literal["sim", "real"] = "sim",
+    mode: Literal["sim", "real"],
     base_name: Optional[str] = None,
     verify_assembly_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
