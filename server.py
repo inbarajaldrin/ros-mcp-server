@@ -999,7 +999,7 @@ def translate_object(
     action: Annotated[TranslateAction, Field(description=(
         "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
         "perform_insert: Insert the object downward into the base. Call after move_to_base. Call move_to_safe_height after opening the gripper post-insertion. "
-        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). "
+        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Called either before move_away_from_base (object still held) or after releasing the object post-insertion. "
         "move_away_from_base: Moves laterally away from base to clear region, lowers the arm, and places the object on the table. Call move_to_safe_height before move_away_from_base. Control gripper to release the object. Can also be used when the object needs regrasping when motion planning fails for current arm orientation. When regrasping, move_to_grasp fixes the orientation but the object remains in its new orientation. Minor orientation changes may occur when the object was placed down — call rotate_object after regrasping to correct."
     ))],
     object_name: str,

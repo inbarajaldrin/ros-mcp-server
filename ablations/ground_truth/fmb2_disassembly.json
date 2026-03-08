@@ -1,0 +1,10 @@
+{
+  "assembly_id": "fmb_assembly_2",
+  "base_name": "base2",
+  "disassembly_order": [
+    { "position": 1, "object_name": "hex_blue",       "grasp_id": 2, "gripper_width_mm": 30.2 },
+    { "position": 2, "object_name": "hex_red",        "grasp_id": 2, "gripper_width_mm": 30.2 },
+    { "position": 3, "object_name": "inverted_u_brown","grasp_id": 2, "gripper_width_mm": 56.1 },
+    { "position": 4, "object_name": "u_green",        "grasp_id": 1, "gripper_width_mm": 35.0 }
+  ]
+}

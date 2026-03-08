@@ -1,0 +1,66 @@
+{
+  "assembly_id": "fmb_assembly_2",
+  "base_name": "base2",
+  "objects": [
+    {
+      "object_name": "u_green",
+      "valid_grasps": [
+        {
+          "grasp_id": 1,
+          "gripper_width_mm": 35.0
+        },
+        {
+          "grasp_id": 2,
+          "gripper_width_mm": 84.0
+        },
+        {
+          "grasp_id": 3,
+          "gripper_width_mm": 35.0
+        }
+      ]
+    },
+    {
+      "object_name": "inverted_u_brown",
+      "valid_grasps": [
+        {
+          "grasp_id": 1,
+          "gripper_width_mm": 74.4
+        },
+        {
+          "grasp_id": 2,
+          "gripper_width_mm": 56.1
+        },
+        {
+          "grasp_id": 3,
+          "gripper_width_mm": 74.4
+        }
+      ]
+    },
+    {
+      "object_name": "hex_red",
+      "valid_grasps": [
+        {
+          "grasp_id": 1,
+          "gripper_width_mm": 24.4
+        },
+        {
+          "grasp_id": 2,
+          "gripper_width_mm": 30.2
+        }
+      ]
+    },
+    {
+      "object_name": "hex_blue",
+      "valid_grasps": [
+        {
+          "grasp_id": 1,
+          "gripper_width_mm": 24.4
+        },
+        {
+          "grasp_id": 2,
+          "gripper_width_mm": 30.2
+        }
+      ]
+    }
+  ]
+}

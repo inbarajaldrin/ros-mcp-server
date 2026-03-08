@@ -1,0 +1,10 @@
+{
+  "assembly_id": "fmb_assembly_1",
+  "base_name": "base1",
+  "assembly_order": [
+    { "position": 1, "object_name": "u_brown",            "grasp_id": 1, "gripper_width_mm": 35.0,  "pattern": "with_regrasp"    },
+    { "position": 2, "object_name": "u_orange",           "grasp_id": 1, "gripper_width_mm": 35.0,  "pattern": "with_regrasp"    },
+    { "position": 3, "object_name": "line_green",         "grasp_id": 1, "gripper_width_mm": 39.8,  "pattern": "without_regrasp" },
+    { "position": 4, "object_name": "inverted_u_yellow",  "grasp_id": 2, "gripper_width_mm": 56.7,  "pattern": "with_regrasp"    }
+  ]
+}

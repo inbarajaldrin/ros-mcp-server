@@ -29,7 +29,7 @@ Use the tools provided to you in order as per requirement to complete a given ta
 
 @mcp.prompt()
 def phase_1_disassembly_sequence_discovery(
-    orchestrator: Annotated[Literal["enabled", "disabled", "permissive"], Field(description="Orchestration mode: permissive (default, may orchestrate), enabled (must orchestrate, fallback to individual on failure), disabled (individual calls only)")] = "permissive"
+    orchestrator: Annotated[Literal["enabled"], Field(description="Set to 'enabled' to require orchestration: once a working sequence is verified for one object, orchestrate remaining objects (fallback to individual calls on failure)")] = None
 ) -> str:
     """
     Phase 1: Disassembly sequence discovery in a simulated environment.
@@ -39,17 +39,12 @@ def phase_1_disassembly_sequence_discovery(
         orchestrator_instruction = (
             "Once you have verified a working sequence of tool calls for one object, "
             "orchestrate the tools to perform a composed policy for the remaining objects. "
-            "If orchestration fails for an object, fall back to individual tool calls for that object."
-        )
-    elif orchestrator == "disabled":
-        orchestrator_instruction = (
-            "DO NOT orchestrate the tools to perform a composed policy. "
-            "Perform each step using individual tool calls for every object."
+            "If orchestration fails for any reason, fall back to individual tool calls."
         )
     else:
         orchestrator_instruction = (
-            "You can orchestrate the tools to perform a composed policy to disassemble "
-            "the remaining objects once you have verified a working sequence for one object."
+            "Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object. "
+            "Continue till you have disassembled all the objects."
         )
 
     return f"""**Initialization:**
@@ -68,7 +63,6 @@ Disassemble in reverse assembly order. The information you collect in this run w
 **Execution**
 
 Use existing tools to perform disassembly one object at a time.
-Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object.
 {orchestrator_instruction}
 
 **Verification**

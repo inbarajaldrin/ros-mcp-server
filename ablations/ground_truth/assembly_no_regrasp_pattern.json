@@ -1,0 +1,16 @@
+{
+  "pattern": "assembly_without_regrasp",
+  "applies_to": "line shapes",
+  "step_count": 9,
+  "sequence": [
+    { "step": 1, "tool": "control_gripper",  "action": "open",               "arg": "width" },
+    { "step": 2, "tool": "move_to_grasp",    "action": "move_to_object" },
+    { "step": 3, "tool": "control_gripper",  "action": "close" },
+    { "step": 4, "tool": "move_to_grasp",    "action": "move_to_safe_height" },
+    { "step": 5, "tool": "rotate_object" },
+    { "step": 6, "tool": "translate_object", "action": "move_to_base" },
+    { "step": 7, "tool": "translate_object", "action": "perform_insert" },
+    { "step": 8, "tool": "control_gripper",  "action": "open",               "arg": "width" },
+    { "step": 9, "tool": "translate_object", "action": "move_to_safe_height" }
+  ]
+}

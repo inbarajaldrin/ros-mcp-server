@@ -291,7 +291,6 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
         entry[field] = extra_fields[field]
     if comment:
         entry["comment"] = comment
-    entry["previous"] = []
 
     # Find or create object entry
     order_list = data.get(order_key, [])
@@ -304,12 +303,7 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
                 f"{order_key} mismatch: object '{object_name}' already has "
                 f"{order_key} {existing.get(order_key)}, cannot change to {order_position}"
             )
-        # Object already exists — overwrite (move current to previous)
-        prev = existing.get("previous", [])
-        # Archive current active fields
-        archived = {k: v for k, v in existing.items() if k not in ("previous",)}
-        prev.append(archived)
-        entry["previous"] = prev
+        # Object already exists — overwrite
         order_list[obj_idx] = entry
     else:
         order_list.append(entry)
@@ -341,10 +335,6 @@ def _update_results(mode: str, assembly_id: str, object_name: str,
     if mode == "assembly" and "tool_sequence" in extra_fields:
         if err := _validate_assembly_extras(extra_fields["tool_sequence"]):
             return err
-    # Archive current to previous
-    prev = existing.get("previous", [])
-    archived = {k: v for k, v in existing.items() if k not in ("previous",)}
-    prev.append(archived)
 
     # Build updated entry — keep existing values for fields not provided
     updated = {
@@ -362,7 +352,6 @@ def _update_results(mode: str, assembly_id: str, object_name: str,
         updated["comment"] = comment
     elif "comment" in existing:
         updated["comment"] = existing["comment"]
-    updated["previous"] = prev
 
     order_list[obj_idx] = updated
     data[order_key] = order_list
@@ -398,7 +387,6 @@ class AssemblyEntry(BaseModel):
     object_name: str
     tool_sequence: List[str] = Field(description="MCP tool calls made in order")
     comment: Optional[str] = None
-    previous: List[dict] = Field(default_factory=list, description="Archived older versions of this entry")
 
 class DisassemblyEntry(BaseModel):
     """A single object entry in the disassembly order list."""
@@ -406,7 +394,6 @@ class DisassemblyEntry(BaseModel):
     object_name: str
     grasp_id: int
     comment: Optional[str] = None
-    previous: List[dict] = Field(default_factory=list, description="Archived older versions of this entry")
 
 class AssemblyResults(BaseModel):
     """Return schema for reading assembly results."""

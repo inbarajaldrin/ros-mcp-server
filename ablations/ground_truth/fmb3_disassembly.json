@@ -1,0 +1,10 @@
+{
+  "assembly_id": "fmb_assembly_3",
+  "base_name": "base3",
+  "disassembly_order": [
+    { "position": 1, "object_name": "fork_yellow", "grasp_id": 4, "gripper_width_mm": 35.1 },
+    { "position": 2, "object_name": "fork_orange", "grasp_id": 4, "gripper_width_mm": 35.1 },
+    { "position": 3, "object_name": "line_red",    "grasp_id": 1, "gripper_width_mm": 39.8 },
+    { "position": 4, "object_name": "line_brown",  "grasp_id": 1, "gripper_width_mm": 39.8 }
+  ]
+}
