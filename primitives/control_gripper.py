@@ -495,9 +495,9 @@ def main(args=None):
         elif not success:
             if controller.blocked:
                 if known_args.command == "close":
-                    error = "Gripper already closed on object. Open the gripper to release first."
+                    error = "Gripper already holding an object."
                 else:
-                    error = "Gripper blocked: pressing against object, cannot reach target width. Open the gripper wider to release."
+                    error = "Gripper blocked: pressing against object its holding, cannot reach target width."
             else:
                 error = "Gripper verification failed after retries"
 

@@ -118,7 +118,18 @@ def _load_grasp_points(object_name: str) -> list:
 
 @mcp.resource("assembly://{assembly_id}/objects")
 def assembly_objects(assembly_id: str) -> str:
-    """Objects in this assembly with their assembly order and subtypes."""
+    """Objects in this assembly with their assembly order, subtypes, and grasp points.
+
+    Returns:
+        assembly_id: assembly identifier
+        base_name: name of the fixed base (board)
+        objects: list sorted by assembly_order, each containing:
+            name: object name
+            subtype: object geometry — "block", "peg", or "socket"
+            assembly_order: position in assembly sequence
+            grasp_points: list of {id, gripper_width_mm}
+                gripper_width_mm: width in mm to open gripper before grasping at this point.
+                    Includes tolerance — do not open beyond this value."""
     config = _load_assembly_config(assembly_id)
     if not config:
         return json.dumps({"error": f"Assembly config not found for '{assembly_id}'"})
@@ -147,7 +158,24 @@ def assembly_objects(assembly_id: str) -> str:
 
 @mcp.resource("assembly://{assembly_id}/results/{task_type}")
 def results_resource(assembly_id: str, task_type: str) -> str:
-    """Assembly or disassembly results for this assembly."""
+    """Results logged during assembly or disassembly for this assembly.
+
+    task_type: "disassembly" or "assembly"
+
+    Returns (disassembly):
+        assembly_id, base_name
+        disassembly_order: list of completed objects, each containing:
+            disassembly_order: sequence position
+            object_name, grasp_id
+            comment: optional note
+
+    Returns (assembly):
+        assembly_id, base_name
+        assembly_order: list of completed objects, each containing:
+            assembly_order: sequence position
+            object_name
+            tool_sequence: MCP tool calls executed in order
+            comment: optional note"""
     if task_type not in MODES:
         return json.dumps({"error": f"Invalid task_type: '{task_type}'. Must be one of: {sorted(MODES.keys())}"})
     return json.dumps(_read_results(task_type, assembly_id), indent=2)
@@ -186,11 +214,11 @@ def _save_json(mode: str, assembly_id: str, data: dict) -> None:
 
 
 def _err(msg: str) -> dict:
-    return {"success": False, "error": msg}
+    return {"result": "failure", "error": msg}
 
 
 def _ok() -> dict:
-    return {"success": True}
+    return {"result": "success"}
 
 
 def _validate_base_name(data: dict, base_name: str) -> Optional[dict]:
@@ -313,57 +341,12 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
     return _ok()
 
 
-def _update_results(mode: str, assembly_id: str, object_name: str,
-                    comment: Optional[str] = None, **extra_fields) -> dict:
-    """Update an existing object's result. Moves current to previous, sets new values."""
-    order_key = MODES[mode]["order_key"]
-
-    try:
-        data = _load_json(mode, assembly_id)
-    except Exception as e:
-        return _err(f"Error loading log: {str(e)}")
-
-    order_list = data.get(order_key, [])
-    obj_idx = _find_object(order_list, object_name)
-
-    if obj_idx is None:
-        return _err(f"Object '{object_name}' not found in {mode} results for '{assembly_id}'")
-
-    existing = order_list[obj_idx]
-
-    # Validate mode-specific fields if provided
-    if mode == "assembly" and "tool_sequence" in extra_fields:
-        if err := _validate_assembly_extras(extra_fields["tool_sequence"]):
-            return err
-
-    # Build updated entry — keep existing values for fields not provided
-    updated = {
-        order_key: existing[order_key],
-        "object_name": object_name,
-    }
-    if MODES[mode]["has_grasp_id"]:
-        updated["grasp_id"] = existing.get("grasp_id")
-    for field in MODES[mode]["extra_fields"]:
-        if field in extra_fields:
-            updated[field] = extra_fields[field]
-        else:
-            updated[field] = existing.get(field)
-    if comment is not None:
-        updated["comment"] = comment
-    elif "comment" in existing:
-        updated["comment"] = existing["comment"]
-
-    order_list[obj_idx] = updated
-    data[order_key] = order_list
-    _save_json(mode, assembly_id, data)
-    return _ok()
-
 
 def _clear_results(mode: str, assembly_id: str) -> dict:
     """Shared clear logic."""
     path = _results_file(mode, assembly_id)
     if not path.exists():
-        return {"success": False, "message": "Log not found"}
+        return _err("Log not found")
     try:
         path.unlink()
         return _ok()
@@ -414,34 +397,18 @@ def write_assembly_results(
     base_name: str,
     object_name: str,
     assembly_order: int,
-    tool_sequence: Annotated[List[str], Field(description='The exact MCP tool calls made in order. Format each entry as "server__tool_name(key = \'value\', key2 = \'value2\')". The grasp_id is captured within the tool calls themselves.')],
+    tool_sequence: Annotated[List[str], Field(description='MCP tool calls in order. Format each entry as "server__tool_name(key=\'value\', key2=\'value2\')".')],
     comment: str = "",
 ) -> dict:
     """Log a successful assembly result for an object. Only call this when assembly verification succeeds.
 
     Returns:
-        success: True if logged successfully, False on validation error
+        result: "success" or "failure"
         error: validation error message (only on failure)"""
     return _write_results("assembly", assembly_id, base_name, object_name,
                           assembly_order, comment=comment or None,
                           tool_sequence=tool_sequence)
 
-
-@mcp.tool()
-def update_assembly_results(
-    assembly_id: AssemblyId,
-    object_name: str,
-    tool_sequence: List[str],
-    comment: str = "",
-) -> dict:
-    """Update an existing object's assembly result with a corrected sequence. Use this when reverification finds a better or corrected tool sequence.
-
-    Returns:
-        success: True if updated successfully, False on validation error
-        error: validation error message (only on failure)"""
-    return _update_results("assembly", assembly_id, object_name,
-                           comment=comment or None,
-                           tool_sequence=tool_sequence)
 
 
 @mcp.tool()
@@ -456,7 +423,7 @@ def write_disassembly_results(
     """Log a successful disassembly result for an object. Only call this when disassembly verification succeeds.
 
     Returns:
-        success: True if logged successfully, False on validation error
+        result: "success" or "failure"
         error: validation error message (only on failure)"""
     return _write_results("disassembly", assembly_id, base_name, object_name,
                           disassembly_order, comment=comment or None,
@@ -471,7 +438,7 @@ def clear_results(
     """Clear all results for an assembly.
 
     Returns:
-        success: True if cleared, False if log not found or deletion failed
+        result: "success" or "failure"
         error: failure reason (only on failure)"""
     if err := _validate_task_type(task_type):
         return err

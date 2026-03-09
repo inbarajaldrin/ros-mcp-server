@@ -39,9 +39,8 @@ logger = logging.getLogger("RosMCPServer")
 
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
-GripperCommand = str  # "close" or numeric mm value (e.g. "35")
-MoveToGraspAction = Literal["move_to_object", "move_to_safe_height"]
-TranslateAction = Literal["move_to_base", "perform_insert", "move_to_safe_height", "move_away_from_base"]
+GripperCommand = str  # "open", "close", or numeric mm value (e.g. "35")
+TranslateAction = Literal["insert", "place_down"]
 PhaseNumber = Literal[1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
 
@@ -893,49 +892,62 @@ async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, An
 ##
 ## ############################################################################################## ##
 
-@mcp.tool()
-def move_home(mode: Mode) -> Dict[str, Any]:
-    """Move robot to home position. Rejected if the robot is currently holding an object (sim mode only).
+class MoveHomeResult(BaseModel):
+    result: Literal["success", "failure"]
+    error: Optional[str] = None
 
-    Returns:
-        result: "success" or "failure"
-        error: failure reason (only on failure)"""
-    return _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
+@mcp.tool()
+def move_home(mode: Mode) -> MoveHomeResult:
+    """Move robot to home position.
+
+Returns:
+    result: "success" or "failure"
+    error: failure reason (only on failure)"""
+    raw = _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
+    return MoveHomeResult(**{k: v for k, v in raw.items() if k in MoveHomeResult.model_fields}).model_dump(exclude_none=True)
 
 class GripperResult(BaseModel):
     result: Literal["success", "failure"]
-    command: GripperCommand
-    mode: Mode
     error: Optional[str] = None
 
 @mcp.tool()
 def control_gripper(
-    command: Annotated[GripperCommand, Field(description="close = close jaws on object. Numeric value (e.g. 35) = open to that width in mm. Three steps per object: (1) gripper_width_mm before move_to_object (approach), (2) close to grasp the object, (3) gripper_width_mm after move_away_from_base or perform_insert (release).")],
+    command: Annotated[GripperCommand, Field(description="-")],
     mode: Mode,
 ) -> GripperResult:
-    """Control gripper width for grasping or releasing objects.
+    """Control gripper finger width.
 
-    Returns:
-        result: "success" or "failure"
-        command: the gripper command issued
-        mode: "sim" or "real"
-        error: failure reason (only on failure)"""
+Commands:
+- open = fully open gripper.
+- close = close fingers on object.
+- Numeric (e.g. 35) = open to that width in mm.
+
+Returns:
+    result: "success" or "failure"
+    error (only on failure):
+        "Gripper jammed: fingers are asymmetric." — indicate collisions between the gripper and the object meaning the grasp id is not reachable in the objects current orientation.
+        "Gripper already holding an object."
+        "Gripper blocked: pressing against object its holding, cannot reach target width." — open gripper to release the object"""
     raw = _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
     return GripperResult(**{k: v for k, v in raw.items() if k in GripperResult.model_fields}).model_dump(exclude_none=True)
 
+class ScanWorkspaceResult(BaseModel):
+    result: Literal["success", "failure"]
+    error: Optional[str] = None
+
 @mcp.tool()
 def scan_workspace(
-    object_name: Annotated[str, Field(description="Name of the object to locate")],
-    mode: Annotated[Literal["real"], Field(description="Must be 'real'. Scanning is a physical-only operation.")] = "real",
-) -> Dict[str, Any]:
-    """Scan workspace at fixed height to locate an object. Follows a predefined path across x,y and stops when the object is detected.
+    object_name: Annotated[str, Field(description="-")],
+    mode: Annotated[Literal["real"], Field(description="real mode only")] = "real",
+) -> ScanWorkspaceResult:
+    """Scan workspace at fixed height to locate an object. Follows a predefined path across x,y
+and stops when the object is detected.
 
-    Returns:
-        result: "success" or "failure"
-        mode: "real"
-        object_name: the object searched for
-        error: failure reason (only on failure)"""
-    return _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
+Returns:
+    result: "success" or "failure"
+    error: failure reason (only on failure)"""
+    raw = _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
+    return ScanWorkspaceResult(**{k: v for k, v in raw.items() if k in ScanWorkspaceResult.model_fields}).model_dump(exclude_none=True)
 
 class Quaternion(BaseModel):
     x: float
@@ -953,76 +965,85 @@ class Position(BaseModel):
 
 class MoveToGraspResult(BaseModel):
     result: Literal["success", "failure"]
-    object_name: str
-    grasp_id: int
-    mode: Mode
-    movement_type: MoveToGraspAction
     current_object_position: Optional[Position] = None
     current_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
 @mcp.tool()
 def move_to_grasp(
-    object_name: str,
-    grasp_id: int,
-    action: Annotated[MoveToGraspAction, Field(description=(
-        "move_to_object: Move robotic arm down to the object's grasp point. Gripper must be set to gripper_width_mm before calling. "
-        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m) after grasping. Call after closing the gripper."
-    ))],
+    object_name: Annotated[str, Field(description="-")],
+    grasp_id: Annotated[int, Field(description="-")],
     mode: Mode,
 ) -> MoveToGraspResult:
-    """Move to grasp position.
+    """Move robotic arm to grasp an object.
 
-    Returns:
-        result: "success" or "failure"
-        object_name: the object targeted
-        grasp_id: the grasp point used
-        mode: "sim" or "real"
-        movement_type: the action performed
-        current_object_position: {x, y, z} after movement
-        current_object_orientation: {quat: {x, y, z, w}} after movement
-        error: failure reason (only on failure)"""
+Sequence:
+1. "control_gripper" to gripper_width_mm before move_to_grasp.
+2. "move_to_grasp" to move arm to grasp point.
+3. "control_gripper" to grasp the object.
+4. "move_to_safe_height" to lift arm after grasping.
+
+Returns:
+    result: "success" or "failure"
+    current_object_position: {x, y, z} after movement
+    current_object_orientation: {quat: {x, y, z, w}} after movement
+    error: failure reason (only on failure)"""
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
-    cmd += f" --{action.replace('_', '-')}"
-    return _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
+    raw = _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
+    return MoveToGraspResult(**{k: v for k, v in raw.items() if k in MoveToGraspResult.model_fields}).model_dump(exclude_none=True)
 
 class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
-    mode: Mode
-    movement_type: TranslateAction
-    object_name: Optional[str] = None
-    base_name: Optional[str] = None
     error: Optional[str] = None
 
 @mcp.tool()
 def translate_object(
-    action: Annotated[TranslateAction, Field(description=(
-        "move_to_base: Move grasped object to hover above the assembly base. Call before perform_insert. "
-        "perform_insert: Insert the object downward into the base. Call after move_to_base. Call move_to_safe_height after opening the gripper post-insertion. "
-        "move_to_safe_height: Lift robotic arm to safe height (z=0.3m). Called either before move_away_from_base (object still held) or after releasing the object post-insertion. "
-        "move_away_from_base: Moves laterally away from base to clear region, lowers the arm, and places the object on the table. Call move_to_safe_height before move_away_from_base. Control gripper to release the object. Can also be used when the object needs regrasping when motion planning fails for current arm orientation. When regrasping, move_to_grasp fixes the orientation but the object remains in its new orientation. Minor orientation changes may occur when the object was placed down — call rotate_object after regrasping to correct."
-    ))],
-    object_name: str,
+    action: Annotated[TranslateAction, Field(description="-")],
+    object_name: Annotated[str, Field(description="-")],
+    base_name: Annotated[str, Field(description="-")],
     mode: Mode,
-    base_name: Annotated[Optional[str], Field(description="The assembly base. Required for move_to_base and perform_insert only.")] = None,
-    grasp_id: Annotated[Optional[int], Field(description="Grasp point ID from get_scene_info. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
-    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Ignored in sim mode. Required in real mode for move_to_base and perform_insert.")] = None,
+    grasp_id: Annotated[Optional[int], Field(description="Required only in real mode")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x,y,z,w]. Required only in real mode")] = None,
 ) -> TranslateObjectResult:
-    """Translate object to target position. Maintains object's current orientation.
+    """Translate a grasped object to a target position.
 
-    Returns:
-        result: "success" or "failure"
-        mode: "sim" or "real"
-        movement_type: the action performed
-        object_name: the object moved (if applicable)
-        base_name: the assembly base (if applicable)
-        error: failure reason (only on failure)"""
+Actions:
+- "insert" — Move object above the base then insert object into the base.
+- "place_down" — Move object laterally to clear region and place object on table.
+
+Sequence:
+- insert
+  1. Object must be grasped and the robotic arm must be at safe height.
+  2. Object must be within 1 degree of target orientation — call rotate_object to correct before inserting.
+  3. Perform insert.
+  4. Release object using control_gripper.
+- place_down
+  1. Object must be grasped and the robotic arm must be at safe height.
+  2. Perform place_down.
+  3. Release object using control_gripper.
+
+Note: When performing insert, if rotate_object rotated the object by more than one axis,
+there is a good chance the current orientation of the robotic arm would result in a motion
+planning failure. In those cases a regrasp is required — place_down the object and regrasp
+it, which retains the correct object orientation while resetting the robotic arm to a
+top-down orientation.
+
+Returns:
+    result: "success" or "failure"
+    error (only on failure):
+        "Motion planning failed: no collision-free path to the target position"
+            — No action was performed. Solver could not find a collision-free trajectory
+              from current robotic arm pose. The arm is still holding the object.
+        "Grasp check failed before {movement_type}: {err}"
+            — Object is not grasped.
+        "Object orientation error is {X} degrees (tolerance: {Y} degrees)."
+            — Object needs rotation before insert."""
     # Validate required fields per action
-    if action in ["move_to_base", "perform_insert"] and not base_name:
+    if action == "insert" and not base_name:
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
 
-    if mode == "real" and action not in ["move_away_from_base", "move_to_safe_height"]:
+    if mode == "real" and action != "place_down":
         missing = []
         if grasp_id is None:
             missing.append("grasp_id")
@@ -1032,11 +1053,10 @@ def translate_object(
             return {"result": "failure",
                     "error": f"Real mode requires: {', '.join(missing)}"}
 
-    cli_action = action
     cmd = f"--mode {mode} --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
-    cmd += f" --{cli_action.replace('_', '-')}"
+    cmd += f" --{action.replace('_', '-')}"
     if grasp_id is not None:
         cmd += f" --grasp-id {grasp_id}"
     if current_object_orientation is not None:
@@ -1045,49 +1065,59 @@ def translate_object(
         cmd += " --use-default-base-position"
 
     # Adjust timeout based on action
-    if action == "perform_insert":
+    if action == "insert":
         timeout = 300
-    elif action in ["move_to_safe_height", "move_away_from_base"]:
-        timeout = 60
     else:
-        timeout = 90
+        timeout = 60
 
-    result = _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
-    return result
+    raw = _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
+    return TranslateObjectResult(**{k: v for k, v in raw.items() if k in TranslateObjectResult.model_fields}).model_dump(exclude_none=True)
 
 class RotateObjectResult(BaseModel):
     result: Literal["success", "failure"]
-    object_name: str
-    base_name: str
-    mode: Mode
-    movement_type: Literal["rotate_object"] = "rotate_object"
     initial_object_orientation: Optional[Orientation] = None
     final_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
 @mcp.tool()
 def rotate_object(
-    object_name: Annotated[str, Field(description="The object being held by the gripper")],
-    base_name: Annotated[str, Field(description="The assembly base to rotate relative to")],
+    object_name: Annotated[str, Field(description="-")],
+    base_name: Annotated[str, Field(description="-")],
     mode: Mode,
-    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x, y, z, w]. Required for real mode only")] = None,
+    current_object_orientation: Annotated[Optional[List[float]], Field(description="Quaternion [x,y,z,w]. Required only in real mode.")] = None,
 ) -> RotateObjectResult:
-    """Rotates object from current to target orientation relative to base orientation based on fold symmetry of the object.
+    """Rotates object from current to target orientation relative to current base orientation
+based on fold symmetry of the object by moving the robotic arm.
 
-    Returns:
-        result: "success" or "failure"
-        object_name: the object rotated
-        base_name: the assembly base
-        mode: "sim" or "real"
-        movement_type: "rotate_object"
-        initial_object_orientation: {quat: {x, y, z, w}} before rotation
-        final_object_orientation: {quat: {x, y, z, w}} after rotation
-        error: failure reason (only on failure)"""
+Prerequisites:
+- Object must be grasped and the robotic arm must be at safe height.
+
+Returns:
+    result: "success" or "failure"
+    initial_object_orientation: {quat: {x, y, z, w}} before rotation
+    final_object_orientation: {quat: {x, y, z, w}} after rotation
+    error: failure reason (only on failure)"""
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
     if current_object_orientation is not None:
-        # Format numbers to avoid scientific notation which can confuse argument parser
         cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
-    return _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
+    raw = _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
+    return RotateObjectResult(**{k: v for k, v in raw.items() if k in RotateObjectResult.model_fields}).model_dump(exclude_none=True)
+
+class MoveToSafeHeightResult(BaseModel):
+    result: Literal["success", "failure"]
+    error: Optional[str] = None
+
+@mcp.tool()
+def move_to_safe_height(
+    mode: Mode,
+) -> MoveToSafeHeightResult:
+    """Lift robotic arm to safe height (z=0.3m).
+
+Returns:
+    result: "success" or "failure"
+    error: failure reason (only on failure)"""
+    raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", "", timeout=45, error_prefix="Move to safe height")
+    return MoveToSafeHeightResult(**{k: v for k, v in raw.items() if k in MoveToSafeHeightResult.model_fields}).model_dump(exclude_none=True)
 
 ## ############################################################################################## ##
 ##

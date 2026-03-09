@@ -13,23 +13,21 @@ def system_context() -> str:
     """
     return """You are an autonomous agent operating a 6 DOF robotic arm and a parallel gripper.
 
-**Enivornment context:**
+**Environment context:**
 
-1. Motion planning or IK Failure means that the solver was not able to find a collision free or a feasible trajectory to move the object.
-This means the robotic arm hasnt moved yet and is still holding the object.
+Common parameters used across all tools:
+- mode: "sim" = simulation environment, "real" = physical robot.
+- object_name: name of the object being manipulated.
+- base_name: name of the fixed assembly base.
+- grasp_id: grasp point ID from the assembly resource.
 
-2. It's important to keep a track of what state the gripper is when manipulating an object.
-Open and close the gripper to attach or detach the object to the robotic arm.
-Always use gripper_width_mm from the resource provided for both approach and release — it already includes tolerance for the grasp region, so opening beyond gripper_width_mm risks damaging the object or the gripper.
-
-3. Gripper failures (jam, asymmetry) indicate collisions between the gripper and the object — the current grasp point is not accessible.
-
-Use the tools provided to you in order as per requirement to complete a given task"""
+Always know whether the gripper is open or closed and whether the arm is holding an object before calling a tool."""
 
 
 @mcp.prompt()
 def phase_1_disassembly_sequence_discovery(
-    orchestrator: Annotated[Literal["enabled"], Field(description="Set to 'enabled' to require orchestration: once a working sequence is verified for one object, orchestrate remaining objects (fallback to individual calls on failure)")] = None
+    orchestrator: Annotated[Literal["enabled"], Field(description="Set to 'enabled' to require orchestration: once a working sequence is verified for one object, orchestrate remaining objects (fallback to individual calls on failure)")] = None,
+    grasp_hint: Annotated[Literal["enabled"], Field(description="Set to 'enabled' to include grasp z-height accessibility hint")] = None,
 ) -> str:
     """
     Phase 1: Disassembly sequence discovery in a simulated environment.
@@ -37,19 +35,21 @@ def phase_1_disassembly_sequence_discovery(
     """
     if orchestrator == "enabled":
         orchestrator_instruction = (
-            "Once you have verified a working sequence of tool calls for one object, "
-            "orchestrate the tools to perform a composed policy for the remaining objects. "
-            "If orchestration fails for any reason, fall back to individual tool calls."
+            "\nOnce you have verified a working sequence for one object, "
+            "orchestrate a composed policy for the remaining objects. "
+            "Fall back to individual calls on failure."
         )
     else:
-        orchestrator_instruction = (
-            "Perform the tasks by sequentially calling individual tools to figure out a working sequence of tool calls for disassembling one object. "
-            "Continue till you have disassembled all the objects."
-        )
+        orchestrator_instruction = ""
 
-    return f"""**Initialization:**
+    if grasp_hint == "enabled":
+        grasp_hint_text = "\nGrasp points with higher z position are more accessible for top-down grasping."
+    else:
+        grasp_hint_text = ""
 
-Phase 1: Disassembly sequence discovery in a simulated environment.
+    return f"""Phase 1: Disassembly sequence discovery in a simulated environment.
+
+**Initialization:**
 
 You will be provided the fully assembled assembly in the environment.
 
@@ -57,17 +57,18 @@ Save scene state at the start before beginning disassembly.
 
 **Task**
 
-Your goal is to disassemble this top down assembly by moving each object away from the base and placing it on the clear region in the workspace, thereby figuring out which grasp ids let you perform the disassembly.
-Disassemble in reverse assembly order. The information you collect in this run will be used later to perform assembly.
+Your goal is to disassemble the objects into the clear region of the workspace,
+thereby figuring out which grasp ids let you perform the disassembly.
+Disassemble in reverse assembly order. The information you collect in this run
+will be used later to perform assembly.
 
 **Execution**
 
-Use existing tools to perform disassembly one object at a time.
-{orchestrator_instruction}
+Perform disassembly one object at a time.{grasp_hint_text}{orchestrator_instruction}
 
 **Verification**
 
-Run verify disassembly once you've ran all tools required to move one object away from the fixed base.
+Run verify disassembly once you've run all tools required to move one object away from the fixed base.
 
 **SUCCESS** — verify disassembly returns success:
 1. Save scene state.
@@ -79,7 +80,7 @@ Run verify disassembly once you've ran all tools required to move one object awa
 2. Try disassembling the object using a different grasp id. Not all grasp points are accessible from every object orientation.
 
 **Post Execution**
-Signal the client you are done with the disassembly of all objects.
+Signal you are done with the disassembly of all objects.
 """
 
 @mcp.prompt()
@@ -87,40 +88,39 @@ def phase_2_assembly_sequence_discovery() -> str:
     """
     Phase 2: Assembly sequence discovery in a simulated environment.
     """
-    return """**Initialization:**
+    return """Phase 2: Assembly sequence discovery in a simulated environment.
 
-Phase 2: Assembly sequence discovery in a simulated environment.
+**Initialization:**
 
-Read the disassembly results (generated by disassembling a fully assembled assembly) provided below to identify the grasp ids that were successfully used per object during disassembly.
+Read the disassembly results to identify the grasp ids successfully used per object.
 
 Save scene state at the start before beginning assembly.
 
 **Task**
 
-Your goal is to perform assembly of the objects scattered in the scene onto the base object. Use min required tools to perform an assembly for any object.
+Your goal is to perform assembly of the objects scattered in the scene onto the base object.
 
 **Execution**
 
-Read the tool descriptions properly and understand the underlying logic and sequence of the tool calls.
-Once the current orientation of the object is close to the target orientation, grasp the object using the same grasp id as used during disassembly in order to perform the assembly.
+Grasp points with higher z position are more accessible for top-down grasping.
 DO NOT orchestrate the tools to perform a composed policy given the same tool sequence might not work for all objects.
+If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**
 
-Run verify assembly once you've ran all tools required to assemble one object into the fixed base.
+Run verify assembly once you've run all tools required to assemble one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
 1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
-2. Log the tools and arguments executed in sequence that worked for that object.
+2. Log the complete tools and arguments executed in sequence for that object — include ALL steps taken including any recovery steps.
 3. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure:
 1. Figure out if there are any steps you can continue to take to complete the assembly.
 2. If not, restore scene state and try a different sequence you haven't tried before.
-3. If you have exhausted all strategies for this object, stop and signal phase complete with failure — do not skip to the next object. Assembly is sequential and later objects depend on earlier ones being in place.
 
 **Post Execution**
-Signal the client you are done with the assembly of all objects.
+Signal you are done with the assembly of all objects.
 """
 
 @mcp.prompt()
@@ -133,41 +133,37 @@ def phase_3_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(descr
     else:
         setup_instruction = ""
 
-    return f"""**Initialization:**
+    return f"""Phase 3: Performing Assembly ({mode} mode).
 
-Phase 3: Performing Assembly ({mode} mode).
+**Initialization:**
 
-{setup_instruction}Read the assembly sequence log provided below to identify the tool call sequences for each object to perform assembly.
+{setup_instruction}Read the assembly sequence log to identify the tool call sequences for each object.
 
 **Task**
 
-You are to perform assembly of the objects onto a fixed base based on the assembly sequence resource collected using a Digital twin from your previous runs.
+Perform assembly of the objects onto the fixed base using the assembly sequence log.
 
 **Execution**
 
-Use the available tools to perform assembly using the information of the assembly log in the same order. Do not skip any object assembly sequence.
-Follow the sequence of objects and the tool calls with arguements to perform assembly one by one.
-
-Don't orchestrate the tools to perform a composed policy. Perform the tasks using individual tools calls.
-
-IMPORTANT: Before moving to assembly make sure the current object orietnaion is close to the target orientation.
-If the object fell after placing down you can enter a recovery phase to make sure the orientation is fixed again and motion planning succeds before performing the final insert.
+Follow the sequence of objects and tool calls with arguments to perform assembly one by one. Do not skip any object.
+Do not orchestrate the tools to perform a composed policy.
+If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**
 
-Run verify assembly once you've ran all tools required to move one object into the fixed base.
+Run verify assembly once you've run all tools required to move one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
 1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
 2. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure or any of the steps failed:
-1. Grab the object and move to clear space.
+1. Grasp the object and place it in clear space to regrasp.
 2. Start the cycle over for that object.
-3. If you have exhausted all recovery strategies for this object, stop and signal phase complete with failure — do not skip to the next object. Assembly is sequential and later objects depend on earlier ones being in place.
+3. If the object is still not assembled in two tries, signal a human for assistance.
 
 **Post Execution**
-Signal the client you are done with the final assembly of all objects.
+Signal you are done with the final assembly of all objects.
 """
 
 @mcp.prompt()

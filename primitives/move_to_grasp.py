@@ -17,115 +17,10 @@ if _project_root not in sys.path:
 import argparse
 import subprocess
 import json
-import threading
 import logging
 
 
-# ---------------------------------------------------------------------------
-# Fast path for subprocess-only actions and pre-checks. Runs before heavy
-# imports (rclpy, numpy, scipy, IK) to avoid ~2-3s of import overhead.
-# ---------------------------------------------------------------------------
-
-def _fast_path():
-    """Handle subprocess-only actions and pre-flight checks before heavy imports."""
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--mode', type=str, default='sim')
-    pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
-    pre.add_argument('--move-to-object', action='store_true', dest='move_to_object')
-    pre.add_argument('--object-name', type=str, default=None)
-    pre.add_argument('--grasp-id', type=int, default=None)
-    args, _ = pre.parse_known_args()
-
-    pdir = os.path.dirname(os.path.abspath(__file__))
-
-    def _make_env():
-        env = os.environ.copy()
-        root = os.path.dirname(pdir)
-        env['PYTHONPATH'] = f"{root}:{env['PYTHONPATH']}" if 'PYTHONPATH' in env else root
-        return env
-
-    def _output(result):
-        print("__RESULT_JSON__")
-        print(json.dumps(result))
-        print("__END_RESULT_JSON__")
-
-    def _stream(pipe, lines):
-        for line in iter(pipe.readline, ''):
-            line = line.rstrip()
-            if line:
-                lines.append(line)
-                print(f"[INFO] {line}")
-        pipe.close()
-
-    def _run(script, cmd_args=None, timeout=None):
-        cmd = [sys.executable, script] + (cmd_args or [])
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, env=_make_env(),
-        )
-        lines = []
-        t = threading.Thread(target=_stream, args=(proc.stdout, lines), daemon=True)
-        t.start()
-        try:
-            rc = proc.wait(timeout=timeout)
-            t.join(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            t.join(timeout=1.0)
-            return False, '\n'.join(lines)
-        return rc == 0, '\n'.join(lines)
-
-    def _extract_json(text):
-        if "__RESULT_JSON__" in text and "__END_RESULT_JSON__" in text:
-            s = text.find("__RESULT_JSON__") + len("__RESULT_JSON__")
-            e = text.find("__END_RESULT_JSON__")
-            try:
-                return json.loads(text[s:e].strip())
-            except json.JSONDecodeError:
-                pass
-        return None
-
-    def _fail(error, movement_type="move_to_object"):
-        _output({
-            "result": "failure",
-            "object_name": args.object_name,
-            "grasp_id": args.grasp_id,
-            "mode": args.mode,
-            "movement_type": movement_type,
-            "error": error,
-        })
-        sys.exit(1)
-
-    # --- Fast path: --move-to-safe-height (pure subprocess, no rclpy needed) ---
-    if args.move_to_safe_height:
-        script = os.path.join(pdir, 'core', 'move_to_safe_height.py')
-        ok, out = _run(script, timeout=40)
-        rj = _extract_json(out)
-        if rj:
-            rj["movement_type"] = "move_to_safe_height"
-            rj["object_name"] = args.object_name
-            rj["grasp_id"] = args.grasp_id
-            rj["mode"] = args.mode
-            _output(rj)
-        else:
-            _output({
-                "result": "success" if ok else "failure",
-                "object_name": args.object_name,
-                "grasp_id": args.grasp_id,
-                "mode": args.mode,
-                "movement_type": "move_to_safe_height",
-                **({"error": "move_to_safe_height failed"} if not ok else {}),
-            })
-        sys.exit(0 if ok else 1)
-
-    # --move-to-object: gripper check is in DirectObjectMove node (line ~842).
-    # Orientation check + fix-orientation moved to main() after ee_pose available.
-    # Fall through to heavy imports and full main()
-
-
-if __name__ == '__main__':
-    _fast_path()
-
+# Heavy imports follow — only loaded when run as __main__
 
 import rclpy
 from rclpy.node import Node
@@ -2206,29 +2101,12 @@ def main(args=None):
                        help='Vertical offset below grasp point for gripper center in meters (default: 0 = gripper center at grasp point)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
                        help='Mode: "sim" for simulation (uses /objects_poses_sim with TFMessage), "real" for real robot (uses /objects_poses_real with TFMessage). REQUIRED - no default.')
-    parser.add_argument('--move-to-object', action='store_true',
-                       help='Move to object (default mode - must be specified)')
-    parser.add_argument('--move-to-safe-height', action='store_true',
-                       help='Only move to safe height (after closing gripper)')
-    
     # Parse arguments from sys.argv if args is None
     if args is None:
         args = parser.parse_args()
     else:
         args = parser.parse_args(args)
     
-    # Check that at least one mode flag is specified
-    if not args.move_to_object and not args.move_to_safe_height:
-        parser.error("Must specify either --move-to-object or --move-to-safe-height")
-
-    # move-to-safe-height and pre-checks are handled by _fast_path() before heavy imports.
-    # If we reach here with --move-to-safe-height, it means _fast_path wasn't called (e.g. imported as module).
-    if args.move_to_safe_height:
-        parser.error("--move-to-safe-height should be handled by fast path")
-
-    if not args.move_to_object:
-        parser.error("Must specify --move-to-object to move to an object")
-
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height,

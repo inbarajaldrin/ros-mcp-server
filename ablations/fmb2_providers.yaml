@@ -36,7 +36,7 @@ phases:
       - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb2')"
       - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
     commands:
-      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery"
+      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery(grasp_hint='enabled')"
       - "@insert-attachment:fmb_assembly2_manual.png"
     hooks:
       - after: ros-mcp-server__verify_disassembly

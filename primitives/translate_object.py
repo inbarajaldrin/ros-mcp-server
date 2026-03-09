@@ -3,31 +3,20 @@
 Translate Object Primitive - Move held object to assembly position
 
 Modes:
-- --move-to-base: Move to hover position above base (sim: topics, real: provided args)
-- --perform-insert: Sim = move to final position, Real = subprocess to prismatic_peg_insertion.py
-- --move-to-safe-height: Subprocess to move_to_safe_height.py
-- --move-away-from-base: Move laterally to clear area then lower onto table
+- --insert: Move to hover above base then insert (sim: both hover + descend, real: subprocess to prismatic_peg_insertion.py)
+- --place-down: Move laterally to clear area then lower onto table
 
-Note: --move-to-base, --perform-insert, --move-to-safe-height, and --move-away-from-base are mutually exclusive.
+Note: --insert and --place-down are mutually exclusive.
 
 Usage:
-    # Sim mode - move to hover above base
-    python3 translate_object.py --mode sim --object-name fork_orange --base-name base --move-to-base
+    # Sim mode - move to base and insert
+    python3 translate_object.py --mode sim --object-name fork_orange --base-name base --insert
 
-    # Sim mode - move to final position (insert)
-    python3 translate_object.py --mode sim --object-name fork_orange --base-name base --perform-insert
-
-    # Real mode - move to hover above base
-    python3 translate_object.py --mode real --base-name base --move-to-base --final-base-pos 0.5 -0.37 0.1882 --final-base-orientation 0.0 0.0 0.0 1.0
-
-    # Real mode - perform insert (peg-in-hole force control)
-    python3 translate_object.py --mode real --perform-insert
-
-    # Move to safe height
-    python3 translate_object.py --mode sim --move-to-safe-height
+    # Real mode - insert (peg-in-hole force control)
+    python3 translate_object.py --mode real --insert
 
     # Place on clear area (lateral move + lower)
-    python3 translate_object.py --mode real --move-away-from-base
+    python3 translate_object.py --mode real --place-down
 """
 
 import sys
@@ -58,9 +47,8 @@ def _subprocess_fast_path():
     """Exit early for subprocess-only invocations (before heavy imports)."""
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--mode', type=str, default='sim')
-    pre.add_argument('--move-to-safe-height', action='store_true', dest='move_to_safe_height')
-    pre.add_argument('--move-away-from-base', action='store_true', dest='move_away_from_base')
-    pre.add_argument('--perform-insert', action='store_true', dest='perform_insert')
+    pre.add_argument('--place-down', action='store_true', dest='place_down')
+    pre.add_argument('--insert', action='store_true', dest='insert')
     pre.add_argument('--object-name', type=str, default=None)
     pre.add_argument('--base-name', type=str, default=None)
     pre.add_argument('--grasp-id', type=int, default=None)
@@ -72,9 +60,8 @@ def _subprocess_fast_path():
     args, _ = pre.parse_known_args()
 
     is_fast = (
-        args.move_to_safe_height
-        or args.move_away_from_base
-        or (args.perform_insert and args.mode == 'real')
+        args.place_down
+        or (args.insert and args.mode == 'real')
     )
     if not is_fast:
         return  # Fall through to heavy imports and full main()
@@ -145,15 +132,10 @@ def _subprocess_fast_path():
 
     pdir = os.path.dirname(os.path.abspath(__file__))
 
-    if args.move_to_safe_height:
-        log.info("Moving to safe height...")
-        ok, out = _run(os.path.join(pdir, 'core', 'move_to_safe_height.py'), timeout=40)
-        _finish(ok, out, "move_to_safe_height")
-
-    if args.move_away_from_base:
+    if args.place_down:
         if not args.object_name:
-            _output({"result": "failure", "mode": args.mode, "movement_type": "move_away_from_base",
-                     "error": "object_name is required for move_away_from_base"})
+            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
+                     "error": "object_name is required for place_down"})
             sys.exit(1)
         log.info(f"Verifying grasp on {args.object_name} before placing down")
         qdir = os.path.join(os.path.dirname(pdir), 'queries')
@@ -162,19 +144,19 @@ def _subprocess_fast_path():
         vj = _extract_json(out)
         if not ok or (vj and vj.get('result') == 'failure'):
             err = vj.get('error', 'grasp check failed') if vj else 'grasp check failed'
-            _output({"result": "failure", "mode": args.mode, "movement_type": "move_away_from_base",
-                     "error": f"Grasp check failed before move_away_from_base: {err}"})
+            _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
+                     "error": f"Grasp check failed before place_down: {err}"})
             sys.exit(1)
         log.info("Placing object on clear area")
         ca = ['--move', '--mode', args.mode, '--object-name', args.object_name]
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
         if not ok:
-            _finish(ok, out, "move_away_from_base")
+            _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
         ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
-        _finish(ok, out, "move_away_from_base")
+        _finish(ok, out, "place_down")
 
-    if args.perform_insert:
+    if args.insert:
         itype = args.insertion_type
         if itype == 'prismatic':
             script = os.path.join(pdir, 'prismatic_peg_insertion.py')
@@ -202,7 +184,7 @@ def _subprocess_fast_path():
             ca += ['--current-object-orientation'] + [str(x) for x in args.current_object_orientation]
         log.info("Moving down with passive compliance")
         ok, out = _run(script, ca)
-        _finish(ok, out, "perform_insert")
+        _finish(ok, out, "insert")
 
 
 if __name__ == '__main__':
@@ -593,7 +575,7 @@ class TranslateObject(Node):
         if min_error_deg > ORIENTATION_TOLERANCE_DEG:
             self.error_message = (
                 f"Object orientation error is {min_error_deg:.1f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°). "
-                f"Call rotate_object before perform_insert."
+                f"Call rotate_object before insert."
             )
             self.get_logger().error(self.error_message)
             return False
@@ -655,7 +637,7 @@ class TranslateObject(Node):
                 return False
 
         if hover:
-            # move_to_base: single-point joint-space move — let UR controller
+            # hover: single-point joint-space move — let UR controller
             # handle interpolation to avoid protective stops from Jacobian IK
             # velocity spikes on long lateral moves.
             target_quat = R.from_matrix(ee_target_rot_matrix).as_quat()
@@ -678,7 +660,7 @@ class TranslateObject(Node):
                     "time_from_start": Duration(sec=int(t_i), nanosec=int((t_i - int(t_i)) * 1e9))
                 })
         else:
-            # perform_insert: Cartesian Jacobian IK for precise straight-line descent
+            # insert: Cartesian Jacobian IK for precise straight-line descent
             num_waypoints = 60
             self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
             waypoints = compute_cartesian_waypoints_ik(
@@ -1116,13 +1098,6 @@ def run_perform_insert_real(args):
     return run_subprocess(script_path, cmd_args)
 
 
-def run_move_to_safe_height():
-    """Run move_to_safe_height subprocess."""
-    script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_to_safe_height.py')
-    logger.info("Moving to safe height...")
-    return run_subprocess(script_path, timeout=40)
-
-
 def run_move_to_clear_area(object_name=None, mode=None):
     """Run move_to_clear_area subprocess."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_to_clear_area.py')
@@ -1158,10 +1133,8 @@ def main():
     parser.add_argument('--base-name', type=str)
 
     # Movement flags (mutually exclusive)
-    parser.add_argument('--move-to-base', action='store_true')
-    parser.add_argument('--perform-insert', action='store_true', dest='perform_insert')
-    parser.add_argument('--move-to-safe-height', action='store_true')
-    parser.add_argument('--move-away-from-base', action='store_true')
+    parser.add_argument('--insert', action='store_true')
+    parser.add_argument('--place-down', action='store_true', dest='place_down')
 
     # Real mode arguments
     parser.add_argument('--final-base-pos', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
@@ -1174,56 +1147,40 @@ def main():
     args = parser.parse_args()
 
     # Validate flags
-    flags_set = sum([args.move_to_base, args.perform_insert, args.move_to_safe_height, args.move_away_from_base])
+    flags_set = sum([args.insert, args.place_down])
     if flags_set == 0:
-        parser.error("Specify one of --move-to-base, --perform-insert, --move-to-safe-height, --move-away-from-base")
+        parser.error("Specify one of --insert, --place-down")
     if flags_set > 1:
         parser.error("Cannot use multiple movement flags together")
 
     # Validate sim mode requirements
-    if args.mode == 'sim' and not args.move_to_safe_height and not args.move_away_from_base:
+    if args.mode == 'sim' and not args.place_down:
         if args.object_name is None:
             parser.error("--object-name is required in sim mode")
         if args.base_name is None:
             parser.error("--base-name is required in sim mode")
 
     # Validate real mode requirements
-    if args.mode == 'real' and args.move_to_base:
+    if args.mode == 'real' and args.insert:
         if args.base_name is None:
-            parser.error("--base-name is required for --move-to-base in real mode")
+            parser.error("--base-name is required for --insert in real mode")
         if not args.use_default_base_position and args.final_base_pos is None:
             parser.error("--final-base-pos or --use-default-base-position required in real mode")
 
     # --- Subprocess-only paths (no ROS node needed) ---
 
-    if args.move_to_safe_height:
-        success, output_text = run_move_to_safe_height()
-        subprocess_json = extract_json_from_output(output_text)
-        if subprocess_json:
-            subprocess_json["movement_type"] = "move_to_safe_height"
-            subprocess_json["mode"] = args.mode
-            output_result(subprocess_json)
-        else:
-            output_result({
-                "result": "success" if success else "failure",
-                "mode": args.mode,
-                "movement_type": "move_to_safe_height",
-                **({"error": "move_to_safe_height failed"} if not success else {}),
-            })
-        sys.exit(0 if success else 1)
-
-    if args.move_away_from_base:
+    if args.place_down:
         success, output_text = run_move_to_clear_area(object_name=args.object_name, mode=args.mode)
         if not success:
             subprocess_json = extract_json_from_output(output_text)
             if subprocess_json:
-                subprocess_json["movement_type"] = "move_away_from_base"
+                subprocess_json["movement_type"] = "place_down"
                 subprocess_json["mode"] = args.mode
                 output_result(subprocess_json)
             else:
                 output_result({
                     "result": "failure", "mode": args.mode,
-                    "movement_type": "move_away_from_base",
+                    "movement_type": "place_down",
                     "error": "move_to_clear_area failed",
                 })
             sys.exit(1)
@@ -1231,41 +1188,41 @@ def main():
         success, output_text = run_move_down(mode=args.mode)
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
-            subprocess_json["movement_type"] = "move_away_from_base"
+            subprocess_json["movement_type"] = "place_down"
             subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             output_result({
                 "result": "success" if success else "failure",
                 "mode": args.mode,
-                "movement_type": "move_away_from_base",
+                "movement_type": "place_down",
                 **({"error": "move_down failed"} if not success else {}),
             })
         sys.exit(0 if success else 1)
 
-    if args.perform_insert and args.mode == 'real':
+    if args.insert and args.mode == 'real':
         success, output_text = run_perform_insert_real(args)
         subprocess_json = extract_json_from_output(output_text)
         if subprocess_json:
-            subprocess_json["movement_type"] = "perform_insert"
+            subprocess_json["movement_type"] = "insert"
             subprocess_json["mode"] = args.mode
             output_result(subprocess_json)
         else:
             result = {
                 "result": "success" if success else "failure",
                 "mode": "real",
-                "movement_type": "perform_insert",
+                "movement_type": "insert",
             }
             if not success:
-                result["error"] = "perform_insert failed"
+                result["error"] = "insert failed"
             output_result(result)
         sys.exit(0 if success else 1)
 
     # --- ROS node paths (sim move-to-base, sim perform-insert, real move-to-base) ---
 
-    # Verify grasp before move_to_base or perform_insert
+    # Verify grasp before insert
     if args.mode == 'sim' and args.object_name:
-        movement_type = "move_to_base" if args.move_to_base else "perform_insert"
+        movement_type = "insert"
         logger.info(f"Verifying grasp on {args.object_name} before {movement_type}")
         script_dir = os.path.dirname(os.path.abspath(__file__))
         vg_script = os.path.join(os.path.dirname(script_dir), 'queries', 'verify_grasp.py')
@@ -1306,9 +1263,11 @@ def main():
             while not node.current_poses:
                 rclpy.spin_once(node, timeout_sec=0.1)
 
-        if args.move_to_base:
+        if args.insert:
             if args.mode == 'sim':
                 success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True)
+                if success:
+                    success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False)
             else:
                 success = node.translate_for_target_real(
                     args.object_name, args.base_name,
@@ -1318,9 +1277,6 @@ def main():
                     grasp_id=args.grasp_id,
                     object_orientation=args.current_object_orientation,
                 )
-        elif args.perform_insert:
-            # Sim mode only (real mode handled above as subprocess)
-            success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False)
 
         if success:
             node.get_logger().info("Operation completed successfully!")
@@ -1333,10 +1289,10 @@ def main():
         error = str(e)
     finally:
         # Determine movement type for JSON output
-        if args.move_to_base:
-            movement_type = "move_to_base"
-        elif args.perform_insert:
-            movement_type = "perform_insert"
+        if args.insert:
+            movement_type = "insert"
+        elif args.place_down:
+            movement_type = "place_down"
         else:
             movement_type = "unknown"
 
