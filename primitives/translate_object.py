@@ -48,21 +48,10 @@ def _subprocess_fast_path():
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--mode', type=str, default='sim')
     pre.add_argument('--place-down', action='store_true', dest='place_down')
-    pre.add_argument('--insert', action='store_true', dest='insert')
     pre.add_argument('--object-name', type=str, default=None)
-    pre.add_argument('--base-name', type=str, default=None)
-    pre.add_argument('--grasp-id', type=int, default=None)
-    pre.add_argument('--final-base-pos', type=float, nargs=3, default=None)
-    pre.add_argument('--final-base-orientation', type=float, nargs=4, default=None)
-    pre.add_argument('--use-default-base-position', action='store_true', dest='use_default_base_position')
-    pre.add_argument('--current-object-orientation', type=float, nargs=4, default=None)
-    pre.add_argument('--insertion-type', type=str, default='prismatic')
     args, _ = pre.parse_known_args()
 
-    is_fast = (
-        args.place_down
-        or (args.insert and args.mode == 'real')
-    )
+    is_fast = args.place_down
     if not is_fast:
         return  # Fall through to heavy imports and full main()
 
@@ -155,36 +144,6 @@ def _subprocess_fast_path():
         log.info("Lowering object onto table")
         ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
         _finish(ok, out, "place_down")
-
-    if args.insert:
-        itype = args.insertion_type
-        if itype == 'prismatic':
-            script = os.path.join(pdir, 'prismatic_peg_insertion.py')
-            log.info("Using prismatic peg insertion")
-        elif itype == 'legacy':
-            script = os.path.join(pdir, '_real_mode_stash', 'legacy', 'peg_in_hole_insert.py')
-            log.info("Using legacy peg_in_hole_insert")
-        else:
-            _output({"result": "failure", "error": f"Unknown insertion type: {itype}"})
-            sys.exit(1)
-        ca = []
-        if args.object_name:
-            ca += ['--object-name', args.object_name]
-        if args.base_name:
-            ca += ['--base-name', args.base_name]
-        if args.grasp_id is not None:
-            ca += ['--grasp-id', str(args.grasp_id)]
-        if args.final_base_pos:
-            ca += ['--final-base-pos'] + [str(x) for x in args.final_base_pos]
-        if args.final_base_orientation:
-            ca += ['--final-base-orientation'] + [str(x) for x in args.final_base_orientation]
-        if args.use_default_base_position:
-            ca.append('--use-default-base-position')
-        if args.current_object_orientation is not None:
-            ca += ['--current-object-orientation'] + [str(x) for x in args.current_object_orientation]
-        log.info("Moving down with passive compliance")
-        ok, out = _run(script, ca)
-        _finish(ok, out, "insert")
 
 
 if __name__ == '__main__':
@@ -568,10 +527,14 @@ class TranslateObject(Node):
         symmetry_dir = str(get_symmetry_dir())
         fold_data = load_symmetry_data(object_name, symmetry_dir)
         equivalents = equivalent_orientations(R_target_relative.as_matrix(), fold_data)
-        min_error_deg = min(
-            np.degrees((R_relative.inv() * R.from_matrix(R_eq)).magnitude())
-            for R_eq in equivalents
-        )
+        best_R_eq = equivalents[0]
+        min_error_rad = float('inf')
+        for R_eq in equivalents:
+            err = (R_relative.inv() * R.from_matrix(R_eq)).magnitude()
+            if err < min_error_rad:
+                min_error_rad = err
+                best_R_eq = R_eq
+        min_error_deg = np.degrees(min_error_rad)
         if min_error_deg > ORIENTATION_TOLERANCE_DEG:
             self.error_message = (
                 f"Object orientation error is {min_error_deg:.1f}° (tolerance: {ORIENTATION_TOLERANCE_DEG}°). "
@@ -580,6 +543,10 @@ class TranslateObject(Node):
             self.get_logger().error(self.error_message)
             return False
         self.get_logger().info(f"Orientation verified: {min_error_deg:.1f}° error (tolerance: {ORIENTATION_TOLERANCE_DEG}°)")
+
+        # Snap to closest fold-equivalent orientation (world frame) so the
+        # target position accounts for symmetry like real mode does.
+        R_object_snapped = R_base.as_matrix() @ best_R_eq
 
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
@@ -598,9 +565,10 @@ class TranslateObject(Node):
         R_base_current = T_base_current[:3, :3]
         target_object_position_abs = base_current_position + R_base_current @ target_position_relative
 
-        # Create target object transformation (keep current orientation)
+        # Use snapped orientation for target (not raw current) to eliminate
+        # position drift from orientation error propagating through T_grasp
         T_object_target = np.eye(4)
-        T_object_target[:3, :3] = T_object_current[:3, :3]
+        T_object_target[:3, :3] = R_object_snapped
         T_object_target[:3, 3] = target_object_position_abs
 
         # Required EE position to place object at target
@@ -1200,25 +1168,7 @@ def main():
             })
         sys.exit(0 if success else 1)
 
-    if args.insert and args.mode == 'real':
-        success, output_text = run_perform_insert_real(args)
-        subprocess_json = extract_json_from_output(output_text)
-        if subprocess_json:
-            subprocess_json["movement_type"] = "insert"
-            subprocess_json["mode"] = args.mode
-            output_result(subprocess_json)
-        else:
-            result = {
-                "result": "success" if success else "failure",
-                "mode": "real",
-                "movement_type": "insert",
-            }
-            if not success:
-                result["error"] = "insert failed"
-            output_result(result)
-        sys.exit(0 if success else 1)
-
-    # --- ROS node paths (sim move-to-base, sim perform-insert, real move-to-base) ---
+    # --- ROS node paths (sim insert, real insert) ---
 
     # Verify grasp before insert
     if args.mode == 'sim' and args.object_name:
@@ -1267,8 +1217,18 @@ def main():
             if args.mode == 'sim':
                 success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True)
                 if success:
+                    # Let the robot settle at hover before reading fresh poses.
+                    # The old two-subprocess approach had ~3-5s of LLM round-trip
+                    # between hover and insert; this replicates that settling window.
+                    time.sleep(1.0)
+                    node.current_ee_pose = None
+                    while node.current_ee_pose is None:
+                        rclpy.spin_once(node, timeout_sec=0.1)
+                    node.current_joint_angles = None
+                    node.read_current_joint_angles()
                     success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False)
             else:
+                # Real mode: hover above base, then insertion subprocess
                 success = node.translate_for_target_real(
                     args.object_name, args.base_name,
                     final_base_pos=args.final_base_pos,
@@ -1277,6 +1237,12 @@ def main():
                     grasp_id=args.grasp_id,
                     object_orientation=args.current_object_orientation,
                 )
+                if success:
+                    insert_ok, insert_out = run_perform_insert_real(args)
+                    if not insert_ok:
+                        success = False
+                        insert_json = extract_json_from_output(insert_out)
+                        node.error_message = (insert_json or {}).get('error', 'insert failed')
 
         if success:
             node.get_logger().info("Operation completed successfully!")
