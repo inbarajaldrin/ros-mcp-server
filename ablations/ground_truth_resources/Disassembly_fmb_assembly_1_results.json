@@ -1,0 +1,26 @@
+{
+  "assembly_id": "fmb_assembly_1",
+  "base_name": "base1",
+  "disassembly_order": [
+    {
+      "disassembly_order": 1,
+      "object_name": "inverted_u_yellow",
+      "grasp_id": 2
+    },
+    {
+      "disassembly_order": 2,
+      "object_name": "line_green",
+      "grasp_id": 1
+    },
+    {
+      "disassembly_order": 3,
+      "object_name": "u_orange",
+      "grasp_id": 1
+    },
+    {
+      "disassembly_order": 4,
+      "object_name": "u_brown",
+      "grasp_id": 1
+    }
+  ]
+}

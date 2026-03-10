@@ -1,0 +1,108 @@
+name: mode2_anthropic_fmb3
+description: "Mode 2: Sim-verified escalation pipeline (Anthropic, fmb3)"
+created: 2026-03-09T00:00:00.000Z
+runs: 3
+escalation: true
+models:
+  - provider: anthropic
+    model: claude-haiku-4-5
+  - provider: anthropic
+    model: claude-sonnet-4-6
+  - provider: anthropic
+    model: claude-opus-4-6
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: 150
+  clearContextBetweenPhases: true
+systemPrompt: "@insert-prompt:Prompts__system_context"
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+phases:
+  - name: Disassembly sequence discovery
+    tools:
+      deny:
+        - mcp-tools-orchestrator__execute_composed_code
+    onStart:
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:isaac-sim__delete_objects()"
+      - "@tool-exec:isaac-sim__play_scene()"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb3')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb3')"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
+    commands:
+      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery(grasp_hint='enabled')"
+      - "@insert-attachment:fmb_assembly3_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_disassembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: failure
+          requires_response: false
+        run: "@escalate"
+
+  - name: Assembly sequence discovery
+    tools:
+      deny:
+        - mcp-tools-orchestrator__execute_composed_code
+    onStart:
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_3', task_type='disassembly')"
+    commands:
+      - "@insert-prompt:Prompts__phase_2_assembly_sequence_discovery"
+      - "@insert-attachment:fmb_assembly3_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        gate:
+          run: "@tool-exec:mcp-tools-orchestrator__execute_composed_code(code='from unified_api import *; exec(open(os.path.join(os.environ[\"ROS_MCP_SERVER_DIR\"], \"ablations\", \"replay_verify.py\")).read()); setup_and_replay(\"fmb_assembly_3\", \"base3\", \"sim\", 2)')"
+          whenOutput:
+            status: success
+          onPass:
+            - "@complete-phase"
+          onFail:
+            - "Replay verification of your logged assembly sequences failed. Fix your tool_sequences and signal phase 2 complete again. Details: {{gate_output}}"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: failure
+          requires_response: false
+        run: "@escalate"
+
+  - name: Assembly execution (real)
+    onStart:
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_3')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_3', task_type='disassembly')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_3', task_type='assembly')"
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='real')"
+      - "@insert-attachment:fmb_assembly3_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_real')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+          requires_response: false
+        run: "@abort"

@@ -6,24 +6,27 @@ runs: 1
 models: []
 settings:
   maxIterations: -1
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
-  - name: disassembly
-    enabled: true
+  - name: Disassembly sequence discovery
     onStart:
-      - "@tool-exec:ros-mcp-server__move_home(mode='real')"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
       - "@tool-exec:isaac-sim__add_objects(assembly='fmb3')"
       - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
       - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb3')"
-      - "@tool-exec:isaac-sim__save_scene_state()"
     commands:
       # fork_yellow (grasp_id=4, gripper_width_mm=35.1)
       - "@tool-exec:ros-mcp-server__control_gripper(command='35.1', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=4, mode='sim', object_name='fork_yellow')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='fork_yellow')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='fork_yellow')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='35.1', mode='sim')"
       # - "@tool-exec:ros-mcp-server__verify_disassembly(base_name='base3', object_name='fork_yellow')"
       # fork_orange (grasp_id=4, gripper_width_mm=35.1)
@@ -31,7 +34,7 @@ phases:
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=4, mode='sim', object_name='fork_orange')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='fork_orange')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='fork_orange')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='35.1', mode='sim')"
       # - "@tool-exec:ros-mcp-server__verify_disassembly(base_name='base3', object_name='fork_orange')"
       # line_red (grasp_id=1, gripper_width_mm=39.8)
@@ -39,7 +42,7 @@ phases:
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=1, mode='sim', object_name='line_red')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='line_red')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='line_red')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='39.8', mode='sim')"
       # - "@tool-exec:ros-mcp-server__verify_disassembly(base_name='base3', object_name='line_red')"
       # line_brown (grasp_id=1, gripper_width_mm=39.8)
@@ -47,12 +50,15 @@ phases:
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=1, mode='sim', object_name='line_brown')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='line_brown')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='line_brown')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='39.8', mode='sim')"
       # - "@tool-exec:ros-mcp-server__verify_disassembly(base_name='base3', object_name='line_brown')"
       # - "@tool-exec:ros-mcp-server__verify_disassembly(base_name='base3', check_all=True)"
-  - name: assembly
-    enabled: true
+    hooks:
+      - after: ros-mcp-server__verify_disassembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+
+  - name: Assembly sequence discovery
     onStart:
       - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
@@ -90,7 +96,7 @@ phases:
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
       - "@tool-exec:ros-mcp-server__rotate_object(base_name='base3', mode='sim', object_name='fork_orange')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='fork_orange')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='fork_orange')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='35.1', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=4, mode='sim', object_name='fork_orange')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
@@ -106,7 +112,7 @@ phases:
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_safe_height(mode='sim')"
       - "@tool-exec:ros-mcp-server__rotate_object(base_name='base3', mode='sim', object_name='fork_yellow')"
-      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', mode='sim', object_name='fork_yellow')"
+      - "@tool-exec:ros-mcp-server__translate_object(action='place_down', base_name='base3', mode='sim', object_name='fork_yellow')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='35.1', mode='sim')"
       - "@tool-exec:ros-mcp-server__move_to_grasp(grasp_id=4, mode='sim', object_name='fork_yellow')"
       - "@tool-exec:ros-mcp-server__control_gripper(command='close', mode='sim')"
@@ -118,8 +124,6 @@ phases:
       # - "@tool-exec:ros-mcp-server__verify_assembly(base_name='base3', object_name='fork_yellow')"
       # - "@tool-exec:ros-mcp-server__verify_assembly(base_name='base3', check_all=True)"
       - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
-# hooks:
-#   - after: "ros-mcp-server__verify_disassembly"
-#     run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
-#   - after: "ros-mcp-server__verify_assembly"
-#     run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"

@@ -1,25 +1,18 @@
-name: fmb2_providers
-description: "Ablation 1: Provider Comparison Phase 1-3 sim (fmb2, all 6 models)"
-created: 2026-02-23T00:00:00.000Z
-runs: 3
+name: ablation_context_phased
+description: "Context ablation: Phased execution P1-3 sim (fmb1, sonnet, context cleared)"
+created: 2026-03-09T00:00:00.000Z
+runs: 5
 models:
   - provider: anthropic
     model: claude-sonnet-4-6
-  - provider: openai
-    model: gpt-5-mini
-  - provider: google
-    model: gemini-2.5-flash
-  - provider: anthropic
-    model: claude-haiku-4-5
-  - provider: google
-    model: gemini-2.5-pro
-  - provider: openai
-    model: gpt-5
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: 150
   clearContextBetweenPhases: true
 systemPrompt: "@insert-prompt:Prompts__system_context"
+tools:
+  deny:
+    - mcp-tools-orchestrator__execute_composed_code
 hooks:
   - before: isaac-sim__restore_scene_state
     run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
@@ -30,14 +23,14 @@ phases:
       - "@tool-exec:isaac-sim__delete_objects()"
       - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
-      - "@tool-exec:isaac-sim__add_objects(assembly='fmb2')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb1')"
       - "@tool-exec:isaac-sim__setup_pose_publisher()"
       - "@wait:1"
-      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb2')"
-      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
+      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
     commands:
       - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery(grasp_hint='enabled')"
-      - "@insert-attachment:fmb_assembly2_manual.png"
+      - "@insert-attachment:fmb_assembly1_manual.png"
     hooks:
       - after: ros-mcp-server__verify_disassembly
         run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
@@ -56,11 +49,11 @@ phases:
   - name: Assembly sequence discovery
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
-      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
-      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_2', task_type='disassembly')"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='disassembly')"
     commands:
       - "@insert-prompt:Prompts__phase_2_assembly_sequence_discovery"
-      - "@insert-attachment:fmb_assembly2_manual.png"
+      - "@insert-attachment:fmb_assembly1_manual.png"
     hooks:
       - after: ros-mcp-server__verify_assembly
         run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
@@ -79,11 +72,11 @@ phases:
   - name: Assembly execution (sim)
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
-      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
-      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_2', task_type='assembly')"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='assembly')"
     commands:
       - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
-      - "@insert-attachment:fmb_assembly2_manual.png"
+      - "@insert-attachment:fmb_assembly1_manual.png"
     hooks:
       - after: ros-mcp-server__verify_assembly
         run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"

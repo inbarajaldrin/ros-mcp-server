@@ -1,0 +1,52 @@
+name: mode1_p3_fmb2
+description: "Mode 1: Isolated P3 sim assembly execution (fmb2, 6 models, GT P1+P2, orch denied)"
+created: 2026-03-09T00:00:00.000Z
+runs: 3
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+  - provider: anthropic
+    model: claude-haiku-4-5
+  - provider: openai
+    model: gpt-5
+  - provider: openai
+    model: gpt-5-mini
+  - provider: google
+    model: gemini-2.5-pro
+  - provider: google
+    model: gemini-2.5-flash
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: 150
+  clearContextBetweenPhases: true
+systemPrompt: "@insert-prompt:Prompts__system_context"
+tools:
+  deny:
+    - mcp-tools-orchestrator__execute_composed_code
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+phases:
+  - name: Assembly execution (sim)
+    onStart:
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
+      - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_2', task_type='disassembly')"
+      - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_2', task_type='assembly')"
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
+      - "@insert-attachment:fmb_assembly2_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+          requires_response: false
+        run: "@abort"

@@ -1,0 +1,26 @@
+{
+  "assembly_id": "fmb_assembly_3",
+  "base_name": "base3",
+  "disassembly_order": [
+    {
+      "disassembly_order": 1,
+      "object_name": "fork_yellow",
+      "grasp_id": 4
+    },
+    {
+      "disassembly_order": 2,
+      "object_name": "fork_orange",
+      "grasp_id": 4
+    },
+    {
+      "disassembly_order": 3,
+      "object_name": "line_red",
+      "grasp_id": 1
+    },
+    {
+      "disassembly_order": 4,
+      "object_name": "line_brown",
+      "grasp_id": 1
+    }
+  ]
+}

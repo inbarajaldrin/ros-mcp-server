@@ -103,7 +103,6 @@ Your goal is to perform assembly of the objects scattered in the scene onto the 
 **Execution**
 
 Grasp points with higher z position are more accessible for top-down grasping.
-DO NOT orchestrate the tools to perform a composed policy given the same tool sequence might not work for all objects.
 If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**
@@ -146,7 +145,6 @@ Perform assembly of the objects onto the fixed base using the assembly sequence 
 **Execution**
 
 Follow the sequence of objects and tool calls with arguments to perform assembly one by one. Do not skip any object.
-Do not orchestrate the tools to perform a composed policy.
 If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**

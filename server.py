@@ -1014,7 +1014,7 @@ Actions:
 Sequence:
 - insert
   1. Object must be grasped and the robotic arm must be at safe height.
-  2. Object must be within 1 degree of target orientation — call rotate_object to correct before inserting.
+  2. Object must be at target orientation — call rotate_object to correct before inserting.
   3. Perform insert.
   4. Release object using control_gripper.
 - place_down
@@ -1163,6 +1163,44 @@ async def signal_phase_complete(
         verify_disassembly_fn=_verify_all_disassembled,
         verify_assembly_fn=_verify_all_assembled,
     )
+
+
+@mcp.tool()
+def signal_verify_results(
+    phase: Annotated[Literal[1, 2], Field(description="1=disassembly, 2=assembly")],
+    base_name: Annotated[str, Field(description="Assembly base object name")],
+    mode: Mode,
+    replay_data: Annotated[str, Field(description="JSON string with orchestrator replay outcome")],
+) -> Dict[str, Any]:
+    """Verify scene state after orchestrator replay of discovered sequences.
+
+    Called by the orchestrator after replaying logged tool_sequences.
+    Do not call directly. Runs verify_assembly (phase 2) or
+    verify_disassembly (phase 1) on the current scene, then constructs
+    a response combining replay outcome with verification result.
+
+    replay_data JSON shape:
+        replay: "success" or "failure"
+        failed_object: object name (only on replay failure)
+        failed_step: tool call string (only on replay failure)
+        error: error message (only on replay failure)
+        completed_objects: list of objects replayed successfully
+        remaining_objects: list of objects not attempted (only on replay failure)
+
+    Returns:
+        result: "success" or "failure"
+        message: agent-facing instructions (what to fix or confirmation)
+        verification: full verify result from scene state check"""
+    from triggers.signal_verify_results import handle_verify_results
+    return handle_verify_results(
+        phase=phase,
+        base_name=base_name,
+        mode=mode,
+        replay_data=replay_data,
+        verify_disassembly_fn=_verify_all_disassembled,
+        verify_assembly_fn=_verify_all_assembled,
+    )
+
 
 class SignalOperatorResult(BaseModel):
     result: Literal["success", "failure"]

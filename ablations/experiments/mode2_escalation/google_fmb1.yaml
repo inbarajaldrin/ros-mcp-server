@@ -1,10 +1,13 @@
-name: fmb1_phased
-description: "Ablation 1: Phased execution Phase 1-3 sim (fmb1, sonnet)"
-created: 2026-02-23T00:00:00.000Z
-runs: 5
+name: mode2_google_fmb1
+description: "Mode 2: Sim-verified escalation pipeline (Google, fmb1)"
+created: 2026-03-09T00:00:00.000Z
+runs: 3
+escalation: true
 models:
-  - provider: anthropic
-    model: claude-sonnet-4-6
+  - provider: google
+    model: gemini-2.5-flash
+  - provider: google
+    model: gemini-2.5-pro
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: 150
@@ -15,6 +18,9 @@ hooks:
     run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
 phases:
   - name: Disassembly sequence discovery
+    tools:
+      deny:
+        - mcp-tools-orchestrator__execute_composed_code
     onStart:
       - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
@@ -41,9 +47,12 @@ phases:
           phase: 1
           status: failure
           requires_response: false
-        run: "@abort"
+        run: "@escalate"
 
   - name: Assembly sequence discovery
+    tools:
+      deny:
+        - mcp-tools-orchestrator__execute_composed_code
     onStart:
       - "@tool-exec:isaac-sim__randomize_object_poses()"
       - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
@@ -58,25 +67,32 @@ phases:
         whenOutput:
           phase: 2
           status: success
-        run: "@complete-phase"
+        gate:
+          run: "@tool-exec:mcp-tools-orchestrator__execute_composed_code(code='from unified_api import *; exec(open(os.path.join(os.environ[\"ROS_MCP_SERVER_DIR\"], \"ablations\", \"replay_verify.py\")).read()); setup_and_replay(\"fmb_assembly_1\", \"base1\", \"sim\", 2)')"
+          whenOutput:
+            status: success
+          onPass:
+            - "@complete-phase"
+          onFail:
+            - "Replay verification of your logged assembly sequences failed. Fix your tool_sequences and signal phase 2 complete again. Details: {{gate_output}}"
       - after: ros-mcp-server__signal_phase_complete
         whenOutput:
           phase: 2
           status: failure
           requires_response: false
-        run: "@abort"
+        run: "@escalate"
 
-  - name: Assembly execution (sim)
+  - name: Assembly execution (real)
     onStart:
-      - "@tool-exec:isaac-sim__randomize_object_poses()"
       - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
+      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='disassembly')"
       - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_1', task_type='assembly')"
     commands:
-      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='real')"
       - "@insert-attachment:fmb_assembly1_manual.png"
     hooks:
       - after: ros-mcp-server__verify_assembly
-        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_real')"
       - after: ros-mcp-server__signal_phase_complete
         whenOutput:
           phase: 3

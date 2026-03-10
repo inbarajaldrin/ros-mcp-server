@@ -1,0 +1,70 @@
+{
+  "assembly_id": "fmb_assembly_3",
+  "base_name": "base3",
+  "assembly_order": [
+    {
+      "assembly_order": 1,
+      "object_name": "line_brown",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='39.8', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='line_brown', grasp_id=1, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='line_brown', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='line_brown', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='insert', object_name='line_brown', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='39.8', mode='sim')"
+      ]
+    },
+    {
+      "assembly_order": 2,
+      "object_name": "line_red",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='39.8', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='line_red', grasp_id=1, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='line_red', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='line_red', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='insert', object_name='line_red', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='39.8', mode='sim')"
+      ]
+    },
+    {
+      "assembly_order": 3,
+      "object_name": "fork_orange",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='fork_orange', grasp_id=4, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='fork_orange', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='fork_orange', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='place_down', object_name='fork_orange', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='fork_orange', grasp_id=4, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='fork_orange', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='fork_orange', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='insert', object_name='fork_orange', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')"
+      ]
+    },
+    {
+      "assembly_order": 4,
+      "object_name": "fork_yellow",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='fork_yellow', grasp_id=4, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='fork_yellow', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='fork_yellow', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='place_down', object_name='fork_yellow', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')",
+        "ros-mcp-server__move_to_grasp(object_name='fork_yellow', grasp_id=4, mode='sim')",
+        "ros-mcp-server__control_gripper(command='close', mode='sim')",
+        "ros-mcp-server__move_to_safe_height(object_name='fork_yellow', mode='sim')",
+        "ros-mcp-server__rotate_object(object_name='fork_yellow', base_name='base3', mode='sim')",
+        "ros-mcp-server__translate_object(action='insert', object_name='fork_yellow', base_name='base3', mode='sim')",
+        "ros-mcp-server__control_gripper(command='35.1', mode='sim')"
+      ]
+    }
+  ]
+}

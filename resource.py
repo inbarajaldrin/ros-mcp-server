@@ -24,6 +24,8 @@ else:
 
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+GROUND_TRUTH_DIR = Path(__file__).parent / "ablations" / "ground_truth_resources"
+
 # ========== MODE CONFIGURATION ==========
 # Each mode defines its file prefix, order key, and type-specific required fields.
 # Common required field: grasp_id. Only successful results are logged.
@@ -154,6 +156,29 @@ def assembly_objects(assembly_id: str) -> str:
         "base_name": base_name,
         "objects": objects,
     }, indent=2)
+
+
+@mcp.resource("assembly://{assembly_id}/ground_truth/{task_type}")
+def ground_truth_resource(assembly_id: str, task_type: str) -> str:
+    """Ground truth results for this assembly (static, verified sequences).
+
+    Same schema as results_resource but reads from ablations/ground_truth_resources/.
+    Used in Mode 1 isolated experiments to inject fixed inputs independent of
+    prior phase performance.
+
+    task_type: "disassembly" or "assembly"
+
+    Returns: same structure as results_resource."""
+    if task_type not in MODES:
+        return json.dumps({"error": f"Invalid task_type: '{task_type}'. Must be one of: {sorted(MODES.keys())}"})
+    prefix = MODES[task_type]["prefix"]
+    path = GROUND_TRUTH_DIR / f"{prefix}_{assembly_id}_results.json"
+    if not path.exists():
+        return json.dumps({"error": f"Ground truth not found: {path.name}"})
+    try:
+        return path.read_text()
+    except OSError as e:
+        return json.dumps({"error": str(e)})
 
 
 @mcp.resource("assembly://{assembly_id}/results/{task_type}")
