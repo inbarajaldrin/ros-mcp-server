@@ -15,6 +15,13 @@ hooks:
 phases:
   - name: Assembly sequence discovery (orchestrator enabled)
     onStart:
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:isaac-sim__delete_objects()"
+      - "@tool-exec:isaac-sim__play_scene()"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb1')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
       - "@tool-exec:isaac-sim__randomize_object_poses()"
       - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
       - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_1', task_type='disassembly')"
