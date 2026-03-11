@@ -130,7 +130,7 @@ def assembly_objects(assembly_id: str) -> str:
             subtype: object geometry — "block", "peg", or "socket"
             assembly_order: position in assembly sequence
             grasp_points: list of {id, gripper_width_mm}
-                gripper_width_mm: width in mm to open gripper before grasping at this point.
+                gripper_width_mm: width in mm to open gripper before grasping and after releasing at this point.
                     Includes tolerance — do not open beyond this value."""
     config = _load_assembly_config(assembly_id)
     if not config:

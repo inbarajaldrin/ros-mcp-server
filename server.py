@@ -1016,11 +1016,11 @@ Sequence:
   1. Object must be grasped and the robotic arm must be at safe height.
   2. Object must be at target orientation — call rotate_object to correct before inserting.
   3. Perform insert.
-  4. Release object using control_gripper.
+  4. Release object using control_gripper to gripper_width_mm.
 - place_down
   1. Object must be grasped and the robotic arm must be at safe height.
   2. Perform place_down.
-  3. Release object using control_gripper.
+  3. Release object using control_gripper to gripper_width_mm.
 
 Note: When performing insert, if rotate_object rotated the object by more than one axis,
 there is a good chance the current orientation of the robotic arm would result in a motion
