@@ -20,11 +20,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 import numpy as np
 import re
 
-from primitives.shared.config import SAFE_HEIGHT
+from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import json
 import yaml
 
-from primitives.shared.ik import compute_cartesian_waypoints_ik
+from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinematics, dh_params
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 
 class MoveToSafeHeight(Node):
@@ -244,10 +244,24 @@ class MoveToSafeHeight(Node):
 
             num_waypoints = 60
 
+            # SAFE_HEIGHT is calibrated for face-down EE, where the gripper
+            # offset projects fully into -z. Derive the intended gripper center
+            # safe height, then compute the flange z for the current orientation.
+            T_fk = forward_kinematics(dh_params, self.current_joint_angles)
+            R_fk = T_fk[:3, :3]
+            tool_offset_world = R_fk @ GRIPPER_CENTER_TOOL_OFFSET
+            facedown_offset_z = -GRIPPER_CENTER_TOOL_OFFSET[2]  # -0.2286
+            gripper_center_safe_z = self.safe_height + facedown_offset_z
+            target_flange_z = gripper_center_safe_z - tool_offset_world[2]
+            self.get_logger().info(
+                f"Gripper center safe Z: {gripper_center_safe_z:.4f}, "
+                f"target flange Z: {target_flange_z:.4f} (offset: {tool_offset_world[2]:.4f})"
+            )
+
             # Use fast Jacobian-based IK for dense waypoints
             self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
             waypoints = compute_cartesian_waypoints_ik(
-                self.current_joint_angles, self.safe_height,
+                self.current_joint_angles, target_flange_z,
                 num_waypoints=num_waypoints
             )
             if waypoints is None:
@@ -257,7 +271,7 @@ class MoveToSafeHeight(Node):
 
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
-            cart_dist = abs(self.safe_height - current_pos[2])
+            cart_dist = abs(target_flange_z - current_pos[2])
             joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
             total_duration = compute_duration(
                 joint_distance=joint_dist, cartesian_distance=cart_dist, profile='s_curve'
