@@ -84,11 +84,22 @@ Signal you are done with the disassembly of all objects.
 """
 
 @mcp.prompt()
-def phase_2_assembly_sequence_discovery() -> str:
+def phase_2_assembly_sequence_discovery(
+    orchestrator: Annotated[Literal["enabled"], Field(description="Set to 'enabled' to require orchestration: once a working sequence is verified for one object, orchestrate remaining objects (fallback to individual calls on failure)")] = None,
+) -> str:
     """
     Phase 2: Assembly sequence discovery in a simulated environment.
     """
-    return """Phase 2: Assembly sequence discovery in a simulated environment.
+    if orchestrator == "enabled":
+        orchestrator_instruction = (
+            "\nOnce you have verified a working sequence for one object, "
+            "orchestrate a composed policy for the remaining objects. "
+            "Fall back to individual calls on failure."
+        )
+    else:
+        orchestrator_instruction = ""
+
+    return f"""Phase 2: Assembly sequence discovery in a simulated environment.
 
 **Initialization:**
 
@@ -103,7 +114,7 @@ Your goal is to perform assembly of the objects scattered in the scene onto the 
 **Execution**
 
 Grasp points with higher z position are more accessible for top-down grasping.
-If you exhaust all strategies for an object, signal failure — do not skip to the next object.
+If you exhaust all strategies for an object, signal failure — do not skip to the next object.{orchestrator_instruction}
 
 **Verification**
 
