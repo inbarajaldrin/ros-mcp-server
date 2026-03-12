@@ -10,7 +10,7 @@ models:
     model: gemini-2.5-pro
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
-  maxIterations: 150
+  maxIterations: 200
   clearContextBetweenPhases: true
 systemPrompt: "@insert-prompt:Prompts__system_context"
 hooks:
