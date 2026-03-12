@@ -329,7 +329,7 @@ class DirectObjectMove(Node):
 
         # Movement parameters (configurable)
         self.hover_height_offset = 0.1  # Hover height above grasp point in step 1 (meters)
-        self.table_clearance = 0.0  # Minimum clearance above table for gripper fingers (meters)
+        self.table_clearance = 0.01  # Minimum clearance above table for gripper fingers (meters) - 1.0cm
         
         # Set default topic based on mode if not provided
         if topic_name is None:
