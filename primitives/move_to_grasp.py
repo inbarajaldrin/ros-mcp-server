@@ -46,6 +46,7 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from queries.get_scene_info import load_grasp_validity_data
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
 from visualization_msgs.msg import MarkerArray, Marker
@@ -353,6 +354,11 @@ class DirectObjectMove(Node):
         self.target_xyz = target_xyz  # Optional target position [x, y, z]
         self.target_xyzw = target_xyzw  # Optional target orientation [x, y, z, w]
         self.grasp_id = grasp_id  # Specific grasp point ID to use
+        # Look up expected gripper_width_mm for this object+grasp_id
+        self.expected_gripper_width = None
+        if grasp_id is not None and object_name:
+            validity = load_grasp_validity_data(object_name)
+            self.expected_gripper_width = validity.get(grasp_id)
         self.last_target_pose = None
         self.position_threshold = 0.005  # 5mm
         self.angle_threshold = 2.0       # 2 degrees
@@ -859,8 +865,9 @@ class DirectObjectMove(Node):
                 else:
                     self.get_logger().warn("Gripper width topic not available. Proceeding without gripper check.")
                     self.gripper_check_done = True
-            elif self.current_gripper_width < 30.0:
-                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm). Set gripper to the required gripper_width_mm before calling move_to_grasp."
+            elif self.expected_gripper_width and self.current_gripper_width < (self.expected_gripper_width - 2.0):
+                expected_str = f" (expected >= {self.expected_gripper_width:.1f}mm)" if self.expected_gripper_width else ""
+                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm){expected_str}. Set gripper to the required gripper_width_mm before calling move_to_grasp."
                 self.get_logger().error(self.error_message)
                 self.should_exit = True
                 return

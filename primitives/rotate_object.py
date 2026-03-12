@@ -34,6 +34,7 @@ import json
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import argparse
+import signal
 import time
 
 
@@ -1609,7 +1610,12 @@ class ReorientForAssembly(Node):
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response_callback)
 
+            _traj_t0 = time.time()
             while rclpy.ok() and not self.trajectory_completed:
+                if time.time() - _traj_t0 > 60:
+                    self.error_message = "Trajectory execution timed out after 60s"
+                    self.get_logger().error(self.error_message)
+                    return False
                 rclpy.spin_once(self, timeout_sec=0.1)
 
             if self.trajectory_success:
@@ -1792,6 +1798,8 @@ def main(args=None):
     # In real mode, orientations are required; in sim mode, they're optional (read from topic)
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
+    parser.add_argument('--skip-verify-grasp', action='store_true',
+                       help='Skip internal grasp verification (caller already verified)')
     args = parser.parse_args()
 
     # Validate arguments based on mode
@@ -1799,34 +1807,45 @@ def main(args=None):
         if args.current_object_orientation is None:
             parser.error("--current-object-orientation is required in real mode")
     
-    # === Verify grasp before starting ===
-    grasp_verified = run_verify_grasp(
-        object_name=args.object_name,
-        mode=args.mode
-    )
-    if not grasp_verified:
-        output_result({
-            "result": "failure",
-            "object_name": args.object_name,
-            "base_name": args.base_name,
-            "mode": args.mode,
-            "movement_type": "rotate_object",
-            "error": "Grasp verification failed - object may not be grasped"
-        })
-        sys.exit(1)
+    # Ensure finally blocks run on SIGTERM (from timeout command) so output is always produced
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+
+    # === Verify grasp before starting (unless caller already did it) ===
+    if not args.skip_verify_grasp:
+        grasp_verified = run_verify_grasp(
+            object_name=args.object_name,
+            mode=args.mode
+        )
+        if not grasp_verified:
+            output_result({
+                "result": "failure",
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+                "mode": args.mode,
+                "movement_type": "rotate_object",
+                "error": "Grasp verification failed - object may not be grasped"
+            })
+            sys.exit(1)
 
     node = None
     success = False
     try:
         rclpy.init()
         node = ReorientForAssembly(mode=args.mode)
-        node.action_client.wait_for_server()
+        if not node.action_client.wait_for_server(timeout_sec=15):
+            raise RuntimeError("Action server not available after 15s")
+        _t0 = time.time()
         while node.current_ee_pose is None:
+            if time.time() - _t0 > 10:
+                raise RuntimeError("EE pose not received after 10s")
             rclpy.spin_once(node, timeout_sec=0.1)
 
         # In sim mode, wait for poses from topic if not provided via arguments
         if args.mode == 'sim' and args.current_object_orientation is None:
+            _t0 = time.time()
             while not node.current_poses:
+                if time.time() - _t0 > 10:
+                    raise RuntimeError("Object poses not received after 10s")
                 rclpy.spin_once(node, timeout_sec=0.1)
 
         success = node.reorient_for_target(
@@ -1840,26 +1859,41 @@ def main(args=None):
             node.get_logger().error("Reorientation failed")
 
     except KeyboardInterrupt:
-        if node is not None:
-            node.error_message = "Operation interrupted by user"
-        else:
-            print("\n[INFO] Operation interrupted by user")
+        error = "Operation interrupted by user"
+    except SystemExit:
+        error = "Process terminated (SIGTERM)"
     except Exception as e:
-        if node is not None:
-            node.error_message = f"Unexpected error: {e}"
-        else:
-            print(f"[ERROR] Unexpected error: {e}")
+        error = f"Unexpected error: {e}"
+    else:
+        error = None
     finally:
-        try:
-            if node is not None:
-                node.output_result_json(success)
-                # Explicitly destroy subscriptions and action client to avoid shutdown delays
+        # Build result from local vars — always emits JSON regardless of node state
+        if node is not None:
+            if error and not node.error_message:
+                node.error_message = error
+            node.output_result_json(success)
+            try:
                 if node.object_sub is not None:
                     node.destroy_subscription(node.object_sub)
                 node.destroy_subscription(node.ee_sub)
                 node.destroy_subscription(node.joint_state_sub)
                 node.action_client.destroy()
                 node.destroy_node()
+            except Exception:
+                pass
+        else:
+            result = {
+                "result": "success" if success else "failure",
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+                "mode": args.mode,
+                "movement_type": "rotate_object",
+            }
+            if not success:
+                result["error"] = error or "ROS connection failed before node initialization"
+            output_result(result)
+
+        try:
             rclpy.shutdown()
         except Exception:
             pass

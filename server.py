@@ -169,13 +169,26 @@ def _is_connection_error(result: dict) -> bool:
     return False
 
 
+def _wait_for_rosbridge(timeout: int = 10):
+    """Poll until rosbridge accepts a websocket connection or timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            ws_manager.connect()
+            logger.info("rosbridge ready (ws connected)")
+            return
+        except Exception:
+            time.sleep(0.5)
+    logger.warning(f"rosbridge not ready after {timeout}s — proceeding anyway")
+
+
 def _run_with_retry(func, *args, **kwargs) -> Dict[str, Any]:
     """Run a tool function with pre-flight health check and one retry on connection errors.
 
     1. Runs _ensure_services_healthy() before every call (lightweight poll()).
     2. Executes the tool function.
     3. If result matches a connection error pattern on the first attempt:
-       restart services, close ws, sleep 2s, retry once.
+       restart services, verify rosbridge readiness, retry once.
     4. On success or application error: return immediately.
     """
     max_attempts = 2
@@ -184,16 +197,37 @@ def _run_with_retry(func, *args, **kwargs) -> Dict[str, Any]:
         result = func(*args, **kwargs)
 
         if attempt < max_attempts and isinstance(result, dict) and _is_connection_error(result):
+            # Don't retry subprocess timeouts — they indicate a stuck process, not a connection error.
+            # Retrying just doubles the wait (90s → 207s) with no chance of success.
+            rc = result.get("returncode")
+            if rc in (124, -9):
+                logger.warning(f"Subprocess timed out (rc={rc}), skipping retry")
+                return result
             logger.warning(f"Connection error detected (attempt {attempt}), restarting services and retrying...")
             # Force full restart
             _start_services()
             ws_manager.close()
-            time.sleep(2)
+            _wait_for_rosbridge(timeout=10)
             continue
 
         return result
 
     return result  # Should not reach here, but return last result as fallback
+
+
+def _parse_result(model_cls, raw: dict):
+    """Parse primitive output into a Pydantic result model.
+
+    Safety net: if the primitive returned no 'result' field (e.g. empty dict
+    after a failed retry), return a proper failure dict instead of crashing
+    with a Pydantic validation error.
+    """
+    filtered = {k: v for k, v in raw.items() if k in model_cls.model_fields}
+    if "result" not in filtered:
+        error_msg = raw.get("output", raw.get("error", "Infrastructure error — primitive returned no result, retry the call"))
+        logger.warning(f"Primitive returned no result field (raw keys: {list(raw.keys())}), returning failure")
+        return {"result": "failure", "error": str(error_msg)[:500]}
+    return model_cls(**filtered).model_dump(exclude_none=True)
 
 
 # Initialize MCP (no lifespan - services started in __main__ before mcp.run())
@@ -904,7 +938,7 @@ Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
     raw = _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
-    return MoveHomeResult(**{k: v for k, v in raw.items() if k in MoveHomeResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(MoveHomeResult, raw)
 
 class GripperResult(BaseModel):
     result: Literal["success", "failure"]
@@ -929,7 +963,7 @@ Returns:
         "Gripper already holding an object."
         "Gripper blocked: pressing against object its holding, cannot reach target width." — open gripper to release the object"""
     raw = _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
-    return GripperResult(**{k: v for k, v in raw.items() if k in GripperResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(GripperResult, raw)
 
 class ScanWorkspaceResult(BaseModel):
     result: Literal["success", "failure"]
@@ -947,7 +981,7 @@ Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
     raw = _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
-    return ScanWorkspaceResult(**{k: v for k, v in raw.items() if k in ScanWorkspaceResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(ScanWorkspaceResult, raw)
 
 class Quaternion(BaseModel):
     x: float
@@ -990,7 +1024,7 @@ Returns:
     error: failure reason (only on failure)"""
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     raw = _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
-    return MoveToGraspResult(**{k: v for k, v in raw.items() if k in MoveToGraspResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(MoveToGraspResult, raw)
 
 class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
@@ -1073,7 +1107,7 @@ Returns:
         timeout = 60
 
     raw = _run_with_retry(_run_primitive, "translate_object.py", cmd, timeout=timeout, error_prefix="Translate object")
-    return TranslateObjectResult(**{k: v for k, v in raw.items() if k in TranslateObjectResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(TranslateObjectResult, raw)
 
 class RotateObjectResult(BaseModel):
     result: Literal["success", "failure"]
@@ -1099,11 +1133,35 @@ Returns:
     initial_object_orientation: {quat: {x, y, z, w}} before rotation
     final_object_orientation: {quat: {x, y, z, w}} after rotation
     error: failure reason (only on failure)"""
-    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\""
+    # Verify grasp as a separate subprocess before rotate_object to avoid
+    # nested DDS participant churn that causes discovery race conditions.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vg_script = os.path.join(script_dir, 'queries', 'verify_grasp.py')
+    vg_cmd = [sys.executable, vg_script, '--object-name', object_name, '--mode', mode]
+    if mode == 'real':
+        vg_cmd.append('--width-only')
+    try:
+        vg_proc = subprocess.run(vg_cmd, capture_output=True, text=True, timeout=15,
+                                 env={**os.environ, 'PYTHONPATH': f"{script_dir}:{os.environ.get('PYTHONPATH', '')}"})
+    except subprocess.TimeoutExpired:
+        return _parse_result(RotateObjectResult, {"result": "failure", "error": "Grasp verification timed out"})
+    if vg_proc.returncode != 0:
+        vg_out = (vg_proc.stdout or '') + (vg_proc.stderr or '')
+        error = "Grasp verification failed - object may not be grasped"
+        if '__RESULT_JSON__' in vg_out and '__END_RESULT_JSON__' in vg_out:
+            try:
+                json_str = vg_out[vg_out.rfind('__RESULT_JSON__') + len('__RESULT_JSON__'):vg_out.rfind('__END_RESULT_JSON__')].strip()
+                vj = json.loads(json_str)
+                error = vj.get('error', error)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return _parse_result(RotateObjectResult, {"result": "failure", "error": error})
+
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\" --skip-verify-grasp"
     if current_object_orientation is not None:
         cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
     raw = _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
-    return RotateObjectResult(**{k: v for k, v in raw.items() if k in RotateObjectResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(RotateObjectResult, raw)
 
 class MoveToSafeHeightResult(BaseModel):
     result: Literal["success", "failure"]
@@ -1119,7 +1177,7 @@ Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
     raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", "", timeout=45, error_prefix="Move to safe height")
-    return MoveToSafeHeightResult(**{k: v for k, v in raw.items() if k in MoveToSafeHeightResult.model_fields}).model_dump(exclude_none=True)
+    return _parse_result(MoveToSafeHeightResult, raw)
 
 ## ############################################################################################## ##
 ##
