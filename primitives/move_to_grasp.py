@@ -359,6 +359,7 @@ class DirectObjectMove(Node):
         if grasp_id is not None and object_name:
             validity = load_grasp_validity_data(object_name)
             self.expected_gripper_width = validity.get(grasp_id)
+        self._gripper_settle_pending = False  # True after first below-threshold reading
         self.last_target_pose = None
         self.position_threshold = 0.005  # 5mm
         self.angle_threshold = 2.0       # 2 degrees
@@ -866,8 +867,18 @@ class DirectObjectMove(Node):
                     self.get_logger().warn("Gripper width topic not available. Proceeding without gripper check.")
                     self.gripper_check_done = True
             elif self.expected_gripper_width and self.current_gripper_width < (self.expected_gripper_width - 2.0):
-                expected_str = f" (expected >= {self.expected_gripper_width:.1f}mm)" if self.expected_gripper_width else ""
-                self.error_message = f"Gripper is not open ({self.current_gripper_width:.1f}mm){expected_str}. Set gripper to the required gripper_width_mm before calling move_to_grasp."
+                if not self._gripper_settle_pending:
+                    self._gripper_settle_pending = True
+                    self.get_logger().info(
+                        f"Gripper at {self.current_gripper_width:.1f}mm "
+                        f"(expected >= {self.expected_gripper_width - 2.0:.1f}mm) — waiting to settle..."
+                    )
+                    return  # Re-poll on next timer tick (~0.5s)
+                self.error_message = (
+                    f"Gripper is not open ({self.current_gripper_width:.1f}mm) "
+                    f"(expected >= {self.expected_gripper_width:.1f}mm). "
+                    f"Set gripper to the required gripper_width_mm before calling move_to_grasp."
+                )
                 self.get_logger().error(self.error_message)
                 self.should_exit = True
                 return
