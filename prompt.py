@@ -35,9 +35,10 @@ def phase_1_disassembly_sequence_discovery(
     """
     if orchestrator == "enabled":
         orchestrator_instruction = (
-            "\nOnce you have verified a working sequence for one object, "
-            "orchestrate a composed policy for the remaining objects. "
-            "Fall back to individual calls on failure."
+            "\nOnce you have verified a working disassembly sequence for the first object, "
+            "use `execute_composed_code` to compose and replay the same grasp→lift→place pattern "
+            "for remaining objects (substituting object_name and grasp_id). "
+            "If the composed execution fails for any object, fall back to individual tool calls for that object."
         )
     else:
         orchestrator_instruction = ""
@@ -92,9 +93,10 @@ def phase_2_assembly_sequence_discovery(
     """
     if orchestrator == "enabled":
         orchestrator_instruction = (
-            "\nOnce you have verified a working sequence for one object, "
-            "orchestrate a composed policy for the remaining objects. "
-            "Fall back to individual calls on failure."
+            "\nOnce you have verified a working grasp→rotate→insert sequence for the first object, "
+            "use `execute_composed_code` to compose and replay the same pattern "
+            "for remaining objects (substituting object_name, grasp_id, and gripper_width). "
+            "If the composed execution fails for any object, fall back to individual tool calls for that object."
         )
     else:
         orchestrator_instruction = ""
