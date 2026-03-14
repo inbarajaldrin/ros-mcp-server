@@ -38,11 +38,20 @@ def _parse_tool_call(call_str):
 
     Input format: "ros-mcp-server__tool_name(key='value', key2='value2')"
     Output: ("ros_mcp_server__tool_name", {"key": "value", "key2": "value2"})
+
+    Handles trailing annotations like " [FAILED]" or " [JAMMED]" that may
+    appear after the closing parenthesis in logged tool sequences.
     """
+    # Strip trailing annotations (e.g. " [FAILED]", " [FIRST ATTEMPT FAILED]")
+    import re
+    call_str = re.sub(r'\s*\[.*?\]\s*$', '', call_str)
+
     # Split function name from args
     paren_idx = call_str.index("(")
     raw_name = call_str[:paren_idx]
-    args_str = call_str[paren_idx + 1:-1]  # strip parens
+    # Find the last ')' to handle any nested parens in values
+    close_paren_idx = call_str.rindex(")")
+    args_str = call_str[paren_idx + 1:close_paren_idx]
 
     # Normalize server__tool format: hyphens → underscores for Python
     func_name = raw_name.replace("-", "_")
