@@ -55,6 +55,8 @@ phases:
     tools:
       deny:
         - mcp-tools-orchestrator__execute_composed_code
+        - isaac-sim__save_scene_state
+        - isaac-sim__restore_scene_state
     onStart:
       - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:isaac-sim__delete_objects()"
