@@ -80,6 +80,41 @@ phases:
         whenOutput:
           phase: 2
           status: success
+        run: "@tool-exec:isaac-sim__new_stage()"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@wait:0.5"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@tool-exec:isaac-sim__quick_start()"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@tool-exec:isaac-sim__add_objects(assembly='fmb3')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@wait:1"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
+        run: "@tool-exec:isaac-sim__randomize_object_poses()"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
         gate:
           run: "@tool-exec:mcp-tools-orchestrator__execute_composed_code(code='from unified_api import *; exec(open(os.path.join(os.environ[\"ROS_MCP_SERVER_DIR\"], \"ablations\", \"replay_verify.py\")).read()); setup_and_replay(\"fmb_assembly_3\", \"base3\", \"sim\", 2)')"
           whenOutput:
