@@ -28,10 +28,11 @@ tools:
 phases:
   - name: Assembly execution (state-threaded)
     onStart:
+      - "@tool-exec:isaac-sim__new_stage()"
+      - "@wait:0.5"
+      - "@tool-exec:isaac-sim__quick_start()"
       - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
       - "@tool-exec:ros-mcp-server__clear_primitive_state()"
-      - "@tool-exec:isaac-sim__delete_objects()"
-      - "@tool-exec:isaac-sim__play_scene()"
       - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
       - "@tool-exec:isaac-sim__add_objects(assembly='fmb3')"
       - "@tool-exec:isaac-sim__setup_pose_publisher()"
