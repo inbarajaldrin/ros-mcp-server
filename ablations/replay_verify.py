@@ -73,15 +73,16 @@ def _parse_tool_call(call_str):
 
 
 def setup_and_replay(assembly_id, base_name, mode, phase):
-    """Robot reset + replay + verify. Convenience wrapper for gate hooks.
+    """Scene setup + replay + verify. Convenience wrapper for gate hooks.
 
-    Resets robot state before replaying logged sequences. Scene setup
-    (delete/add objects, randomize poses) is handled by client-driven
-    @tool-exec hooks that fire before this gate — the orchestrator only
-    calls ros-mcp-server tools available via IPC.
+    Resets robot and scene state before replaying logged sequences.
+    Call from execute_composed_code after `from unified_api import *`
+    and `exec(open(...).read())`.
     """
     ros_mcp_server__move_home(mode=mode)
     ros_mcp_server__control_gripper(command='open', mode=mode)
+    if phase == 2:
+        isaac_sim__randomize_object_poses()
     replay(assembly_id, base_name, mode, phase)
 
 
