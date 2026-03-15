@@ -105,7 +105,7 @@ def phase_2_assembly_sequence_discovery(
 
 **Initialization:**
 
-Read the disassembly results to identify the grasp ids successfully used per object.
+Read the disassembly results to identify the grasp ids successfully used to disassemble each object from a fully assembled state. Use the same grasp ids to assemble them back when their current orientation matches their target orientation.
 
 Save scene state at the start before beginning assembly.
 
@@ -124,7 +124,7 @@ Run verify assembly once you've run all tools required to assemble one object in
 
 **SUCCESS** — verify assembly returns success:
 1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
-2. Log the complete tools and arguments executed in sequence for that object — include ALL steps taken including any recovery steps.
+2. Log the minimal successful tool sequence for that object — only the steps needed to reproduce the assembly from a fresh scene. Include recovery steps that were part of the final successful path (e.g. place_down + regrasp). Do not include failed tool calls, abandoned attempts, or diagnostic queries (get_scene_info, verify_clearance, verify_assembly). Use the grasp_id and matching gripper_width_mm that worked.
 3. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure:

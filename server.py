@@ -240,6 +240,18 @@ mcp = FastMCP("ros-mcp-server")
 ##
 ## ############################################################################################## ##
 
+# TODO: Add MCP tool annotations (readOnlyHint, destructiveHint, etc.) to all tools.
+# replay_verify.py can then filter out read-only tools during replay instead of
+# hardcoding a skip-list. Query tools like get_scene_info, verify_clearance,
+# verify_assembly, verify_grasp should be marked readOnlyHint=True.
+#
+# Example:
+#   @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+#   def get_scene_info(...):
+#
+# Then in replay_verify.py:
+#   if tool_annotations.get("readOnlyHint"): continue  # skip queries during replay
+
 @mcp.tool()
 def get_topics():
     """List all active ROS topics.

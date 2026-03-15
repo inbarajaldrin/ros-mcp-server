@@ -78,6 +78,11 @@ phases:
         whenOutput:
           phase: 2
           status: success
+        run: "@tool-exec:isaac-sim__save_scene_state(json_file_path='pre_gate_assembled.json')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: success
         run: "@tool-exec:isaac-sim__new_stage()"
       - after: ros-mcp-server__signal_phase_complete
         whenOutput:
@@ -120,7 +125,8 @@ phases:
           onPass:
             - "@complete-phase"
           onFail:
-            - "Replay verification of your logged assembly sequences failed. Fix your tool_sequences and signal phase 2 complete again. Details: {{gate_output}}"
+            - "@tool-exec:isaac-sim__restore_scene_state(json_file_path='pre_gate_assembled.json')"
+            - "Replay verification of your logged assembly sequences failed. Did you log the right tool_sequences required for a fresh assembly without requiring a failed attempt? Go through your memory and update the logs and signal phase 2 complete again. Details: {{gate_output}}"
       - after: ros-mcp-server__signal_phase_complete
         whenOutput:
           phase: 2
