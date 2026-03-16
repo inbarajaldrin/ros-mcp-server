@@ -8,8 +8,6 @@ models:
     model: claude-haiku-4-5
   - provider: anthropic
     model: claude-sonnet-4-6
-  - provider: anthropic
-    model: claude-opus-4-6
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: 200
@@ -133,40 +131,3 @@ phases:
           status: failure
           requires_response: false
         run: "@escalate"
-
-  - name: Assembly execution (sim)
-    tools:
-      deny:
-        - mcp-tools-orchestrator__execute_composed_code
-        - isaac-sim__save_scene_state
-        - isaac-sim__restore_scene_state
-    onStart:
-      - "@tool-exec:isaac-sim__new_stage()"
-      - "@wait:0.5"
-      - "@tool-exec:isaac-sim__quick_start()"
-      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
-      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
-      - "@tool-exec:isaac-sim__add_objects(assembly='fmb2')"
-      - "@tool-exec:isaac-sim__setup_pose_publisher()"
-      - "@wait:1"
-      - "@tool-exec:isaac-sim__randomize_object_poses()"
-      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
-      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_2', task_type='disassembly')"
-      - "@insert-resource:Resources__results_resource(assembly_id='fmb_assembly_2', task_type='assembly')"
-    commands:
-      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='sim')"
-      - "@insert-attachment:fmb_assembly2_manual.png"
-    hooks:
-      - after: ros-mcp-server__verify_assembly
-        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
-      - after: ros-mcp-server__signal_phase_complete
-        whenOutput:
-          phase: 3
-          status: success
-        run: "@complete-phase"
-      - after: ros-mcp-server__signal_phase_complete
-        whenOutput:
-          phase: 3
-          status: failure
-          requires_response: false
-        run: "@abort"

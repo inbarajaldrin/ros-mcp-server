@@ -1,5 +1,5 @@
-name: mode1_p3_fmb3
-description: "Mode 1: Isolated P3 state-threaded assembly execution (fmb3, 6 models, GT P1+P2, orch denied)"
+name: mode3_sim_fmb3
+description: "Mode 3: Sim P3 state-threaded assembly execution (fmb3, 6 models, GT P1+P2, orch denied)"
 created: 2026-03-09T00:00:00.000Z
 runs: 3
 models:
