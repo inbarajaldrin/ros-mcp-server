@@ -181,6 +181,29 @@ def ground_truth_resource(assembly_id: str, task_type: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.resource("assembly://{assembly_id}/ground_truth_ablation_quat/{task_type}")
+def ground_truth_ablation_quat_resource(assembly_id: str, task_type: str) -> str:
+    """Ground truth with orientation placeholders for quaternion accuracy ablation.
+
+    Same as ground_truth_resource but tool sequences include
+    current_object_orientation and grasp_id as placeholder params that the
+    agent must fill from live tool outputs.
+
+    task_type: "disassembly" or "assembly"
+
+    Returns: same structure as results_resource."""
+    if task_type not in MODES:
+        return json.dumps({"error": f"Invalid task_type: '{task_type}'. Must be one of: {sorted(MODES.keys())}"})
+    prefix = MODES[task_type]["prefix"]
+    path = GROUND_TRUTH_DIR / "ablation_quat" / f"{prefix}_{assembly_id}_results.json"
+    if not path.exists():
+        return json.dumps({"error": f"Ground truth not found: {path.name}"})
+    try:
+        return path.read_text()
+    except OSError as e:
+        return json.dumps({"error": str(e)})
+
+
 @mcp.resource("assembly://{assembly_id}/results/{task_type}")
 def results_resource(assembly_id: str, task_type: str) -> str:
     """Results logged during assembly or disassembly for this assembly.

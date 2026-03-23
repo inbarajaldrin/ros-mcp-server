@@ -1,0 +1,59 @@
+name: ablation_quat_fmb2
+description: "Quaternion accuracy ablation: P3 sim assembly (fmb2, 6 models, agent must carry forward orientation)"
+created: 2026-03-22T00:00:00.000Z
+runs: 3
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+  - provider: anthropic
+    model: claude-haiku-4-5
+  - provider: openai
+    model: gpt-5
+  - provider: openai
+    model: gpt-5-mini
+  - provider: google
+    model: gemini-2.5-pro
+  - provider: google
+    model: gemini-2.5-flash
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_ablation_quat.json
+  maxIterations: 200
+  clearContextBetweenPhases: true
+systemPrompt: "@insert-prompt:Prompts__system_context"
+tools:
+  deny:
+    - mcp-tools-orchestrator__execute_composed_code
+    - isaac-sim__save_scene_state
+    - isaac-sim__restore_scene_state
+phases:
+  - name: Assembly execution (agent-provided orientation)
+    onStart:
+      - "@tool-exec:isaac-sim__new_stage()"
+      - "@wait:0.5"
+      - "@tool-exec:isaac-sim__quick_start()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb2')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
+      - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_2', task_type='disassembly')"
+      - "@insert-resource:Resources__ground_truth_ablation_quat_resource(assembly_id='fmb_assembly_2', task_type='assembly')"
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='real')"
+      - "@insert-attachment:fmb_assembly2_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_assembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+          requires_response: false
+        run: "@abort"

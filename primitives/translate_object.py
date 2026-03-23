@@ -472,7 +472,7 @@ class TranslateObject(Node):
     # Sim mode: translate to target (hover or final position)
     # ------------------------------------------------------------------
 
-    def translate_for_target_sim(self, object_name, base_name, hover=True):
+    def translate_for_target_sim(self, object_name, base_name, hover=True, object_orientation=None):
         """
         Sim mode: Compute and execute EE translation.
 
@@ -481,6 +481,9 @@ class TranslateObject(Node):
             base_name: Name of the base object
             hover: If True, target is HOVER_HEIGHT above base (move-to-base).
                    If False, target is final object position from JSON (perform-insert sim).
+            object_orientation: Optional quaternion [x,y,z,w]. When provided, used for
+                orientation verification instead of reading from sim topic. Enables
+                ablation mode where the agent must carry forward orientation values.
         """
         self.object_name = object_name
         self.base_name = base_name
@@ -520,7 +523,23 @@ class TranslateObject(Node):
             self.error_message = f"No target orientation found for {object_name} in assembly config"
             self.get_logger().error(self.error_message)
             return False
-        R_object_current = R.from_matrix(T_object_current[:3, :3])
+        # Use agent-provided orientation when available (ablation mode),
+        # otherwise fall back to sim topic (default behavior)
+        if object_orientation is not None:
+            quat_array = np.array(object_orientation, dtype=float)
+            if np.any(np.abs(quat_array) > 1.0):
+                self.error_message = f"current_object_orientation has component(s) outside [-1, 1]: {quat_array.tolist()}"
+                self.get_logger().error(self.error_message)
+                return False
+            quat_norm_sq = float(np.sum(quat_array ** 2))
+            if abs(quat_norm_sq - 1.0) > 0.02:
+                self.error_message = f"current_object_orientation norm² = {quat_norm_sq:.4f} (expected ~1.0): {quat_array.tolist()}"
+                self.get_logger().error(self.error_message)
+                return False
+            R_object_current = R.from_quat(object_orientation)
+            self.get_logger().info(f"Using agent-provided object orientation: {object_orientation}")
+        else:
+            R_object_current = R.from_matrix(T_object_current[:3, :3])
         R_base = R.from_matrix(T_base_current[:3, :3])
         R_relative = R.from_matrix(R_base.as_matrix().T @ R_object_current.as_matrix())
         R_target_relative = R.from_quat(target_quat)
@@ -1215,7 +1234,7 @@ def main():
 
         if args.insert:
             if args.mode == 'sim':
-                success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True)
+                success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True, object_orientation=args.current_object_orientation)
                 if success:
                     # Let the robot settle at hover before reading fresh poses.
                     # The old two-subprocess approach had ~3-5s of LLM round-trip
@@ -1226,7 +1245,7 @@ def main():
                         rclpy.spin_once(node, timeout_sec=0.1)
                     node.current_joint_angles = None
                     node.read_current_joint_angles()
-                    success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False)
+                    success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False, object_orientation=args.current_object_orientation)
             else:
                 # Real mode: hover above base, then insertion subprocess
                 success = node.translate_for_target_real(

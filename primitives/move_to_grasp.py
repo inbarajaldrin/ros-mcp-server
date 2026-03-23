@@ -870,14 +870,12 @@ class DirectObjectMove(Node):
                 if not self._gripper_settle_pending:
                     self._gripper_settle_pending = True
                     self.get_logger().info(
-                        f"Gripper at {self.current_gripper_width:.1f}mm "
-                        f"(expected >= {self.expected_gripper_width - 2.0:.1f}mm) — waiting to settle..."
+                        f"Gripper at {self.current_gripper_width:.1f}mm — waiting to settle..."
                     )
                     return  # Re-poll on next timer tick (~0.5s)
                 self.error_message = (
-                    f"Gripper is not open ({self.current_gripper_width:.1f}mm) "
-                    f"(expected >= {self.expected_gripper_width:.1f}mm). "
-                    f"Set gripper to the required gripper_width_mm before calling move_to_grasp."
+                    f"Gripper is not open ({self.current_gripper_width:.1f}mm). "
+                    f"Open the gripper before calling move_to_grasp."
                 )
                 self.get_logger().error(self.error_message)
                 self.should_exit = True

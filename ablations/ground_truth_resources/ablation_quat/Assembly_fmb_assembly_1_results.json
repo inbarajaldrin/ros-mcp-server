@@ -1,0 +1,83 @@
+{
+  "assembly_id": "fmb_assembly_1",
+  "base_name": "base1",
+  "assembly_order": [
+    {
+      "assembly_order": 1,
+      "object_name": "u_brown",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='u_brown', grasp_id=1, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='u_brown', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='u_brown', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='place_down', object_name='u_brown', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='u_brown', grasp_id=1, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='u_brown', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='u_brown', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='insert', object_name='u_brown', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')"
+      ]
+    },
+    {
+      "assembly_order": 2,
+      "object_name": "u_orange",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='u_orange', grasp_id=1, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='u_orange', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='u_orange', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='place_down', object_name='u_orange', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='u_orange', grasp_id=1, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='u_orange', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='u_orange', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='insert', object_name='u_orange', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='35', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')"
+      ]
+    },
+    {
+      "assembly_order": 3,
+      "object_name": "line_green",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='39.8', mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='line_green', grasp_id=1, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='line_green', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='line_green', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='insert', object_name='line_green', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='39.8', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')"
+      ]
+    },
+    {
+      "assembly_order": 4,
+      "object_name": "inverted_u_yellow",
+      "tool_sequence": [
+        "ros-mcp-server__control_gripper(command='56.7', mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='inverted_u_yellow', grasp_id=2, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='inverted_u_yellow', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='inverted_u_yellow', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='place_down', object_name='inverted_u_yellow', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='56.7', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')",
+        "ros-mcp-server__move_to_grasp(object_name='inverted_u_yellow', grasp_id=2, mode='real')",
+        "ros-mcp-server__control_gripper(command='close', mode='real')",
+        "ros-mcp-server__move_to_safe_height(object_name='inverted_u_yellow', mode='real')",
+        "ros-mcp-server__rotate_object(object_name='inverted_u_yellow', base_name='base1', current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__translate_object(action='insert', object_name='inverted_u_yellow', base_name='base1', grasp_id=<>, current_object_orientation=<>, mode='real')",
+        "ros-mcp-server__control_gripper(command='56.7', mode='real')",
+        "ros-mcp-server__move_to_safe_height(mode='real')"
+      ]
+    }
+  ]
+}
