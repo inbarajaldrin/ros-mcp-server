@@ -31,6 +31,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 import json
+import re
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import argparse

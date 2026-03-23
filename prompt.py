@@ -165,8 +165,7 @@ If you exhaust all strategies for an object, signal failure — do not skip to t
 Run verify assembly once you've run all tools required to move one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
-1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
-2. Move on to the next object.
+1. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure or any of the steps failed:
 1. Grasp the object and place it in clear space to regrasp.
