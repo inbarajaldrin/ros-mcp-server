@@ -31,6 +31,7 @@ import subprocess
 import argparse
 import threading
 import json
+import re
 import time
 
 import logging
@@ -195,10 +196,24 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger('translate_object')
 
 
+def _json_dumps_decimal(obj, **kwargs):
+    """json.dumps that outputs decimal notation instead of scientific notation.
+    Prevents LLM tokenization issues where e.g. 1e-6 gets corrupted to 16."""
+    s = json.dumps(obj, **kwargs)
+    parts = re.split(r'("(?:[^"\\]|\\.)*")', s)
+    for i, part in enumerate(parts):
+        if not part.startswith('"'):
+            parts[i] = re.sub(
+                r'-?\d+\.?\d*[eE][+-]?\d+',
+                lambda m: f'{float(m.group()):.10f}'.rstrip('0').rstrip('.'),
+                part
+            )
+    return ''.join(parts)
+
 def output_result(result):
     """Output JSON result with markers for MCP server parsing"""
     print("__RESULT_JSON__")
-    print(json.dumps(result))
+    print(_json_dumps_decimal(result))
     print("__END_RESULT_JSON__")
 
 
