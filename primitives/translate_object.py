@@ -50,6 +50,7 @@ def _subprocess_fast_path():
     pre.add_argument('--mode', type=str, default='sim')
     pre.add_argument('--place-down', action='store_true', dest='place_down')
     pre.add_argument('--object-name', type=str, default=None)
+    pre.add_argument('--current-object-orientation', type=float, nargs=4, default=None)
     args, _ = pre.parse_known_args()
 
     is_fast = args.place_down
@@ -58,6 +59,15 @@ def _subprocess_fast_path():
 
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     log = logging.getLogger('translate_object')
+
+    # Validate quaternion if provided (catches SDK parser corruption like 1e-6 → 16)
+    if args.current_object_orientation is not None:
+        if any(abs(v) > 1.0 for v in args.current_object_orientation):
+            print("__RESULT_JSON__")
+            print(json.dumps({"result": "failure", "mode": args.mode,
+                              "error": f"current_object_orientation has component(s) outside [-1, 1]: {args.current_object_orientation}"}))
+            print("__END_RESULT_JSON__")
+            sys.exit(1)
 
     def _output(result):
         print("__RESULT_JSON__")
@@ -1168,6 +1178,20 @@ def main():
             parser.error("--base-name is required for --insert in real mode")
         if not args.use_default_base_position and args.final_base_pos is None:
             parser.error("--final-base-pos or --use-default-base-position required in real mode")
+
+    # --- Validate quaternion if provided (all actions) ---
+
+    if args.current_object_orientation is not None:
+        quat_array = np.array(args.current_object_orientation, dtype=float)
+        if np.any(np.abs(quat_array) > 1.0):
+            output_result({"result": "failure", "mode": args.mode,
+                           "error": f"current_object_orientation has component(s) outside [-1, 1]: {quat_array.tolist()}"})
+            sys.exit(1)
+        quat_norm_sq = float(np.sum(quat_array ** 2))
+        if abs(quat_norm_sq - 1.0) > 0.02:
+            output_result({"result": "failure", "mode": args.mode,
+                           "error": f"current_object_orientation norm² = {quat_norm_sq:.4f} (expected ~1.0): {quat_array.tolist()}"})
+            sys.exit(1)
 
     # --- Subprocess-only paths (no ROS node needed) ---
 
