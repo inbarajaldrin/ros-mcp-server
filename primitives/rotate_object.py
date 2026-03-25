@@ -67,6 +67,10 @@ def output_result(result):
     print("__END_RESULT_JSON__")
 
 
+# Quaternion output precision — controls how many decimal places are reported to the LLM.
+# Set to 4 to avoid scientific notation (0.000001 → 0.0), or 6 for full precision (triggers SDK bug).
+QUAT_DECIMAL_PLACES = 4
+
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
 SYMMETRY_DIR = str(get_symmetry_dir())
@@ -1681,19 +1685,19 @@ class ReorientForAssembly(Node):
             if self.initial_object_orientation_quat is not None and self.initial_object_orientation_rpy_deg is not None:
                 result["initial_object_orientation"] = {
                     "quat": {
-                        "x": round(float(self.initial_object_orientation_quat[0]), 6),
-                        "y": round(float(self.initial_object_orientation_quat[1]), 6),
-                        "z": round(float(self.initial_object_orientation_quat[2]), 6),
-                        "w": round(float(self.initial_object_orientation_quat[3]), 6)
+                        "x": round(float(self.initial_object_orientation_quat[0]), QUAT_DECIMAL_PLACES),
+                        "y": round(float(self.initial_object_orientation_quat[1]), QUAT_DECIMAL_PLACES),
+                        "z": round(float(self.initial_object_orientation_quat[2]), QUAT_DECIMAL_PLACES),
+                        "w": round(float(self.initial_object_orientation_quat[3]), QUAT_DECIMAL_PLACES)
                     },
                 }
             if self.final_object_orientation_quat is not None and self.final_object_orientation_rpy_deg is not None:
                 result["final_object_orientation"] = {
                     "quat": {
-                        "x": round(float(self.final_object_orientation_quat[0]), 6),
-                        "y": round(float(self.final_object_orientation_quat[1]), 6),
-                        "z": round(float(self.final_object_orientation_quat[2]), 6),
-                        "w": round(float(self.final_object_orientation_quat[3]), 6)
+                        "x": round(float(self.final_object_orientation_quat[0]), QUAT_DECIMAL_PLACES),
+                        "y": round(float(self.final_object_orientation_quat[1]), QUAT_DECIMAL_PLACES),
+                        "z": round(float(self.final_object_orientation_quat[2]), QUAT_DECIMAL_PLACES),
+                        "w": round(float(self.final_object_orientation_quat[3]), QUAT_DECIMAL_PLACES)
                     },
                 }
             # if self.initial_ee_orientation_quat is not None and self.initial_ee_orientation_rpy_deg is not None:

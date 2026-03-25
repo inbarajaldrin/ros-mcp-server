@@ -309,6 +309,10 @@ def fix_orientation_inprocess(node, target_xy, logger):
     return fix_success[0]
 
 
+# Quaternion output precision — controls how many decimal places are reported to the LLM.
+# Set to 4 to avoid scientific notation (0.000001 → 0.0), or 6 for full precision (triggers SDK bug).
+QUAT_DECIMAL_PLACES = 4
+
 def _json_dumps_decimal(obj, **kwargs):
     """json.dumps that outputs decimal notation instead of scientific notation.
     Prevents LLM tokenization issues where e.g. 1e-6 gets corrupted to 16."""
@@ -1981,10 +1985,10 @@ class DirectObjectMove(Node):
                 },
                 "current_object_orientation": {
                     "quat": {
-                        "x": round(self.final_orientation_quat[0], 6),
-                        "y": round(self.final_orientation_quat[1], 6),
-                        "z": round(self.final_orientation_quat[2], 6),
-                        "w": round(self.final_orientation_quat[3], 6)
+                        "x": round(self.final_orientation_quat[0], QUAT_DECIMAL_PLACES),
+                        "y": round(self.final_orientation_quat[1], QUAT_DECIMAL_PLACES),
+                        "z": round(self.final_orientation_quat[2], QUAT_DECIMAL_PLACES),
+                        "w": round(self.final_orientation_quat[3], QUAT_DECIMAL_PLACES)
                     },
                 }
             }
