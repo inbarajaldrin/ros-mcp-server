@@ -1,17 +1,24 @@
 """Signal phase completion to the MCP client.
 
 Related files (phase signal pipeline):
-  - triggers/signal_phase_complete.py (this file) — handles phase signals, gates on logged results
-  - elicitations/verify_assembly.py   — Pydantic schemas for human verification of real-world assembly (phase 3)
+  - triggers/signal_phase_complete.py (this file) -- handles phase signals, gates on logged results
+  - triggers/signal_verify_results.py -- post-replay verification, manages verify_rejection.json
+  - resource.py -- write_assembly_results clears rejections via clear_rejection()
+  - ablations/replay_verify.py -- orchestrator replay script, calls signal_verify_results
+  - elicitations/verify_assembly.py -- Pydantic schemas for human verification (phase 3 real)
 
 The agent calls this at the end of each assembly phase. The MCP client
 watches for this tool's result to trigger the next phase.
 
+Phase 2 gate sequence:
+  Gate 0: Check verify_rejection.json -- reject if unresolved replay failures exist.
+          Auto-escalate (requires_response=False) if any object has >= 3 failed attempts.
+  Gate 1: Check Assembly_*_results.json exists on disk.
+  Gate 2: Run verify_assembly(check_all) to confirm scene state.
+
 Phase behaviors:
-  - Phase 1 (Disassembly sequence discovery): Gates on Disassembly_*_results.json
-    + verify_disassembly(check_all) in sim.
-  - Phase 2 (Assembly sequence discovery): Gates on Assembly_*_results.json
-    + verify_assembly(check_all) in sim.
+  - Phase 1 (Disassembly): Gates on Disassembly_*_results.json + verify_disassembly(check_all).
+  - Phase 2 (Assembly): Gate 0 (rejection) + Gate 1 (results file) + Gate 2 (verify_assembly).
   - Phase 3 sim: Gates on verify_assembly(check_all).
   - Phase 3 real: Invokes verify_assembly elicitation for human verification.
 """
@@ -133,11 +140,47 @@ def _handle_phase_2(
     """Phase 2: Assembly sequence discovery.
 
     On success, gates on:
+      0. No unresolved verify rejections (orchestrator replay failures).
       1. Assembly results JSON logged to disk.
       2. verify_assembly(check_all) confirms all objects are actually assembled.
     """
     if status != "success":
         return {"requires_response": False}
+
+    # Gate 0: check for unresolved orchestrator replay rejections
+    from triggers.signal_verify_results import (
+        get_unresolved_rejections, has_exhausted_object
+    )
+
+    exhausted = has_exhausted_object()
+    if exhausted:
+        return {
+            "status": "failure",
+            "requires_response": False,
+            "message": (
+                f"Object '{exhausted}' has exhausted maximum replay attempts. "
+                f"Escalating to next model."
+            ),
+        }
+
+    unresolved = get_unresolved_rejections()
+    if unresolved:
+        objects = list(unresolved.keys())
+        details = "; ".join(
+            f"'{name}' (attempt {s['attempts']}, failed at: {s.get('last_failed_step', '?')})"
+            for name, s in unresolved.items()
+        )
+        return {
+            "status": "failure",
+            "requires_response": True,
+            "message": (
+                f"You must update the logged tool_sequence for {objects} "
+                f"using write_assembly_results before signaling completion. "
+                f"Your assembly was correct but your logs are incomplete. "
+                f"Review your conversation history for the actual steps you "
+                f"performed. Details: {details}"
+            ),
+        }
 
     # Gate 1: results file must exist
     if not _has_assembly_results():

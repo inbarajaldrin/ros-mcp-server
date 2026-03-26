@@ -386,6 +386,15 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
 
     data[order_key] = order_list
     _save_json(mode, assembly_id, data)
+
+    # Clear any orchestrator replay rejection for this object
+    if mode == "assembly":
+        try:
+            from triggers.signal_verify_results import clear_rejection
+            clear_rejection(object_name)
+        except ImportError:
+            pass  # signal_verify_results not available (e.g. standalone resource server)
+
     return _ok()
 
 

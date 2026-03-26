@@ -3,6 +3,11 @@
 Assembly-agnostic: reads logged results JSON, replays every tool_sequence
 entry in order, then calls signal_verify_results to check scene state.
 
+Checkpoint support: saves scene state after each successfully replayed
+object. On subsequent replays (after the agent fixes a failed object's
+logs), restores the checkpoint from the last completed object and only
+replays from the failed object onwards instead of replaying everything.
+
 Usage (from execute_composed_code):
     from unified_api import *
     exec(open(os.path.join(os.environ['ROS_MCP_SERVER_DIR'], 'ablations', 'replay_verify.py')).read())
@@ -33,6 +38,52 @@ def _get_results_path(phase, assembly_id):
     return logs_dir / f"{prefix}_{assembly_id}_results.json"
 
 
+def _get_rejection_path():
+    """Build path to verify_rejection.json."""
+    base = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
+    if base:
+        return Path(base) / "logs" / "verify_rejection.json"
+    return None
+
+
+def _get_previously_completed():
+    """Read completed_objects from verify_rejection.json (from prior replay)."""
+    path = _get_rejection_path()
+    if not path or not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        # Objects that were successfully replayed before and haven't been
+        # re-rejected since. A resolved=True object was completed in a prior
+        # replay and then its logs were updated -- still safe to skip.
+        completed = []
+        for name, state in data.get("failed_objects", {}).items():
+            # Only include objects that are resolved (logs were fixed).
+            # Unresolved objects need to be replayed with their new sequences.
+            pass
+        # Use the completed_objects list stored during the last replay
+        return data.get("last_completed_objects", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_completed_objects(completed):
+    """Store the list of completed objects in verify_rejection.json for next replay."""
+    path = _get_rejection_path()
+    if not path:
+        return
+    try:
+        if path.exists():
+            data = json.loads(path.read_text())
+        else:
+            data = {"failed_objects": {}}
+        data["last_completed_objects"] = completed
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2))
+    except (json.JSONDecodeError, OSError):
+        pass
+
+
 def _parse_tool_call(call_str):
     """Parse a tool call string into (function_name, kwargs).
 
@@ -53,7 +104,7 @@ def _parse_tool_call(call_str):
     close_paren_idx = call_str.rindex(")")
     args_str = call_str[paren_idx + 1:close_paren_idx]
 
-    # Normalize server__tool format: hyphens → underscores for Python
+    # Normalize server__tool format: hyphens -> underscores for Python
     func_name = raw_name.replace("-", "_")
 
     # Parse key=value pairs
@@ -78,18 +129,44 @@ def setup_and_replay(assembly_id, base_name, mode, phase):
     Resets robot state before replaying logged sequences. Scene setup
     (new_stage, quick_start, add_objects, randomize) is handled by
     client-driven @tool-exec hooks that fire before this gate.
+
+    If a previous replay completed some objects before failing, restores
+    the checkpoint from the last completed object and skips re-replaying them.
     """
-    ros_mcp_server__move_home(mode=mode)
-    ros_mcp_server__control_gripper(command='open', mode=mode)
-    replay(assembly_id, base_name, mode, phase)
+    # Check for checkpoint from a previous replay attempt
+    prev_completed = _get_previously_completed()
+
+    if prev_completed:
+        # Restore scene to after the last completed object
+        checkpoint_name = f"replay_checkpoint_{len(prev_completed)}.json"
+        try:
+            isaac_sim__restore_scene_state(json_file_path=checkpoint_name)
+            ros_mcp_server__move_home(mode=mode)
+            ros_mcp_server__control_gripper(command='open', mode=mode)
+        except Exception:
+            # Checkpoint restore failed -- fall back to full replay
+            prev_completed = []
+            ros_mcp_server__move_home(mode=mode)
+            ros_mcp_server__control_gripper(command='open', mode=mode)
+    else:
+        ros_mcp_server__move_home(mode=mode)
+        ros_mcp_server__control_gripper(command='open', mode=mode)
+
+    replay(assembly_id, base_name, mode, phase, skip_objects=prev_completed)
 
 
-def replay(assembly_id, base_name, mode, phase):
+def replay(assembly_id, base_name, mode, phase, skip_objects=None):
     """Replay logged tool sequences and verify scene state.
 
     Reads the results JSON, replays each object's tool_sequence in order,
     then calls signal_verify_results with the outcome.
+
+    Args:
+        skip_objects: list of object names to skip (already verified in prior replay).
     """
+    if skip_objects is None:
+        skip_objects = []
+
     # Read results
     results_path = _get_results_path(phase, assembly_id)
     if not results_path.exists():
@@ -111,16 +188,21 @@ def replay(assembly_id, base_name, mode, phase):
         sys.exit(1)
 
     # Replay each object's tool sequence
-    completed_objects = []
+    completed_objects = list(skip_objects)  # start with previously verified objects
     for entry in entries:
         object_name = entry["object_name"]
         tool_sequence = entry.get("tool_sequence", [])
 
+        # Skip objects already verified in a prior replay
+        if object_name in skip_objects:
+            continue
+
         if not tool_sequence:
-            # Disassembly entries don't have tool_sequence — skip replay
+            # Disassembly entries don't have tool_sequence -- skip replay
             completed_objects.append(object_name)
             continue
 
+        completed_steps = []  # steps that succeeded for this object
         for step in tool_sequence:
             try:
                 func_name, kwargs = _parse_tool_call(step)
@@ -133,16 +215,18 @@ def replay(assembly_id, base_name, mode, phase):
                 # Check for tool-level failure
                 if isinstance(result, dict) and result.get("result") == "failure":
                     error_msg = result.get("error", "tool returned failure")
-                    # Build remaining objects list
                     remaining = [
                         e["object_name"] for e in entries
                         if e["object_name"] not in completed_objects
                         and e["object_name"] != object_name
                     ]
+                    _save_completed_objects(completed_objects)
                     replay_data = json.dumps({
                         "replay": "failure",
                         "failed_object": object_name,
                         "failed_step": step,
+                        "completed_steps_for_object": completed_steps,
+                        "total_steps_for_object": tool_sequence,
                         "error": error_msg,
                         "completed_objects": completed_objects,
                         "remaining_objects": remaining,
@@ -154,16 +238,21 @@ def replay(assembly_id, base_name, mode, phase):
                     print(json.dumps(verify_result))
                     sys.exit(1)
 
+                completed_steps.append(step)
+
             except Exception as e:
                 remaining = [
                     e_["object_name"] for e_ in entries
                     if e_["object_name"] not in completed_objects
                     and e_["object_name"] != object_name
                 ]
+                _save_completed_objects(completed_objects)
                 replay_data = json.dumps({
                     "replay": "failure",
                     "failed_object": object_name,
                     "failed_step": step,
+                    "completed_steps_for_object": completed_steps,
+                    "total_steps_for_object": tool_sequence,
                     "error": str(e),
                     "completed_objects": completed_objects,
                     "remaining_objects": remaining,
@@ -177,7 +266,15 @@ def replay(assembly_id, base_name, mode, phase):
 
         completed_objects.append(object_name)
 
-    # All objects replayed successfully — verify scene state
+        # Save checkpoint after each successfully replayed object
+        checkpoint_name = f"replay_checkpoint_{len(completed_objects)}.json"
+        try:
+            isaac_sim__save_scene_state(json_file_path=checkpoint_name)
+        except Exception:
+            pass  # Non-fatal -- just means next replay can't skip this object
+
+    # All objects replayed successfully -- clear completed list and verify
+    _save_completed_objects([])  # reset for clean state
     replay_data = json.dumps({
         "replay": "success",
         "completed_objects": completed_objects,
