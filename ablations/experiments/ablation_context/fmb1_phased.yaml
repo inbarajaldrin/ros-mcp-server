@@ -5,6 +5,8 @@ runs: 5
 models:
   - provider: anthropic
     model: claude-sonnet-4-6
+  - provider: anthropic
+    model: claude-haiku-4-5
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: 200
