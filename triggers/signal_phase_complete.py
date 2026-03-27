@@ -157,9 +157,10 @@ def _handle_phase_2(
         return {
             "status": "failure",
             "requires_response": False,
+            "action": "switch",
             "message": (
                 f"Object '{exhausted}' has exhausted maximum replay attempts. "
-                f"Escalating to next model."
+                f"Switching to next model to fix logs."
             ),
         }
 

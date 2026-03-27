@@ -130,5 +130,11 @@ phases:
         whenOutput:
           phase: 2
           status: failure
+          action: switch
+        run: "@switch"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: failure
           requires_response: false
         run: "@escalate"
