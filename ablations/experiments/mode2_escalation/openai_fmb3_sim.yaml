@@ -8,6 +8,8 @@ models:
     model: gpt-5-mini
   - provider: openai
     model: gpt-5
+  - provider: openai
+    model: o3
 settings:
   mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
   maxIterations: 200
