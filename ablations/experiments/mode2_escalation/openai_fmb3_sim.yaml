@@ -126,7 +126,12 @@ phases:
             - "@complete-phase"
           onFail:
             - "@tool-exec:isaac-sim__restore_scene_state(json_file_path='pre_gate_assembled.json')"
-            - "@switch"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 2
+          status: failure
+          action: switch
+        run: "@switch"
       - after: ros-mcp-server__signal_phase_complete
         whenOutput:
           phase: 2
