@@ -1,0 +1,44 @@
+name: ablation_orchestrator_haiku_with
+description: "Orchestrator ablation: P1 disassembly with orchestrator enabled (fmb1, haiku)"
+created: 2026-03-09T00:00:00.000Z
+runs: 3
+models:
+  - provider: anthropic
+    model: claude-haiku-4-5
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  maxIterations: 200
+systemPrompt: "@insert-prompt:Prompts__system_context"
+hooks:
+  - before: isaac-sim__restore_scene_state
+    run: "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+phases:
+  - name: Disassembly sequence discovery (orchestrator enabled)
+    onStart:
+      - "@tool-exec:isaac-sim__new_stage()"
+      - "@wait:0.5"
+      - "@tool-exec:isaac-sim__quick_start()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb1')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__assemble_objects(assembly='fmb1')"
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_1')"
+    commands:
+      - "@insert-prompt:Prompts__phase_1_disassembly_sequence_discovery(orchestrator='enabled')"
+      - "@insert-attachment:fmb_assembly1_manual.png"
+    hooks:
+      - after: ros-mcp-server__verify_disassembly
+        run: "@tool-exec:ros2-video-recorder__capture_camera_image(topic_name='/workspace_camera_sim')"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 1
+          status: failure
+          requires_response: false
+        run: "@abort"
