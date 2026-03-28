@@ -1,7 +1,7 @@
 name: ablation_orchestrator_with
 description: "Orchestrator ablation: P1 disassembly with orchestrator enabled (fmb1, sonnet)"
 created: 2026-03-09T00:00:00.000Z
-runs: 2
+runs: 3
 models:
   - provider: anthropic
     model: claude-sonnet-4-6
