@@ -10,15 +10,22 @@ Related files (phase signal pipeline):
 The agent calls this at the end of each assembly phase. The MCP client
 watches for this tool's result to trigger the next phase.
 
+Sim verification runs ALWAYS (on both success and failure signals) to determine
+true assembly/disassembly state. If the agent signals failure but sim says the
+task actually succeeded and logs exist, the status is overridden to success so
+the gate replay can run. This ensures the system (not the agent) decides
+whether to escalate or switch.
+
 Phase 2 gate sequence:
+  Pre-check: verify_assembly(check_all) runs regardless of agent-reported status.
   Gate 0: Check verify_rejection.json -- reject if unresolved replay failures exist.
-          Auto-escalate (requires_response=False) if any object has >= 3 failed attempts.
-  Gate 1: Check Assembly_*_results.json exists on disk.
-  Gate 2: Run verify_assembly(check_all) to confirm scene state.
+          Trigger @switch (requires_response=False) if any object has >= 3 failed attempts.
+  Gate 1: verify_assembly(check_all) -- confirm all objects are actually assembled.
+  Gate 2: Check Assembly_*_results.json exists on disk.
 
 Phase behaviors:
-  - Phase 1 (Disassembly): Gates on Disassembly_*_results.json + verify_disassembly(check_all).
-  - Phase 2 (Assembly): Gate 0 (rejection) + Gate 1 (results file) + Gate 2 (verify_assembly).
+  - Phase 1 (Disassembly): Sim verify always + gates on results file + verify_disassembly.
+  - Phase 2 (Assembly): Sim verify always + Gate 0 (rejection) + Gate 1 (results file) + Gate 2.
   - Phase 3 sim: Gates on verify_assembly(check_all).
   - Phase 3 real: Invokes verify_assembly elicitation for human verification.
 """
@@ -98,7 +105,34 @@ def _handle_phase_1(
       1. Disassembly results JSON logged to disk.
       2. verify_disassembly(check_all) confirms all objects are actually disassembled.
     """
+    # Always run sim verification to determine true assembly state,
+    # regardless of what the agent reported as status.
+    sim_passed = False
+    if base_name and verify_disassembly_fn:
+        verification = verify_disassembly_fn(base_name, mode)
+        sim_passed = isinstance(verification, dict) and verification.get("result") == "success"
+
     if status != "success":
+        if sim_passed:
+            # Agent said failure but sim says disassembly is actually complete.
+            logs_dir = _get_logs_dir()
+            has_results = logs_dir.exists() and len(list(logs_dir.glob("Disassembly_*_results.json"))) > 0
+            if has_results:
+                # Logs exist — override to success so @complete-phase fires.
+                return {
+                    "status": "success",
+                    "requires_response": False,
+                    "message": "Disassembly verification passed despite agent signaling failure. Proceeding with logged results.",
+                    "override": True,
+                }
+            else:
+                # Sim passed but no logs written — prompt agent to write them.
+                return {
+                    "status": "failure",
+                    "requires_response": True,
+                    "message": "Disassembly verification passed but you have not logged any results. Use write_disassembly_results to log the grasp_id for each object you disassembled, then signal phase 1 complete again.",
+                    "override": True,
+                }
         return {"requires_response": False}
 
     # Gate 1: results file must exist
@@ -116,16 +150,17 @@ def _handle_phase_1(
         }
 
     # Gate 2: verify all objects are actually disassembled
-    if base_name and verify_disassembly_fn:
-        verification = verify_disassembly_fn(base_name, mode)
-        if isinstance(verification, dict) and verification.get("result") == "failure":
-            still_assembled = verification.get("still_assembled_objects", [])
-            return {
-                "status": "failure",
-                "requires_response": True,
-                "message": f"Disassembly verification failed. Still assembled: {still_assembled}. Disassemble remaining objects and signal phase 1 complete again.",
-                "verification": verification,
-            }
+    if not sim_passed:
+        if base_name and verify_disassembly_fn:
+            verification = verify_disassembly_fn(base_name, mode)
+            if isinstance(verification, dict) and verification.get("result") == "failure":
+                still_assembled = verification.get("still_assembled_objects", [])
+                return {
+                    "status": "failure",
+                    "requires_response": True,
+                    "message": f"Disassembly verification failed. Still assembled: {still_assembled}. Disassemble remaining objects and signal phase 1 complete again.",
+                    "verification": verification,
+                }
 
     return {"requires_response": False}
 
@@ -144,7 +179,31 @@ def _handle_phase_2(
       1. Assembly results JSON logged to disk.
       2. verify_assembly(check_all) confirms all objects are actually assembled.
     """
+    # Always run sim verification to determine true assembly state,
+    # regardless of what the agent reported as status.
+    sim_passed = False
+    if base_name and verify_assembly_fn:
+        verification = verify_assembly_fn(base_name, mode)
+        sim_passed = isinstance(verification, dict) and verification.get("result") == "success"
+
     if status != "success":
+        if sim_passed:
+            if _has_assembly_results():
+                # Sim passed + logs exist — override to success so gate replay can run.
+                return {
+                    "status": "success",
+                    "requires_response": False,
+                    "message": "Assembly verification passed despite agent signaling failure. Proceeding with gate replay.",
+                    "override": True,
+                }
+            else:
+                # Sim passed but no logs written — prompt agent to write them.
+                return {
+                    "status": "failure",
+                    "requires_response": True,
+                    "message": "Assembly verification passed but you have not logged any results. Use write_assembly_results to log the tool_sequence for each object you assembled, then signal phase 2 complete again.",
+                    "override": True,
+                }
         return {"requires_response": False}
 
     # Gate 0: check for unresolved orchestrator replay rejections
@@ -183,25 +242,26 @@ def _handle_phase_2(
             ),
         }
 
-    # Gate 1: results file must exist
+    # Gate 1: verify all objects are actually assembled
+    if not sim_passed:
+        if base_name and verify_assembly_fn:
+            verification = verify_assembly_fn(base_name, mode)
+            if isinstance(verification, dict) and verification.get("result") == "failure":
+                unassembled = verification.get("unassembled_objects", [])
+                return {
+                    "status": "failure",
+                    "requires_response": True,
+                    "message": f"Assembly verification failed. Unassembled: {unassembled}. Assemble remaining objects and signal phase 2 complete again.",
+                    "verification": verification,
+                }
+
+    # Gate 2: results file must exist
     if not _has_assembly_results():
         return {
             "status": "failure",
             "requires_response": True,
             "message": "You have not logged any assembly results. Use write_assembly_results to log the tool_sequence for each object you assembled, then signal phase 2 complete again.",
         }
-
-    # Gate 2: verify all objects are actually assembled
-    if base_name and verify_assembly_fn:
-        verification = verify_assembly_fn(base_name, mode)
-        if isinstance(verification, dict) and verification.get("result") == "failure":
-            unassembled = verification.get("unassembled_objects", [])
-            return {
-                "status": "failure",
-                "requires_response": True,
-                "message": f"Assembly verification failed. Unassembled: {unassembled}. Assemble remaining objects and signal phase 2 complete again.",
-                "verification": verification,
-            }
 
     return {"requires_response": False}
 
