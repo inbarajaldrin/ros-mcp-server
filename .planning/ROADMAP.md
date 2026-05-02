@@ -18,6 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 4: Analyzer Dashboard** - Static HTML dashboard built against real Phase 3 traces
 - [ ] **Phase 5: Algorithm Derivation + Per-Object Configs** - Universal algorithm + per-object YAMLs + termination criterion derived from data
 - [ ] **Phase 6: Dispatcher Integration + Generalization Validation** - Single-line integration at translate_object.py:1085 + ≥5 consecutive autonomous successes per object + second-assembly proof
+- [ ] **Phase 7: Gripper URDF + RViz Visualization** - Import OnRobot RG2 gripper geometry into UR5e URDF (USD→URDF), replace custom DH-based collision setup with URDF-driven RViz visualization + ros2_control collision checking
 
 ## Phase Details
 
@@ -114,3 +115,22 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 4. Analyzer Dashboard | 0/TBD | Not started | - |
 | 5. Algorithm Derivation + Per-Object Configs | 0/TBD | Not started | - |
 | 6. Dispatcher Integration + Generalization Validation | 0/TBD | Not started | - |
+| 7. Gripper URDF + RViz Visualization (decoupled — can pull forward) | 0/TBD | Not started | - |
+
+### Phase 7: Gripper URDF + RViz Visualization
+**Goal**: Import the OnRobot RG2 gripper geometry into the UR5e URDF so RViz shows the actual gripper mounted on the flange, and ros2_control collision-checks the gripper natively. Replaces the custom DH-based `GRIPPER_CENTER_TOOL_OFFSET` (229 mm hardcoded) with a proper URDF-driven approach. Source geometry: existing USD asset in the Isaac Sim extension (`isaac-sim-mcp/exts/ur5e-dt/`) — convert USD → URDF, link to the UR5e URDF as a fixed-joint child of `tool0`, validate visually in RViz.
+**Depends on**: None — independent of the calibration/wrapper/data pipeline. **Per CONVENTIONS §6 phase boundaries are guidance not gates: this phase is decoupled from Phases 1–6 and can be pulled forward to immediately benefit RViz preview during calibration pose verification.** Recommended sequencing: do this BEFORE the first real-hardware Phase 1 calibration run so collision visualization is live during pose previews.
+**Requirements**: TBD (will be added when phase is planned via `/gsd-plan-phase 7`). Anticipated coverage:
+  - USD → URDF conversion script for the OnRobot RG2 (likely via `usd_to_urdf` tooling or hand-written from USD geometry)
+  - Combined URDF that adds the RG2 as a fixed-joint child of UR5e's `tool0` link
+  - RViz config with gripper rendered correctly
+  - `ros2_control` / MoveIt collision-check integration so the gripper is part of the planning scene
+  - Removal (or deprecation) of `GRIPPER_CENTER_TOOL_OFFSET` from `primitives/shared/config.py` and downstream usages, replaced by URDF FK lookups
+  - Documentation in `compliant_insertion_studio/docs/` for swapping in different grippers in the future
+**Success Criteria** (what must be TRUE — to be refined during planning):
+  1. RViz preview of any robot pose shows the gripper geometry attached at `tool0`
+  2. The fake-hardware bringup includes the gripper as a part of the URDF (no manual TF publish)
+  3. Calibration / wrapper code that previously used `GRIPPER_CENTER_TOOL_OFFSET` reads gripper-tip TF from URDF instead
+  4. A new gripper assembly can be swapped in with a single URDF/xacro edit (no Python changes)
+**If this phase fails**: We continue with the custom DH offset approach. The compliance pipeline still works but: (a) RViz previews don't show gripper collisions, requiring custom DH-based preflight scripts (annoying to maintain — operator's stated complaint), (b) swapping grippers means editing constants in multiple Python files instead of one URDF.
+**Plans**: TBD

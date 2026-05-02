@@ -60,6 +60,10 @@ None yet.
 
 None yet. Build-order interlocks (per research SUMMARY.md) are baked into phase ordering — no parallel-phase risks at this point.
 
+### Roadmap Evolution
+
+- 2026-05-02: Phase 7 added: Gripper URDF + RViz Visualization (USD→URDF conversion + integrate OnRobot RG2 into UR5e URDF for accurate RViz preview and ros2_control collision-checking; replaces custom DH-based `GRIPPER_CENTER_TOOL_OFFSET`). Per CONVENTIONS §6, this phase is decoupled from Phases 1–6 and recommended to be pulled forward to BEFORE the first real-hardware Phase 1 calibration run, so operator can verify calibration poses with full gripper geometry visible in RViz.
+
 ## Deferred Items
 
 Items acknowledged and carried forward from previous milestone close:
