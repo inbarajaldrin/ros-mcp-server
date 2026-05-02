@@ -45,6 +45,7 @@ Hardware/software setup that must complete *before* demos are collected, otherwi
 - [ ] **SETUP-04**: `pyproject.toml` numpy pin reconciled with runtime numpy 2.2.6 (lift the `<2` pin)
 - [ ] **SETUP-05**: `.gitignore` excludes `compliant_insertion_studio/logs/insert_*.csv` and `*.meta.json`
 - [ ] **SETUP-06**: `compliant_insertion_studio/` folder scaffolded with subdirectory layout shown above and a top-level `README.md` describing how to use it standalone (calibrate → wrap → analyze → configure → integrate)
+- [ ] **SETUP-07**: Existing `primitives/compliant_insert.py` (the working scaffold validated this session — F/T zero, force_mode RPC, signal handlers, basic CSV) migrated to `compliant_insertion_studio/wrapper/compliant_insert.py` with import paths fixed. Phase 2 extends this file (adds HOVER, full schema, signal markers, hands-off gate); does **not** rewrite from scratch.
 
 ### F/T Calibration & Validity (CAL)
 
