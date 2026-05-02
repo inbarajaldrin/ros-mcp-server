@@ -188,3 +188,9 @@ utils/recordings/
 
 # Mobile clip files
 mobileclip_blt.ts
+
+# Compliant Insertion Studio — episode telemetry (binary-ish, large, regenerated)
+compliant_insertion_studio/logs/insert_*.csv
+compliant_insertion_studio/logs/insert_*.meta.json
+compliant_insertion_studio/logs/validation_*
+_references/

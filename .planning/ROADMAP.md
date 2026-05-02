@@ -22,16 +22,18 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Foundation Setup + F/T Calibration
-**Goal**: Hardware, drivers, folder scaffold, and F/T calibration smoke-test are locked-in so that no episode is collected against a contaminated baseline or into a wrong directory layout.
+**Goal**: Hardware, drivers, folder scaffold, **foundational F/T payload calibration**, and F/T runtime smoke-test are locked-in so that no episode is collected against a contaminated baseline, with a wrong gripper payload (causing orientation-dependent bias), or into a wrong directory layout.
 **Depends on**: Nothing (first phase)
-**Requirements**: SETUP-01, SETUP-02, SETUP-03, SETUP-04, SETUP-05, SETUP-06, CAL-01, CAL-02, CAL-03, CAL-04
+**Requirements**: SETUP-01..07, CAL-01..10 (17 reqs total)
 **Success Criteria** (what must be TRUE):
-  1. Operator can run `python compliant_insertion_studio/shared/ft_smoke_test.py` standalone and see a pass/fail report with per-axis residual bias and drift rate
-  2. The `compliant_insertion_studio/` folder tree exists with all subdirectories (wrapper, dispatcher, shared, configs, analyzer, logs, docs) and a top-level README describing standalone use
-  3. `ur_robot_driver` reports version >= 2.13.0, `pyproject.toml` numpy pin reconciled with runtime numpy 2.2.6, `set_payload` documented as bringup-only single source of truth
-  4. `docs/ft_calibration_sop.md` exists and documents warm-up window, when-to-re-run, and what-to-do-on-failure (escalate, do not proceed)
-  5. `.gitignore` excludes `compliant_insertion_studio/logs/insert_*.csv` and `*.meta.json` so binary-ish telemetry never enters the repo
-**If this phase fails**: Every demo collected afterward is suspect — contaminated F/T baseline, wrong driver version, or missing folder layout means re-collection (the most expensive failure mode per build-order interlocks #1 and #2).
+  1. **Foundational payload calibration**: `python3 compliant_insertion_studio/shared/ft_calibration.py --gripper-id <name>` runs ≥ 8 poses, recovers payload mass + CoG + 6-axis bias, writes versioned YAML to `configs/`, prints `set_target_payload(mass, cog)` line for paste into bringup. Operator pastes + commits + restarts bringup. After this, force mode behaves correctly across orientations (no per-pose re-zeroing needed).
+  2. **Session-level smoke test**: `python3 compliant_insertion_studio/shared/ft_smoke_test.py` standalone reports pass/fail with per-axis residual bias < 2 N, |T| < 0.3 Nm, drift < 0.5 N/s.
+  3. **Folder scaffold**: `compliant_insertion_studio/` tree exists with all subdirectories (wrapper, dispatcher, shared, configs, analyzer, logs, docs) and a top-level README describing standalone use.
+  4. **Driver state**: `ur_robot_driver` reports version ≥ 2.13.0, `pyproject.toml` numpy pin reconciled with runtime numpy 2.2.6, `set_target_payload` documented as bringup-only single source of truth.
+  5. **Migration done**: existing `primitives/compliant_insert.py` migrated to `compliant_insertion_studio/wrapper/compliant_insert.py` with import paths working.
+  6. **SOP doc**: `docs/ft_calibration_sop.md` covers all three calibration layers (foundational / session / per-pose), warm-up window, when-to-re-run, what-to-do-on-failure, and the URCap Measure wizard alternative.
+  7. **Gitignore**: excludes `compliant_insertion_studio/logs/insert_*.csv`, `*.meta.json`, and `_references/` so binary-ish telemetry and reference repos never enter the repo.
+**If this phase fails**: Every demo collected afterward is suspect — contaminated F/T baseline, wrong driver version, wrong payload (causing orientation-dependent bias the wrapper's per-pose zero only partially masks), or missing folder layout means re-collection (the most expensive failure mode per build-order interlocks #1 and #2).
 **Plans**: TBD
 
 ### Phase 2: Episode Wrapper + Telemetry Schema

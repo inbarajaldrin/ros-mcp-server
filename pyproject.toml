@@ -13,7 +13,7 @@ dependencies = [
     "scipy>=1.11.0",
     "typing_extensions>=4.0.0",
     "ultralytics>=8.3.204",
-    "numpy<2",
+    "numpy>=2.0",
     "clip",
     "python-box>=7.0.0",
     "pymongo>=4.16.0",

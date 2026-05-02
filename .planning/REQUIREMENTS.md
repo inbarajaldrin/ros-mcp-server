@@ -49,12 +49,32 @@ Hardware/software setup that must complete *before* demos are collected, otherwi
 
 ### F/T Calibration & Validity (CAL)
 
-F/T sensor calibration is one-time-per-mount, but a quick **smoke test** at session start (or when problems surface) confirms the sensor is still trustworthy. Not re-calibration — a 10-second confidence check.
+F/T calibration is **three layers** — see `.planning/CONVENTIONS.md` §8. CAL covers all three.
 
-- [ ] **CAL-01**: New primitive `compliant_insertion_studio/shared/ft_smoke_test.py` — moves arm to a known neutral pose, calls `zero_ftsensor`, holds 5 s, samples /wrench, reports residual bias per axis + drift rate
-- [ ] **CAL-02**: Pass criteria documented in `docs/ft_calibration_sop.md`: per-axis residual |F| < 2 N, per-axis residual |T| < 0.3 Nm, drift over 5 s window < 0.5 N/s in any axis
-- [ ] **CAL-03**: Smoke-test runnable standalone (`python ft_smoke_test.py`) and as a precondition wrapper integrated into the episode wrapper (skip ACTIVE if smoke fails)
-- [ ] **CAL-04**: SOP doc `docs/ft_calibration_sop.md` covers: F/T sensor warm-up window (≥ 10–30 min powered on before first session of the day), when to re-run smoke (start of session, after a protective stop, after physical bumps to the sensor), what to do if smoke fails (escalate — do not proceed)
+**Foundational (per-mount, one-time):** payload identification — recovers gripper+jig mass and CoG so UR's gravity compensation is correct. Without this, force mode produces orientation-dependent bias that no amount of `zero_ftsensor` can fix. Algorithm: linear least-squares per Kubus-Kröger-Wahl 2007, derived from `_references/repos/force_torque_tools/force_torque_sensor_calib/src/ft_calib.cpp` and documented in `_references/articles/ft_payload_calibration_math.md`.
+
+**Session-level (per-session, smoke check):** quick "is the sensor still trustworthy?" probe in a known neutral pose. Catches drift/damage between sessions.
+
+**Per-pose (`zero_ftsensor`):** runtime bias subtraction immediately before force mode — handled in WRAP, not CAL.
+
+#### Foundational — payload calibration (one-time per gripper mount)
+
+- [ ] **CAL-01**: New primitive `compliant_insertion_studio/shared/ft_calibration.py` — moves robot through ≥ 8 well-distributed poses (gripper-pointing direction varied across the sphere), settles + samples /wrench at each, computes payload mass + CoG + 6-axis bias via Kubus-2007 LSQ in NumPy. ~200 LOC. Algorithm derived from `_references/repos/force_torque_tools/`; written fresh for ROS2 + UR + no-accelerometer (gravity derived from EE orientation via `/tcp_pose_broadcaster/pose`).
+- [ ] **CAL-02**: Output written to `compliant_insertion_studio/configs/ft_calibration_<gripper_id>_<YYYYMMDD>.yaml` with: `mass_kg`, `cog_xyz_m`, `bias_force_xyz_N`, `bias_torque_xyz_Nm`, residuals per axis, pose count, conditioning warnings, source poses logged. Versioned by gripper_id so multiple gripper assemblies can be calibrated independently.
+- [ ] **CAL-03**: Operator workflow: (1) attach gripper + jig in target configuration with no part, (2) launch standard ROS2 bringup, (3) `python3 compliant_insertion_studio/shared/ft_calibration.py --gripper-id <name>` → arm moves through ≥ 8 poses (~3 min total), (4) script prints recommended `set_target_payload(mass, cog)` line for paste into bringup launch, (5) operator pastes + commits the bringup change, (6) restarts ROS bringup once. After this, payload is correct for all subsequent sessions until gripper changes.
+- [ ] **CAL-04**: Pose sequence chosen for good LSQ conditioning (gravity vector in F/T frame must span at least 3 linearly independent directions; ≥ 8 poses recommended). Pose set parameterized in YAML (`compliant_insertion_studio/configs/calibration_poses.yaml`) so it can be tuned per workspace.
+- [ ] **CAL-05**: Calibration script self-validates: residual per axis < 0.5 N or 0.05 Nm, recovered mass within ±10% of expected (operator provides expected mass as `--expected-mass-kg` for sanity check). Fails loudly if poses are too similar (rank-deficient H matrix).
+
+#### Session-level — F/T smoke test
+
+- [ ] **CAL-06**: New primitive `compliant_insertion_studio/shared/ft_smoke_test.py` — assumes payload is foundationally correct, robot is in a steady neutral pose, calls `zero_ftsensor`, holds 5 s, samples /wrench at 100 Hz, reports residual bias per axis + drift rate
+- [ ] **CAL-07**: Pass criteria: per-axis residual |F| < 2 N, per-axis residual |T| < 0.3 Nm, drift over 5 s window < 0.5 N/s in any axis. Documented in `docs/ft_calibration_sop.md`.
+- [ ] **CAL-08**: Smoke-test runnable standalone (`python ft_smoke_test.py`) and as PRE-phase precondition in the episode wrapper (skip ACTIVE if smoke fails)
+
+#### Documentation
+
+- [ ] **CAL-09**: SOP doc `compliant_insertion_studio/docs/ft_calibration_sop.md` covers all three layers: (a) when to re-run foundational calibration (gripper change, jig change, sensor remount), (b) F/T sensor warm-up window (≥ 10–30 min before first session of the day), (c) when to re-run smoke (start of session, after a protective stop, after physical bumps), (d) what to do if smoke fails (re-run foundational; if foundational also fails, escalate — do not proceed)
+- [ ] **CAL-10**: SOP also documents the relationship to UR's URCap "Measure" wizard (alternative to our calibration script — pendant-driven, 4 poses, less precise, but no ROS2 dependency). Operator may use either; outputs are interchangeable in `set_target_payload()`. See `_references/articles/ur_polyscope_payload_measure_wizard.md`.
 
 ### Episode Wrapper (WRAP)
 
@@ -211,10 +231,17 @@ Every v1 requirement maps to exactly one phase. Coverage = 100% (62/62).
 | SETUP-04 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | SETUP-05 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | SETUP-06 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-07 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | CAL-01 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | CAL-02 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | CAL-03 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | CAL-04 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-05 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-06 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-07 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-08 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-09 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-10 | Phase 1: Foundation Setup + F/T Calibration | Pending |
 | WRAP-01 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
 | WRAP-02 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
 | WRAP-03 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
@@ -269,17 +296,19 @@ Every v1 requirement maps to exactly one phase. Coverage = 100% (62/62).
 | VAL-05 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
 
 **Coverage:**
-- v1 requirements: 62 total (6 SETUP + 4 CAL + 11 WRAP + 6 TELE + 5 DATA + 9 DASH + 9 ALGO + 7 DISP + 5 VAL)
-- Mapped to phases: 62
+- v1 requirements: **69 total** (7 SETUP + 10 CAL + 11 WRAP + 6 TELE + 5 DATA + 9 DASH + 9 ALGO + 7 DISP + 5 VAL)
+- Mapped to phases: 69
 - Unmapped: 0
 
 **Per-phase totals:**
-- Phase 1 (Foundation Setup + F/T Calibration): 10 reqs (SETUP-01..06, CAL-01..04)
+- Phase 1 (Foundation Setup + F/T Calibration): **17 reqs** (SETUP-01..07, CAL-01..10)
 - Phase 2 (Episode Wrapper + Telemetry Schema): 17 reqs (WRAP-01..11, TELE-01..06)
 - Phase 3 (20-Episode FMB1 Data Collection): 5 reqs (DATA-01..05)
 - Phase 4 (Analyzer Dashboard): 9 reqs (DASH-01..09)
 - Phase 5 (Algorithm Derivation + Per-Object Configs): 9 reqs (ALGO-01..09)
 - Phase 6 (Dispatcher Integration + Generalization Validation): 12 reqs (DISP-01..07, VAL-01..05)
+
+**Note on phase boundaries:** per `.planning/CONVENTIONS.md` §6, requirements may complete out of phase order when work is naturally coupled. Traceability is updated when this happens to record where each requirement *actually* completed.
 
 ---
 *Requirements defined: 2026-05-01*
