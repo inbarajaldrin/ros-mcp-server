@@ -144,6 +144,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 - **Don't commit unless explicitly approved**, no `Co-Authored-By` lines (operator global rule).
 - **`_references/` and `compliant_insertion_studio/logs/` are gitignored**: never commit reference repos or telemetry.
 - **Ask the operator before**: adding a new top-level dependency, writing > 200 LOC without checkpoint, performing any robot motion, modifying primitives outside `compliant_insertion_studio/`, departing from a documented decision in PROJECT/REQUIREMENTS/ROADMAP.
+- **Two execution tracks — away-from-robot and at-robot**: every requirement is tagged either `[N]` (no-robot — can be done from anywhere with the codebase) or `[R]` (robot-required — needs the physical UR5e + bringup). When the operator is away from the robot, work the `[N]` track. When the operator is at the robot, work the `[R]` track and any `[N]` items needed to unblock it. **`.planning/TRACKS.md` is the live list of what's ready in each track right now.** Update it whenever a task transitions states (ready → in-progress → done, or new requirements get tagged).
 ## Anti-patterns — explicit "don't"
 - Writing 100-line SOPs based on extrapolation rather than documented procedures
 - Confusing similar-sounding concepts (e.g., "calibration" vs "bias offset" — they are different things on a UR5e)
