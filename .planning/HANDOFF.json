@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-02T12:57:25.275Z",
+  "phase": "7",
+  "phase_name": "Gripper URDF + RViz Visualization",
+  "phase_dir": ".planning/phases/07-gripper-urdf-rviz",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused_before_planning",
+  "completed_tasks": [
+    {"id": "SETUP-04", "name": "Lift numpy<2 pin in pyproject.toml", "status": "done", "commit": "f02909f"},
+    {"id": "SETUP-05", "name": ".gitignore excludes logs + _references", "status": "done", "commit": "f02909f"},
+    {"id": "SETUP-06", "name": "compliant_insertion_studio/ folder scaffold", "status": "done", "commit": "f02909f"},
+    {"id": "SETUP-07", "name": "Migrate compliant_insert.py to wrapper/", "status": "done", "commit": "f02909f"},
+    {"id": "CAL-01", "name": "ft_calibration.py (Kubus 2007 LSQ, 8 poses)", "status": "done", "commit": "de21453"},
+    {"id": "CAL-02", "name": "YAML output schema in calibration script", "status": "done", "commit": "de21453"},
+    {"id": "CAL-05", "name": "Calibration self-validation (residuals + mass + rank + condition)", "status": "done", "commit": "de21453"},
+    {"id": "CAL-06", "name": "ft_smoke_test.py (10s session confidence check)", "status": "done", "commit": "f02909f"},
+    {"id": "CAL-07", "name": "Smoke pass criteria documented", "status": "done", "commit": "de21453"},
+    {"id": "CAL-09", "name": "ft_calibration_sop.md three-layer rewrite", "status": "done", "commit": "de21453"},
+    {"id": "CAL-10", "name": "URCap Measure wizard alternative documented", "status": "done", "commit": "de21453"}
+  ],
+  "remaining_tasks": [
+    {"id": "Phase 7 plan", "name": "Run /gsd-plan-phase 7 to break down USD→URDF + RG2 integration", "status": "not_started", "track": "[N]"},
+    {"id": "TELE-01..06", "name": "Episode telemetry CSV + meta JSON schema (Phase 2)", "status": "not_started", "track": "[N]"},
+    {"id": "WRAP-01..11", "name": "Episode wrapper full lifecycle (Phase 2)", "status": "not_started", "track": "[N→R]"},
+    {"id": "DASH-01..09", "name": "Static HTML dashboard scaffolding (Phase 4)", "status": "not_started", "track": "[N→R]"},
+    {"id": "DISP-01..03,07", "name": "Dispatcher code + standalone README (Phase 6)", "status": "not_started", "track": "[N]"},
+    {"id": "SETUP-01", "name": "apt upgrade ros-humble-ur-robot-driver to 2.13.0", "status": "not_started", "track": "[R]"},
+    {"id": "CAL-03", "name": "Run ft_calibration.py on real robot, paste set_target_payload", "status": "not_started", "track": "[R]"},
+    {"id": "CAL-04 verify", "name": "Verify 8-pose set on real bringup (RViz preview already done)", "status": "not_started", "track": "[R]"},
+    {"id": "DATA-01..05", "name": "20-episode FMB1 collection (Phase 3)", "status": "not_started", "track": "[R]"},
+    {"id": "ALGO-01..09", "name": "Algorithm + per-object configs (Phase 5)", "status": "not_started", "track": "[N→R]"},
+    {"id": "VAL-01..05", "name": "Generalization validation runs (Phase 6)", "status": "not_started", "track": "[R]"}
+  ],
+  "blockers": [
+    {"description": "Operator away from robot — all [R]-tagged tasks paused until return", "type": "human_action", "workaround": "Work [N]/[N→R] tasks per .planning/TRACKS.md priority order"}
+  ],
+  "human_actions_pending": [
+    {"action": "Run sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (SETUP-01)", "context": "Needs robot bringup restart window. Required before real-robot CAL-03 calibration run.", "blocking": false},
+    {"action": "Run ft_calibration.py on real robot (CAL-03)", "context": "Recovers payload mass + CoG. Output paste-ready set_target_payload(mass, cog) line for bringup launch.", "blocking": false},
+    {"action": "Paste set_target_payload line into ur_bringup launch + restart bringup once", "context": "Foundational F/T calibration — required for orientation-independent force mode behavior.", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "Two-track work split [N] / [R] / [N→R]", "rationale": "Operator goes between sessions at-robot and away-from-robot; project must keep moving regardless of physical access.", "phase": "all"},
+    {"decision": "Phase 7 (Gripper URDF + RViz) decoupled from Phases 1–6", "rationale": "USD→URDF + RViz integration is independent of calibration/wrapper pipeline and best done before first real-robot calibration so RViz preview shows actual gripper.", "phase": "7"},
+    {"decision": "8-pose calibration set with face_down + face_forward + 2 side_pointing + 4 obliques (LSQ condition number 1.64)", "rationale": "Optimal conditioning (target <10) while keeping all gripper-tip positions in safe envelope. Dropped face_up (gripper at z=0.92m, overhead collision risk) and face_left_w2_pi (gripper at y=+0.19m, over robot base).", "phase": "1"},
+    {"decision": "F/T calibration is three layers: foundational (per-mount) + session smoke + per-pose zero", "rationale": "Industry-standard separation. Per-pose zero alone cannot fix wrong payload params — orientation-dependent bias was the symptom.", "phase": "1"},
+    {"decision": "All deliverables under compliant_insertion_studio/", "rationale": "Self-contained subsystem droppable into other robotics projects with one-line edit at host's translate_object equivalent.", "phase": "all"},
+    {"decision": "Workflow agents disabled in config.json (inline-default)", "rationale": "Operator wants to see work happen in main conversation and intervene mid-stream.", "phase": "all"},
+    {"decision": "Reference repos to _references/repos/ + articles to _references/articles/ (gitignored)", "rationale": "Research before code is mandatory; cloned references enable grep/inspect without re-fetching.", "phase": "all"}
+  ],
+  "uncommitted_files": [],
+  "background_processes": [
+    {"process": "ur_bringup (fake hardware)", "pid": 668318, "purpose": "RViz calibration pose previews", "action_on_resume": "Kill if still running, OR keep if continuing Phase 7 RViz work"},
+    {"process": "rviz2", "pids": [668344, 668452], "purpose": "Visualize fake-hardware robot + URDF", "action_on_resume": "Same as bringup"},
+    {"process": "grasp_points_publisher (real mode)", "pid": 390584, "purpose": "Started earlier for real-mode primitive testing — no longer needed since real bringup was killed", "action_on_resume": "Kill (stale, no real bringup to feed)"}
+  ],
+  "next_action": "Run /gsd-plan-phase 7 to break Phase 7 (Gripper URDF + RViz) into concrete tasks. USD source: ~/Documents/isaac-sim-mcp/exts/ur5e-dt/. Target: integrate OnRobot RG2 as fixed-joint child of tool0 in UR5e URDF.",
+  "context_notes": "Project initialization complete. Two-track split established. Phase 1 ~64% done on no-robot half (11/17 reqs); remaining 6 [N] are TELE schema (Phase 2). Real robot work blocked until operator returns. Phase 7 is the highest-value [N] work to do now — replaces custom DH-based GRIPPER_CENTER_TOOL_OFFSET with URDF FK and gives RViz native gripper visualization (operator called the custom approach 'annoying to maintain'). Calibration script verified via 4 RViz fake-hardware previews; 8-pose set with side-pointing additions covers gripper sphere well."
+}
