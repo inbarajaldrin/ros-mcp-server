@@ -125,11 +125,12 @@ class MoveToClearArea(Node):
             latched_qos
         )
 
-        # Subscribe to sim object poses for grasp verification or sim placement collision check
+        # Subscribe to object poses for grasp verification (real or sim) or sim placement collision check
         if self.object_name or self.robot_mode == 'sim':
             from tf2_msgs.msg import TFMessage
+            poses_topic = '/objects_poses_real' if self.robot_mode == 'real' else '/objects_poses_sim'
             self.object_pose_sub = self.create_subscription(
-                TFMessage, '/objects_poses_sim', self._object_pose_cb, 10
+                TFMessage, poses_topic, self._object_pose_cb, 10
             )
 
         self.action_client.wait_for_server()
@@ -180,8 +181,19 @@ class MoveToClearArea(Node):
             self.object_poses[transform.child_frame_id] = transform
 
     def _verify_grasp(self):
-        """Verify the robot is holding the object (gripper center within threshold of object)."""
+        """Verify the robot is holding the object (gripper center within threshold of object).
+
+        In real mode the object's AprilTag is occluded by the gripper once grasped,
+        so /objects_poses_real drops it. The upstream caller (translate_object)
+        already runs a width-only verify; skip the pose-lookup here for real mode.
+        """
         from scipy.spatial.transform import Rotation as Rot
+
+        if self.robot_mode == 'real':
+            self.get_logger().info(
+                f"Skipping pose-based grasp verification for '{self.object_name}' (real mode — tag occluded by gripper)"
+            )
+            return True
 
         self.get_logger().info(f"Verifying grasp on '{self.object_name}'...")
 

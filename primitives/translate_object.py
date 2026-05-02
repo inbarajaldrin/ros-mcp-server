@@ -140,7 +140,7 @@ def _subprocess_fast_path():
         log.info(f"Verifying grasp on {args.object_name} before placing down")
         qdir = os.path.join(os.path.dirname(pdir), 'queries')
         ok, out = _run(os.path.join(qdir, 'verify_grasp.py'),
-                       ['--object-name', args.object_name, '--mode', args.mode], timeout=15)
+                       ['--object-name', args.object_name, '--mode', args.mode, '--width-only'], timeout=15)
         vj = _extract_json(out)
         if not ok or (vj and vj.get('result') == 'failure'):
             err = vj.get('error', 'grasp check failed') if vj else 'grasp check failed'

@@ -620,9 +620,6 @@ class ReorientForAssembly(Node):
 
         Optimized: computes FK once and short-circuits on first collision.
         """
-        if self.mode != 'sim':
-            return False
-
         # Compute FK once (previously computed 6-8 times across sub-checks)
         joint_positions = compute_all_joint_positions(joint_angles)
         T_ee = forward_kinematics(dh_params, joint_angles)
