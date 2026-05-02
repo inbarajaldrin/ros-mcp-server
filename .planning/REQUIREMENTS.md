@@ -200,25 +200,86 @@ Explicitly excluded from any version. Anti-features documented to prevent re-add
 
 ## Traceability
 
-Empty initially — populated by roadmap creation.
+Every v1 requirement maps to exactly one phase. Coverage = 100% (62/62).
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SETUP-01..06 | TBD | Pending |
-| CAL-01..04 | TBD | Pending |
-| WRAP-01..11 | TBD | Pending |
-| TELE-01..06 | TBD | Pending |
-| DATA-01..05 | TBD | Pending |
-| DASH-01..09 | TBD | Pending |
-| ALGO-01..09 | TBD | Pending |
-| DISP-01..07 | TBD | Pending |
-| VAL-01..05 | TBD | Pending |
+| SETUP-01 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-02 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-03 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-04 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-05 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| SETUP-06 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-01 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-02 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-03 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| CAL-04 | Phase 1: Foundation Setup + F/T Calibration | Pending |
+| WRAP-01 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-02 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-03 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-04 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-05 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-06 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-07 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-08 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-09 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-10 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| WRAP-11 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-01 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-02 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-03 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-04 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-05 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| TELE-06 | Phase 2: Episode Wrapper + Telemetry Schema | Pending |
+| DATA-01 | Phase 3: 20-Episode FMB1 Data Collection | Pending |
+| DATA-02 | Phase 3: 20-Episode FMB1 Data Collection | Pending |
+| DATA-03 | Phase 3: 20-Episode FMB1 Data Collection | Pending |
+| DATA-04 | Phase 3: 20-Episode FMB1 Data Collection | Pending |
+| DATA-05 | Phase 3: 20-Episode FMB1 Data Collection | Pending |
+| DASH-01 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-02 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-03 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-04 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-05 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-06 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-07 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-08 | Phase 4: Analyzer Dashboard | Pending |
+| DASH-09 | Phase 4: Analyzer Dashboard | Pending |
+| ALGO-01 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-02 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-03 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-04 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-05 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-06 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-07 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-08 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| ALGO-09 | Phase 5: Algorithm Derivation + Per-Object Configs | Pending |
+| DISP-01 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-02 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-03 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-04 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-05 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-06 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| DISP-07 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| VAL-01 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| VAL-02 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| VAL-03 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| VAL-04 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
+| VAL-05 | Phase 6: Dispatcher Integration + Generalization Validation | Pending |
 
 **Coverage:**
 - v1 requirements: 62 total (6 SETUP + 4 CAL + 11 WRAP + 6 TELE + 5 DATA + 9 DASH + 9 ALGO + 7 DISP + 5 VAL)
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 62 ⚠️ (will be 0 after roadmap creation)
+- Mapped to phases: 62
+- Unmapped: 0
+
+**Per-phase totals:**
+- Phase 1 (Foundation Setup + F/T Calibration): 10 reqs (SETUP-01..06, CAL-01..04)
+- Phase 2 (Episode Wrapper + Telemetry Schema): 17 reqs (WRAP-01..11, TELE-01..06)
+- Phase 3 (20-Episode FMB1 Data Collection): 5 reqs (DATA-01..05)
+- Phase 4 (Analyzer Dashboard): 9 reqs (DASH-01..09)
+- Phase 5 (Algorithm Derivation + Per-Object Configs): 9 reqs (ALGO-01..09)
+- Phase 6 (Dispatcher Integration + Generalization Validation): 12 reqs (DISP-01..07, VAL-01..05)
 
 ---
 *Requirements defined: 2026-05-01*
-*Last updated: 2026-05-01 after initial definition*
+*Last updated: 2026-05-01 after roadmap creation (traceability populated, coverage 62/62)*
