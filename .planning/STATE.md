@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: AT ROBOT — Phase 1 + Phase 2 + Phase 7 [N]-halves shipped; ready to do Phase 1 + Phase 2 + Phase 7 [R]-halves
-last_updated: "2026-05-03T00:00:00.000Z"
-last_activity: 2026-05-03 — at-robot session start. Phase 2 wrapper + telemetry schema shipped 2026-05-02; gripper-name fix sweep + dx/dy/dz warning + planning state refresh committed.
+stopped_at: Phase 1 [R]-half ✅ DONE this session (CAL-03/04/06..08); Phase 2 [R]-half (WRAP-VERIFY) outstanding — needs operator to set up u_brown
+last_updated: "2026-05-03T11:55:00.000Z"
+last_activity: 2026-05-03 at-robot session — F/T payload calibration ran successfully (mass 2.11 kg, CoG ≈ origin), smoke test passed, paused before WRAP-VERIFY (needs physical part setup).
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 0
   completed_plans: 0
-  percent: 14
+  percent: 28
 ---
 
 # Project State
@@ -21,17 +21,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01, gripper-name fix 2026-05-02)
 
 **Core value:** Replace the failing `--insert` real-mode path with a force-compliant insert primitive that works reliably across every FMB1 part and is a one-config-file extension to any new part.
-**Current focus:** AT ROBOT — Phase 1 [R]-half (SETUP-01, CAL-03/04, CAL-06..08), Phase 7 visual sign-off, Phase 2 wrapper end-to-end verification. See `.planning/TRACKS.md` for the ordered checklist.
+**Current focus:** WRAP-VERIFY (the only remaining at-robot task before Phase 3 data collection). Operator needs to physically place u_brown on FMB1 base + grasp it before next session. See `.planning/TRACKS.md` for the live checklist.
 
 ## Current Position
 
-Phase: Phase 7 of 7 ✅ shipped 2026-05-02 (Gripper URDF + RViz Visualization, real-bringup sign-off pending)
-Most recent work: Phase 2 [N]-half ✅ shipped 2026-05-02 (episode wrapper + locked v1 telemetry schema). Phase 2 [R]-half (real-robot end-to-end + induced-failure tests) is the at-robot to-do.
-Next at-robot session goal: Close Phase 1 [R]-half (drives Phase 2 [R]-half once calibration is good).
-Status: Phase 7 done; Phase 1 [N]-half (11/17 reqs) done; Phase 2 [N]-half (17/17 reqs) done. 1 of 7 phases formally complete in roadmap.
-Last activity: 2026-05-03 — at-robot session start. Pre-flight commits landed (4 commits + dx/dy/dz warning + this STATE.md refresh).
+Phase: Phase 1 ✅ DONE 2026-05-03 (foundational F/T payload calibration recovered + smoke test passed); Phase 7 ✅ shipped 2026-05-02 (RG2 URDF + dual-RobotModel RViz). Phase 2 [N]-half shipped, [R]-half (WRAP-VERIFY) is the next at-robot task. 2 of 7 phases formally complete.
+Most recent work: 2026-05-03 — CAL-03 (mass 2.11 kg, CoG ≈ [-0.003, +0.003, -0.032]), CAL-04 (all 8 poses reachable), CAL-06..08 (smoke test PASS), HOME_JOINTS introduced, wrapper frame-conversion bug fixed, workspace convention +X = robot's RIGHT empirically verified.
+Next at-robot session goal: WRAP-VERIFY end-to-end on u_brown (~15 min including induced-failure tests), then Phase 3 data collection.
 
-Progress: [█░░░░░░░░░] 14% (1 of 7 phases formally complete; significant code shipped in Phases 1+2 awaiting at-robot signoff to mark them complete)
+Progress: [██░░░░░░░░] 28% (2 of 7 phases formally complete; Phase 2 [N]-half done — only [R]-half WRAP-VERIFY remains)
 
 ## Performance Metrics
 
@@ -93,6 +91,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-05-03T00:00:00.000Z
-Stopped at: AT ROBOT — pre-flight commits landed; ready to start [R]-track per .planning/TRACKS.md priority order (SETUP-01 first)
-Resume file: .planning/TRACKS.md (live at-robot checklist)
+Last session: 2026-05-03T11:55:00.000Z
+Stopped at: Clean session-pause after Phase 1 [R]-half completion. All ROS processes shut down via close_robot.sh. Operator declined skinny WRAP-VERIFY in favor of resuming next at-robot session with u_brown physically set up.
+Resume file: .planning/TRACKS.md (live at-robot checklist) + .planning/HANDOFF.json (decisions + next_action block)

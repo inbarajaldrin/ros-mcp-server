@@ -1,56 +1,60 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-03T00:00:00.000Z",
+  "timestamp": "2026-05-03T11:55:00.000Z",
   "phase": null,
-  "phase_name": "Phase 1 [R]-half + Phase 7 sign-off + Phase 2 [R]-half",
+  "phase_name": "Phase 1 [R]-half ✅ DONE; Phase 2 [R]-half (WRAP-VERIFY) outstanding; Phase 7 visual sign-off outstanding",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
-  "status": "at_robot_ready",
-  "completed_tasks": [
-    {"id": "PRE-FLIGHT-01", "name": "Commit primitives/shared/config.py refactor (TABLE_HEIGHT explicit derivation)", "status": "done", "commit": "0075655"},
-    {"id": "PRE-FLIGHT-02", "name": "Commit utils/ursim_cli.py bootup + shutdown_seq combo commands", "status": "done", "commit": "09ee6eb"},
-    {"id": "PRE-FLIGHT-03", "name": "Commit gripper-name fix sweep (Robotiq 2F-85 -> OnRobot RG2) across 10 files", "status": "done", "commit": "3c03269"},
-    {"id": "PRE-FLIGHT-04", "name": "Commit Phase 2 deliverables (wrapper + schema + telemetry + synthetic test)", "status": "done", "commit": "a471a20"},
-    {"id": "PRE-FLIGHT-05", "name": "Add loud WARN line in run_hover() so dx/dy/dz limitation surfaces in every CSV episode stdout", "status": "done", "commit": "b26ec33"},
-    {"id": "PRE-FLIGHT-06", "name": "Refresh TRACKS.md / STATE.md / HANDOFF.json to reflect at-robot stance", "status": "done", "commit": "pending"}
+  "status": "session_paused_clean_handoff",
+  "completed_this_session": [
+    {"id": "verify_baselink_motion", "name": "All 6 base_link cardinal directions empirically verified on real arm; wrapper's tool0_controller -> base_link wrench transform confirmed correct", "commit": "9df6075..545d40b..3d8a1c5"},
+    {"id": "convention-fix", "name": "Workspace convention corrected from operator's verbal claim '+X = LEFT' to empirically-verified '+X = robot's RIGHT'", "commit": "78d17e5"},
+    {"id": "wrapper-frame-fix", "name": "Wrapper _start_force_mode() now uses task_frame.header.frame_id='base' + explicit base_link->base sign flip; matches verified pattern in verify_baselink_motion.py", "commit": "78d17e5"},
+    {"id": "ursim-cli-localmode", "name": "ursim_cli surfaces clear hint when Local-mode blocks an action command (play/stop/load/power_on/etc.)", "commit": "33b33dd"},
+    {"id": "launch-real-rg2", "name": "ur5e_with_rg2.launch.py supports real hardware too (use_fake_hardware:=false robot_ip:=...); RG2 visualization now appears in RViz in BOTH modes", "commit": "5b9dd71"},
+    {"id": "launch-helpers", "name": "launch_robot.sh + close_robot.sh helpers; documented stale-play bringup-restart trap and Local-mode pendant requirement", "commit": "d2f1eaf..2cdc6b8"},
+    {"id": "HOME_JOINTS", "name": "HOME_JOINTS = [+90°, -90°, +90°, -90°, -90°, 0°] formalized in primitives/shared/config.py; move_home.py --joint-space flag; ft_calibration.py uses it for clean entry/exit", "commit": "5435cb0"},
+    {"id": "calibration-poses-rotated", "name": "All 8 CALIBRATION_POSES_RAD rotated +90° in shoulder_pan to match operator's rectangular workspace orientation; LSQ math invariant under rotation about base Z", "commit": "e6f1c06"},
+    {"id": "CAL-03", "name": "F/T payload calibration ran successfully on real robot. mass=2.1109 kg, CoG=[-0.0032, +0.0031, -0.0318] m, residuals 0.86 N / 0.062 Nm (mild warn but rank 10/10, condition number 16.3). YAML at compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260503.yaml. Operator pasted set_target_payload(2.11, [-0.003, 0.003, -0.032]) into bringup.", "commit": "no-commit-cal-output-yaml-not-tracked"},
+    {"id": "CAL-04", "name": "All 8 calibration poses (workspace-rotated) reachable on real hardware end-to-end; no protective stops with --move-duration-s 10", "commit": "verified-via-cal-03-success"},
+    {"id": "CAL-06..08", "name": "ft_smoke_test PASS post-payload: bias F=(-0.25, -0.28, +0.33) N (max 0.33 << 2.0 N threshold); torque max 0.006 << 0.3 Nm; drift max 0.007 N/s << 0.5 N/s threshold", "commit": "verified-via-smoke-test"}
   ],
   "remaining_tasks": [
-    {"id": "SETUP-01", "name": "sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (needs bringup restart window)", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
-    {"id": "CAL-03", "name": "Run ft_calibration.py --gripper-id onrobot_rg2_with_camera; paste set_target_payload(...) into bringup launch; restart bringup", "status": "ready_at_robot", "track": "[R]", "est_minutes": 10},
-    {"id": "CAL-04", "name": "Verify all 8 calibration poses reachable on real bringup post-paste", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
-    {"id": "CAL-06..08", "name": "Run ft_smoke_test.py to confirm session-level bias < 2 N, |T| < 0.3 Nm, drift < 0.5 N/s", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
-    {"id": "PHASE-7-SIGNOFF", "name": "Open RViz with compliant_insertion_studio/launch/ur5e_with_rg2.launch.py on real bringup; confirm RG2 renders correctly at tool0 with calibration pose", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
-    {"id": "WRAP-VERIFY", "name": "End-to-end wrapper run on a known-good u_brown setup (PRE -> HOVER -> ZERO -> ACTIVE -> DONE) + induced-failure tests (SIGTERM, SIGABRT, SIGKILL mid-phase) + sign-convention spot check (push down -> fz positive)", "status": "ready_at_robot", "track": "[R]", "est_minutes": 15},
-    {"id": "Phase 3 [R]", "name": "20-episode FMB1 data collection (4 objects x 5 demos each)", "status": "blocked_until_phase1_R_done", "track": "[R]", "est_minutes": 90},
-    {"id": "Phase 4 [N]", "name": "DASH-01..09 static HTML dashboard scaffolding (Plotly + PapaParse)", "status": "do_at_away", "track": "[N]"},
+    {"id": "WRAP-VERIFY", "name": "End-to-end wrapper run on a known-good u_brown setup (PRE -> HOVER -> ZERO -> ACTIVE -> DONE) + induced-failure tests (SIGTERM, SIGABRT, SIGKILL mid-phase). Operator must physically place u_brown on FMB1 base + grasp it + provide --current-object-orientation quaternion. Catches integration bugs BEFORE Phase 3 collection where re-collecting episodes is expensive.", "status": "ready_at_robot_pending_part_setup", "track": "[R]", "est_minutes": 15},
+    {"id": "PHASE-7-SIGNOFF", "name": "Visual sign-off of RG2 URDF on real bringup. RViz already starts with launch_robot.sh real --rviz; just confirm gripper appears at tool0 in current pose.", "status": "low_priority_can_be_done_anytime", "track": "[R]", "est_minutes": 2},
+    {"id": "Phase 3 [R]", "name": "20-episode FMB1 data collection (4 objects x 5 demos each)", "status": "blocked_until_WRAP_VERIFY_done", "track": "[R]", "est_minutes": 90},
+    {"id": "Phase 4 [N]", "name": "DASH-01..09 static HTML dashboard scaffolding (Plotly + PapaParse). Operator can do at-away while waiting for next at-robot session.", "status": "do_at_away", "track": "[N]"},
     {"id": "Phase 5 [N->R]", "name": "ALGO-01..09 algorithm + per-object configs (parametric universal insert) — needs Phase 3 data", "status": "blocked_until_phase3_done", "track": "[N->R]"},
     {"id": "Phase 6 [N->R]", "name": "DISP-01..07 dispatcher integration + VAL-01..05 generalization validation", "status": "blocked_until_phase5_done", "track": "[N->R]"}
   ],
-  "blockers": [],
+  "blockers": [
+    {"description": "WRAP-VERIFY needs operator to physically set up u_brown on the FMB1 base before it can run end-to-end. No part is currently positioned in the workspace.", "type": "physical_setup", "workaround": "Could run --skip-hover --skip-smoke for FSM-only mechanics test, but that misses the dispatcher-integration coupling — defer to next at-robot session when part is ready."}
+  ],
   "human_actions_pending": [
-    {"action": "Run sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (SETUP-01)", "context": "First at-robot to-do. Needs bringup restart window. Required before real-robot CAL-03 calibration run.", "blocking": true},
-    {"action": "Run ft_calibration.py on real robot (CAL-03) and paste set_target_payload(...) into bringup launch", "context": "Recovers payload mass + CoG via Kubus 2007 LSQ. Required for orientation-independent force mode. Output: configs/ft_calibration_onrobot_rg2_with_camera_<date>.yaml + a printable set_target_payload(mass, cog) line.", "blocking": true},
-    {"action": "Visual sign-off of Phase 7 RG2 URDF on real bringup", "context": "Open RViz with the new launch and confirm gripper renders correctly with the calibration pose. Currently verified only against fake-hardware bringup.", "blocking": false}
+    {"action": "Place u_brown on FMB1 base + grasp it with gripper before next at-robot session", "context": "Required for WRAP-VERIFY full end-to-end run.", "blocking": true}
   ],
   "decisions": [
-    {"decision": "Phase 2 wrapper HOVER strategy: subprocess _run_hover.py wrapping translate_for_target_real, NOT in-process import", "rationale": "Sidesteps dual-rclpy-Node coupling. Matches existing primitive-orchestration pattern (translate_object.py:1085 -> insertion subprocess). Easy to flip to in-process if Phase 5/6 surfaces a need.", "phase": "2"},
-    {"decision": "Phase 2 STEP-BACK gate: --step-back {prompt,signal,auto} runtime flag, default 'prompt' (stdin Y/N)", "rationale": "Prompt is safest (operator must explicitly confirm). Signal mode (SIGUSR1 trigger) supports headless dispatcher use. Auto mode is for repeated-attempt sessions with operator already-stepped-back.", "phase": "2"},
-    {"decision": "Phase 2 wrapper |Fz| capped at 5 N unless --override-fz-cap explicit", "rationale": "CONVENTIONS: gear/part/fixture damage limit. Cap is enforced in _start_force_mode() before SetForceMode RPC.", "phase": "2"},
-    {"decision": "Phase 2 known limitation: target_x/y/z columns reference HOVER pose, not the actual hole world coords", "rationale": "Hole world coords are a Phase 5 deliverable (per-object YAML wires offsets). Wrapper now logs a loud WARN line at HOVER completion so the limitation surfaces in every episode's stdout. CSV is schema-compliant; dx/dy/dz won't be physically meaningful for termination derivation until Phase 5.", "phase": "2"},
-    {"decision": "Pre-existing dirty files committed in 2 separate commits (config.py + ursim_cli.py)", "rationale": "Both clean independent additions found uncommitted at session start. Operator confirmed commit + leave the rest (deleted ablation YAMLs, untracked _real_mode_stash) untouched.", "phase": "pre-flight"}
+    {"decision": "Workspace convention IS +X = robot's RIGHT, +Y = FORWARD (away from base), +Z = UP", "rationale": "Empirically verified 2026-05-03 via verify_baselink_motion.py — drove robot in commanded base_link direction, operator confirmed which side the robot moved. Original verbal '+X = LEFT' was incorrect.", "phase": "diag"},
+    {"decision": "Wrapper sends task_frame in `base` frame (NOT base_link), with explicit X/Y sign flip on the wrench", "rationale": "force_mode_controller silently auto-transforms task_frame from header.frame_id to `<tf_prefix>base`. base ↔ base_link is R_z(180°). Sending frame_id=`base_link` + raw wrench produces silent X/Y inversion. For Z-only insertion (today) this was a no-op; for any future X/Y commanded force it would have been a latent bug. Now correct end-to-end.", "phase": "2"},
+    {"decision": "HOME_JOINTS = [+90°, -90°, +90°, -90°, -90°, 0°] is the calibration-tidy joint-space home", "rationale": "Operator's rectangular workspace places the robot base at the long-side center; EE only sits inside the workspace when shoulder_pan = +90°. Rest of joints chosen to match calibration starting orientation so calibration entry needs no arm reconfiguration.", "phase": "1"},
+    {"decision": "All 8 CALIBRATION_POSES_RAD rotated +π/2 in shoulder_pan to match HOME_JOINTS + workspace", "rationale": "Kubus 2007 LSQ is invariant under rotations about base Z (the rotation is absorbed in g-in-FT vector distribution; recovered mass + CoG identical). Keeps EE inside workspace throughout calibration.", "phase": "1"},
+    {"decision": "F/T payload calibration accepted with mild residual warnings (max 0.86 N, 0.062 Nm)", "rationale": "Above the 0.5 N / 0.05 Nm 'optimal' thresholds but rank 10/10 and condition number 16.3 (well under 100). Most likely cause is sensor not warmed up (typically wants 10-30 min idle in a pose before calibration). Operator accepted these values; smoke test passed cleanly post-paste. Could re-run after warmup for a tighter fit if Phase 3 data shows orientation-dependent bias.", "phase": "1"},
+    {"decision": "Local mode + bringup restart requires manual STOP+PLAY on pendant", "rationale": "When close_robot.sh runs and a new bringup launches, the External Control URCap loses its link. Pendant still shows Play active but the link is stale, manifesting as 'Velocity or acceleration limits exceeded' on any move. Dashboard /play /stop are blocked in Local mode (verified empirically). launch_robot.sh real now documents this in its NEXT STEPS block.", "phase": "ops"}
   ],
   "uncommitted_files": [
     "D ablations/experiments/remaining/haiku_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
     "D ablations/experiments/remaining/sonnet_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
     "?? primitives/_real_mode_stash/ (untracked, pre-existing — operator chose to leave as-is)",
-    "?? logs/ (gitignored)"
+    "?? logs/ (gitignored)",
+    "?? compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260503.yaml (gitignored — calibration output, recoverable by re-running)",
+    "?? compliant_insertion_studio/logs/diagnostics/ (gitignored — verify_*.log files)"
   ],
   "background_processes": [
-    {"process": "ros2 launch ur5e_with_rg2.launch.py", "status": "may need restart on real bringup for Phase 7 visual sign-off", "purpose": "Phase 7 verification RViz session", "action_on_resume": "Restart against real bringup when ready for PHASE-7-SIGNOFF"},
-    {"process": "Isaac Sim ur5e-dt extension", "status": "should be closed", "purpose": "Was used to derive canonical tool0->rg2_base_link TF in Phase 7", "action_on_resume": "Verify with 'pgrep -af bin/isaacsim'; only restart if doing more TF derivation"}
+    {"process": "ros2 launch ur5e_with_rg2.launch.py use_fake_hardware:=false robot_ip:=192.168.1.111 rviz:=true", "status": "STOPPED at session pause via close_robot.sh", "purpose": "Real bringup + RViz with RG2 dual-RobotModel", "action_on_resume": "Re-launch with: bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz; then operator does pendant STOP+PLAY (URCap re-link)"},
+    {"process": "rviz2 (dual-RobotModel config)", "status": "STOPPED at session pause", "purpose": "Visualization of UR5e + RG2 attached at tool0 via static TF", "action_on_resume": "Bundled in launch_robot.sh real --rviz"}
   ],
-  "next_action": "AT ROBOT — work .planning/TRACKS.md priority order top-down: SETUP-01 (apt upgrade + bringup restart) -> CAL-03 (foundational F/T calibration) -> CAL-04 (8-pose verify) -> CAL-06..08 (smoke test) -> PHASE-7-SIGNOFF (RViz visual) -> WRAP-VERIFY (end-to-end wrapper run + induced-failure tests + sign-convention check). Total ~45 min if everything works first try.",
-  "context_notes": "Pre-flight cleaning done: 4 commits landed (config.py refactor, ursim_cli bootup/shutdown_seq, gripper-name fix sweep across 10 files, Phase 2 deliverables). Plus a 5th commit adding the loud dx/dy/dz WARN line to run_hover(). Working tree is now exactly the pre-existing dirty state operator chose to keep (deleted ablation YAMLs, untracked _real_mode_stash, gitignored logs/). Phase 2 wrapper is at compliant_insertion_studio/wrapper/compliant_insert.py — full FSM + WRAP-10 signals + idempotent cleanup; synthetic-CSV smoke test 34/34 pass. The single biggest risk in WRAP-VERIFY: F/T sign convention. SCHEMA.md says positive fz = robot resisting downward push; if sign comes out flipped at the robot, all per-axis-error logic in Phase 5 would be wrong. Verify with the manual 'push gripper down by hand -> fz positive' check FIRST in WRAP-VERIFY."
+  "next_action": "Next at-robot session: (1) operator places u_brown on FMB1 base + grasps it. (2) bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz. (3) operator STOP+PLAY on pendant for URCap re-link. (4) Run WRAP-VERIFY: python3 -m compliant_insertion_studio.wrapper.compliant_insert --object-name u_brown --base-name fmb1_base --grasp-id 0 --current-object-orientation <qx qy qz qw> --use-default-base-position --fz 3.0 --step-back prompt --no-prompt-notes. (5) Watch FSM walk PRE -> HOVER -> ZERO -> ACTIVE -> DONE; eyeball CSV at compliant_insertion_studio/logs/insert_u_brown_<ts>.csv. (6) Induced-failure tests: SIGTERM mid-ACTIVE, SIGABRT mid-ACTIVE, kill -9 mid-ACTIVE -> verify cleanup reaches safe state every time. ~15 min total. After WRAP-VERIFY passes -> Phase 1 + Phase 2 [R]-halves both formally complete -> ready for Phase 3 data collection.",
+  "context_notes": "Phase 1 [R]-half is DONE this session. Calibration validated: gripper mass 2.11 kg + CoG ≈ origin-aligned + 32 mm into the tool. Smoke test passes cleanly after operator pasted set_target_payload(2.1109, [-0.0032, 0.0031, -0.0318]) into bringup launch. The big architectural finding of the session: the wrapper's force-mode wrench was being sent in the wrong frame (frame_id=base_link silently auto-transformed to base, flipping X/Y). Now corrected — and empirically verified. The dx/dy/dz workspace convention also corrected (+X = robot's RIGHT, not LEFT as originally stated). HOME_JOINTS introduced as a workspace-aware calibration-tidy joint-space home (operator's rectangle requires shoulder_pan=+90°; the regular Cartesian HOME_POSE IK landed at +79°, causing the original calibration to protective-stop on the wrist swings between poses). Calibration poses also rotated +90° in shoulder_pan to match. WRAP-VERIFY is the only remaining at-robot task before Phase 3 data collection — needs operator to physically set up u_brown on the FMB1 base + grasp it. Risk for next session: the wrapper has subprocess integrations (HOVER via translate_object, smoke test, move_home, move_to_safe_height, move_home exit) — any of these could surface real-hardware bugs the synthetic CSV test can't catch."
 }

@@ -16,48 +16,39 @@ See `.planning/codebase/CONVENTIONS.md` for the two-track principle.
 
 ---
 
-## Active session: AT ROBOT (2026-05-03)
+## Active session: PAUSED 2026-05-03 (clean handoff)
 
-### Done since last TRACKS.md update
+### Done this session (2026-05-03)
 
-- ✅ **Phase 7 — Gripper URDF + RViz Visualization** shipped 2026-05-02 (USD→OBJ+MTL pipeline + dual-URDF + static TF + dual-RobotModel RViz). Visual sign-off on real bringup still outstanding (item 4 below).
-- ✅ **Phase 2 — Wrapper extension + telemetry schema** shipped 2026-05-02 (~700 LOC wrapper + 269-line SCHEMA.md + 130-LOC schema_v1 + 235-LOC telemetry + 116-LOC HOVER subprocess + 338-LOC synthetic test, 34/34 synthetic checks pass). End-to-end real-robot verification still outstanding (item 5 below).
-- ✅ Gripper-name fix sweep (Robotiq 2F-85 → OnRobot RG2) across 10 docs/code files.
-- ✅ Pre-existing dirty files committed: `primitives/shared/config.py` refactor, `utils/ursim_cli.py` bootup/shutdown_seq.
+- ✅ **All 4 horizontal axes empirically verified** via verify_baselink_motion.py (commands base_link direction → robot moves in that direction). Wrapper's tool0_controller → base_link wrench transform confirmed correct.
+- ✅ **Workspace convention corrected**: empirically `+X = robot's RIGHT` (operator's verbal `+X = LEFT` was wrong). +Y = forward, +Z = up unchanged.
+- ✅ **Wrapper frame-conversion bug fixed**: `_start_force_mode()` now uses `task_frame.header.frame_id="base"` + explicit base_link→base sign flip. (Previously `frame_id="base_link"` silently auto-transformed to `base` which is `R_z(180°)` from base_link, flipping commanded X/Y.) For Z-only insertion this was a no-op; for any future X/Y commanded force it would have been a latent bug. Now correct end-to-end.
+- ✅ **HOME_JOINTS** introduced: `[+90°, -90°, +90°, -90°, -90°, 0°]` joint-space "tidy home" matching workspace orientation. `move_home.py --joint-space` flag wires it. Calibration uses it for clean entry/exit.
+- ✅ **CALIBRATION_POSES_RAD rotated +π/2 in shoulder_pan** to match workspace; LSQ math invariant under rotations about base Z.
+- ✅ **CAL-03 done**: F/T payload calibration ran successfully on real robot. **mass = 2.1109 kg, CoG = [-0.0032, +0.0031, -0.0318] m.** Residuals 0.86 N / 0.062 Nm (mild warn but rank 10/10, condition number 16.3). Operator pasted `set_target_payload(2.1109, [-0.0032, 0.0031, -0.0318])` into bringup.
+- ✅ **CAL-04 done**: All 8 calibration poses (workspace-rotated) reachable on real hardware end-to-end with `--move-duration-s 10` (no protective stops).
+- ✅ **CAL-06..08 done**: ft_smoke_test PASS post-payload. Bias F max 0.33 N (threshold 2.0), torque max 0.006 Nm (threshold 0.3), drift max 0.007 N/s (threshold 0.5).
+- ✅ **launch_robot.sh + close_robot.sh** helpers committed; documented stale-play bringup-restart trap and Local-mode pendant requirement.
+- ✅ **Phase 7 launch supports real hardware** (`use_fake_hardware:=false robot_ip:=...`); RG2 visualization in RViz works in BOTH modes.
+- ✅ **ursim_cli** surfaces clear hint when Local-mode blocks an action command (play/stop/load/power_on/etc.).
 
-### Ready to work right now (at-robot track)
+### Ready to work right now (at-robot track) — single remaining task before Phase 3
 
-Priority order — top first.
+1. **WRAP-VERIFY** — full wrapper end-to-end on a known-good u_brown setup (~15 min including induced-failure tests)
+   - **Operator must physically place u_brown on FMB1 base + grasp it before this can run.** That's the only thing blocking it.
+   - Then: `bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz`
+   - Pendant: STOP+PLAY (URCap re-link after bringup restart — see launch_robot.sh "NEXT STEPS" block for why)
+   - Wrapper: `python3 -m compliant_insertion_studio.wrapper.compliant_insert --object-name u_brown --base-name fmb1_base --grasp-id 0 --current-object-orientation <qx qy qz qw> --use-default-base-position --fz 3.0 --step-back prompt --no-prompt-notes`
+   - Verify FSM walks PRE → HOVER → ZERO → ACTIVE → DONE; eyeball CSV at `compliant_insertion_studio/logs/insert_u_brown_<ts>.csv`
+   - Heed the "TARGET-POSE LIMITATION" WARN line — `dx/dy/dz` columns are not meaningful until Phase 5
+   - Induced-failure tests: SIGTERM mid-ACTIVE, SIGABRT mid-ACTIVE, SIGKILL mid-ACTIVE → verify cleanup reaches safe-state every time
+   - F/T sign-convention spot check: push gripper down by hand → confirm `fz` goes negative in CSV (gravity in tool frame)
+   - Pass = Phase 2 [R]-half done. Phase 1 + Phase 2 + Phase 7 then all fully complete.
 
-1. **SETUP-01: apt upgrade UR driver** (~5 min, needs bringup restart window)
-   - `sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs`
-   - Reason: 2.13.0 ships F/T frame bugfix needed before calibration data collection
+2. **Phase 7 visual sign-off** (~2 min, can be done anytime alongside any at-robot work)
+   - RViz already starts with `launch_robot.sh real --rviz` — just confirm gripper renders at `tool0` in current pose. Already validated against fake-hardware.
 
-2. **CAL-03 + CAL-04: foundational F/T payload calibration** (~15 min)
-   - Run `python3 compliant_insertion_studio/shared/ft_calibration.py --gripper-id onrobot_rg2_with_camera`
-   - Paste resulting `set_target_payload(mass, cog)` line into bringup launch
-   - Restart bringup once
-   - Re-verify across 8 poses (CAL-04)
-
-3. **CAL-06..08: ft_smoke_test on real robot** (~5 min)
-   - Run `python3 compliant_insertion_studio/shared/ft_smoke_test.py` once after CAL-03 paste
-   - Confirms session-level bias < 2 N, |T| < 0.3 Nm, drift < 0.5 N/s
-   - Pass = Phase 1 [R]-half done
-
-4. **Phase 7 visual sign-off** (~5 min)
-   - Open RViz with the new launch (`compliant_insertion_studio/launch/ur5e_with_rg2.launch.py`)
-   - Confirm RG2 renders at `tool0` correctly with the calibration pose set on real bringup
-   - Verifies the URDF-side work was right against fake-hardware (only at-robot validation outstanding)
-
-5. **WRAP verification: full wrapper end-to-end on a known-good u_brown setup** (~15 min including induced-failure tests)
-   - `python3 -m compliant_insertion_studio.wrapper.compliant_insert --object-name u_brown --base-name fmb1_base --grasp-id 0 --current-object-orientation 0 0 0 1 --use-default-base-position --fz 3.0`
-   - Verify FSM walks PRE → HOVER → ZERO → ACTIVE → DONE
-   - Heed the new "TARGET-POSE LIMITATION" WARN line — `dx/dy/dz` columns are not meaningful until Phase 5
-   - Induced-failure tests: SIGTERM mid-ACTIVE, SIGABRT mid-ZERO, SIGKILL mid-ACTIVE → verify cleanup reaches safe-state every time
-   - Sign-convention spot check: push gripper down by hand → confirm `fz` goes positive in CSV
-   - Pass = Phase 2 [R]-half done
-
-After items 1–5: **Phase 1 + Phase 2 + Phase 7 all fully complete.** Ready to start Phase 3 (DATA collection) the next at-robot session, or pivot back to [N] tracks (Phase 4 dashboard, Phase 6 dispatcher) for at-away sessions.
+After WRAP-VERIFY: **Phase 1 + Phase 2 + Phase 7 all fully complete.** Ready to start Phase 3 (DATA collection) — same at-robot session if energy permits, or next session.
 
 ### Pending — needs robot but blocked on items 1–5 above
 
@@ -86,5 +77,5 @@ Both unblock the at-robot DATA collection + algorithm derivation work that follo
 
 ---
 
-*Updated: 2026-05-03 — at-robot session start, Phase 7 + Phase 2 [N]-halves shipped 2026-05-02.*
+*Updated: 2026-05-03 11:55 UTC — clean session pause after Phase 1 [R]-half completion. WRAP-VERIFY is the only at-robot task remaining before Phase 3 data collection.*
 *Update mechanism: edit this file when transitioning a task between Ready / In-Progress / Done / Blocked, or when a phase changes which track items it owns.*
