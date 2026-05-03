@@ -2,7 +2,7 @@
 
 ## Overview
 
-Replace the failing `--insert` real-mode path on UR5e + Robotiq 2F-85 with a force-compliant insert primitive that works reliably on every FMB1 part and is a one-config-file extension to any new part. The journey follows a non-negotiable build-order interlock derived from three converging research threads: lock the data contract (schema + wrapper) and pre-collection hardware/F-T calibration first → collect 20 real demos → build the dashboard against those real shapes → derive per-object YAML configs and the termination criterion *from* the dashboard signatures → and only then flip the integration switch at `translate_object.py:1085` and validate generalization with ≥5 consecutive autonomous successes per object plus a second-assembly proof. The termination criterion is itself a project deliverable, not an input.
+Replace the failing `--insert` real-mode path on UR5e + OnRobot RG2 with a force-compliant insert primitive that works reliably on every FMB1 part and is a one-config-file extension to any new part. The journey follows a non-negotiable build-order interlock derived from three converging research threads: lock the data contract (schema + wrapper) and pre-collection hardware/F-T calibration first → collect 20 real demos → build the dashboard against those real shapes → derive per-object YAML configs and the termination criterion *from* the dashboard signatures → and only then flip the integration switch at `translate_object.py:1085` and validate generalization with ≥5 consecutive autonomous successes per object plus a second-assembly proof. The termination criterion is itself a project deliverable, not an input.
 
 ## Phases
 
@@ -58,7 +58,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. `compliant_insertion_studio/logs/` contains >= 20 CSV+meta pairs covering all 4 FMB1 objects with >= 5 episodes per object
   2. Each object has at least one episode tagged as abort or intentional misalignment in its meta JSON (failure-mode quota)
   3. Every episode's meta JSON has a non-empty `user_notes` field describing what the operator did to guide the part in
-  4. All episodes were collected on the physical UR5e + Robotiq + FMB1 base in real mode (no sim, no synthetic) and the hands-off window timestamps are populated in every meta JSON
+  4. All episodes were collected on the physical UR5e + OnRobot RG2 + FMB1 base in real mode (no sim, no synthetic) and the hands-off window timestamps are populated in every meta JSON
 **If this phase fails**: Dashboard built against an incomplete or biased dataset visualizes a fiction. Without a failure-mode library, the algorithm phase cannot derive failure-detection thresholds — interlock #4 violation.
 **Plans**: TBD
 

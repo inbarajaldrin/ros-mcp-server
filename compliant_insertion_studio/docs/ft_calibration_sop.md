@@ -1,7 +1,7 @@
 # F/T Sensor Calibration SOP
 
 Three-layer F/T calibration procedure for the Compliant Insertion Studio on
-UR5e + Robotiq 2F-85. Read **all three sections** the first time — the layers
+UR5e + OnRobot RG2. Read **all three sections** the first time — the layers
 work together and skipping foundational calibration is the most common
 failure mode in force-controlled assembly.
 
@@ -58,7 +58,7 @@ source ~/Desktop/ros2_ws/install/setup.bash
 
 # 1. Verify the pose plan first (no robot motion)
 python3 compliant_insertion_studio/shared/ft_calibration.py \
-  --gripper-id robotiq_2f85_with_camera \
+  --gripper-id onrobot_rg2_with_camera \
   --dry-run
 
 # 2. Visually verify each pose is reachable. (Optional: Freedrive through
@@ -66,7 +66,7 @@ python3 compliant_insertion_studio/shared/ft_calibration.py \
 
 # 3. Run for real (~75 seconds for 8 poses)
 python3 compliant_insertion_studio/shared/ft_calibration.py \
-  --gripper-id robotiq_2f85_with_camera \
+  --gripper-id onrobot_rg2_with_camera \
   --expected-mass-kg 1.05      # whatever you think the gripper weighs, for sanity check
 ```
 
@@ -338,7 +338,7 @@ calibration's source YAML path into each episode's `<csv>.meta.json`:
 {
   ...
   "foundational_calibration": {
-    "yaml_path": "compliant_insertion_studio/configs/ft_calibration_robotiq_2f85_with_camera_20260501.yaml",
+    "yaml_path": "compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260501.yaml",
     "mass_kg": 1.0823,
     "cog_xyz_m": [0.0014, -0.0025, 0.0521],
     "calibration_age_days": 4

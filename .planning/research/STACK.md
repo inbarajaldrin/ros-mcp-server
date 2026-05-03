@@ -1,6 +1,6 @@
 # Stack Research
 
-**Domain:** Force-compliant peg-in-hole insertion for UR5e + Robotiq 2F-85 — operator-guided kinesthetic demos, offline analytical policy synthesis, single-operator scale (~20 episodes).
+**Domain:** Force-compliant peg-in-hole insertion for UR5e + OnRobot RG2 — operator-guided kinesthetic demos, offline analytical policy synthesis, single-operator scale (~20 episodes).
 **Researched:** 2026-05-01
 **Confidence:** HIGH (ROS2/UR driver, Plotly.js, Python deps verified live on system); MEDIUM (parameter-schema patterns — synthesized from project constraints + literature, not a single canonical reference).
 

@@ -1,8 +1,8 @@
 # Pitfalls Research
 
-**Domain:** Force-compliant peg-in-hole assembly with kinesthetic demonstrations and offline policy synthesis on UR5e + Robotiq 2F-85
+**Domain:** Force-compliant peg-in-hole assembly with kinesthetic demonstrations and offline policy synthesis on UR5e + OnRobot RG2
 **Researched:** 2026-05-01
-**Confidence:** MEDIUM-HIGH (UR/Robotiq specifics are HIGH from official docs and forum reports; small-data classifier guidance MEDIUM; some operator-process pitfalls drawn from LfD survey literature MEDIUM)
+**Confidence:** MEDIUM-HIGH (UR + strain-gauge F/T sensor specifics are HIGH from official UR docs and forum reports; the Robotiq FT-300 sensor manual cited below is a general strain-gauge reference, not the project's hardware — UR5e built-in F/T is the actual sensor; small-data classifier guidance MEDIUM; some operator-process pitfalls drawn from LfD survey literature MEDIUM)
 
 This file builds on six pitfalls the operator has already characterized:
 
@@ -48,7 +48,7 @@ Episode wrapper / lifecycle phase (the phase that builds the PRE → HOVER → Z
 The internal UR F/T sensor warms up over the first 20–30 minutes of operation. Force readings drift by 1–3 N during this window. Episodes recorded in the first 10 minutes of a session use a different "baseline" than episodes recorded an hour later, so cross-episode signature comparison ("median Fz at success") is contaminated by drift, not real part-to-part variation.
 
 **Why it happens:**
-Documented behavior of strain-gauge based F/T sensors. Robotiq's own sensor manual explicitly mentions temperature sensitivity. UR's internal sensor is no exception.
+Documented behavior of strain-gauge based F/T sensors. The Robotiq FT-300 manual (cited as a general strain-gauge sensor reference, not our hardware) explicitly mentions temperature sensitivity. UR's internal F/T sensor — the actual sensor on this project — is no exception.
 
 **How to avoid:**
 - Warm-up procedure: run the arm for 10 minutes (idle, gripper closed, in HOVER pose) before recording the first episode. Document this as part of the "operator workflow" SOP.
@@ -529,7 +529,7 @@ Generalization validation phase. Make the success-rate gate explicit in the mile
 | `zero_ftsensor` | Call once per session | Re-call at every ZERO phase; verify residual; log post-zero bias |
 | `set_payload` | Call from multiple places | Single source of truth at robot bringup; never mid-episode unless documented |
 | `objects_poses_real` (vision) | Use unconditionally | Check timestamp staleness; lock out during ACTIVE |
-| `gripper_command` (Robotiq) | Assume close = grasp | Verify with `gripper_grasp_detected` AND width check |
+| `gripper_command` (OnRobot RG2) | Assume close = grasp | Verify with `gripper_grasp_detected` AND width check |
 | MCP server auto-injection | Allow pose override during ACTIVE | Set explicit lockout flag in wrapper context |
 | SIGTERM cleanup | Direct switch back to position controller | Stop force mode FIRST, settle, THEN switch — or risk transient |
 | CSV writing | Buffered with no flush | Flush every N rows; ensure crash-safety so truncated logs are still partially usable |
@@ -663,5 +663,5 @@ Generalization validation phase. Make the success-rate gate explicit in the mile
 - [Milvus AI Reference: Handling overfitting in small datasets](https://milvus.io/ai-quick-reference/how-do-you-handle-overfitting-in-small-datasets) — small-N overfit risks; held-out-set discipline (MEDIUM)
 
 ---
-*Pitfalls research for: force-compliant peg-in-hole assembly with kinesthetic demonstrations on UR5e + Robotiq 2F-85*
+*Pitfalls research for: force-compliant peg-in-hole assembly with kinesthetic demonstrations on UR5e + OnRobot RG2*
 *Researched: 2026-05-01*

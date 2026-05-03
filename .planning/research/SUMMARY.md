@@ -1,6 +1,6 @@
 # Project Research Summary
 
-**Project:** Compliant Insertion Studio (force-compliant peg-in-hole on UR5e + Robotiq 2F-85)
+**Project:** Compliant Insertion Studio (force-compliant peg-in-hole on UR5e + OnRobot RG2)
 **Domain:** Contact-rich manipulation with kinesthetic-demo data collection and offline analytical (rule-derived) policy synthesis
 **Researched:** 2026-05-01
 **Confidence:** MEDIUM-HIGH (stack and architecture validated against live system; features/pitfalls drawn from converging literature + UR-specific forum reports)
@@ -172,7 +172,7 @@ Phases with standard patterns (skip research-phase):
 | Stack | HIGH | Live-verified on operator's system (`ros2 interface show`, `ros2 topic hz`, `apt list --installed`); CDN versions checked against official releases pages; `ur_robot_driver` 2.13.0 release date confirmed. |
 | Features | MEDIUM-HIGH | Table stakes drawn from converging literature (NIST/Falco, Schimmels, Suarez-Ruiz/Pham, Chen 2016 AIM, DexForce, FILIC); some operator-UX features (pause/resume, default suggestions in user_notes) flagged LOW confidence inline. |
 | Architecture | HIGH | Component boundaries / file layout / build order validated against existing repo conventions and the working `compliant_insert.py` placeholder. The runtime classifier question (MEDIUM) is intentionally deferred per PROJECT.md. |
-| Pitfalls | MEDIUM-HIGH | UR/Robotiq specifics HIGH (official docs + forum reports including the documented 5.4.x `set_payload`/`zero_ftsensor` bug); small-data classifier guidance MEDIUM; some operator-process pitfalls drawn from LfD survey literature MEDIUM. |
+| Pitfalls | MEDIUM-HIGH | UR + strain-gauge F/T sensor specifics HIGH (official UR docs + forum reports including the documented 5.4.x `set_payload`/`zero_ftsensor` bug; Robotiq FT-300 sensor manual cited as a general strain-gauge reference, not the project's hardware — UR5e built-in F/T is the actual sensor); small-data classifier guidance MEDIUM; some operator-process pitfalls drawn from LfD survey literature MEDIUM. |
 
 **Overall confidence:** MEDIUM-HIGH. The stack and architecture are solid (live-verified). The features and pitfalls are well-supported but include some inferences from literature that need empirical confirmation against the actual FMB1 parts. The biggest unknown — termination criterion — is *expected* to be unknown; that's why it's a deliverable.
 

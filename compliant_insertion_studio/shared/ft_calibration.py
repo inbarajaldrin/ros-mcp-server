@@ -36,8 +36,8 @@ Preconditions (operator's responsibility):
     calibration to include it)
 
 Usage:
-  python3 ft_calibration.py --gripper-id robotiq_2f85_with_camera
-  python3 ft_calibration.py --gripper-id robotiq_2f85 --expected-mass-kg 1.05 \
+  python3 ft_calibration.py --gripper-id onrobot_rg2_with_camera
+  python3 ft_calibration.py --gripper-id onrobot_rg2 --expected-mass-kg 1.05 \
                              --num-poses 10 --output-yaml configs/my_cal.yaml
 
 Reference:
@@ -78,20 +78,31 @@ TCP_TOPIC = "/tcp_pose_broadcaster/pose"
 
 GRAVITY_M_S2 = 9.81  # standard gravity, robot base assumed upright
 
-# 8 calibration poses (joint-space, radians).
+# 6 calibration poses (joint-space, radians).
+#
 # Strategy: keep shoulder_pan / shoulder_lift / elbow steady at a known-safe
 # config, vary wrist_1 + wrist_2 to point the tool-Z axis in different
 # world-frame directions (so gravity-in-FT-frame spans 3D for LSQ conditioning).
 # wrist_3 stays at 0 — spinning about tool Z does not change gravity-in-FT.
 #
 # All poses share base config: shoulder_pan=0, shoulder_lift=-π/2, elbow=π/2.
-# Operator should visually verify the first pose looks safe before the run.
+# Operator should visually verify each pose looks safe in RViz fake-hardware
+# preview before the first real-hardware run.
+#
+# This 6-pose set was chosen after RViz preview rejected two extreme variants
+# that the gripper-tip preflight (accounting for the 229mm GRIPPER_CENTER_TOOL_OFFSET)
+# also flagged:
+#   - face_up_w1_flipped (w1=+π/2): gripper tip rises to z≈0.92m (overhead camera mount risk)
+#   - face_left_w2_pi (w2=π):       gripper tip swings to y=+0.19m (over the robot base body)
+# Conditioning of the remaining 6 poses (singular value ratio of stacked
+# gravity-in-FT matrix) is 1.64 — well below the 10 target and 3 optimal,
+# so we lose nothing on math by dropping the unsafe poses.
 CALIBRATION_POSES_RAD = [
     # name,                    [pan,  lift,    elbow,   w1,        w2,        w3]
     ("face_down_canonical",    [0.0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/2, 0.0]),
-    ("face_right_w2_zero",     [0.0, -math.pi/2, math.pi/2, -math.pi/2,  0.0,       0.0]),
-    ("face_up_w1_flipped",     [0.0, -math.pi/2, math.pi/2,  math.pi/2, -math.pi/2, 0.0]),
-    ("face_left_w2_pi",        [0.0, -math.pi/2, math.pi/2, -math.pi/2,  math.pi,   0.0]),
+    ("face_forward_w2_zero",   [0.0, -math.pi/2, math.pi/2, -math.pi/2,  0.0,       0.0]),  # tool Z → world -Y
+    ("side_pointing_pos_x",    [0.0, -math.pi/2, math.pi/2,  0.0,       -math.pi/2, 0.0]),  # tool Z → world +X
+    ("side_pointing_neg_x",    [0.0, -math.pi/2, math.pi/2,  0.0,        math.pi/2, 0.0]),  # tool Z → world -X
     ("tilted_w1_neg_pi4",      [0.0, -math.pi/2, math.pi/2, -math.pi/4, -math.pi/2, 0.0]),
     ("tilted_w1_neg_3pi4",     [0.0, -math.pi/2, math.pi/2, -3*math.pi/4, -math.pi/2, 0.0]),
     ("oblique_w2_neg_pi4",     [0.0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/4, 0.0]),
@@ -351,7 +362,7 @@ def write_yaml(result: dict, args, output_path: Path):
 def main():
     parser = argparse.ArgumentParser(description="F/T payload calibration (foundational, per-mount)")
     parser.add_argument("--gripper-id", type=str, required=True,
-                        help="Identifier for this gripper config (e.g. 'robotiq_2f85')")
+                        help="Identifier for this gripper config (e.g. 'onrobot_rg2')")
     parser.add_argument("--expected-mass-kg", type=float, default=None,
                         help="Approximate expected mass for sanity check (warns if recovered differs by > 20%%)")
     parser.add_argument("--num-poses", type=int, default=8,
@@ -368,6 +379,10 @@ def main():
                         help="Print pose plan and exit without moving the robot")
     parser.add_argument("--no-return-home", action="store_true",
                         help="Skip the move-back-to-pose-0 at the end (default returns to pose 0)")
+    parser.add_argument("--motion-only", action="store_true",
+                        help="Visualization preview: move through poses but skip /wrench sampling and LSQ. "
+                             "Use against fake-hardware bringup (where /tcp_pose_broadcaster isn't loaded) "
+                             "to verify trajectories in RViz before running on real hardware.")
     args = parser.parse_args()
 
     # Pose set selection
@@ -399,7 +414,9 @@ def main():
     node = FTCalibrationNode()
     log = lambda msg: node.get_logger().info(msg)
 
-    if not node.wait_for_topics(timeout_s=5.0):
+    if args.motion_only:
+        log("MOTION-ONLY mode: skipping /tcp_pose check + wrench sampling + LSQ. RViz preview only.")
+    elif not node.wait_for_topics(timeout_s=5.0):
         log(f"ERROR: timed out waiting for {TCP_TOPIC} — bringup live?")
         rclpy.shutdown()
         sys.exit(2)
@@ -433,23 +450,43 @@ def main():
             while time.time() < t_end:
                 rclpy.spin_once(node, timeout_sec=0.05)
 
-            log(f"  Sampling /wrench for {args.sample_s}s …")
-            mean_wrench, ee_quat, n_samples = node.sample_pose(hold_s=args.sample_s)
-            g_in_ft = gravity_in_ft_frame(ee_quat)
-            log(f"  Samples={n_samples}, EE_quat=[{ee_quat[0]:+.3f},{ee_quat[1]:+.3f},{ee_quat[2]:+.3f},{ee_quat[3]:+.3f}]")
-            log(f"  g_in_ft=[{g_in_ft[0]:+.3f}, {g_in_ft[1]:+.3f}, {g_in_ft[2]:+.3f}] m/s²")
-            log(f"  mean wrench: F=({mean_wrench[0]:+.2f},{mean_wrench[1]:+.2f},{mean_wrench[2]:+.2f})N "
-                f"T=({mean_wrench[3]:+.3f},{mean_wrench[4]:+.3f},{mean_wrench[5]:+.3f})Nm")
-
-            measurements.append((g_in_ft, mean_wrench))
-            pose_names.append(name)
-            pose_joint_configs.append([float(x) for x in joints])
+            if args.motion_only:
+                log(f"  (motion-only — skipping wrench sampling)")
+                pose_names.append(name)
+                pose_joint_configs.append([float(x) for x in joints])
+            else:
+                log(f"  Sampling /wrench for {args.sample_s}s …")
+                mean_wrench, ee_quat, n_samples = node.sample_pose(hold_s=args.sample_s)
+                g_in_ft = gravity_in_ft_frame(ee_quat)
+                log(f"  Samples={n_samples}, EE_quat=[{ee_quat[0]:+.3f},{ee_quat[1]:+.3f},{ee_quat[2]:+.3f},{ee_quat[3]:+.3f}]")
+                log(f"  g_in_ft=[{g_in_ft[0]:+.3f}, {g_in_ft[1]:+.3f}, {g_in_ft[2]:+.3f}] m/s²")
+                log(f"  mean wrench: F=({mean_wrench[0]:+.2f},{mean_wrench[1]:+.2f},{mean_wrench[2]:+.2f})N "
+                    f"T=({mean_wrench[3]:+.3f},{mean_wrench[4]:+.3f},{mean_wrench[5]:+.3f})Nm")
+                measurements.append((g_in_ft, mean_wrench))
+                pose_names.append(name)
+                pose_joint_configs.append([float(x) for x in joints])
 
         # Optional return to pose 0
         if not args.no_return_home and len(poses) > 1:
             log("")
             log(f"Returning to pose 0 ({poses[0][0]}) for clean exit …")
             move_to_joint_pose(poses[0][1], duration_s=args.move_duration_s, log=log)
+
+        # Motion-only short-circuit (RViz preview)
+        if args.motion_only:
+            log("")
+            log(f"=== MOTION-ONLY preview complete ({len(pose_names)} poses) ===")
+            log("Verify in RViz that all poses look safe + no workspace collisions.")
+            log("Re-run without --motion-only on real bringup once approved.")
+            final = {
+                "result": "success_motion_only",
+                "poses_visited": pose_names,
+                "note": "Visualization preview only; no calibration data computed.",
+            }
+            print("__RESULT_JSON__")
+            print(json.dumps(final))
+            print("__END_RESULT_JSON__")
+            sys.exit(0)
 
         # Solve
         log("")

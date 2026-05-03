@@ -117,7 +117,7 @@ The 20-episode FMB1 dataset that informs Phase 4 algorithm derivation.
 - [ ] `[R]` **DATA-01**: ≥ 5 guided demo episodes per FMB1 object × 4 objects (u_brown, u_orange, line_green, inverted_u_yellow) — ≥ 20-episode minimum
 - [ ] `[R]` **DATA-02**: Each episode includes operator-narrated `user_notes` describing what they did to guide the part in
 - [ ] `[R]` **DATA-03**: Mandatory failure-mode quota: ≥ 1 abort or intentional misalignment per object (populates failure-signature library)
-- [ ] `[R]` **DATA-04**: All demos in real mode on physical UR5e + Robotiq + FMB1 base (no sim, no synthetic)
+- [ ] `[R]` **DATA-04**: All demos in real mode on physical UR5e + OnRobot RG2 + FMB1 base (no sim, no synthetic)
 - [ ] `[R]` **DATA-05**: Hands-off window observed every episode (operator steps back during ZERO phase)
 
 ### Analyzer Dashboard (DASH)
@@ -212,7 +212,7 @@ Explicitly excluded from any version. Anti-features documented to prevent re-add
 | Feature | Reason |
 |---------|--------|
 | Other robot arms (Franka/KUKA/etc.) | Algorithm uses UR `force_mode_controller` SetForceMode service surface and UR-specific F/T zero. Mechanical port deferred to dedicated milestone. |
-| Other grippers (vacuum, soft, multi-finger) | Per-grasp width references and width-only `verify_grasp` depend on Robotiq 2F-85 conventions. |
+| Other grippers (vacuum, soft, multi-finger) | Per-grasp width references and width-only `verify_grasp` depend on OnRobot RG2 conventions. |
 | Vision-in-the-insert-loop | AprilTag is occluded by the gripper during ACTIVE phase; force-only feedback by design. Re-emergence of the tag mid-insert is ignored. The whole point of compliance is to absorb the sim-to-real perception gap. |
 | Online learning / RL / policy gradients | Strictly offline analysis from logged demos. No runtime parameter updates. |
 | Multi-strategy retry chains | Max 1–2 retries (retract 5 mm → re-approach → try again). No fallback ladders, no rule cascades, no escalation to a different family at runtime. |

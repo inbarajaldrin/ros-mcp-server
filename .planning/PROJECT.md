@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole policy** for force-compliant assembly inserts on a UR5e + Robotiq 2F-85, replacing the current broken `prismatic_peg_insertion.py` real-mode insert path. Operator runs guided demonstrations; the system records F/T + pose telemetry per episode; analysis surfaces per-object parameters (axis-wise compliance, force levels, termination criteria, retry behavior) for a single universal insert algorithm parameterized differently per part. Proof-of-concept target: FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow); design must generalize to a second assembly without rework.
+A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole policy** for force-compliant assembly inserts on a UR5e + OnRobot RG2, replacing the current broken `prismatic_peg_insertion.py` real-mode insert path. Operator runs guided demonstrations; the system records F/T + pose telemetry per episode; analysis surfaces per-object parameters (axis-wise compliance, force levels, termination criteria, retry behavior) for a single universal insert algorithm parameterized differently per part. Proof-of-concept target: FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow); design must generalize to a second assembly without rework.
 
 ## Core Value
 
@@ -41,7 +41,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 - [ ] 5 guided demo episodes per FMB1 object × 4 objects = 20-episode minimum dataset
 - [ ] Each episode includes operator-narrated `user_notes` describing what they did to guide the part in
 - [ ] Mix of clean inserts and intentional misalignments to populate failure-mode library
-- [ ] All episodes in real mode on the physical UR5e + Robotiq + FMB1 base
+- [ ] All episodes in real mode on the physical UR5e + OnRobot RG2 + FMB1 base
 
 #### Parametric Algorithm
 - [ ] One universal `compliant_insert.py` algorithm, parameterized by per-object YAML configs in `primitives/insert_configs/<object>.yaml`
@@ -63,7 +63,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 ### Out of Scope
 
 - **Other robot arms (Franka/KUKA/etc.)** — Algorithm uses UR `force_mode_controller` SetForceMode service surface and UR-specific F/T zero. Porting is mechanical but explicitly deferred.
-- **Other grippers (vacuum, soft, multi-finger)** — Per-grasp width references and width-only verify_grasp depend on Robotiq 2F-85 conventions.
+- **Other grippers (vacuum, soft, multi-finger)** — Per-grasp width references and width-only verify_grasp depend on OnRobot RG2 conventions.
 - **Vision-in-the-insert-loop** — AprilTag is occluded by the gripper during ACTIVE phase; force-only feedback by design. Re-emergence of the tag mid-insert is ignored.
 - **Online learning / RL / policy gradients** — Strictly offline analysis from logged demos. No runtime parameter updates.
 - **Multi-strategy retry chains** — Max 1–2 retries (retract 5 mm → re-approach → try again). No fallback ladders, no rule cascades, no escalation to a different family at runtime.
@@ -72,7 +72,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 
 ## Context
 
-**The repo (ros-mcp-server)** is a ROS2-Humble MCP server fronting a UR5e + Robotiq 2F-85 for sim-and-real robotic assembly. The primitives live in `primitives/`: `move_to_grasp`, `control_gripper`, `move_to_safe_height`, `rotate_object`, `translate_object` (with sim and real branches), and a stash of older real-mode insertion attempts in `primitives/_real_mode_stash/` (`prismatic_peg_insertion.py`, `peg_in_hole_insertion.py`, `urscript/peg_in_hole_insert.py`, `urscript/move_down.py`, `legacy/insert_compliance.py`, etc.). The stash is **untracked in git** and uses stale import paths (`primitives.utils.workspace_config` → should be `primitives.shared.config`); it is reference-only, not a foundation to build on.
+**The repo (ros-mcp-server)** is a ROS2-Humble MCP server fronting a UR5e + OnRobot RG2 for sim-and-real robotic assembly. The primitives live in `primitives/`: `move_to_grasp`, `control_gripper`, `move_to_safe_height`, `rotate_object`, `translate_object` (with sim and real branches), and a stash of older real-mode insertion attempts in `primitives/_real_mode_stash/` (`prismatic_peg_insertion.py`, `peg_in_hole_insertion.py`, `urscript/peg_in_hole_insert.py`, `urscript/move_down.py`, `legacy/insert_compliance.py`, etc.). The stash is **untracked in git** and uses stale import paths (`primitives.utils.workspace_config` → should be `primitives.shared.config`); it is reference-only, not a foundation to build on.
 
 **Recent (this session) progress:**
 - Real-mode pipeline confirmed working through `move_to_grasp → close → safe_height → rotate → translate place_down` for u_brown after two patches:
@@ -84,7 +84,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 **Hardware/services available** (all confirmed live in the current ROS graph):
 - `/objects_poses_real` (vision-tracked AprilTag poses, drops parts when occluded)
 - `/grasp_points_real` (computed by `utils/grasp_points_publisher.py`)
-- `/gripper_command`, `/gripper_width`, `/gripper_grasp_detected` (Robotiq driver, started by `ros2 run onrobot_ros gripper_control`)
+- `/gripper_command`, `/gripper_width`, `/gripper_grasp_detected` (OnRobot RG2 driver, started by `ros2 run onrobot_ros gripper_control`)
 - `/tcp_pose_broadcaster/pose`, `/force_torque_sensor_broadcaster/wrench`
 - Controllers loaded: `scaled_joint_trajectory_controller` (active), `passthrough_trajectory_controller`, `force_mode_controller`
 - Services: `/force_mode_controller/start_force_mode` (`ur_msgs/srv/SetForceMode`), `/stop_force_mode` (Trigger), `/io_and_status_controller/zero_ftsensor` (Trigger), `/controller_manager/switch_controller`
@@ -95,8 +95,8 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 
 ## Constraints
 
-- **Tech stack**: ROS2 Humble, Python 3.10, `rclpy`, `ur_robot_driver`, Robotiq 2F-85 driver. Force mode via `ur_msgs/srv/SetForceMode` only — no direct URScript injection.
-- **Hardware**: One physical UR5e + Robotiq 2F-85 + workspace cameras. Single-instance, no parallel data collection.
+- **Tech stack**: ROS2 Humble, Python 3.10, `rclpy`, `ur_robot_driver`, OnRobot RG2 driver. Force mode via `ur_msgs/srv/SetForceMode` only — no direct URScript injection.
+- **Hardware**: One physical UR5e + OnRobot RG2 + workspace cameras. Single-instance, no parallel data collection.
 - **Operator time**: ~5 demos per object × 4 objects = ~30–60 min collection sessions. Design must accommodate iterative collection across multiple sessions.
 - **Pendant mode**: Local mode preferred (operator retains manual control). Dashboard service calls (`--recover`, etc.) cannot be automated.
 - **Compliance**: Force-mode commanded wrench must stay gentle (≤ 5 N) by default — gear / part / fixture damage limits.

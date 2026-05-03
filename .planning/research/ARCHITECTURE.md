@@ -474,5 +474,5 @@ This bubbles up through `run_perform_insert_real` → `extract_json_from_output`
 
 ---
 
-*Architecture research for: Compliant Insertion Studio (PoC milestone, FMB1 + UR5e + Robotiq 2F-85)*
+*Architecture research for: Compliant Insertion Studio (PoC milestone, FMB1 + UR5e + OnRobot RG2)*
 *Researched: 2026-05-01*

@@ -3,14 +3,14 @@
 
 **Compliant Insertion Studio**
 
-A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole policy** for force-compliant assembly inserts on a UR5e + Robotiq 2F-85, replacing the current broken `prismatic_peg_insertion.py` real-mode insert path. Operator runs guided demonstrations; the system records F/T + pose telemetry per episode; analysis surfaces per-object parameters (axis-wise compliance, force levels, termination criteria, retry behavior) for a single universal insert algorithm parameterized differently per part. Proof-of-concept target: FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow); design must generalize to a second assembly without rework.
+A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole policy** for force-compliant assembly inserts on a UR5e + OnRobot RG2, replacing the current broken `prismatic_peg_insertion.py` real-mode insert path. Operator runs guided demonstrations; the system records F/T + pose telemetry per episode; analysis surfaces per-object parameters (axis-wise compliance, force levels, termination criteria, retry behavior) for a single universal insert algorithm parameterized differently per part. Proof-of-concept target: FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow); design must generalize to a second assembly without rework.
 
 **Core Value:** **Replace the failing `--insert` real-mode path with a force-compliant insert primitive that works reliably across every FMB1 part and is a one-config-file extension to any new part.** If everything else slips, the FMB1 inserts must complete autonomously end-to-end.
 
 ### Constraints
 
-- **Tech stack**: ROS2 Humble, Python 3.10, `rclpy`, `ur_robot_driver`, Robotiq 2F-85 driver. Force mode via `ur_msgs/srv/SetForceMode` only — no direct URScript injection.
-- **Hardware**: One physical UR5e + Robotiq 2F-85 + workspace cameras. Single-instance, no parallel data collection.
+- **Tech stack**: ROS2 Humble, Python 3.10, `rclpy`, `ur_robot_driver`, OnRobot RG2 driver. Force mode via `ur_msgs/srv/SetForceMode` only — no direct URScript injection.
+- **Hardware**: One physical UR5e + OnRobot RG2 + workspace cameras. Single-instance, no parallel data collection.
 - **Operator time**: ~5 demos per object × 4 objects = ~30–60 min collection sessions. Design must accommodate iterative collection across multiple sessions.
 - **Pendant mode**: Local mode preferred (operator retains manual control). Dashboard service calls (`--recover`, etc.) cannot be automated.
 - **Compliance**: Force-mode commanded wrench must stay gentle (≤ 5 N) by default — gear / part / fixture damage limits.
