@@ -69,8 +69,27 @@ class URSimCLI(Node):
     def __init__(self):
         super().__init__('ursim_cli')
 
+    # Action commands that the robot's safety controller blocks when the
+    # pendant is in Local mode (operator preference per .planning/codebase/
+    # CONVENTIONS.md). Verified live 2026-05-03: stop, play, power_on,
+    # power_off, brake_release all return "Command is not allowed due to
+    # safety reasons, please switch robot to Remote Control mode and
+    # reconnect to port 29999". The standard query commands (status, mode,
+    # safety, running, ...) keep working in Local mode.
+    LOCAL_MODE_BLOCKED = frozenset({
+        'play', 'stop', 'pause',
+        'power_on', 'power_off', 'brake_release',
+        'unlock_protective_stop', 'restart_safety',
+        'shutdown',
+    })
+    LOCAL_MODE_REJECTION_HINT = "Command is not allowed due to safety reasons"
+
     def call_trigger(self, command: str) -> dict:
-        """Call a trigger service (no parameters)."""
+        """Call a trigger service (no parameters).
+
+        On Local-mode rejection (which blocks every action command), surface
+        a clearer pendant-action message instead of just the raw response.
+        """
         service_name = self.TRIGGER_SERVICES.get(command)
         if not service_name:
             return {'success': False, 'error': f"Unknown command: {command}"}
@@ -86,10 +105,22 @@ class URSimCLI(Node):
             return {'success': False, 'error': 'Service call timed out'}
 
         response = future.result()
-        return {
+        result = {
             'success': response.success,
-            'message': response.message
+            'message': response.message,
         }
+        if (not response.success
+                and command in self.LOCAL_MODE_BLOCKED
+                and self.LOCAL_MODE_REJECTION_HINT in (response.message or "")):
+            result['local_mode_blocked'] = True
+            result['hint'] = (
+                f"Pendant is in Local mode — '{command}' must be done manually on the "
+                f"teach pendant. Per CONVENTIONS the operator keeps Local mode for safety; "
+                f"dashboard {sorted(self.LOCAL_MODE_BLOCKED)} are all blocked. "
+                f"Switch to Remote mode on the pendant if you need code-driven control "
+                f"(then switch back to Local before next session)."
+            )
+        return result
 
     def call_query(self, query_type: str) -> dict:
         """Call a query service to get robot state."""
@@ -356,6 +387,8 @@ def print_result(result: dict):
                 print(f"    {key}: {val}")
     else:
         print(f"  ✗ {result.get('error') or result.get('message') or result.get('answer') or 'Unknown error'}")
+        if result.get('local_mode_blocked'):
+            print(f"  ⓘ {result.get('hint')}")
 
 
 def main():
