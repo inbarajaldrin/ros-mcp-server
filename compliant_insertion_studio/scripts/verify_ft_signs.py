@@ -266,6 +266,15 @@ def main():
         print("    - Speed limits are 0.02 m/s linear, 0.2 rad/s angular.")
         print("    - Damping 0.7, gain 0.5 — robot won't drift far on its own.")
         print()
+        print("  WORKSPACE AXES (operator-confirmed):")
+        print("    +X = robot's LEFT      -X = robot's RIGHT")
+        print("    +Y = FORWARD from base  -Y = BACK toward base")
+        print("    +Z = UP (ceiling)       -Z = DOWN (floor)")
+        print()
+        print("  This script reads wrench in tool0_controller (sensor frame), then")
+        print("  transforms to base_link via TF. The 'fx_base/fy_base/fz_base' columns")
+        print("  are what should match the directions above.")
+        print()
         prompt("  Stand near the robot. Press Enter when ready to enter force mode... ")
 
         print("\n[1/4] Waiting for wrench topic...")
@@ -290,47 +299,50 @@ def main():
         node.stream_wrench(5.0, "BASELINE — DO NOT TOUCH the robot")
         if state["interrupted"]: return
 
-        # ---- Step 1: +X ----
-        print("\n  ----- Step 1: push +X -----")
-        print("  Push the gripper GENTLY in the +X direction (away from robot base, toward the front of the workspace).")
-        print("  Hold for ~5 seconds.")
+        # ---- Step 1: +X = robot's LEFT ----
+        print("\n  ----- Step 1: push +X (robot's LEFT) -----")
+        print("  Push the gripper GENTLY to the robot's LEFT (your right if you face the robot from the front).")
+        print("  Expected: fx_base goes POSITIVE.   Hold for ~5 seconds.")
         prompt("  Press Enter when ready to start streaming...")
-        node.stream_wrench(5.0, "PUSH +X")
+        node.stream_wrench(5.0, "PUSH +X (robot's LEFT)")
         if state["interrupted"]: return
 
-        # ---- Step 2: -X ----
-        print("\n  ----- Step 2: push -X -----")
-        print("  Now push GENTLY in the -X direction (back toward the robot base).")
+        # ---- Step 2: -X = robot's RIGHT ----
+        print("\n  ----- Step 2: push -X (robot's RIGHT) -----")
+        print("  Now push GENTLY to the robot's RIGHT.")
+        print("  Expected: fx_base goes NEGATIVE.")
         prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH -X")
+        node.stream_wrench(5.0, "PUSH -X (robot's RIGHT)")
         if state["interrupted"]: return
 
-        # ---- Step 3: +Y ----
-        print("\n  ----- Step 3: push +Y -----")
-        print("  Push GENTLY in the +Y direction (your LEFT if you face the robot from the front).")
+        # ---- Step 3: +Y = FORWARD from base ----
+        print("\n  ----- Step 3: push +Y (FORWARD from base) -----")
+        print("  Push GENTLY in the direction the EE points away from the robot base (forward into the workspace).")
+        print("  Expected: fy_base goes POSITIVE.")
         prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH +Y")
+        node.stream_wrench(5.0, "PUSH +Y (FORWARD from base)")
         if state["interrupted"]: return
 
-        # ---- Step 4: -Y ----
-        print("\n  ----- Step 4: push -Y -----")
-        print("  Push GENTLY in the -Y direction (your RIGHT).")
+        # ---- Step 4: -Y = BACK toward base ----
+        print("\n  ----- Step 4: push -Y (BACK toward base) -----")
+        print("  Now push GENTLY back toward the robot base.")
+        print("  Expected: fy_base goes NEGATIVE.")
         prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH -Y")
+        node.stream_wrench(5.0, "PUSH -Y (BACK toward base)")
         if state["interrupted"]: return
 
-        # ---- Step 5: +Z ----
-        print("\n  ----- Step 5: push +Z (LIFT UP) -----")
-        print("  LIFT the gripper gently UPWARD (toward the ceiling).")
-        print("  This is the critical sign-convention check — SCHEMA.md says fz should go MORE POSITIVE.")
+        # ---- Step 5: +Z = UP ----
+        print("\n  ----- Step 5: push +Z (LIFT UP toward ceiling) -----")
+        print("  LIFT the gripper gently UPWARD.")
+        print("  Expected: fz_base goes POSITIVE.   This is the critical post-fix check.")
         prompt("  Press Enter when ready...")
         node.stream_wrench(5.0, "LIFT UP (+Z)")
         if state["interrupted"]: return
 
-        # ---- Step 6: -Z ----
-        print("\n  ----- Step 6: push -Z (PUSH DOWN) -----")
-        print("  Now PUSH DOWN gently on the gripper (toward the floor).")
-        print("  SCHEMA.md says fz should go MORE NEGATIVE.")
+        # ---- Step 6: -Z = DOWN ----
+        print("\n  ----- Step 6: push -Z (PUSH DOWN toward floor) -----")
+        print("  Now PUSH DOWN gently on the gripper.")
+        print("  Expected: fz_base goes NEGATIVE (may be small — robot yields to push).")
         prompt("  Press Enter when ready...")
         node.stream_wrench(5.0, "PUSH DOWN (-Z)")
         if state["interrupted"]: return
@@ -338,8 +350,13 @@ def main():
         print("\n" + "=" * 70)
         print("  VERIFICATION COMPLETE")
         print("=" * 70)
-        print("  Review the streams above and report back to me which axes match")
-        print("  SCHEMA.md's sign conventions. Cleanup will run on Ctrl-C.")
+        print("  Sign convention summary (look at the *_base columns, not the *_raw):")
+        print("    +X push (robot's LEFT)        → fx_base should be POSITIVE")
+        print("    -X push (robot's RIGHT)       → fx_base should be NEGATIVE")
+        print("    +Y push (FORWARD from base)   → fy_base should be POSITIVE")
+        print("    -Y push (BACK toward base)    → fy_base should be NEGATIVE")
+        print("    +Z lift (UP toward ceiling)   → fz_base should be POSITIVE")
+        print("    -Z push (DOWN toward floor)   → fz_base should be NEGATIVE")
         print()
         print("  Press Ctrl-C when done reviewing to stop force mode and switch back.")
         print()
