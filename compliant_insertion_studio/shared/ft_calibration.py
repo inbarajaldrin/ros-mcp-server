@@ -97,16 +97,24 @@ GRAVITY_M_S2 = 9.81  # standard gravity, robot base assumed upright
 # Conditioning of the remaining 6 poses (singular value ratio of stacked
 # gravity-in-FT matrix) is 1.64 — well below the 10 target and 3 optimal,
 # so we lose nothing on math by dropping the unsafe poses.
+#
+# All poses use shoulder_pan = +π/2 (matches HOME_JOINTS, which is the
+# operator's workspace-facing orientation). Rotating about base Z leaves
+# the gravity-in-FT distribution invariant up to a Z-axis rotation in
+# tool frame, so the Kubus 2007 LSQ result (mass + CoG) is unchanged
+# from the canonical shoulder_pan=0 set. Operator-confirmed 2026-05-03
+# that the EE only stays inside the workspace rectangle when shoulder_pan
+# is at +π/2.
 CALIBRATION_POSES_RAD = [
-    # name,                    [pan,  lift,    elbow,   w1,        w2,        w3]
-    ("face_down_canonical",    [0.0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/2, 0.0]),
-    ("face_forward_w2_zero",   [0.0, -math.pi/2, math.pi/2, -math.pi/2,  0.0,       0.0]),  # tool Z → world -Y
-    ("side_pointing_pos_x",    [0.0, -math.pi/2, math.pi/2,  0.0,       -math.pi/2, 0.0]),  # tool Z → world +X
-    ("side_pointing_neg_x",    [0.0, -math.pi/2, math.pi/2,  0.0,        math.pi/2, 0.0]),  # tool Z → world -X
-    ("tilted_w1_neg_pi4",      [0.0, -math.pi/2, math.pi/2, -math.pi/4, -math.pi/2, 0.0]),
-    ("tilted_w1_neg_3pi4",     [0.0, -math.pi/2, math.pi/2, -3*math.pi/4, -math.pi/2, 0.0]),
-    ("oblique_w2_neg_pi4",     [0.0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/4, 0.0]),
-    ("oblique_w1w2_pi4",       [0.0, -math.pi/2, math.pi/2, -math.pi/4, -math.pi/4, 0.0]),
+    # name,                    [pan,         lift,      elbow,     w1,           w2,           w3]
+    ("face_down_canonical",    [math.pi/2, -math.pi/2, math.pi/2, -math.pi/2,   -math.pi/2,   0.0]),
+    ("face_forward_w2_zero",   [math.pi/2, -math.pi/2, math.pi/2, -math.pi/2,    0.0,         0.0]),
+    ("side_pointing_pos_x",    [math.pi/2, -math.pi/2, math.pi/2,  0.0,         -math.pi/2,   0.0]),
+    ("side_pointing_neg_x",    [math.pi/2, -math.pi/2, math.pi/2,  0.0,          math.pi/2,   0.0]),
+    ("tilted_w1_neg_pi4",      [math.pi/2, -math.pi/2, math.pi/2, -math.pi/4,   -math.pi/2,   0.0]),
+    ("tilted_w1_neg_3pi4",     [math.pi/2, -math.pi/2, math.pi/2, -3*math.pi/4, -math.pi/2,   0.0]),
+    ("oblique_w2_neg_pi4",     [math.pi/2, -math.pi/2, math.pi/2, -math.pi/2,   -math.pi/4,   0.0]),
+    ("oblique_w1w2_pi4",       [math.pi/2, -math.pi/2, math.pi/2, -math.pi/4,   -math.pi/4,   0.0]),
 ]
 
 
