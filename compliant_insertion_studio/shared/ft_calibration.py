@@ -438,17 +438,22 @@ def main():
     # Move to home FIRST so we always start from a known clean pose. This avoids
     # large unexpected swings on Pose 1 that depend on whatever pose the robot
     # was in when the script was invoked. Home pose is safer + reproducible.
+    # Use joint-space HOME_JOINTS (operator-confirmed 2026-05-03 — see
+    # primitives/shared/config.py). The Cartesian HOME_POSE IK lands at a
+    # joint config requiring an ~80° base swing into pose 1, which can
+    # trip protective stops; HOME_JOINTS is engineered to share arm
+    # geometry with the calibration starting pose so entry is gentle.
     log("")
-    log("→ Moving to HOME (clean starting pose) …")
+    log("→ Moving to HOME_JOINTS (calibration-tidy joint-space home) …")
     home_script = REPO_ROOT / "primitives" / "move_home.py"
-    home_proc = subprocess.run([sys.executable, str(home_script)],
+    home_proc = subprocess.run([sys.executable, str(home_script), "--joint-space"],
                                 capture_output=True, text=True, timeout=60,
                                 cwd=str(REPO_ROOT))
     if '"result": "success"' not in home_proc.stdout:
-        log(f"  Aborting: move_home failed. stdout tail: {home_proc.stdout[-300:]!r}")
+        log(f"  Aborting: move_home --joint-space failed. stdout tail: {home_proc.stdout[-300:]!r}")
         log(f"  stderr tail: {home_proc.stderr[-200:]!r}")
         sys.exit(2)
-    log("  At home.")
+    log("  At HOME_JOINTS.")
 
     measurements = []  # list of (g_in_ft, mean_wrench)
     pose_names = []
@@ -483,19 +488,20 @@ def main():
                 pose_names.append(name)
                 pose_joint_configs.append([float(x) for x in joints])
 
-        # Return to HOME for clean exit pose (operator request 2026-05-03).
+        # Return to HOME_JOINTS for clean exit pose (operator request 2026-05-03).
         # Previously returned to pose 0 (face_down_canonical) which is awkward
-        # geometry to leave the robot in. Home is the canonical safe pose.
+        # geometry to leave the robot in. HOME_JOINTS shares arm geometry with
+        # pose 0 except for shoulder_pan, so the exit transition is short.
         if not args.no_return_home:
             log("")
-            log("→ Moving to HOME (clean exit pose) …")
-            home_proc = subprocess.run([sys.executable, str(home_script)],
+            log("→ Moving to HOME_JOINTS (clean exit pose) …")
+            home_proc = subprocess.run([sys.executable, str(home_script), "--joint-space"],
                                         capture_output=True, text=True, timeout=60,
                                         cwd=str(REPO_ROOT))
             if '"result": "success"' not in home_proc.stdout:
-                log(f"  WARN: move_home at exit failed (non-fatal): {home_proc.stdout[-200:]!r}")
+                log(f"  WARN: move_home --joint-space at exit failed (non-fatal): {home_proc.stdout[-200:]!r}")
             else:
-                log("  At home.")
+                log("  At HOME_JOINTS.")
 
         # Motion-only short-circuit (RViz preview)
         if args.motion_only:

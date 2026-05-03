@@ -23,7 +23,23 @@ MIN_DURATION = 2.5          # seconds — floor to avoid jerky micro-moves
 MAX_DURATION = 10.0         # seconds — cap for very long moves
 
 HOME_POSE = [0.065, -0.385, 0.481, 0, 180, 0]  # EE tool frame
-PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame 
+PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
+
+# Joint-space "tidy" home — operator-confirmed 2026-05-03 on the real arm
+# inside the rectangular workspace (robot base mounted at the long-side
+# center). Tidy = arm geometry that matches the F/T calibration starting
+# pose (face_down_canonical, with shoulder_pan rotated to face the
+# workspace) so going from this home into the calibration sequence
+# requires zero arm reconfiguration. Use this when HOME_POSE Cartesian
+# IK picks an unfortunate joint config (e.g. shoulder_pan landing at
+# +79° instead of +90° due to mount-orientation drift).
+#   shoulder_pan = +90°  (EE faces into the workspace rectangle)
+#   shoulder_lift = -90°  upper arm horizontal pointing away from base
+#   elbow = +90°          forearm vertical, pointing down (elbow-up)
+#   wrist_1 = -90°        wrist neutral so gripper hangs aligned
+#   wrist_2 = -90°        gripper opening axis aligned with workspace
+#   wrist_3 = 0°          no final rotation
+HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)
 DH_PARAMS = [
