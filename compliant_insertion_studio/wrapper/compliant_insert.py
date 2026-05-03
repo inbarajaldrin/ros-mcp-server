@@ -642,6 +642,17 @@ def run_hover(ep: CompliantInsertEpisode) -> str:
     ep.meta.set_assembly_target(list(ep.target_xyz), list(ep.target_quat))
     ep.meta.set_optional("hover_pose_world", {"xyz_m": list(ep.target_xyz), "quat_xyzw": list(ep.target_quat)})
 
+    # Loud warning: target = HOVER pose for v1 — not the actual hole. dx/dy/dz
+    # in the CSV will look like noise around zero (descent) and any in-plane
+    # drift, NOT real per-axis error vs the hole. Phase 5 wires per-object
+    # hole offsets from configs/<object>.yaml — DO NOT interpret today's
+    # dx/dy/dz columns as termination-criterion-quality data.
+    ep.get_logger().warn(
+        "TARGET-POSE LIMITATION: dx/dy/dz columns reference the HOVER pose, "
+        "NOT the actual hole. Use today's CSVs for FSM verification + force/pose "
+        "shape inspection only — per-axis-error analysis is invalid until Phase 5."
+    )
+
     # WRAP-11: IK pre-check after HOVER lands
     ok, ik_info = ep._hover_pose_passes_ik_check(pose)
     ep.meta.set_optional("ik_pre_check", ik_info)
