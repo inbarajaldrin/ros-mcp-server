@@ -1,62 +1,56 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-03T03:00:13.656Z",
-  "phase": "7",
-  "phase_name": "Gripper URDF + RViz Visualization",
-  "phase_dir": ".planning/phases/07-gripper-urdf-rviz",
+  "timestamp": "2026-05-03T00:00:00.000Z",
+  "phase": null,
+  "phase_name": "Phase 1 [R]-half + Phase 7 sign-off + Phase 2 [R]-half",
+  "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
-  "status": "shipped",
+  "status": "at_robot_ready",
   "completed_tasks": [
-    {"id": "RESEARCH-01", "name": "Reverse-engineer isaac-sim-mcp ur5e-dt quickstart attach (canonical tool0→rg2_base_link transform)", "status": "done", "commit": "2826210"},
-    {"id": "RESEARCH-01b", "name": "Verify Isaac Sim USD→URDF exporter availability + identify kinematic-loop limitation", "status": "done", "commit": "2826210"},
-    {"id": "EXPORT-01", "name": "USD→OBJ+MTL pipeline via omni.kit.asset_converter (standalone driver, venv-symlink trap fix)", "status": "done", "commit": "2826210"},
-    {"id": "MTL-PATCH-01", "name": "Patch Isaac Sim's broken Kd 1 1 1 MTL with USD-canonical diffuse_color_constant per material", "status": "done", "commit": "2826210"},
-    {"id": "URDF-01", "name": "compliant_insertion_studio/launch/ur5e_with_rg2.launch.py: parallel robot_state_publisher + static_transform_publisher + dual-RobotModel", "status": "done", "commit": "2826210"},
-    {"id": "RVIZ-01", "name": "compliant_insertion_studio/rviz/ur5e_with_rg2.rviz: dual-RobotModel config, TF disabled to avoid color-debug confounding", "status": "done", "commit": "2826210"},
-    {"id": "TF-DERIVE-01", "name": "Static TF tool0→rg2_base_link xyz=(0,0,0) rpy=(0,0,π) — derived from live Isaac Sim quickstart attach scene", "status": "done", "commit": "2826210"},
-    {"id": "VALIDATE-01", "name": "5-pose visual validation + sweep test + TF cross-check vs Isaac Sim canonical (within 1°)", "status": "done", "commit": "2826210"},
-    {"id": "DOCS-01", "name": "compliant_insertion_studio/docs/gripper_urdf.md README + future-gripper-swap procedure", "status": "done", "commit": "2826210"},
-    {"id": "ROADMAP-01", "name": "Update ROADMAP.md: criterion #3 (ros2_control planning-scene integration) DROPPED, criterion #6 (offset migration) DEFERRED", "status": "done", "commit": "2826210"},
-    {"id": "SKILL-01", "name": "Capture USD→URDF visualization + external-URDF→TF-tree-attach patterns + 3 reusable scripts in ~/.claude/skills/isaac-sim-extension-dev/", "status": "done", "commit": null}
+    {"id": "PRE-FLIGHT-01", "name": "Commit primitives/shared/config.py refactor (TABLE_HEIGHT explicit derivation)", "status": "done", "commit": "0075655"},
+    {"id": "PRE-FLIGHT-02", "name": "Commit utils/ursim_cli.py bootup + shutdown_seq combo commands", "status": "done", "commit": "09ee6eb"},
+    {"id": "PRE-FLIGHT-03", "name": "Commit gripper-name fix sweep (Robotiq 2F-85 -> OnRobot RG2) across 10 files", "status": "done", "commit": "3c03269"},
+    {"id": "PRE-FLIGHT-04", "name": "Commit Phase 2 deliverables (wrapper + schema + telemetry + synthetic test)", "status": "done", "commit": "a471a20"},
+    {"id": "PRE-FLIGHT-05", "name": "Add loud WARN line in run_hover() so dx/dy/dz limitation surfaces in every CSV episode stdout", "status": "done", "commit": "b26ec33"},
+    {"id": "PRE-FLIGHT-06", "name": "Refresh TRACKS.md / STATE.md / HANDOFF.json to reflect at-robot stance", "status": "done", "commit": "pending"}
   ],
   "remaining_tasks": [
-    {"id": "Phase 1 [R]", "name": "SETUP-01 (apt upgrade ros-humble-ur-robot-driver) → CAL-03 (run ft_calibration.py on real robot, paste set_target_payload) → SETUP-02/03 verification → WRAP verification", "status": "blocked_at_robot", "track": "[R]"},
-    {"id": "Phase 2 [N]", "name": "WRAP-01..11 episode wrapper full lifecycle + TELE-01..06 telemetry CSV + meta JSON schema", "status": "not_started", "track": "[N→R]"},
-    {"id": "Phase 3 [R]", "name": "20-episode FMB1 data collection (4 objects × 5 demos each)", "status": "blocked_at_robot", "track": "[R]"},
-    {"id": "Phase 4 [N]", "name": "DASH-01..09 static HTML dashboard scaffolding (Plotly + PapaParse)", "status": "not_started", "track": "[N→R]"},
-    {"id": "Phase 5 [N→R]", "name": "ALGO-01..09 algorithm + per-object configs (parametric universal insert)", "status": "not_started", "track": "[N→R]"},
-    {"id": "Phase 6 [N→R]", "name": "DISP-01..07 dispatcher integration + VAL-01..05 generalization validation", "status": "not_started", "track": "[N→R]"}
+    {"id": "SETUP-01", "name": "sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (needs bringup restart window)", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
+    {"id": "CAL-03", "name": "Run ft_calibration.py --gripper-id onrobot_rg2_with_camera; paste set_target_payload(...) into bringup launch; restart bringup", "status": "ready_at_robot", "track": "[R]", "est_minutes": 10},
+    {"id": "CAL-04", "name": "Verify all 8 calibration poses reachable on real bringup post-paste", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
+    {"id": "CAL-06..08", "name": "Run ft_smoke_test.py to confirm session-level bias < 2 N, |T| < 0.3 Nm, drift < 0.5 N/s", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
+    {"id": "PHASE-7-SIGNOFF", "name": "Open RViz with compliant_insertion_studio/launch/ur5e_with_rg2.launch.py on real bringup; confirm RG2 renders correctly at tool0 with calibration pose", "status": "ready_at_robot", "track": "[R]", "est_minutes": 5},
+    {"id": "WRAP-VERIFY", "name": "End-to-end wrapper run on a known-good u_brown setup (PRE -> HOVER -> ZERO -> ACTIVE -> DONE) + induced-failure tests (SIGTERM, SIGABRT, SIGKILL mid-phase) + sign-convention spot check (push down -> fz positive)", "status": "ready_at_robot", "track": "[R]", "est_minutes": 15},
+    {"id": "Phase 3 [R]", "name": "20-episode FMB1 data collection (4 objects x 5 demos each)", "status": "blocked_until_phase1_R_done", "track": "[R]", "est_minutes": 90},
+    {"id": "Phase 4 [N]", "name": "DASH-01..09 static HTML dashboard scaffolding (Plotly + PapaParse)", "status": "do_at_away", "track": "[N]"},
+    {"id": "Phase 5 [N->R]", "name": "ALGO-01..09 algorithm + per-object configs (parametric universal insert) — needs Phase 3 data", "status": "blocked_until_phase3_done", "track": "[N->R]"},
+    {"id": "Phase 6 [N->R]", "name": "DISP-01..07 dispatcher integration + VAL-01..05 generalization validation", "status": "blocked_until_phase5_done", "track": "[N->R]"}
   ],
-  "blockers": [
-    {"description": "Operator away from robot — all [R]-tagged tasks paused until return", "type": "human_action", "workaround": "Work [N]/[N→R] tasks per .planning/TRACKS.md priority order (Phase 2 wrapper extension is highest-value [N] now)"}
-  ],
+  "blockers": [],
   "human_actions_pending": [
-    {"action": "Run sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (SETUP-01)", "context": "Needs robot bringup restart window. Required before real-robot CAL-03 calibration run.", "blocking": false},
-    {"action": "Run ft_calibration.py on real robot (CAL-03) and paste set_target_payload(...) into bringup launch", "context": "Recovers payload mass + CoG via Kubus 2007 LSQ. Required for orientation-independent force mode.", "blocking": false},
-    {"action": "Phase 7 deliverables ready for at-robot verification — open RViz with the new launch and confirm gripper renders correctly with the calibration pose set on real bringup", "context": "Currently verified only against fake-hardware bringup. Final visual sign-off on real robot is at-robot work.", "blocking": false}
+    {"action": "Run sudo apt upgrade ros-humble-ur-robot-driver ros-humble-ur-msgs (SETUP-01)", "context": "First at-robot to-do. Needs bringup restart window. Required before real-robot CAL-03 calibration run.", "blocking": true},
+    {"action": "Run ft_calibration.py on real robot (CAL-03) and paste set_target_payload(...) into bringup launch", "context": "Recovers payload mass + CoG via Kubus 2007 LSQ. Required for orientation-independent force mode. Output: configs/ft_calibration_onrobot_rg2_with_camera_<date>.yaml + a printable set_target_payload(mass, cog) line.", "blocking": true},
+    {"action": "Visual sign-off of Phase 7 RG2 URDF on real bringup", "context": "Open RViz with the new launch and confirm gripper renders correctly with the calibration pose. Currently verified only against fake-hardware bringup.", "blocking": false}
   ],
   "decisions": [
-    {"decision": "Phase 7 visualization-only — GRIPPER_CENTER_TOOL_OFFSET (51 call sites) NOT touched", "rationale": "Operator: 'we don't have to change the code's offset logic at all. this is purely a visualization build we will extend its capabilities later.' Future phase will revisit FK/offset migration when triggered (e.g. by gripper change).", "phase": "7"},
-    {"decision": "OBJ + MTL is the canonical mesh+color pipeline (NOT DAE, NOT URDF top-level materials)", "rationale": "Multi-visual URDF top-level material name lookup hits documented RViz2 bug (ros2/rviz#1293). DAE Lambert shading goes all-black on per-face flat normals. OBJ + Assimp's MTL auto-loading is per-mesh-group reliable. UR5e itself uses DAE, but UR's per-vertex normals are artist-authored differently than RG2's per-face USD authoring.", "phase": "7"},
-    {"decision": "Static TF rpy=(0, 0, π), xyz=(0, 0, 0) for tool0→rg2_base_link", "rationale": "Derived from live read of /World/UR5e/wrist_3_link and /World/RG2_Gripper world transforms after isaac-sim-mcp ur5e-dt quickstart physics-settle. Anchored on /World/RG2_Gripper (asset root), NOT the leaf onrobot_rg2_base_link prim — leaf has its own -90°-about-Z xformOp:orient that's already encoded in the URDF mesh visuals; double-counting it produces a clean 90° error.", "phase": "7"},
-    {"decision": "ROADMAP success criterion #3 (ros2_control / MoveIt collision-check integration) DROPPED for Phase 7", "rationale": "Standalone-URDF + static-TF approach explicitly does not put gripper in ros2_control planning scene. Collision continues to use existing custom Python preflights (gripper-tip preflight in primitives/rotate_object.py). Future phase if downstream Phase 3/5 surface collision pain.", "phase": "7"},
-    {"decision": "Skill knowledge captured in ~/.claude/skills/isaac-sim-extension-dev/ (2 reference docs + 3 reusable scripts)", "rationale": "USD→URDF visualization patterns + external URDF→TF tree attach patterns are reusable across other robots/grippers. Script trio is parameterized (USD path, prim paths, MCP socket port) — not RG2-specific.", "phase": "7"}
+    {"decision": "Phase 2 wrapper HOVER strategy: subprocess _run_hover.py wrapping translate_for_target_real, NOT in-process import", "rationale": "Sidesteps dual-rclpy-Node coupling. Matches existing primitive-orchestration pattern (translate_object.py:1085 -> insertion subprocess). Easy to flip to in-process if Phase 5/6 surfaces a need.", "phase": "2"},
+    {"decision": "Phase 2 STEP-BACK gate: --step-back {prompt,signal,auto} runtime flag, default 'prompt' (stdin Y/N)", "rationale": "Prompt is safest (operator must explicitly confirm). Signal mode (SIGUSR1 trigger) supports headless dispatcher use. Auto mode is for repeated-attempt sessions with operator already-stepped-back.", "phase": "2"},
+    {"decision": "Phase 2 wrapper |Fz| capped at 5 N unless --override-fz-cap explicit", "rationale": "CONVENTIONS: gear/part/fixture damage limit. Cap is enforced in _start_force_mode() before SetForceMode RPC.", "phase": "2"},
+    {"decision": "Phase 2 known limitation: target_x/y/z columns reference HOVER pose, not the actual hole world coords", "rationale": "Hole world coords are a Phase 5 deliverable (per-object YAML wires offsets). Wrapper now logs a loud WARN line at HOVER completion so the limitation surfaces in every episode's stdout. CSV is schema-compliant; dx/dy/dz won't be physically meaningful for termination derivation until Phase 5.", "phase": "2"},
+    {"decision": "Pre-existing dirty files committed in 2 separate commits (config.py + ursim_cli.py)", "rationale": "Both clean independent additions found uncommitted at session start. Operator confirmed commit + leave the rest (deleted ablation YAMLs, untracked _real_mode_stash) untouched.", "phase": "pre-flight"}
   ],
   "uncommitted_files": [
-    "M ablations/experiments/remaining/haiku_orchestrator_p1_with.yaml (deleted, pre-existing)",
-    "M ablations/experiments/remaining/sonnet_orchestrator_p1_with.yaml (deleted, pre-existing)",
-    "M compliant_insertion_studio/shared/ft_calibration.py (pre-existing from prior session)",
-    "M primitives/shared/config.py (pre-existing from prior session)",
-    "M utils/ursim_cli.py (pre-existing from prior session)",
-    "?? logs/ (gitignored)",
-    "?? primitives/_real_mode_stash/ (untracked from prior session)"
+    "D ablations/experiments/remaining/haiku_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
+    "D ablations/experiments/remaining/sonnet_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
+    "?? primitives/_real_mode_stash/ (untracked, pre-existing — operator chose to leave as-is)",
+    "?? logs/ (gitignored)"
   ],
   "background_processes": [
-    {"process": "ros2 launch ur5e_with_rg2.launch.py", "status": "may still be running", "purpose": "Phase 7 verification RViz session", "action_on_resume": "Kill if not needed: pkill -SIGINT -f 'ros2 launch'; pkill -SIGTERM -f 'rviz2|robot_state_publisher|ros2_control_node|urscript_interface'; wait ~15s for urscript_interface SIGINT-resistance"},
-    {"process": "Isaac Sim ur5e-dt extension", "status": "should be closed (we ran 'pkill -SIGTERM -f bin/isaacsim' earlier)", "purpose": "Was used to derive canonical tool0→rg2_base_link TF", "action_on_resume": "Verify with 'pgrep -af bin/isaacsim'; restart only if doing more TF derivation"}
+    {"process": "ros2 launch ur5e_with_rg2.launch.py", "status": "may need restart on real bringup for Phase 7 visual sign-off", "purpose": "Phase 7 verification RViz session", "action_on_resume": "Restart against real bringup when ready for PHASE-7-SIGNOFF"},
+    {"process": "Isaac Sim ur5e-dt extension", "status": "should be closed", "purpose": "Was used to derive canonical tool0->rg2_base_link TF in Phase 7", "action_on_resume": "Verify with 'pgrep -af bin/isaacsim'; only restart if doing more TF derivation"}
   ],
-  "next_action": "Decide track based on robot access: [R]-track → SETUP-01 + CAL-03 (Phase 1 finish, ~25min total); [N]-track → /gsd-discuss-phase 2 (Phase 2 wrapper extension + TELE schema, the highest-value remaining [N] work). Phase 7 is shipped — no Phase 7 follow-up required.",
-  "context_notes": "Phase 7 took several iterations to land the right approach. Initial DAE pipelines hit Lambert darkness + welding artifacts; STL + URDF top-level materials hit the multi-visual material bug; OBJ + MTL with USD-canonical color patching was the production answer. The journey produced reusable knowledge captured in ~/.claude/skills/isaac-sim-extension-dev/references/{usd-to-urdf-visualization.md,external-urdf-tf-attach.md} + 3 parameterized scripts (usd_to_obj_export.py, patch_obj_mtl_from_usd.py, derive_static_tf_from_isaacsim.py). The single biggest meta-lesson: when verifying mesh rendering quality, compare to Isaac Sim's render as ground truth (and use ask-gpt skill for visual diff) — Claude's own visual judgment is unreliable on subtle rendering differences. Also: TF arrows in RViz are red/green/blue and easy to mistake for mesh tints — disable TF visualization during color verification."
+  "next_action": "AT ROBOT — work .planning/TRACKS.md priority order top-down: SETUP-01 (apt upgrade + bringup restart) -> CAL-03 (foundational F/T calibration) -> CAL-04 (8-pose verify) -> CAL-06..08 (smoke test) -> PHASE-7-SIGNOFF (RViz visual) -> WRAP-VERIFY (end-to-end wrapper run + induced-failure tests + sign-convention check). Total ~45 min if everything works first try.",
+  "context_notes": "Pre-flight cleaning done: 4 commits landed (config.py refactor, ursim_cli bootup/shutdown_seq, gripper-name fix sweep across 10 files, Phase 2 deliverables). Plus a 5th commit adding the loud dx/dy/dz WARN line to run_hover(). Working tree is now exactly the pre-existing dirty state operator chose to keep (deleted ablation YAMLs, untracked _real_mode_stash, gitignored logs/). Phase 2 wrapper is at compliant_insertion_studio/wrapper/compliant_insert.py — full FSM + WRAP-10 signals + idempotent cleanup; synthetic-CSV smoke test 34/34 pass. The single biggest risk in WRAP-VERIFY: F/T sign convention. SCHEMA.md says positive fz = robot resisting downward push; if sign comes out flipped at the robot, all per-axis-error logic in Phase 5 would be wrong. Verify with the manual 'push gripper down by hand -> fz positive' check FIRST in WRAP-VERIFY."
 }

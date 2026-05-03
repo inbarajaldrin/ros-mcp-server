@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 7 shipped — RG2 URDF + RViz visualization done; ready for Phase 1 [R] tasks when at robot
-last_updated: "2026-05-02T19:30:00.000Z"
-last_activity: 2026-05-02 — Phase 7 shipped (RG2 visual URDF + dual-RobotModel RViz pattern + USD→OBJ→MTL pipeline)
+stopped_at: AT ROBOT — Phase 1 + Phase 2 + Phase 7 [N]-halves shipped; ready to do Phase 1 + Phase 2 + Phase 7 [R]-halves
+last_updated: "2026-05-03T00:00:00.000Z"
+last_activity: 2026-05-03 — at-robot session start. Phase 2 wrapper + telemetry schema shipped 2026-05-02; gripper-name fix sweep + dx/dy/dz warning + planning state refresh committed.
 progress:
   total_phases: 7
   completed_phases: 1
@@ -18,19 +18,20 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-01)
+See: .planning/PROJECT.md (updated 2026-05-01, gripper-name fix 2026-05-02)
 
 **Core value:** Replace the failing `--insert` real-mode path with a force-compliant insert primitive that works reliably across every FMB1 part and is a one-config-file extension to any new part.
-**Current focus:** Phase 1 — Foundation Setup + F/T Calibration ([N]-half done; [R]-half blocked on robot return)
+**Current focus:** AT ROBOT — Phase 1 [R]-half (SETUP-01, CAL-03/04, CAL-06..08), Phase 7 visual sign-off, Phase 2 wrapper end-to-end verification. See `.planning/TRACKS.md` for the ordered checklist.
 
 ## Current Position
 
-Phase: Phase 7 of 7 ✅ shipped 2026-05-02 (Gripper URDF + RViz Visualization)
-Next phase: resume Phase 1 [R] track when at robot (SETUP-01 → CAL-03 → SETUP-02/03 verification → WRAP verification); or Phase 2 [N] (TELE schema + wrapper extension) when away
-Status: Phase 7 deliverables shipped; Phase 1 [N]-half (11/17 reqs) was completed earlier. 1 of 7 phases complete.
-Last activity: 2026-05-02 — Phase 7 RG2 visualization shipped (USD→OBJ+MTL pipeline + dual-URDF + static TF + dual-RobotModel RViz). Skill knowledge captured in ~/.claude/skills/isaac-sim-extension-dev/.
+Phase: Phase 7 of 7 ✅ shipped 2026-05-02 (Gripper URDF + RViz Visualization, real-bringup sign-off pending)
+Most recent work: Phase 2 [N]-half ✅ shipped 2026-05-02 (episode wrapper + locked v1 telemetry schema). Phase 2 [R]-half (real-robot end-to-end + induced-failure tests) is the at-robot to-do.
+Next at-robot session goal: Close Phase 1 [R]-half (drives Phase 2 [R]-half once calibration is good).
+Status: Phase 7 done; Phase 1 [N]-half (11/17 reqs) done; Phase 2 [N]-half (17/17 reqs) done. 1 of 7 phases formally complete in roadmap.
+Last activity: 2026-05-03 — at-robot session start. Pre-flight commits landed (4 commits + dx/dy/dz warning + this STATE.md refresh).
 
-Progress: [█░░░░░░░░░] 14% (1 of 7 phases complete)
+Progress: [█░░░░░░░░░] 14% (1 of 7 phases formally complete; significant code shipped in Phases 1+2 awaiting at-robot signoff to mark them complete)
 
 ## Performance Metrics
 
@@ -92,6 +93,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-05-02T13:37:28.832Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-gripper-urdf-rviz/07-CONTEXT.md
+Last session: 2026-05-03T00:00:00.000Z
+Stopped at: AT ROBOT — pre-flight commits landed; ready to start [R]-track per .planning/TRACKS.md priority order (SETUP-01 first)
+Resume file: .planning/TRACKS.md (live at-robot checklist)
