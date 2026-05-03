@@ -209,7 +209,7 @@ class BaselinkMotionTester(Node):
         print(f"\n  [{label}] streaming base_link TCP for {duration_s:.0f}s "
               f"(start: x={sx:+.4f}, y={sy:+.4f}, z={sz:+.4f})")
         print(f"  {'t':>5} | {'x_bl':>9} {'y_bl':>9} {'z_bl':>9} | "
-              f"{'dx_bl':>+9} {'dy_bl':>+9} {'dz_bl':>+9}")
+              f"{'dx_bl':>9} {'dy_bl':>9} {'dz_bl':>9}")
         t_end = time.time() + duration_s
         last_print = 0.0
         while time.time() < t_end:
