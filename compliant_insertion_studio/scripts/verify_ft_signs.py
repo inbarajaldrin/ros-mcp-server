@@ -226,15 +226,109 @@ class FloppyTester(Node):
 
 
 def prompt(msg: str) -> str:
+    """Read a line from stdin, raising KeyboardInterrupt naturally on Ctrl-C.
+
+    Important: do NOT install a custom SIGINT handler in this script — Python's
+    default SIGINT handler raises KeyboardInterrupt from blocking input(), which
+    is what we want. A custom SIGINT handler that just sets a flag leaves input()
+    blocking forever (the bug the operator hit).
+    """
     try:
         return input(msg)
     except EOFError:
         return ""
 
 
+def _is_program_running() -> bool:
+    """Check whether external_control.urp (or whatever) is running on the pendant."""
+    try:
+        r = subprocess.run(
+            ["ros2", "service", "call", "/dashboard_client/program_running",
+             "ur_dashboard_msgs/srv/IsProgramRunning"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    return "program_running=True" in r.stdout
+
+
+def _ros_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def go_home_then_floppy(node: "FloppyTester") -> bool:
+    """Reset robot to home then re-enter floppy force mode.
+
+    Sequence: stop force mode -> switch to position controller -> move_home ->
+    switch back to force mode -> start floppy. Each step prints status; failures
+    are reported with detail and the function returns False so the caller can
+    abort the test cleanly.
+    """
+    if not _is_program_running():
+        print("  ERROR: pendant program not running. Press Play on the pendant and re-run this script.")
+        return False
+
+    print("  [reset] Stop force mode...")
+    try:
+        node.stop_floppy()
+    except Exception as e:
+        print(f"  WARN: stop_force_mode raised (non-fatal): {e}")
+    time.sleep(0.5)
+
+    print("  [reset] Switch to position controller (deactivate force, activate position)...")
+    subprocess.run(
+        ["ros2", "control", "switch_controllers", "--deactivate", FORCE_CTRL],
+        capture_output=True, text=True, timeout=10,
+    )
+    time.sleep(0.3)
+    r = subprocess.run(
+        ["ros2", "control", "switch_controllers", "--activate", POS_CTRL],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        print(f"  ERROR: failed to activate position controller: {r.stderr.strip()}")
+        return False
+
+    print("  [reset] Move home...")
+    repo_root = _ros_repo_root()
+    try:
+        r = subprocess.run(
+            [sys.executable, str(repo_root / "primitives" / "move_home.py")],
+            capture_output=True, text=True, timeout=60, cwd=str(repo_root),
+        )
+    except subprocess.TimeoutExpired:
+        print("  ERROR: move_home timed out (>60 s). Pendant program paused?")
+        return False
+    if '"result": "success"' not in r.stdout:
+        print(f"  ERROR: move_home failed.")
+        print(f"    stdout tail: {r.stdout[-300:]!r}")
+        print(f"    stderr tail: {r.stderr[-200:]!r}")
+        return False
+
+    print("  [reset] Switch back to force mode (deactivate position, activate force)...")
+    subprocess.run(
+        ["ros2", "control", "switch_controllers", "--deactivate", POS_CTRL],
+        capture_output=True, text=True, timeout=10,
+    )
+    time.sleep(0.3)
+    r = subprocess.run(
+        ["ros2", "control", "switch_controllers", "--activate", FORCE_CTRL],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        print(f"  ERROR: failed to activate force_mode_controller: {r.stderr.strip()}")
+        return False
+
+    time.sleep(1.0)   # post-switch settle to avoid force spikes contaminating start
+    if not node.start_floppy():
+        print("  ERROR: start_force_mode failed after re-switch.")
+        return False
+    print("  [reset] Floppy mode re-active. Robot at home and yielding.\n")
+    return True
+
+
 def main():
-    # Open logfile and replace stdout with a tee so every print() lands in both
-    # the terminal and the timestamped log under logs/diagnostics/.
+    # Open logfile and tee stdout so every print() lands in both terminal + log.
     logfile = open(_LOG_PATH, "w", buffering=1)
     sys.stdout = _TeeStream(sys.__stdout__, logfile)
     print(f"[LOG] Tee'd output to: {_LOG_PATH}")
@@ -242,13 +336,15 @@ def main():
     rclpy.init()
     node = FloppyTester()
 
+    # SIGTERM -> set flag (rare; operator-issued kill). SIGINT is intentionally
+    # NOT overridden so Ctrl-C raises KeyboardInterrupt from blocking input(),
+    # which the outer try/except handles cleanly.
     state = {"interrupted": False}
-    def _exit(signum, frame):
-        print(f"\n[!] Signal {signum} — cleanup starting")
+    def _on_sigterm(signum, frame):
+        print(f"\n[!] SIGTERM received — cleanup starting")
         state["interrupted"] = True
 
-    signal.signal(signal.SIGINT, _exit)
-    signal.signal(signal.SIGTERM, _exit)
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:
         print("=" * 70)
@@ -256,114 +352,98 @@ def main():
         print("=" * 70)
         print()
         print("  This will:")
-        print("    1. Switch the robot into force_mode_controller")
-        print("    2. Start force mode with ZERO commanded wrench (all 6 axes loose)")
-        print("    3. Walk you through 6 push directions, printing fx/fy/fz")
-        print("    4. On Ctrl-C: stop force mode, switch back to position controller")
+        print("    1. Switch into force_mode_controller, start floppy (zero commanded wrench)")
+        print("    2. Stream a BASELINE wrench (don't touch)")
+        print("    3. For each of 6 push directions: home -> floppy -> stream during your push")
+        print("    4. Cleanup: stop force mode, switch back to position controller")
+        print("    Ctrl-C at any time -> clean cleanup")
         print()
         print("  SAFETY:")
-        print("    - The robot will yield to gentle hand pressure on the gripper.")
-        print("    - Speed limits are 0.02 m/s linear, 0.2 rad/s angular.")
+        print("    - Robot yields to gentle hand pressure on the gripper.")
+        print("    - Speed limits 0.02 m/s linear, 0.2 rad/s angular.")
         print("    - Damping 0.7, gain 0.5 — robot won't drift far on its own.")
         print()
         print("  WORKSPACE AXES (operator-confirmed):")
-        print("    +X = robot's LEFT      -X = robot's RIGHT")
-        print("    +Y = FORWARD from base  -Y = BACK toward base")
+        print("    +X = robot's LEFT       -X = robot's RIGHT")
+        print("    +Y = BACK toward base   -Y = FORWARD away from base")
         print("    +Z = UP (ceiling)       -Z = DOWN (floor)")
         print()
-        print("  This script reads wrench in tool0_controller (sensor frame), then")
-        print("  transforms to base_link via TF. The 'fx_base/fy_base/fz_base' columns")
-        print("  are what should match the directions above.")
+        print("  Reads wrench in tool0_controller (sensor frame), transforms to base_link")
+        print("  via TF. The fx_base/fy_base/fz_base columns are the ones that should")
+        print("  match the directions above.")
         print()
         prompt("  Stand near the robot. Press Enter when ready to enter force mode... ")
 
-        print("\n[1/4] Waiting for wrench topic...")
+        print("\n[1/3] Waiting for wrench topic...")
         if not node.wait_for_wrench(timeout=5.0):
             print("  ERROR: /force_torque_sensor_broadcaster/wrench is silent. Bringup running?")
             return
 
-        print("[2/4] Switching to force_mode_controller...")
+        print("[2/3] Initial switch into force_mode_controller for the BASELINE window...")
         if not switch_controllers(activate=[FORCE_CTRL], deactivate=[POS_CTRL]):
             print("  ERROR: controller switch failed.")
             return
-        time.sleep(1.0)   # post-switch settle to avoid force spikes
+        time.sleep(1.0)   # post-switch settle
 
-        print("[3/4] Starting force mode (zero commanded wrench, 6-DOF compliant)...")
+        print("[3/3] Starting force mode (zero commanded wrench, 6-DOF compliant)...")
         if not node.start_floppy():
             print("  ERROR: start_force_mode failed.")
             return
+        print("  Force mode ACTIVE. Floppy.\n")
 
-        print("[4/4] Force mode ACTIVE. Robot is now floppy.\n")
-
-        # ---- Step 0: baseline ----
+        # ---- BASELINE (no home reset needed; we just entered force mode) ----
         node.stream_wrench(5.0, "BASELINE — DO NOT TOUCH the robot")
         if state["interrupted"]: return
 
-        # ---- Step 1: +X = robot's LEFT ----
-        print("\n  ----- Step 1: push +X (robot's LEFT) -----")
-        print("  Push the gripper GENTLY to the robot's LEFT (your right if you face the robot from the front).")
-        print("  Expected: fx_base goes POSITIVE.   Hold for ~5 seconds.")
-        prompt("  Press Enter when ready to start streaming...")
-        node.stream_wrench(5.0, "PUSH +X (robot's LEFT)")
-        if state["interrupted"]: return
+        # ---- Per-push pattern: home + floppy + push window ----
+        push_steps = [
+            ("Step 1: push +X (robot's LEFT)",
+             "Push the gripper GENTLY to the robot's LEFT.",
+             "Expected: fx_base goes POSITIVE."),
+            ("Step 2: push -X (robot's RIGHT)",
+             "Push the gripper GENTLY to the robot's RIGHT.",
+             "Expected: fx_base goes NEGATIVE."),
+            ("Step 3: push +Y (BACK toward base)",
+             "Push the gripper GENTLY BACKWARD toward the robot base.",
+             "Expected: fy_base goes POSITIVE."),
+            ("Step 4: push -Y (FORWARD away from base)",
+             "Push the gripper GENTLY FORWARD into the workspace, away from the robot base.",
+             "Expected: fy_base goes NEGATIVE."),
+            ("Step 5: push +Z (LIFT UP toward ceiling)",
+             "LIFT the gripper gently UPWARD toward the ceiling.",
+             "Expected: fz_base goes POSITIVE.   (Critical post-fix check.)"),
+            ("Step 6: push -Z (PUSH DOWN toward floor)",
+             "PUSH DOWN gently on the gripper.",
+             "Expected: fz_base goes NEGATIVE.   (May be small — robot yields.)"),
+        ]
 
-        # ---- Step 2: -X = robot's RIGHT ----
-        print("\n  ----- Step 2: push -X (robot's RIGHT) -----")
-        print("  Now push GENTLY to the robot's RIGHT.")
-        print("  Expected: fx_base goes NEGATIVE.")
-        prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH -X (robot's RIGHT)")
-        if state["interrupted"]: return
-
-        # ---- Step 3: +Y = FORWARD from base ----
-        print("\n  ----- Step 3: push +Y (FORWARD from base) -----")
-        print("  Push GENTLY in the direction the EE points away from the robot base (forward into the workspace).")
-        print("  Expected: fy_base goes POSITIVE.")
-        prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH +Y (FORWARD from base)")
-        if state["interrupted"]: return
-
-        # ---- Step 4: -Y = BACK toward base ----
-        print("\n  ----- Step 4: push -Y (BACK toward base) -----")
-        print("  Now push GENTLY back toward the robot base.")
-        print("  Expected: fy_base goes NEGATIVE.")
-        prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH -Y (BACK toward base)")
-        if state["interrupted"]: return
-
-        # ---- Step 5: +Z = UP ----
-        print("\n  ----- Step 5: push +Z (LIFT UP toward ceiling) -----")
-        print("  LIFT the gripper gently UPWARD.")
-        print("  Expected: fz_base goes POSITIVE.   This is the critical post-fix check.")
-        prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "LIFT UP (+Z)")
-        if state["interrupted"]: return
-
-        # ---- Step 6: -Z = DOWN ----
-        print("\n  ----- Step 6: push -Z (PUSH DOWN toward floor) -----")
-        print("  Now PUSH DOWN gently on the gripper.")
-        print("  Expected: fz_base goes NEGATIVE (may be small — robot yields to push).")
-        prompt("  Press Enter when ready...")
-        node.stream_wrench(5.0, "PUSH DOWN (-Z)")
-        if state["interrupted"]: return
+        for label, instruction, expected in push_steps:
+            if state["interrupted"]:
+                return
+            print(f"\n  ----- {label} -----")
+            print(f"  [pre-push] Resetting to home before push...")
+            if not go_home_then_floppy(node):
+                print(f"  Aborting test — go_home_then_floppy failed before {label}")
+                return
+            print(f"  {instruction}")
+            print(f"  {expected}")
+            prompt("  Press Enter when you're touching the gripper, ready to push... ")
+            node.stream_wrench(5.0, label.split(":")[1].strip() if ":" in label else label)
 
         print("\n" + "=" * 70)
         print("  VERIFICATION COMPLETE")
         print("=" * 70)
         print("  Sign convention summary (look at the *_base columns, not the *_raw):")
-        print("    +X push (robot's LEFT)        → fx_base should be POSITIVE")
-        print("    -X push (robot's RIGHT)       → fx_base should be NEGATIVE")
-        print("    +Y push (FORWARD from base)   → fy_base should be POSITIVE")
-        print("    -Y push (BACK toward base)    → fy_base should be NEGATIVE")
-        print("    +Z lift (UP toward ceiling)   → fz_base should be POSITIVE")
-        print("    -Z push (DOWN toward floor)   → fz_base should be NEGATIVE")
-        print()
-        print("  Press Ctrl-C when done reviewing to stop force mode and switch back.")
+        print("    +X push (robot's LEFT)         -> fx_base POSITIVE")
+        print("    -X push (robot's RIGHT)        -> fx_base NEGATIVE")
+        print("    +Y push (BACK toward base)     -> fy_base POSITIVE")
+        print("    -Y push (FORWARD into workspace) -> fy_base NEGATIVE")
+        print("    +Z lift (UP)                   -> fz_base POSITIVE")
+        print("    -Z push (DOWN)                 -> fz_base NEGATIVE")
         print()
 
-        # Hold force mode until operator Ctrl-Cs
-        while not state["interrupted"]:
-            rclpy.spin_once(node, timeout_sec=0.5)
+    except KeyboardInterrupt:
+        print("\n[!] Ctrl-C received — cleanup starting")
 
     finally:
         # Cleanup pattern matches the proven _real_mode_stash/peg_in_hole_insertion.py
