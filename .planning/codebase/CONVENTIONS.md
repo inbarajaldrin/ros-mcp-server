@@ -21,6 +21,7 @@
 - **`_references/` and `compliant_insertion_studio/logs/` are gitignored**: never commit reference repos or telemetry.
 - **Ask the operator before**: adding a new top-level dependency, writing > 200 LOC without checkpoint, performing any robot motion, modifying primitives outside `compliant_insertion_studio/`, departing from a documented decision in PROJECT/REQUIREMENTS/ROADMAP.
 - **Two execution tracks — away-from-robot and at-robot**: every requirement is tagged either `[N]` (no-robot — can be done from anywhere with the codebase) or `[R]` (robot-required — needs the physical UR5e + bringup). When the operator is away from the robot, work the `[N]` track. When the operator is at the robot, work the `[R]` track and any `[N]` items needed to unblock it. **`.planning/TRACKS.md` is the live list of what's ready in each track right now.** Update it whenever a task transitions states (ready → in-progress → done, or new requirements get tagged).
+- **Diagnostic / verification scripts MUST tee output to a timestamped log file** under `compliant_insertion_studio/logs/diagnostics/<script>_<YYYYMMDD_HHMMSS>.log`. Operator + Claude both read structured logs efficiently; copy-paste from terminal scrollback is slow, error-prone, and discards data above the scrollback limit. Pattern: open a log file at start, dual-write each interesting line via a small `tee()` helper or `sys.stdout = TeeStream(stdout, logfile)`. Include the log path in the script's startup banner so operator knows where it lives.
 
 ## Anti-patterns — explicit "don't"
 

@@ -193,4 +193,5 @@ mobileclip_blt.ts
 compliant_insertion_studio/logs/insert_*.csv
 compliant_insertion_studio/logs/insert_*.meta.json
 compliant_insertion_studio/logs/validation_*
+compliant_insertion_studio/logs/diagnostics/
 _references/
