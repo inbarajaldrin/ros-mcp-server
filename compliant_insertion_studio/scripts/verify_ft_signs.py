@@ -30,12 +30,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import WrenchStamped
 from std_srvs.srv import Trigger
 from ur_msgs.srv import SetForceMode
+from scipy.spatial.transform import Rotation
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 
 
 POS_CTRL = "scaled_joint_trajectory_controller"
@@ -99,8 +102,33 @@ class FloppyTester(Node):
         self.start_fm = self.create_client(SetForceMode, "/force_mode_controller/start_force_mode")
         self.stop_fm = self.create_client(Trigger, "/force_mode_controller/stop_force_mode")
 
+        # TF for wrench frame transform (tool0_controller -> base_link)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
     def _wrench_cb(self, msg):
         self.wrench = msg
+
+    def transform_wrench_to_base(self, wrench: WrenchStamped) -> tuple[tuple[float, float, float], tuple[float, float, float], bool]:
+        """Transform wrench from its native frame (tool0_controller) to base_link.
+
+        Returns (force_base, torque_base, transform_succeeded).
+        On failure, returns the raw (sensor-frame) values with succeeded=False.
+        """
+        f_raw = (wrench.wrench.force.x, wrench.wrench.force.y, wrench.wrench.force.z)
+        t_raw = (wrench.wrench.torque.x, wrench.wrench.torque.y, wrench.wrench.torque.z)
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                "base_link", wrench.header.frame_id or "tool0_controller",
+                rclpy.time.Time(),   # latest
+            )
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return f_raw, t_raw, False
+        q = tf.transform.rotation
+        R = Rotation.from_quat([q.x, q.y, q.z, q.w])
+        f_base = R.apply(np.asarray(f_raw))
+        t_base = R.apply(np.asarray(t_raw))
+        return tuple(f_base), tuple(t_base), True
 
     def wait_for_wrench(self, timeout=5.0) -> bool:
         t0 = time.time()
@@ -165,9 +193,17 @@ class FloppyTester(Node):
         self.in_force_mode = False
 
     def stream_wrench(self, duration_s: float, label: str):
-        """Print wrench at ~5 Hz for `duration_s`, with a label header."""
+        """Print wrench at ~5 Hz for `duration_s`, with a label header.
+
+        Prints BOTH raw (sensor-native, typically tool0_controller) and
+        base_link-transformed values so operator can see the difference and
+        confirm the transform is doing what it should.
+        """
         print(f"\n  [{label}] streaming wrench for {duration_s:.0f}s...")
-        print(f"  {'t':>5}  {'fx':>8}  {'fy':>8}  {'fz':>8}  {'tx':>8}  {'ty':>8}  {'tz':>8}")
+        print(f"  {'t':>5}  | "
+              f"{'fx_raw':>9} {'fy_raw':>9} {'fz_raw':>9} | "
+              f"{'fx_base':>9} {'fy_base':>9} {'fz_base':>9} | "
+              f"{'tf':>4}")
         t_end = time.time() + duration_s
         last_print = 0.0
         while time.time() < t_end:
@@ -181,8 +217,12 @@ class FloppyTester(Node):
             f = self.wrench.wrench.force
             tq = self.wrench.wrench.torque
             elapsed = duration_s - (t_end - now)
-            print(f"  {elapsed:5.1f}  {f.x:+8.3f}  {f.y:+8.3f}  {f.z:+8.3f}  "
-                  f"{tq.x:+8.4f}  {tq.y:+8.4f}  {tq.z:+8.4f}")
+            f_base, _t_base, ok = self.transform_wrench_to_base(self.wrench)
+            tf_marker = "OK" if ok else "MISS"
+            print(f"  {elapsed:5.1f}  | "
+                  f"{f.x:+9.3f} {f.y:+9.3f} {f.z:+9.3f} | "
+                  f"{f_base[0]:+9.3f} {f_base[1]:+9.3f} {f_base[2]:+9.3f} | "
+                  f"{tf_marker:>4}")
 
 
 def prompt(msg: str) -> str:

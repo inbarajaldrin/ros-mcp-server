@@ -38,6 +38,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -45,6 +46,8 @@ from geometry_msgs.msg import PoseStamped, WrenchStamped
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
 from ur_msgs.srv import SetForceMode
+from scipy.spatial.transform import Rotation as _SciRot
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 
 from . import schema_v1 as s
 from .telemetry import (
@@ -280,6 +283,13 @@ class CompliantInsertEpisode(Node):
         self.start_fm = self.create_client(SetForceMode, "/force_mode_controller/start_force_mode")
         self.stop_fm = self.create_client(Trigger, "/force_mode_controller/stop_force_mode")
 
+        # TF for wrench frame transform — broadcaster publishes in tool0_controller
+        # (post-driver-fix #1652), but SCHEMA.md commits to base_link for all logged
+        # vectors. Transform per sample.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._wrench_tf_miss_count = 0   # diagnostic — non-fatal if unavailable
+
     # ------------------- callbacks ----------------------------------------
     def _tcp_cb(self, msg): self.tcp = msg
     def _wrench_cb(self, msg): self.wrench = msg
@@ -297,6 +307,35 @@ class CompliantInsertEpisode(Node):
             if self.tcp is not None and self.wrench is not None:
                 return True
         return False
+
+    # ------------------- wrench frame transform ---------------------------
+    def _wrench_in_base(self, wrench: WrenchStamped) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Transform wrench from sensor frame (tool0_controller) to base_link.
+
+        Returns (force_xyz_base, torque_xyz_base). Falls back to raw values + warns
+        if TF lookup fails — so a missing TF doesn't crash an episode mid-collection.
+        """
+        f_raw = (wrench.wrench.force.x, wrench.wrench.force.y, wrench.wrench.force.z)
+        t_raw = (wrench.wrench.torque.x, wrench.wrench.torque.y, wrench.wrench.torque.z)
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                "base_link",
+                wrench.header.frame_id or "tool0_controller",
+                rclpy.time.Time(),
+            )
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            self._wrench_tf_miss_count += 1
+            if self._wrench_tf_miss_count == 1 or self._wrench_tf_miss_count % 100 == 0:
+                self.get_logger().warn(
+                    f"Wrench TF lookup failed (count={self._wrench_tf_miss_count}); "
+                    f"logging RAW sensor-frame values for affected samples"
+                )
+            return f_raw, t_raw
+        q = tf.transform.rotation
+        R = _SciRot.from_quat([q.x, q.y, q.z, q.w])
+        f_base = R.apply(np.asarray(f_raw))
+        t_base = R.apply(np.asarray(t_raw))
+        return tuple(float(v) for v in f_base), tuple(float(v) for v in t_base)
 
     # ------------------- sample logging -----------------------------------
     def _log_sample(self) -> None:
@@ -323,8 +362,9 @@ class CompliantInsertEpisode(Node):
             )
 
         t = (time.time() - self.start_t) if self.start_t is not None else 0.0
-        f = self.wrench.wrench.force
-        tq = self.wrench.wrench.torque
+        # Transform wrench tool0_controller -> base_link so logged force/torque
+        # share the frame with target pose, TCP pose, and per-axis errors.
+        (f_x, f_y, f_z), (t_x, t_y, t_z) = self._wrench_in_base(self.wrench)
         p = self.tcp.pose.position
         q = self.tcp.pose.orientation
 
@@ -339,8 +379,8 @@ class CompliantInsertEpisode(Node):
             "target_qx": tqx_, "target_qy": tqy_, "target_qz": tqz_, "target_qw": tqw_,
             "dx": dx_, "dy": dy_, "dz": dz_,
             "droll": droll_, "dpitch": dpitch_, "dyaw": dyaw_,
-            "fx": f.x, "fy": f.y, "fz": f.z,
-            "tx": tq.x, "ty": tq.y, "tz": tq.z,
+            "fx": f_x, "fy": f_y, "fz": f_z,
+            "tx": t_x, "ty": t_y, "tz": t_z,
             "gripper_width": self.gripper_width_v,
             "commanded_fz": self.commanded_fz,
         }
@@ -362,7 +402,11 @@ class CompliantInsertEpisode(Node):
         return ok
 
     def _sample_bias(self, settle_s: float = 0.5) -> dict | None:
-        """Drop cached wrench, settle, return the next fresh sample as a bias dict."""
+        """Drop cached wrench, settle, return the next fresh sample as a bias dict.
+
+        Returns wrench in base_link frame (post-transform) so post_zero_bias values
+        in meta JSON share the frame convention with logged CSV columns.
+        """
         self.wrench = None
         deadline = time.time() + settle_s
         while time.time() < deadline:
@@ -370,9 +414,8 @@ class CompliantInsertEpisode(Node):
         if self.wrench is None:
             self.get_logger().warn("No /wrench sample arrived during settle window")
             return None
-        f = self.wrench.wrench.force
-        t = self.wrench.wrench.torque
-        return {"Fx": f.x, "Fy": f.y, "Fz": f.z, "Tx": t.x, "Ty": t.y, "Tz": t.z}
+        (f_x, f_y, f_z), (t_x, t_y, t_z) = self._wrench_in_base(self.wrench)
+        return {"Fx": f_x, "Fy": f_y, "Fz": f_z, "Tx": t_x, "Ty": t_y, "Tz": t_z}
 
     # ------------------- start/stop force mode ----------------------------
     def _start_force_mode(self, sel_vec: list[bool]) -> bool:

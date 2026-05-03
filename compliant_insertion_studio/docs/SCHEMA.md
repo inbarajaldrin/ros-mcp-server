@@ -69,8 +69,8 @@ gripper_width,commanded_fz
 | 16–19 | `target_qx`, `target_qy`, `target_qz`, `target_qw` | float | unit quat | all | Assembly target orientation. Same fixed-per-episode logic as position. |
 | 20–22 | `dx`, `dy`, `dz` | float | meters | all | `tcp - target` linear error per axis. Sign-preserving. |
 | 23–25 | `droll`, `dpitch`, `dyaw` | float | radians | all | Relative rotation `target⁻¹ · tcp` decomposed as XYZ extrinsic Euler via `scipy.spatial.transform.Rotation.from_quat(...).as_euler('xyz')`. Convention is fixed in `schema_v1.py`. |
-| 26–28 | `fx`, `fy`, `fz` | float | newtons | all | Wrench force in `base_link` frame from `/force_torque_sensor_broadcaster/wrench`. Sign convention: positive Z is up (= robot is pulling away from a downward push), so contact during a downward `commanded_fz` shows up as **positive** `fz` magnitude on contact. |
-| 29–31 | `tx`, `ty`, `tz` | float | newton-meters | all | Wrench torque, same frame and convention. |
+| 26–28 | `fx`, `fy`, `fz` | float | newtons | all | Wrench force in `base_link` frame, **transformed by the wrapper** from `/force_torque_sensor_broadcaster/wrench` (which publishes in `tool0_controller`, the wrist frame). Sign convention: positive Z is up (= robot is pulling away from a downward push), so contact during a downward `commanded_fz` shows up as **positive** `fz` magnitude on contact. The wrapper transforms tool→base per sample using the live TF; if TF lookup fails (rare), raw tool-frame values are logged as a fallback and a warning is emitted. |
+| 29–31 | `tx`, `ty`, `tz` | float | newton-meters | all | Wrench torque, same frame and transform pipeline as force columns above. |
 | 32 | `gripper_width` | float | meters | all | Latest gripper width from `/gripper_width`. NaN if topic not yet seen. |
 | 33 | `commanded_fz` | float | newtons | mostly 0 | The Fz value commanded into `force_mode_controller` at this sample. 0 outside `ACTIVE`. Negative = pushing down. Useful for distinguishing dwell rows from push rows in the dashboard. |
 
@@ -256,6 +256,7 @@ CSV writer flushes after every row (line-buffered via `open(..., 'w', buffering=
 | Version | Date | Author | Reason |
 |---|---|---|---|
 | v1 | 2026-05-02 | Phase 2 build | Initial lock. |
+| v1.0.1 | 2026-05-03 | F/T frame fix | Documented that wrench is wrapper-transformed from `tool0_controller` (sensor-native, post-driver-PR-#1652) to `base_link` before logging. No column/key changes; description-only fix to match implementation. Surfaced by `verify_ft_signs.py` first run. |
 
 ---
 
