@@ -1,0 +1,58 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="rg2">
+  <link name="rg2_base_link">
+    <inertial>
+      <origin xyz="0 0 0.1" rpy="0 0 0" />
+      <mass value="0.78" />
+      <inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3" />
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0.000000 0.000000 0.000000" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/rg2.obj" scale="1 1 1" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 -0.000000 0.000000" rpy="0.000000 -0.000000 -1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/base_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.017180 -0.000000 0.125800" rpy="0.000000 -0.000000 -1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/lo_knuckle_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.007680 -0.000000 0.142300" rpy="0.000000 -0.000000 -1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/li_knuckle_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.056770 0.000000 0.163970" rpy="0.000000 -0.000000 -1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/l_finger_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.017180 -0.000000 0.125800" rpy="0.000000 0.000000 1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/ro_knuckle_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.007680 -0.000000 0.142300" rpy="0.000000 0.000000 1.570796" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/ri_knuckle_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.056770 0.000000 0.163970" rpy="0.000000 0.000000 1.570797" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes/r_finger_collision.stl" scale="1 1 1" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

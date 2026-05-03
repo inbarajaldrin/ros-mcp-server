@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: planning
+stopped_at: Phase 7 shipped — RG2 URDF + RViz visualization done; ready for Phase 1 [R] tasks when at robot
+last_updated: "2026-05-02T19:30:00.000Z"
+last_activity: 2026-05-02 — Phase 7 shipped (RG2 visual URDF + dual-RobotModel RViz pattern + USD→OBJ→MTL pipeline)
+progress:
+  total_phases: 7
+  completed_phases: 1
+  total_plans: 0
+  completed_plans: 0
+  percent: 14
+---
+
 # Project State
 
 ## Project Reference
@@ -5,20 +21,21 @@
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Replace the failing `--insert` real-mode path with a force-compliant insert primitive that works reliably across every FMB1 part and is a one-config-file extension to any new part.
-**Current focus:** Phase 1 — Foundation Setup + F/T Calibration
+**Current focus:** Phase 1 — Foundation Setup + F/T Calibration ([N]-half done; [R]-half blocked on robot return)
 
 ## Current Position
 
-Phase: 1 of 6 (Foundation Setup + F/T Calibration)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-05-01 — Roadmap created, 6 phases mapped to 62 v1 requirements with 100% coverage
+Phase: Phase 7 of 7 ✅ shipped 2026-05-02 (Gripper URDF + RViz Visualization)
+Next phase: resume Phase 1 [R] track when at robot (SETUP-01 → CAL-03 → SETUP-02/03 verification → WRAP verification); or Phase 2 [N] (TELE schema + wrapper extension) when away
+Status: Phase 7 deliverables shipped; Phase 1 [N]-half (11/17 reqs) was completed earlier. 1 of 7 phases complete.
+Last activity: 2026-05-02 — Phase 7 RG2 visualization shipped (USD→OBJ+MTL pipeline + dual-URDF + static TF + dual-RobotModel RViz). Skill knowledge captured in ~/.claude/skills/isaac-sim-extension-dev/.
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 14% (1 of 7 phases complete)
 
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: —
 - Total execution time: 0 hours
@@ -35,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 | 6. Dispatcher Integration + Generalization Validation | 0 | — | — |
 
 **Recent Trend:**
+
 - Last 5 plans: —
 - Trend: —
 
@@ -74,6 +92,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-05-01
-Stopped at: Roadmap created (6 phases, 62 requirements mapped, 100% coverage). Ready for `/gsd-plan-phase 1`.
-Resume file: None
+Last session: 2026-05-02T13:37:28.832Z
+Stopped at: Phase 7 context gathered
+Resume file: .planning/phases/07-gripper-urdf-rviz/07-CONTEXT.md
