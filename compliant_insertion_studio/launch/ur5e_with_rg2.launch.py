@@ -1,24 +1,29 @@
 # Reference: https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver/blob/humble/ur_bringup/launch/ur5e.launch.py
 """
-Launch fake-hardware UR5e bringup + a parallel robot_state_publisher for the
-OnRobot RG2 + a static TF tool0 -> rg2_base_link, then bring up RViz with a
-config that shows both robot models.
+Launch UR5e bringup (real OR fake hardware) + a parallel robot_state_publisher
+for the OnRobot RG2 + a static TF tool0 -> rg2_base_link, then optionally bring
+up RViz with the dual-RobotModel config.
 
 This is Phase 7's standalone-URDF-plus-static-TF integration (07-CONTEXT.md
 D-4..D-6). The RG2 URDF is at `compliant_insertion_studio/urdf/rg2/rg2.urdf`
-and uses `package://compliant_insertion_studio/...` mesh paths; we rewrite
-those to absolute `file://` paths at launch time because the repo is not a
-ROS2 package.
+and uses `package://compliant_insertion_studio/...` mesh paths; rewritten to
+absolute `file://` paths at launch time because the repo is not a ROS2 package.
 
 Usage:
-    source ~/ros2_ws/install/setup.bash
-    ros2 launch /home/aaugus11/Documents/ros-mcp-server/compliant_insertion_studio/launch/ur5e_with_rg2.launch.py
+    # Fake hardware (Phase 7 default — visualization-only)
+    ros2 launch .../ur5e_with_rg2.launch.py
+
+    # Real robot
+    ros2 launch .../ur5e_with_rg2.launch.py use_fake_hardware:=false robot_ip:=192.168.1.111
 
 Arguments:
-    rviz       (default: true)  Launch RViz2 with the dual-RobotModel config.
-    rg2_only   (default: false) Skip the UR5e bringup; useful for fast RG2
-                                 visual iteration without spinning up the
-                                 controller manager.
+    rviz                (default: true)   Launch RViz2 with dual-RobotModel config.
+    rg2_only            (default: false)  Skip UR5e bringup; only RG2 + static TFs + RViz.
+    use_fake_hardware   (default: true)   true=fake, false=real hardware.
+    fake_sensor_commands(default: true)   Only used in fake mode.
+    robot_ip            (default: 192.0.2.1) Robot IP — set when use_fake_hardware:=false.
+    tf_rpy              (default: "0 0 π") Roll/Pitch/Yaw for tool0 -> rg2_base_link static TF.
+    tf_xyz              (default: "0 0 0") Translation for tool0 -> rg2_base_link static TF.
 """
 from pathlib import Path
 
@@ -67,8 +72,23 @@ def generate_launch_description():
         default_value="false",
         description="Skip UR5e bringup; only load RG2 URDF + static TF + RViz.",
     )
+    use_fake_hardware_arg = DeclareLaunchArgument(
+        "use_fake_hardware",
+        default_value="true",
+        description="true = fake hardware (no robot), false = real hardware (use --robot_ip).",
+    )
+    fake_sensor_commands_arg = DeclareLaunchArgument(
+        "fake_sensor_commands",
+        default_value="true",
+        description="Only honored when use_fake_hardware:=true.",
+    )
+    robot_ip_arg = DeclareLaunchArgument(
+        "robot_ip",
+        default_value="192.0.2.1",
+        description="Robot IP — set when use_fake_hardware:=false.",
+    )
 
-    # UR5e fake-hardware bringup. Includes ur_control.launch.py directly
+    # UR5e bringup — real or fake. Includes ur_control.launch.py directly
     # (rather than ur5e.launch.py) so we can pass launch_rviz:=false — the
     # default UR5e launch hard-codes rviz on, and Phase 7 ships its own
     # dual-RobotModel rviz config.
@@ -81,9 +101,9 @@ def generate_launch_description():
         ),
         launch_arguments={
             "ur_type": "ur5e",
-            "robot_ip": "192.0.2.1",
-            "use_fake_hardware": "true",
-            "fake_sensor_commands": "true",
+            "robot_ip": LaunchConfiguration("robot_ip"),
+            "use_fake_hardware": LaunchConfiguration("use_fake_hardware"),
+            "fake_sensor_commands": LaunchConfiguration("fake_sensor_commands"),
             "activate_joint_controller": "false",
             "launch_rviz": "false",
         }.items(),
@@ -166,6 +186,9 @@ def generate_launch_description():
         [
             rviz_arg,
             rg2_only_arg,
+            use_fake_hardware_arg,
+            fake_sensor_commands_arg,
+            robot_ip_arg,
             rpy_arg,
             xyz_arg,
             ur_launch,

@@ -71,26 +71,32 @@ source_ros() {
 # --- launch ---
 echo "[launch_robot] Mode: $MODE  RViz: $USE_RVIZ  Log: $LOG_FILE"
 
+# Both real and fake modes use the SAME launch file (Phase 7's
+# ur5e_with_rg2.launch.py) so the RG2 robot_state_publisher + static TF
+# tool0 -> rg2_base_link are present in BOTH modes — operator sees the
+# gripper in RViz regardless. Only the use_fake_hardware + robot_ip args
+# change.
+RVIZ_ARG="rviz:=false"
+[[ "$USE_RVIZ" == "true" ]] && RVIZ_ARG="rviz:=true"
+
 if [[ "$MODE" == "real" ]]; then
     echo "[launch_robot] Pinging robot at $ROBOT_IP ..."
     if ! timeout 2 ping -c 1 "$ROBOT_IP" >/dev/null 2>&1; then
         echo "ERROR: robot at $ROBOT_IP not reachable. Check cables/network." >&2
         exit 3
     fi
-    echo "[launch_robot] Reachable. Launching real-hardware bringup..."
-    nohup bash -c "$(declare -f source_ros); source_ros; \
-        ros2 launch ur_bringup ur5e.launch.py ur_type:=ur5e robot_ip:=$ROBOT_IP" \
-        > "$LOG_FILE" 2>&1 &
-    LAUNCH_PID=$!
+    echo "[launch_robot] Reachable. Launching real-hardware bringup with RG2 visualization..."
+    HW_ARGS="use_fake_hardware:=false robot_ip:=$ROBOT_IP"
 elif [[ "$MODE" == "fake" ]]; then
     echo "[launch_robot] Launching fake-hardware bringup with RG2 visualization..."
-    RVIZ_ARG=""
-    [[ "$USE_RVIZ" == "true" ]] && RVIZ_ARG="rviz:=true" || RVIZ_ARG="rviz:=false"
-    nohup bash -c "$(declare -f source_ros); source_ros; \
-        ros2 launch $REPO_ROOT/compliant_insertion_studio/launch/ur5e_with_rg2.launch.py $RVIZ_ARG" \
-        > "$LOG_FILE" 2>&1 &
-    LAUNCH_PID=$!
+    HW_ARGS="use_fake_hardware:=true fake_sensor_commands:=true"
 fi
+
+nohup bash -c "$(declare -f source_ros); source_ros; \
+    ros2 launch $REPO_ROOT/compliant_insertion_studio/launch/ur5e_with_rg2.launch.py \
+        $RVIZ_ARG $HW_ARGS" \
+    > "$LOG_FILE" 2>&1 &
+LAUNCH_PID=$!
 
 echo "[launch_robot] Bringup PID: $LAUNCH_PID"
 
@@ -115,14 +121,8 @@ echo "[launch_robot] Activating scaled_joint_trajectory_controller..."
 ros2 control switch_controllers --activate scaled_joint_trajectory_controller 2>&1 | tail -1
 sleep 0.5
 
-# --- launch RViz separately if real --rviz (fake mode bakes it into the launch) ---
-if [[ "$USE_RVIZ" == "true" && "$MODE" == "real" ]]; then
-    echo "[launch_robot] Launching RViz with dual-RobotModel config..."
-    nohup bash -c "$(declare -f source_ros); source_ros; \
-        rviz2 -d $REPO_ROOT/compliant_insertion_studio/rviz/ur5e_with_rg2.rviz" \
-        > "$LOG_DIR/rviz_${TS}.log" 2>&1 &
-    sleep 2
-fi
+# RViz is now launched by the unified ur5e_with_rg2.launch.py via rviz:=true,
+# so no separate RViz spawn is needed regardless of real/fake mode.
 
 # --- summary ---
 echo ""
