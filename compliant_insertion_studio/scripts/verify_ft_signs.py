@@ -363,8 +363,8 @@ def main():
         print("    - Speed limits 0.02 m/s linear, 0.2 rad/s angular.")
         print("    - Damping 0.7, gain 0.5 — robot won't drift far on its own.")
         print()
-        print("  WORKSPACE AXES (verified empirically 2026-05-03 via this script):")
-        print("    +X = robot's LEFT       -X = robot's RIGHT")
+        print("  WORKSPACE AXES (verified empirically 2026-05-03 via verify_baselink_motion.py):")
+        print("    +X = robot's RIGHT      -X = robot's LEFT")
         print("    +Y = FORWARD (away from base)   -Y = BACK toward base")
         print("    +Z = UP (ceiling)       -Z = DOWN (floor)")
         print("  NOTE: forward push from home pose may hit kinematic limit fast (force")
@@ -399,11 +399,11 @@ def main():
 
         # ---- Per-push pattern: home + floppy + push window ----
         push_steps = [
-            ("Step 1: push +X (robot's LEFT)",
-             "Push the gripper GENTLY to the robot's LEFT.",
-             "Expected: fx_base goes POSITIVE."),
-            ("Step 2: push -X (robot's RIGHT)",
+            ("Step 1: push +X (robot's RIGHT)",
              "Push the gripper GENTLY to the robot's RIGHT.",
+             "Expected: fx_base goes POSITIVE."),
+            ("Step 2: push -X (robot's LEFT)",
+             "Push the gripper GENTLY to the robot's LEFT.",
              "Expected: fx_base goes NEGATIVE."),
             ("Step 3: push +Y (FORWARD away from base)",
              "Push the gripper GENTLY FORWARD into the workspace, away from the robot base.",
@@ -436,8 +436,8 @@ def main():
         print("  VERIFICATION COMPLETE")
         print("=" * 70)
         print("  Sign convention summary (look at the *_base columns, not the *_raw):")
-        print("    +X push (robot's LEFT)              -> fx_base POSITIVE")
-        print("    -X push (robot's RIGHT)             -> fx_base NEGATIVE")
+        print("    +X push (robot's RIGHT)             -> fx_base POSITIVE")
+        print("    -X push (robot's LEFT)              -> fx_base NEGATIVE")
         print("    +Y push (FORWARD away from base)    -> fy_base POSITIVE")
         print("    -Y push (BACK toward base)          -> fy_base NEGATIVE")
         print("    +Z lift (UP)                        -> fz_base POSITIVE")

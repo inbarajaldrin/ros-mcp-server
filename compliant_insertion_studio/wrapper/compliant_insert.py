@@ -432,8 +432,16 @@ class CompliantInsertEpisode(Node):
             return False
 
         req = SetForceMode.Request()
-        req.task_frame.header.frame_id = "base_link"
-        req.task_frame.pose.orientation.w = 1.0   # identity
+        # Send task_frame in `base` directly so there's no auto-transform surprise.
+        # The force_mode_controller.cpp transforms task_frame to `<tf_prefix>base`
+        # internally before URScript sees it; if we sent frame_id="base_link" it would
+        # be silently rotated 180° about Z (base ↔ base_link), and our wrench would
+        # be interpreted in that rotated frame — flipping X and Y signs.
+        # We instead apply the base_link → base sign flip explicitly when constructing
+        # the wrench below, so operator + planning code can keep thinking in base_link.
+        # Verified empirically 2026-05-03 by verify_baselink_motion.py.
+        req.task_frame.header.frame_id = "base"
+        req.task_frame.pose.orientation.w = 1.0   # identity in base
 
         req.selection_vector_x = sel_vec[0]
         req.selection_vector_y = sel_vec[1]
@@ -442,14 +450,23 @@ class CompliantInsertEpisode(Node):
         req.selection_vector_ry = sel_vec[4]
         req.selection_vector_rz = sel_vec[5]
 
-        req.wrench.force.x = 0.0
-        req.wrench.force.y = 0.0
-        req.wrench.force.z = -fz   # negative = pushing down
+        # Operator's intent (in base_link): push down with Fz N along base_link -Z axis.
+        # Convert base_link wrench → base wrench: X and Y signs flipped, Z preserved.
+        # For Phase 2 today the only commanded component is fz (along base_link -Z),
+        # so the conversion is trivially Z = Z. The X/Y flip code is here for the
+        # future case (e.g. lateral nudge during compliance) so the conversion is
+        # correct end-to-end.
+        intent_baselink = (0.0, 0.0, -fz)   # (Fx, Fy, Fz) commanded in base_link
+        wrench_in_base = (-intent_baselink[0], -intent_baselink[1], intent_baselink[2])
+
+        req.wrench.force.x = wrench_in_base[0]
+        req.wrench.force.y = wrench_in_base[1]
+        req.wrench.force.z = wrench_in_base[2]
         req.wrench.torque.x = 0.0
         req.wrench.torque.y = 0.0
         req.wrench.torque.z = 0.0
 
-        req.type = 2   # NO_TRANSFORM (task_frame = base_link as-is)
+        req.type = SetForceMode.Request.NO_TRANSFORM   # = 2
 
         req.speed_limits.linear.x = float(self.args.lin_speed)
         req.speed_limits.linear.y = float(self.args.lin_speed)

@@ -330,7 +330,7 @@ def main():
         print("  (Internal frame conversion to base, 180-deg Z flip, is hidden.)")
         print()
         print("  YOUR conventions (operator-confirmed):")
-        print("    +X = robot's LEFT             -X = robot's RIGHT")
+        print("    +X = robot's RIGHT            -X = robot's LEFT")
         print("    +Y = FORWARD (away from base) -Y = BACK toward base")
         print("    +Z = UP                       -Z = DOWN")
         print()
@@ -351,8 +351,8 @@ def main():
         time.sleep(1.0)
 
         axis_tests = [
-            ("+X (robot's LEFT)",      "x", +1),
-            ("-X (robot's RIGHT)",     "x", -1),
+            ("+X (robot's RIGHT)",     "x", +1),
+            ("-X (robot's LEFT)",      "x", -1),
             ("+Y (FORWARD, away)",     "y", +1),
             ("-Y (BACK, toward base)", "y", -1),
             ("+Z (UP)",                "z", +1),
@@ -368,12 +368,20 @@ def main():
                 print(f"  Aborting — go_home_then_force failed before {label}")
                 return
 
-            # Snapshot start pose in base_link
+            # Snapshot start pose in base_link. Drop any cached TCP first +
+            # spin until a FRESH sample arrives, otherwise we'd snapshot a
+            # pre-home-motion pose and the start would be stale (caused the +Z
+            # auto-verdict false-positive in the 2026-05-03 run).
+            node.tcp_in_base = None
             t0 = time.time()
-            start_xyz_bl = None
-            while start_xyz_bl is None and time.time() - t0 < 3.0:
-                rclpy.spin_once(node, timeout_sec=0.1)
-                start_xyz_bl = node._tcp_in_base_link()
+            while node.tcp_in_base is None and time.time() - t0 < 3.0:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            # Tiny extra settle after first fresh sample, in case home motion is
+            # still ringing down
+            time.sleep(0.2)
+            for _ in range(5):
+                rclpy.spin_once(node, timeout_sec=0.05)
+            start_xyz_bl = node._tcp_in_base_link()
             if start_xyz_bl is None:
                 print("  ERROR: could not get start pose in base_link. Skipping axis.")
                 continue
