@@ -424,7 +424,9 @@ def main():
     log(f"=== F/T Payload Calibration ===")
     log(f"Gripper ID: {args.gripper_id}")
     log(f"Poses: {len(poses)} (settle {args.settle_s}s, sample {args.sample_s}s, move duration {args.move_duration_s}s)")
-    log(f"Expected total runtime: ~{len(poses) * (args.move_duration_s + args.settle_s + args.sample_s) + 5:.0f}s")
+    # Account for home-go + home-return + 8 poses (settle + sample) per pose
+    total_runtime_s = (len(poses) + 2) * args.move_duration_s + len(poses) * (args.settle_s + args.sample_s) + 5
+    log(f"Expected total runtime: ~{total_runtime_s:.0f}s")
     if args.expected_mass_kg is not None:
         log(f"Expected mass for sanity check: {args.expected_mass_kg} kg")
     log(f"Output → {output_path}")
@@ -432,6 +434,21 @@ def main():
     log("Operator: HANDS OFF the robot for the entire duration. Visually verify each pose is safe.")
     log("Starting in 3 seconds…")
     time.sleep(3)
+
+    # Move to home FIRST so we always start from a known clean pose. This avoids
+    # large unexpected swings on Pose 1 that depend on whatever pose the robot
+    # was in when the script was invoked. Home pose is safer + reproducible.
+    log("")
+    log("→ Moving to HOME (clean starting pose) …")
+    home_script = REPO_ROOT / "primitives" / "move_home.py"
+    home_proc = subprocess.run([sys.executable, str(home_script)],
+                                capture_output=True, text=True, timeout=60,
+                                cwd=str(REPO_ROOT))
+    if '"result": "success"' not in home_proc.stdout:
+        log(f"  Aborting: move_home failed. stdout tail: {home_proc.stdout[-300:]!r}")
+        log(f"  stderr tail: {home_proc.stderr[-200:]!r}")
+        sys.exit(2)
+    log("  At home.")
 
     measurements = []  # list of (g_in_ft, mean_wrench)
     pose_names = []
@@ -466,11 +483,19 @@ def main():
                 pose_names.append(name)
                 pose_joint_configs.append([float(x) for x in joints])
 
-        # Optional return to pose 0
-        if not args.no_return_home and len(poses) > 1:
+        # Return to HOME for clean exit pose (operator request 2026-05-03).
+        # Previously returned to pose 0 (face_down_canonical) which is awkward
+        # geometry to leave the robot in. Home is the canonical safe pose.
+        if not args.no_return_home:
             log("")
-            log(f"Returning to pose 0 ({poses[0][0]}) for clean exit …")
-            move_to_joint_pose(poses[0][1], duration_s=args.move_duration_s, log=log)
+            log("→ Moving to HOME (clean exit pose) …")
+            home_proc = subprocess.run([sys.executable, str(home_script)],
+                                        capture_output=True, text=True, timeout=60,
+                                        cwd=str(REPO_ROOT))
+            if '"result": "success"' not in home_proc.stdout:
+                log(f"  WARN: move_home at exit failed (non-fatal): {home_proc.stdout[-200:]!r}")
+            else:
+                log("  At home.")
 
         # Motion-only short-circuit (RViz preview)
         if args.motion_only:
