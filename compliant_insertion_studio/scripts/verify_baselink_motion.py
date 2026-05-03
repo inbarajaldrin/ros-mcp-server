@@ -132,11 +132,14 @@ class BaselinkMotionTester(Node):
         p_base_link = R.apply(p_xyz) + np.asarray([t.x, t.y, t.z])
         return tuple(float(v) for v in p_base_link)
 
-    def cmd_baselink_force(self, axis_baselink: str, direction: int, force_n: float = 2.0) -> bool:
-        """Command a force in a base_link cardinal direction.
+    def drive_baselink(self, axis_baselink: str, direction: int) -> bool:
+        """Drive the robot in a base_link cardinal direction (visible ~6 cm in 3 s).
 
-        Internally converts base_link -> base (sign-flips X and Y, preserves Z) and sends
-        SetForceMode with task_frame.header.frame_id="base" so no auto-transform surprises.
+        Internally uses force_mode as the drive mechanism, with low damping +
+        high gain tuned so the robot reaches the speed cap quickly. Converts
+        base_link -> base (X and Y sign-flipped, Z preserved) before populating
+        the request, and sends task_frame.header.frame_id="base" so there's no
+        auto-transform surprise.
 
         axis_baselink: 'x' | 'y' | 'z' (cardinal in base_link)
         direction: +1 or -1
@@ -148,18 +151,23 @@ class BaselinkMotionTester(Node):
             return False
 
         # base ↔ base_link conversion: X and Y signs flipped, Z preserved
-        if axis_baselink in ("x", "y"):
-            base_direction = -direction
-        else:
-            base_direction = direction
+        base_direction = -direction if axis_baselink in ("x", "y") else direction
+
+        # Drive params — picked so the robot actually moves visibly:
+        #  - 3 N command (within 5 N CONVENTIONS cap)
+        #  - damping_factor=0.025 (low — robot doesn't fight its own velocity)
+        #  - gain_scaling=1.0 (responsive)
+        # With these, the robot reaches the 0.02 m/s speed cap quickly →
+        # ~6 cm displacement over the 3 s drive window.
+        DRIVE_FORCE_N = 3.0
+        DAMPING = 0.025
+        GAIN = 1.0
 
         req = SetForceMode.Request()
-        # Send task_frame in `base` directly so we know exactly what URScript receives.
         req.task_frame.header.frame_id = "base"
         req.task_frame.pose.orientation.w = 1.0   # identity in base
-        # task_frame.pose.position defaults to (0,0,0) — at base origin
 
-        # Single-axis compliance — same axis label in base and base_link (X is X line)
+        # Single-axis compliance (same axis line label in base and base_link)
         req.selection_vector_x = (axis_baselink == "x")
         req.selection_vector_y = (axis_baselink == "y")
         req.selection_vector_z = (axis_baselink == "z")
@@ -167,14 +175,13 @@ class BaselinkMotionTester(Node):
         req.selection_vector_ry = False
         req.selection_vector_rz = False
 
-        # Wrench in `base` frame
-        req.wrench.force.x = float(base_direction * force_n) if axis_baselink == "x" else 0.0
-        req.wrench.force.y = float(base_direction * force_n) if axis_baselink == "y" else 0.0
-        req.wrench.force.z = float(base_direction * force_n) if axis_baselink == "z" else 0.0
+        # Internal drive vector — wrench in `base` frame
+        req.wrench.force.x = float(base_direction * DRIVE_FORCE_N) if axis_baselink == "x" else 0.0
+        req.wrench.force.y = float(base_direction * DRIVE_FORCE_N) if axis_baselink == "y" else 0.0
+        req.wrench.force.z = float(base_direction * DRIVE_FORCE_N) if axis_baselink == "z" else 0.0
 
         req.type = SetForceMode.Request.NO_TRANSFORM   # = 2
 
-        # Conservative speed caps
         req.speed_limits.linear.x = 0.02
         req.speed_limits.linear.y = 0.02
         req.speed_limits.linear.z = 0.02
@@ -182,14 +189,14 @@ class BaselinkMotionTester(Node):
         req.speed_limits.angular.y = 0.05
         req.speed_limits.angular.z = 0.05
 
-        req.gain_scaling = 0.5
-        req.damping_factor = 0.7
+        req.gain_scaling = GAIN
+        req.damping_factor = DAMPING
 
         future = self.start_fm.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         result = future.result()
         if result is None or not result.success:
-            print("  ERROR: start_force_mode RPC failed")
+            print("  ERROR: drive RPC failed")
             return False
         self.in_force_mode = True
         return True
@@ -316,18 +323,18 @@ def main():
         print("  base_link motion verification — operator and script both speak base_link")
         print("=" * 70)
         print()
-        print("  Per axis: home -> single-axis force command (computed from base_link)")
-        print("            -> 3 s drive -> stream TCP pose in BASE_LINK -> stop")
+        print("  Per axis: home -> drive in commanded base_link direction for 3 s")
+        print("           -> stream TCP pose in BASE_LINK -> stop -> verdict")
         print()
-        print("  All numbers shown are in base_link frame (the one you understand).")
-        print("  Internal frame conversion (base_link -> base, 180-deg Z flip) is hidden.")
+        print("  All numbers shown are in base_link frame.")
+        print("  (Internal frame conversion to base, 180-deg Z flip, is hidden.)")
         print()
         print("  YOUR conventions (operator-confirmed):")
-        print("    +X = robot's LEFT       -X = robot's RIGHT")
-        print("    +Y = FORWARD away from base   -Y = BACK toward base")
-        print("    +Z = UP                 -Z = DOWN")
+        print("    +X = robot's LEFT             -X = robot's RIGHT")
+        print("    +Y = FORWARD (away from base) -Y = BACK toward base")
+        print("    +Z = UP                       -Z = DOWN")
         print()
-        print("  Force: 2.0 N   Speed: 0.02 m/s   ->  ~6 cm displacement per 3 s window")
+        print("  Speed cap 0.02 m/s -> ~6 cm displacement per 3 s window.")
         print("  Ctrl-C anytime for clean cleanup.")
         print()
         prompt("  Press Enter when ready to start (you should be near robot)... ")
@@ -371,9 +378,9 @@ def main():
                 print("  ERROR: could not get start pose in base_link. Skipping axis.")
                 continue
 
-            print(f"  Commanding base_link {label} (force {2.0} N)...")
-            if not node.cmd_baselink_force(axis_baselink=axis_bl, direction=direction, force_n=2.0):
-                print(f"  ERROR: cmd_baselink_force failed")
+            print(f"  Driving base_link {label}...")
+            if not node.drive_baselink(axis_baselink=axis_bl, direction=direction):
+                print(f"  ERROR: drive_baselink failed")
                 return
 
             node.stream_tcp_in_baselink(3.0, label, start_xyz_bl)
