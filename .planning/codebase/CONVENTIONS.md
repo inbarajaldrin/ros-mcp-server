@@ -23,6 +23,33 @@
 - **Two execution tracks — away-from-robot and at-robot**: every requirement is tagged either `[N]` (no-robot — can be done from anywhere with the codebase) or `[R]` (robot-required — needs the physical UR5e + bringup). When the operator is away from the robot, work the `[N]` track. When the operator is at the robot, work the `[R]` track and any `[N]` items needed to unblock it. **`.planning/TRACKS.md` is the live list of what's ready in each track right now.** Update it whenever a task transitions states (ready → in-progress → done, or new requirements get tagged).
 - **Diagnostic / verification scripts MUST tee output to a timestamped log file** under `compliant_insertion_studio/logs/diagnostics/<script>_<YYYYMMDD_HHMMSS>.log`. Operator + Claude both read structured logs efficiently; copy-paste from terminal scrollback is slow, error-prone, and discards data above the scrollback limit. Pattern: open a log file at start, dual-write each interesting line via a small `tee()` helper or `sys.stdout = TeeStream(stdout, logfile)`. Include the log path in the script's startup banner so operator knows where it lives.
 
+## Hardware + workspace geometry — verified empirically 2026-05-03
+
+Pin these so future work doesn't re-derive them:
+
+- **Workspace orientation (operator-confirmed via verify_baselink_motion.py)**:
+  - `+X` in base_link = **robot's RIGHT**   (`-X` = robot's LEFT)
+  - `+Y` in base_link = **FORWARD** away from base   (`-Y` = back toward base)
+  - `+Z` in base_link = **UP**   (`-Z` = down to floor)
+  - The operator's rectangular workspace has the robot base mounted at the long-side center; the EE only sits inside the workspace when `shoulder_pan = +π/2`. (`HOME_JOINTS` in `primitives/shared/config.py` encodes this.)
+- **`base` ↔ `base_link` differ by `R_z(180°)`** — X and Y signs flip between the two frames; Z is preserved. Verify with `ros2 run tf2_ros tf2_echo base base_link`.
+- **Frame each ROS topic actually publishes in (live-verified)**:
+  - `/tcp_pose_broadcaster/pose` → **`base`** (NOT `base_link`)
+  - `/force_torque_sensor_broadcaster/wrench` → **`tool0_controller`** (NOT `base_link`; post-driver-PR-#1652)
+  - Wrapper transforms wrench tool0_controller → base_link before logging; SCHEMA.md columns are in base_link.
+- **`force_mode_controller` silently auto-transforms `task_frame` to `<tf_prefix>base`** — sending `task_frame.header.frame_id="base_link"` + raw wrench produces silent X/Y inversion (the wrench is interpreted in the rotated frame). Always send `task_frame.header.frame_id="base"` + apply explicit base_link → base sign flip on the wrench in code. Pattern in `compliant_insertion_studio/wrapper/compliant_insert.py::_start_force_mode()`.
+- **`HOME_JOINTS = [+90°, -90°, +90°, -90°, -90°, 0°]`** in `primitives/shared/config.py` — joint-space "tidy home" matching the workspace + the F/T calibration starting orientation. Use `move_home.py --joint-space` (or for diagnostics, `move_joints.py send --positions ...`) when you need predictable joint config (e.g. before F/T calibration). Cartesian `HOME_POSE` is unchanged for general primitives; the IK seed there happens to land at `shoulder_pan ≈ +79°` which is OK for most workflows but not for calibration.
+- **F/T payload is set per-mount, then sticks**: foundational calibration result lives at `compliant_insertion_studio/configs/ft_calibration_<gripper_id>_<date>.yaml`. The `set_target_payload(mass, cog)` line from that YAML must be pasted into the bringup launch + bringup restarted once. Re-run calibration only when the gripper, jig, or sensor mount changes (or a session-level smoke test fails). Current calibration: 2.1109 kg, CoG ≈ [-0.003, +0.003, -0.032] m.
+
+## Operator workflow — Local mode + bringup quirks
+
+- **`launch_robot.sh real|fake [--rviz] [--ip <IP>]`** is the single entry point for bringup (works for both real and fake hardware). RViz with the dual-RobotModel config (UR5e + RG2) comes up via `--rviz`. Activates `scaled_joint_trajectory_controller` automatically.
+- **`close_robot.sh [-v]`** is the single shutdown entry point. Three-phase shutdown (RViz SIGTERM → ros2 launch SIGINT → UR driver children SIGTERM-grace-SIGKILL) matching the proven pattern from `_real_mode_stash`. Filters cursor IDE processes from pgrep matching.
+- **Local-mode pendant blocks every action command** — dashboard `play`, `stop`, `pause`, `power_on`, `power_off`, `brake_release`, `unlock_protective_stop`, `restart_safety`, `shutdown`, `load_program` all reject with "Command is not allowed due to safety reasons". Only read-only queries (`status`, `mode`, `safety`, `running`, ...) work in Local mode. `utils/ursim_cli.py` surfaces a clear hint when one of these gets rejected.
+- **Bringup restart leaves a stale URCap link** — when `close_robot.sh` runs and a new bringup is launched, the External Control URCap node on the pendant loses its connection to the new `ros2_control_node`. The pendant still SHOWS Play as active, `program_running` reports true, but ros2_control trajectories are silently rejected with `"Velocity or acceleration limits exceeded. Enable robot in URcap to fix this."` — even for tiny moves. **Fix: operator presses STOP then PLAY on the pendant** (re-establishes the External Control link). Cannot be done from code in Local mode.
+- **Protective stop recovery is manual on the pendant** — `dashboard_client/unlock_protective_stop` is also Local-mode-blocked. Operator clears it via the touchscreen prompt.
+- **Pendant program is `external_control.urp`** — keep this loaded. After bringup restart + STOP+PLAY, it's the program that hosts ros2_control's External Control connection.
+
 ## Anti-patterns — explicit "don't"
 
 - Writing 100-line SOPs based on extrapolation rather than documented procedures
