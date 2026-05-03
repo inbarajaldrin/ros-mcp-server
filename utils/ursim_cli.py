@@ -216,6 +216,35 @@ class URSimCLI(Node):
             return r
         return {'success': True, 'message': 'Protective stop unlocked and program started'}
 
+    def bootup(self, program: str = 'external_control.urp') -> dict:
+        """Power on → release brakes → load program → play."""
+        import time
+        for cmd, settle in (('power_on', 4.0), ('brake_release', 3.0)):
+            r = self.call_trigger(cmd)
+            if not r.get('success'):
+                return {'success': False, 'error': f"{cmd} failed: {r.get('message') or r.get('error')}"}
+            time.sleep(settle)
+        r = self.call_param_service('load', program)
+        if not r.get('success'):
+            return {'success': False, 'error': f"load {program} failed: {r.get('answer') or r.get('error')}"}
+        time.sleep(1.0)
+        r = self.call_trigger('play')
+        if not r.get('success'):
+            return {'success': False, 'error': f"play failed: {r.get('message') or r.get('error')}"}
+        return {'success': True, 'message': f'Bootup complete: {program} running'}
+
+    def shutdown_seq(self) -> dict:
+        """Stop program → power off."""
+        import time
+        r = self.call_trigger('stop')
+        if not r.get('success'):
+            return {'success': False, 'error': f"stop failed: {r.get('message') or r.get('error')}"}
+        time.sleep(1.0)
+        r = self.call_trigger('power_off')
+        if not r.get('success'):
+            return {'success': False, 'error': f"power_off failed: {r.get('message') or r.get('error')}"}
+        return {'success': True, 'message': 'Shutdown complete: program stopped, robot powered off'}
+
     def execute(self, user_input: str) -> dict:
         """Parse and execute a command."""
         parts = user_input.strip().split(maxsplit=1)
@@ -231,6 +260,10 @@ class URSimCLI(Node):
         # Combo commands
         if cmd == 'recover':
             return self.recover()
+        if cmd == 'bootup':
+            return self.bootup(arg) if arg else self.bootup()
+        if cmd == 'shutdown_seq':
+            return self.shutdown_seq()
 
         # Execute based on command type
         if cmd in self.TRIGGER_SERVICES:
@@ -260,9 +293,14 @@ Commands:
     quit                  Disconnect from the robot
     shutdown              Shutdown the robot controller
 
+  Combos:
+    bootup [program]      Power on + release brakes + load program + play
+                          (default program: external_control.urp)
+    shutdown_seq          Stop program + power off (does NOT call /shutdown)
+    recover               Unlock protective stop + play (one-shot fix)
+
   Safety:
     unlock                Unlock protective stop
-    recover               Unlock protective stop + play (one-shot fix)
     restart_safety        Restart the safety controller
     close_popup           Close popup dialog (like clicking "Continue")
     close_safety_popup    Close safety popup
@@ -325,6 +363,12 @@ def main():
     parser = argparse.ArgumentParser(description='URSim dashboard CLI')
     parser.add_argument('--recover', action='store_true',
                         help='Unlock protective stop and play (non-interactive)')
+    parser.add_argument('--bootup', nargs='?', const='external_control.urp', default=None,
+                        metavar='PROGRAM',
+                        help='Power on + brake release + load program + play (non-interactive). '
+                             'Default program: external_control.urp')
+    parser.add_argument('--shutdown', action='store_true',
+                        help='Stop program + power off (non-interactive)')
     cli_args = parser.parse_args()
 
     rclpy.init()
@@ -332,6 +376,20 @@ def main():
 
     if cli_args.recover:
         result = node.recover()
+        print_result(result)
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(0 if result.get('success') else 1)
+
+    if cli_args.bootup is not None:
+        result = node.bootup(cli_args.bootup)
+        print_result(result)
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(0 if result.get('success') else 1)
+
+    if cli_args.shutdown:
+        result = node.shutdown_seq()
         print_result(result)
         node.destroy_node()
         rclpy.shutdown()
