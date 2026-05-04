@@ -1,60 +1,97 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-03T11:55:00.000Z",
-  "phase": null,
-  "phase_name": "Phase 1 [R]-half ✅ DONE; Phase 2 [R]-half (WRAP-VERIFY) outstanding; Phase 7 visual sign-off outstanding",
-  "phase_dir": null,
+  "timestamp": "2026-05-04T07:04:18-07:00",
+  "phase": "05",
+  "phase_name": "algorithm-derivation",
+  "phase_dir": ".planning/phases/05-algorithm-derivation/",
   "plan": null,
   "task": null,
   "total_tasks": null,
-  "status": "session_paused_clean_handoff",
-  "completed_this_session": [
-    {"id": "verify_baselink_motion", "name": "All 6 base_link cardinal directions empirically verified on real arm; wrapper's tool0_controller -> base_link wrench transform confirmed correct", "commit": "9df6075..545d40b..3d8a1c5"},
-    {"id": "convention-fix", "name": "Workspace convention corrected from operator's verbal claim '+X = LEFT' to empirically-verified '+X = robot's RIGHT'", "commit": "78d17e5"},
-    {"id": "wrapper-frame-fix", "name": "Wrapper _start_force_mode() now uses task_frame.header.frame_id='base' + explicit base_link->base sign flip; matches verified pattern in verify_baselink_motion.py", "commit": "78d17e5"},
-    {"id": "ursim-cli-localmode", "name": "ursim_cli surfaces clear hint when Local-mode blocks an action command (play/stop/load/power_on/etc.)", "commit": "33b33dd"},
-    {"id": "launch-real-rg2", "name": "ur5e_with_rg2.launch.py supports real hardware too (use_fake_hardware:=false robot_ip:=...); RG2 visualization now appears in RViz in BOTH modes", "commit": "5b9dd71"},
-    {"id": "launch-helpers", "name": "launch_robot.sh + close_robot.sh helpers; documented stale-play bringup-restart trap and Local-mode pendant requirement", "commit": "d2f1eaf..2cdc6b8"},
-    {"id": "HOME_JOINTS", "name": "HOME_JOINTS = [+90°, -90°, +90°, -90°, -90°, 0°] formalized in primitives/shared/config.py; move_home.py --joint-space flag; ft_calibration.py uses it for clean entry/exit", "commit": "5435cb0"},
-    {"id": "calibration-poses-rotated", "name": "All 8 CALIBRATION_POSES_RAD rotated +90° in shoulder_pan to match operator's rectangular workspace orientation; LSQ math invariant under rotation about base Z", "commit": "e6f1c06"},
-    {"id": "CAL-03", "name": "F/T payload calibration ran successfully on real robot. mass=2.1109 kg, CoG=[-0.0032, +0.0031, -0.0318] m, residuals 0.86 N / 0.062 Nm (mild warn but rank 10/10, condition number 16.3). YAML at compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260503.yaml. Operator pasted set_target_payload(2.11, [-0.003, 0.003, -0.032]) into bringup.", "commit": "no-commit-cal-output-yaml-not-tracked"},
-    {"id": "CAL-04", "name": "All 8 calibration poses (workspace-rotated) reachable on real hardware end-to-end; no protective stops with --move-duration-s 10", "commit": "verified-via-cal-03-success"},
-    {"id": "CAL-06..08", "name": "ft_smoke_test PASS post-payload: bias F=(-0.25, -0.28, +0.33) N (max 0.33 << 2.0 N threshold); torque max 0.006 << 0.3 Nm; drift max 0.007 N/s << 0.5 N/s threshold", "commit": "verified-via-smoke-test"}
+  "status": "in_progress",
+  "milestone": "v1.0",
+  "completed_tasks": [
+    {"name": "rotate_object IK selection cost gate", "status": "done", "note": "Tightened IK acceptance to ≤0.025 cost (~1.4° angle accuracy). Without this, IK returned current joints with ~5° pose error as 'valid'."},
+    {"name": "cad_lookup v2 refactor (fold-symmetry + grasp transform)", "status": "done", "note": "Mirrors translate_object real-mode flow. Takes held_quat + ee_orientation as inputs. v1 had 228mm flange-offset bug."},
+    {"name": "Mode B v3 spiral (force + torque rotation)", "status": "done", "note": "1.5s burst with retract phase + spiral search at lower gain/damping. Bias toward target_xy keeps peg from drifting."},
+    {"name": "Descent-spike detector + early Mode B exit", "status": "done", "note": "100ms-windowed z-descent rate; threshold 0.5 mm/s during spiral → records hole_observed_xy + reverts to default wrench."},
+    {"name": "Cross-attempt persistence (hole_xy_prior)", "status": "done", "note": "iterate_insert reads previous meta JSON for hole_observed.xy_m, forwards as --hole-xy-prior. Wrapper uses it as target_xy."},
+    {"name": "at_seat gate", "status": "done", "note": "Wrapper computes at_seat from |tcp_z - predicted_seat_z| ≤ 5mm, passes to correction_eval. Suppresses new Mode B triggers when at seat so predicate can fire."},
+    {"name": "Rotate-every-attempt loop pattern", "status": "done", "note": "loop_iterate always uses --already-held for attempts 2+ → run_assembly_step rotates EE to canonical face-down before each wrapper attempt. Eliminates accumulated tilt drift."},
+    {"name": "60-demo base offset analysis", "status": "done", "note": "Confirmed DEFAULT_BASE_POSITION = (0, -0.4, -0.0625) is authoritative. u_orange has ~6mm -y slot offset; other 3 objects within ~1mm. Spiral absorbs per-object variance."}
   ],
   "remaining_tasks": [
-    {"id": "WRAP-VERIFY", "name": "End-to-end wrapper run on a known-good u_brown setup (PRE -> HOVER -> ZERO -> ACTIVE -> DONE) + induced-failure tests (SIGTERM, SIGABRT, SIGKILL mid-phase). Operator must physically place u_brown on FMB1 base + grasp it + provide --current-object-orientation quaternion. Catches integration bugs BEFORE Phase 3 collection where re-collecting episodes is expensive.", "status": "ready_at_robot_pending_part_setup", "track": "[R]", "est_minutes": 15},
-    {"id": "PHASE-7-SIGNOFF", "name": "Visual sign-off of RG2 URDF on real bringup. RViz already starts with launch_robot.sh real --rviz; just confirm gripper appears at tool0 in current pose.", "status": "low_priority_can_be_done_anytime", "track": "[R]", "est_minutes": 2},
-    {"id": "Phase 3 [R]", "name": "20-episode FMB1 data collection (4 objects x 5 demos each)", "status": "blocked_until_WRAP_VERIFY_done", "track": "[R]", "est_minutes": 90},
-    {"id": "Phase 4 [N]", "name": "DASH-01..09 static HTML dashboard scaffolding (Plotly + PapaParse). Operator can do at-away while waiting for next at-robot session.", "status": "do_at_away", "track": "[N]"},
-    {"id": "Phase 5 [N->R]", "name": "ALGO-01..09 algorithm + per-object configs (parametric universal insert) — needs Phase 3 data", "status": "blocked_until_phase3_done", "track": "[N->R]"},
-    {"id": "Phase 6 [N->R]", "name": "DISP-01..07 dispatcher integration + VAL-01..05 generalization validation", "status": "blocked_until_phase5_done", "track": "[N->R]"}
-  ],
-  "blockers": [
-    {"description": "WRAP-VERIFY needs operator to physically set up u_brown on the FMB1 base before it can run end-to-end. No part is currently positioned in the workspace.", "type": "physical_setup", "workaround": "Could run --skip-hover --skip-smoke for FSM-only mechanics test, but that misses the dispatcher-integration coupling — defer to next at-robot session when part is ready."}
-  ],
-  "human_actions_pending": [
-    {"action": "Place u_brown on FMB1 base + grasp it with gripper before next at-robot session", "context": "Required for WRAP-VERIFY full end-to-end run.", "blocking": true}
+    {"name": "Drive u_orange to 5 consecutive successful inserts", "status": "in_progress", "note": "Loop is running with bias re-enabled (search_bias_kp_N_per_m=400). Track outcome in /tmp/loop_v3l.log."},
+    {"name": "Drive u_brown to 5 consecutive successes", "status": "not_started"},
+    {"name": "Drive line_green to 5 consecutive successes", "status": "not_started"},
+    {"name": "Drive inverted_u_yellow to 5 consecutive successes", "status": "not_started"},
+    {"name": "Update STATE.md, run /gsd-progress to close Phase 5", "status": "not_started"}
   ],
   "decisions": [
-    {"decision": "Workspace convention IS +X = robot's RIGHT, +Y = FORWARD (away from base), +Z = UP", "rationale": "Empirically verified 2026-05-03 via verify_baselink_motion.py — drove robot in commanded base_link direction, operator confirmed which side the robot moved. Original verbal '+X = LEFT' was incorrect.", "phase": "diag"},
-    {"decision": "Wrapper sends task_frame in `base` frame (NOT base_link), with explicit X/Y sign flip on the wrench", "rationale": "force_mode_controller silently auto-transforms task_frame from header.frame_id to `<tf_prefix>base`. base ↔ base_link is R_z(180°). Sending frame_id=`base_link` + raw wrench produces silent X/Y inversion. For Z-only insertion (today) this was a no-op; for any future X/Y commanded force it would have been a latent bug. Now correct end-to-end.", "phase": "2"},
-    {"decision": "HOME_JOINTS = [+90°, -90°, +90°, -90°, -90°, 0°] is the calibration-tidy joint-space home", "rationale": "Operator's rectangular workspace places the robot base at the long-side center; EE only sits inside the workspace when shoulder_pan = +90°. Rest of joints chosen to match calibration starting orientation so calibration entry needs no arm reconfiguration.", "phase": "1"},
-    {"decision": "All 8 CALIBRATION_POSES_RAD rotated +π/2 in shoulder_pan to match HOME_JOINTS + workspace", "rationale": "Kubus 2007 LSQ is invariant under rotations about base Z (the rotation is absorbed in g-in-FT vector distribution; recovered mass + CoG identical). Keeps EE inside workspace throughout calibration.", "phase": "1"},
-    {"decision": "F/T payload calibration accepted with mild residual warnings (max 0.86 N, 0.062 Nm)", "rationale": "Above the 0.5 N / 0.05 Nm 'optimal' thresholds but rank 10/10 and condition number 16.3 (well under 100). Most likely cause is sensor not warmed up (typically wants 10-30 min idle in a pose before calibration). Operator accepted these values; smoke test passed cleanly post-paste. Could re-run after warmup for a tighter fit if Phase 3 data shows orientation-dependent bias.", "phase": "1"},
-    {"decision": "Local mode + bringup restart requires manual STOP+PLAY on pendant", "rationale": "When close_robot.sh runs and a new bringup launches, the External Control URCap loses its link. Pendant still shows Play active but the link is stale, manifesting as 'Velocity or acceleration limits exceeded' on any move. Dashboard /play /stop are blocked in Local mode (verified empirically). launch_robot.sh real now documents this in its NEXT STEPS block.", "phase": "ops"}
+    {"decision": "DEFAULT_BASE_POSITION is authoritative; do NOT use camera for base1", "rationale": "Operator decision based on observation that camera has mm-scale noise. Base is physically pinned at (0, -0.4, -0.0625)."},
+    {"decision": "Bias spiral toward target_xy (best-available estimate)", "rationale": "Pure exploratory spiral can drift away from the hole. Bias keeps peg anchored. Generalizes: target_xy = hole_xy_prior if known, else CAD-derived predicted xy."},
+    {"decision": "Do NOT bake u_orange's 6mm slot offset into fmb_assembly1.json", "rationale": "Spiral should absorb it; tuning the JSON would mask a class of per-object variance the primitive needs to handle generally."},
+    {"decision": "rotate_object every attempt (not setup-once-then-wrapper-only)", "rationale": "Post-cleanup retract holds whatever orientation the prior wedge ended in; tilt accumulates without re-rotation. Each rotate is ~3s and idempotent."},
+    {"decision": "max_corrections=30 (was 12)", "rationale": "30 gives spiral enough budget to break through chamfer in pathological grasps. 12 was too aggressive a safety ceiling."},
+    {"decision": "Use module mode (python3 -m primitives.X) for ALL primitive subprocess invocations", "rationale": "Script-path mode (python3 primitives/X.py) fails silently with ModuleNotFoundError when primitives import siblings."},
+    {"decision": "Spike detection threshold 0.5 mm/s (lowered from initial 5 mm/s)", "rationale": "Successful breakthroughs have peak descent ~0.1-0.5 mm/s, not 5 mm/s. Initial threshold was orders too high."}
   ],
-  "uncommitted_files": [
-    "D ablations/experiments/remaining/haiku_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
-    "D ablations/experiments/remaining/sonnet_orchestrator_p1_with.yaml (deleted, pre-existing — operator chose to leave as-is)",
-    "?? primitives/_real_mode_stash/ (untracked, pre-existing — operator chose to leave as-is)",
-    "?? logs/ (gitignored)",
-    "?? compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260503.yaml (gitignored — calibration output, recoverable by re-running)",
-    "?? compliant_insertion_studio/logs/diagnostics/ (gitignored — verify_*.log files)"
+  "blockers": [],
+  "human_actions_pending": [
+    {"action": "Operator places part in pickup area before each new-object loop", "context": "Camera detector must see the part before move_to_grasp queries", "blocking": false},
+    {"action": "Operator monitors visually during initial attempts", "context": "Distinguish 'peg in chamfer wedge' from 'peg seated' — current Mode B handles both via descent-spike detection but visual confirmation reduces noise", "blocking": false}
   ],
   "background_processes": [
-    {"process": "ros2 launch ur5e_with_rg2.launch.py use_fake_hardware:=false robot_ip:=192.168.1.111 rviz:=true", "status": "STOPPED at session pause via close_robot.sh", "purpose": "Real bringup + RViz with RG2 dual-RobotModel", "action_on_resume": "Re-launch with: bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz; then operator does pendant STOP+PLAY (URCap re-link)"},
-    {"process": "rviz2 (dual-RobotModel config)", "status": "STOPPED at session pause", "purpose": "Visualization of UR5e + RG2 attached at tool0 via static TF", "action_on_resume": "Bundled in launch_robot.sh real --rviz"}
+    {"name": "loop_iterate u_orange tuning", "command": "python3 -m compliant_insertion_studio.scripts.loop_iterate --object-name u_orange --base-name base1 --grasp-id 1 --target-success-count 3 --first-held-quat 0.753200 0.146100 -0.047800 -0.639600", "log": "/tmp/loop_v3l.log", "pid_file": "/tmp/loop.pid"},
+    {"name": "ROS2 bringup (UR5e + RG2 + cameras)", "command": "ros2 launch compliant_insertion_studio/launch/ur5e_with_rg2.launch.py rviz:=true use_fake_hardware:=false robot_ip:=192.168.1.111", "note": "Must be running for any robot motion"}
   ],
-  "next_action": "Next at-robot session: (1) operator places u_brown on FMB1 base + grasps it. (2) bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz. (3) operator STOP+PLAY on pendant for URCap re-link. (4) Run WRAP-VERIFY: python3 -m compliant_insertion_studio.wrapper.compliant_insert --object-name u_brown --base-name fmb1_base --grasp-id 0 --current-object-orientation <qx qy qz qw> --use-default-base-position --fz 3.0 --step-back prompt --no-prompt-notes. (5) Watch FSM walk PRE -> HOVER -> ZERO -> ACTIVE -> DONE; eyeball CSV at compliant_insertion_studio/logs/insert_u_brown_<ts>.csv. (6) Induced-failure tests: SIGTERM mid-ACTIVE, SIGABRT mid-ACTIVE, kill -9 mid-ACTIVE -> verify cleanup reaches safe state every time. ~15 min total. After WRAP-VERIFY passes -> Phase 1 + Phase 2 [R]-halves both formally complete -> ready for Phase 3 data collection.",
-  "context_notes": "Phase 1 [R]-half is DONE this session. Calibration validated: gripper mass 2.11 kg + CoG ≈ origin-aligned + 32 mm into the tool. Smoke test passes cleanly after operator pasted set_target_payload(2.1109, [-0.0032, 0.0031, -0.0318]) into bringup launch. The big architectural finding of the session: the wrapper's force-mode wrench was being sent in the wrong frame (frame_id=base_link silently auto-transformed to base, flipping X/Y). Now corrected — and empirically verified. The dx/dy/dz workspace convention also corrected (+X = robot's RIGHT, not LEFT as originally stated). HOME_JOINTS introduced as a workspace-aware calibration-tidy joint-space home (operator's rectangle requires shoulder_pan=+90°; the regular Cartesian HOME_POSE IK landed at +79°, causing the original calibration to protective-stop on the wrist swings between poses). Calibration poses also rotated +90° in shoulder_pan to match. WRAP-VERIFY is the only remaining at-robot task before Phase 3 data collection — needs operator to physically set up u_brown on the FMB1 base + grasp it. Risk for next session: the wrapper has subprocess integrations (HOVER via translate_object, smoke test, move_home, move_to_safe_height, move_home exit) — any of these could surface real-hardware bugs the synthetic CSV test can't catch."
+  "uncommitted_files": [
+    "compliant_insertion_studio/wrapper/cad_lookup.py",
+    "compliant_insertion_studio/wrapper/compliant_insert.py",
+    "compliant_insertion_studio/wrapper/insert_config.py",
+    "compliant_insertion_studio/wrapper/schema_v1.py",
+    "compliant_insertion_studio/scripts/iterate_insert.py",
+    "compliant_insertion_studio/scripts/loop_iterate.py",
+    "compliant_insertion_studio/scripts/run_assembly_step.py",
+    "compliant_insertion_studio/configs/defaults.yaml",
+    "primitives/rotate_object.py",
+    "CLAUDE.md",
+    ".claude/skills/compliant-insertion-iterate/SKILL.md",
+    ".claude/skills/compliant-insertion-iterate/scripts/analyze_episode.py",
+    ".claude/skills/compliant-insertion-iterate/scripts/compare_runs.py",
+    ".claude/skills/compliant-insertion-iterate/scripts/trajectory_drift.py"
+  ],
+  "blocking_constraints": [
+    {
+      "name": "Always use --already-held in loop attempts 2+",
+      "description": "Skipping rotate_object between attempts lets EE tilt accumulate. Operator observed iter 7 had 4.7° pitch tilt after just a few attempts.",
+      "severity": "blocking",
+      "mitigation": "loop_iterate enforces this; do not bypass with a 'wrapper-only' shortcut."
+    },
+    {
+      "name": "Module mode for primitive subprocess invocations",
+      "description": "python3 primitives/X.py fails silently with ModuleNotFoundError. python3 -m primitives.X works.",
+      "severity": "blocking",
+      "mitigation": "All callsites already converted; new code must follow."
+    },
+    {
+      "name": "Do not use camera for base1 pose",
+      "description": "Camera has mm-scale noise; base is fixed. iterate_insert._config_base_pose() returns DEFAULT_BASE_POSITION from primitives/shared/config.py.",
+      "severity": "blocking",
+      "mitigation": "Already wired; do not introduce a 'fall back to camera' path."
+    },
+    {
+      "name": "rotate_object IK cost threshold ≤ 0.025",
+      "description": "Loosening this re-introduces the bug where IK returns current joints (with 5° pose error) as 'valid'.",
+      "severity": "blocking",
+      "mitigation": "Keep SELECTION_COST_THRESHOLD at 0.025 in primitives/rotate_object.py:_select_best."
+    },
+    {
+      "name": "Mode B action TYPE matters more than magnitude",
+      "description": "Pushing harder Fz + cardinal pokes deepens peg-on-rim wedges. Verified empirically: 4 iterations × 12 corrections = ABORT each time.",
+      "severity": "advisory",
+      "mitigation": "v3 spiral (retract + low-Fz search + lateral force/torque rotation + bias) replaces poke. Don't revert to poke mode without a strong reason."
+    }
+  ],
+  "next_action": "Read .planning/phases/05-algorithm-derivation/.continue-here.md end-to-end. Then check /tmp/loop_v3l.log for current attempt status; decide whether to tune (§6 knobs) or let loop run to 5/5 on u_orange.",
+  "context_notes": "Phase 5 is the FINAL phase. The compliant insert primitive is structurally complete (rotate-every-attempt + cad_lookup v2 + Mode B v3 + spike detection + cross-attempt learning + at_seat gate + bias toward target). Whether it converges to 5/5 per object is now a tuning exercise on the knobs in §6 of the .continue-here.md."
 }
