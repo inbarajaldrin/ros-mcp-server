@@ -206,3 +206,49 @@ Iteration: `analysis/iterations/discovery/001-i006-cross-object-portability/`
 - `/tmp/insert_analyzer/bin_stats.json` — depth-banded medians/IQRs per group
 - `/tmp/insert_analyzer/search_phase.json` — per-episode pre-collapse details
 - `/tmp/insert_analyzer/discriminator.py` — Fz-collapse classifier validation
+
+---
+
+## §6 — H109 refuted: at-contact xy is NOT the success/fail discriminator (discovery 005)
+
+**Question (from §5/discovery 004 interpretation A):** does AUTO_success contact land
+systematically closer to the slot center than AUTO_fail contact?
+
+**Test:** 119 May-04 u_orange autonomous attempts (19 success / 100 fail). For each,
+`offset_mm = ||contact_xy - reference_seat_xy||`. Two reference seat choices: (a) median
+of the 19 AUTO_success actual seat positions (data-driven), and (b) STATE.json
+`predicted_seat_xy_m` = (+0.0341, -0.3635).
+
+| Reference seat | AUTO_success offset_mm (median, IQR) | AUTO_fail offset_mm (median, IQR) | Δ median | AUC | p (one-sided) |
+|---|---|---|---|---|---|
+| data_seat (+0.0290, -0.3674) | 13.85 [12.30, 16.53] | 14.72 [13.25, 16.19] | +0.87 mm | 0.581 | 0.13 |
+| predicted_seat_state_json | 11.96 [9.72, 14.21] | 12.50 [10.87, 14.31] | +0.54 mm | 0.569 | 0.17 |
+
+**Result: REFUTED.** AUC ≈ 0.57 (random = 0.50, useful ≥ 0.75). Both classes contact
+~13 mm from seat with overlapping IQRs. The H109 patch ("retract+re-approach if offset > 4 mm")
+would have rejected nearly every AUTO_success — its 25th-percentile offset is 12.3 mm.
+
+**Combined with §5 (I012):** neither at-contact xy nor per-timepoint post-contact medians
+discriminate. By elimination, the success/fail signal lives in either:
+1. **Post-contact feature aggregates** (max F_lat, integral xy_excursion, time-above-tilt-threshold),
+   or
+2. **Signals not currently recorded** (joint_states, native-rate wrench, per-sample 6-axis cmd —
+   STATE.json:data_recording_gaps G001-G004).
+
+H110 (test 1) is now the highest-priority pending hypothesis. If H110's best AUC < 0.65, we
+have hit a measurement floor and the schema bump becomes the bottleneck.
+
+**Secondary finding:** the 19 AUTO_success seat positions have IQR_y = 13.0 mm vs IQR_x = 5.7 mm.
+Y-spread is 2.3× X-spread. Could mean u_orange's slot is elongated in Y, or that some
+"successes" wedged at intermediate depths in the chamfer rather than fully seating. Worth a
+follow-up partitioning at actual_seat_z (deep ≥25 mm vs partial 20-25 mm).
+
+The data-driven seat (+0.0290, -0.3674) and STATE.json predicted seat (+0.0341, -0.3635)
+disagree by 6.46 mm — within the known 5-17 mm CAD-chain error from CLAUDE.md. The H109
+result is robust across both reference choices.
+
+**Vote of confidence for H101 (directed sweep):** H101 doesn't need a discriminator — it
+forces productive search regardless of where contact landed. The negative discrimination
+result strengthens the case for H101 as the top staged-patch candidate.
+
+Iteration: `analysis/iterations/discovery/005-h109-initial-xy-offset/`

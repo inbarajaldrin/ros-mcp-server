@@ -1,0 +1,82 @@
+{
+  "object": "u_orange",
+  "session_tag": "20260504",
+  "n_AUTO_success": 19,
+  "n_AUTO_fail": 100,
+  "n_succ_with_actual_seat": 19,
+  "data_driven_reference_seat_xy_m": [
+    0.028974,
+    -0.367427
+  ],
+  "data_driven_reference_seat_iqr_x_m": 0.005665000000000003,
+  "data_driven_reference_seat_iqr_y_m": 0.013052499999999911,
+  "predicted_seat_xy_m_state_json": [
+    0.0341,
+    -0.3635
+  ],
+  "ref_disagreement_mm": 6.457337299537643,
+  "results": {
+    "data_seat": {
+      "ref_seat_xy_m": [
+        0.028974,
+        -0.367427
+      ],
+      "succ_offset_mm": {
+        "n": 19,
+        "mean": 15.302190755935214,
+        "median": 13.84836975965039,
+        "p25": 12.300342163061554,
+        "p75": 16.52591049981239,
+        "min": 1.73437308558453,
+        "max": 30.190681095331374
+      },
+      "fail_offset_mm": {
+        "n": 100,
+        "mean": 18.47230355084371,
+        "median": 14.718484799657748,
+        "p25": 13.250104161529212,
+        "p75": 16.19226027714032,
+        "min": 10.448185344833792,
+        "max": 58.855812763056804
+      },
+      "delta_median_mm": 0.8701150400073576,
+      "mannwhitney_U": 797.0,
+      "mannwhitney_p_one_sided_succ_lt_fail": 0.13350411059945094,
+      "AUC_low_offset_predicts_success": 0.5805263157894737
+    },
+    "predicted_seat_state_json": {
+      "ref_seat_xy_m": [
+        0.0341,
+        -0.3635
+      ],
+      "succ_offset_mm": {
+        "n": 19,
+        "mean": 13.14417657102251,
+        "median": 11.955200458377906,
+        "p25": 9.718135070197143,
+        "p75": 14.206845378873432,
+        "min": 7.659539477018189,
+        "max": 26.07067106923024
+      },
+      "fail_offset_mm": {
+        "n": 100,
+        "mean": 16.824339042659474,
+        "median": 12.496838771237162,
+        "p25": 10.86752562283122,
+        "p75": 14.314097995723692,
+        "min": 6.024811781292439,
+        "max": 64.55555090772599
+      },
+      "delta_median_mm": 0.5416383128592557,
+      "mannwhitney_U": 818.0,
+      "mannwhitney_p_one_sided_succ_lt_fail": 0.16912502342844488,
+      "AUC_low_offset_predicts_success": 0.5694736842105264
+    }
+  },
+  "interpretation_thresholds": {
+    "AUC_>=_0.75": "strong discriminator \u2192 confirm H109",
+    "AUC_>=_0.65": "moderate \u2192 H109 partially supported",
+    "AUC_<_0.60": "no separation \u2192 H109 refuted",
+    "p_<_0.01_AND_AUC_>=_0.65": "publish I013"
+  }
+}
