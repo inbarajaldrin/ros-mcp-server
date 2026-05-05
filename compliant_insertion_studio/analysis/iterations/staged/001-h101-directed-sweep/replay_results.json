@@ -1,0 +1,581 @@
+{
+  "summary": {
+    "n_failures_replayed": 69,
+    "fraction_in_gold_disp_band": 0.6811594202898551,
+    "fraction_closer_to_hole": 1.0,
+    "predicted_disp_mm_at_1s": {
+      "p25": 1.4907591278851737,
+      "p50": 1.5965450557127034,
+      "p75": 1.8238330333540032
+    },
+    "actual_disp_mm_at_1s": {
+      "p25": 0.12954149914217586,
+      "p50": 0.20026232796010754,
+      "p75": 0.5713326526639424
+    },
+    "dist_to_hole_delta_mm": {
+      "p25": -1.5016267641437733,
+      "p50": -1.4968630180378129,
+      "p75": -1.484702363280823
+    },
+    "hole_xy_m": [
+      0.0341,
+      -0.3635
+    ],
+    "object": "u_orange"
+  },
+  "per_episode": [
+    {
+      "n_samples_post_contact": 4481,
+      "disp_actual_mm_at_1s": 0.42916779935121335,
+      "disp_predicted_mm_at_1s": 1.5892314164703278,
+      "dist_to_hole_delta_mm": -1.4719350435116185,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_030708.csv"
+    },
+    {
+      "n_samples_post_contact": 4590,
+      "disp_actual_mm_at_1s": 0.5713326526639424,
+      "disp_predicted_mm_at_1s": 1.6490106836070457,
+      "dist_to_hole_delta_mm": -1.4998236648140137,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_032228.csv"
+    },
+    {
+      "n_samples_post_contact": 4947,
+      "disp_actual_mm_at_1s": 0.18911372240004198,
+      "disp_predicted_mm_at_1s": 1.4353201638289788,
+      "dist_to_hole_delta_mm": -1.46954143523529,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_042545.csv"
+    },
+    {
+      "n_samples_post_contact": 11798,
+      "disp_actual_mm_at_1s": 0.144837840359484,
+      "disp_predicted_mm_at_1s": 1.3708158866534639,
+      "dist_to_hole_delta_mm": -1.4999985576408803,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_054114.csv"
+    },
+    {
+      "n_samples_post_contact": 11792,
+      "disp_actual_mm_at_1s": 0.15601602481799798,
+      "disp_predicted_mm_at_1s": 1.5907991478234231,
+      "dist_to_hole_delta_mm": -1.4849435139074711,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_061336.csv"
+    },
+    {
+      "n_samples_post_contact": 11790,
+      "disp_actual_mm_at_1s": 0.2366114959168438,
+      "disp_predicted_mm_at_1s": 1.7293837434568862,
+      "dist_to_hole_delta_mm": -1.5016267641437733,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_061627.csv"
+    },
+    {
+      "n_samples_post_contact": 11640,
+      "disp_actual_mm_at_1s": 0.1209049213225274,
+      "disp_predicted_mm_at_1s": 1.6053336150752129,
+      "dist_to_hole_delta_mm": -1.4851428780915283,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_063022.csv"
+    },
+    {
+      "n_samples_post_contact": 11644,
+      "disp_actual_mm_at_1s": 0.057999999999999025,
+      "disp_predicted_mm_at_1s": 1.5050064159194498,
+      "dist_to_hole_delta_mm": -1.4851469383404987,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_063312.csv"
+    },
+    {
+      "n_samples_post_contact": 11643,
+      "disp_actual_mm_at_1s": 0.12256018929489572,
+      "disp_predicted_mm_at_1s": 1.5777104367049728,
+      "dist_to_hole_delta_mm": -1.5005562493970293,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_063602.csv"
+    },
+    {
+      "n_samples_post_contact": 11642,
+      "disp_actual_mm_at_1s": 0.24857393266389635,
+      "disp_predicted_mm_at_1s": 1.6180988015139692,
+      "dist_to_hole_delta_mm": -1.485312955258276,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_064632.csv"
+    },
+    {
+      "n_samples_post_contact": 20989,
+      "disp_actual_mm_at_1s": 0.1887988347422009,
+      "disp_predicted_mm_at_1s": 1.5664507178558216,
+      "dist_to_hole_delta_mm": -1.4997695738640169,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_065219.csv"
+    },
+    {
+      "n_samples_post_contact": 22065,
+      "disp_actual_mm_at_1s": 0.20026232796010754,
+      "disp_predicted_mm_at_1s": 1.6703898080653086,
+      "dist_to_hole_delta_mm": -1.4701471987067436,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_065428.csv"
+    },
+    {
+      "n_samples_post_contact": 17133,
+      "disp_actual_mm_at_1s": 0.221379764206212,
+      "disp_predicted_mm_at_1s": 1.2724489248187918,
+      "dist_to_hole_delta_mm": -1.4860392799634896,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_065731.csv"
+    },
+    {
+      "n_samples_post_contact": 17477,
+      "disp_actual_mm_at_1s": 0.152502458996592,
+      "disp_predicted_mm_at_1s": 1.3634102545522617,
+      "dist_to_hole_delta_mm": -1.515297677625616,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_065903.csv"
+    },
+    {
+      "n_samples_post_contact": 17540,
+      "disp_actual_mm_at_1s": 0.2761014306373728,
+      "disp_predicted_mm_at_1s": 1.4666855008006316,
+      "dist_to_hole_delta_mm": -1.4851805865621452,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_070116.csv"
+    },
+    {
+      "n_samples_post_contact": 17385,
+      "disp_actual_mm_at_1s": 0.184382754074247,
+      "disp_predicted_mm_at_1s": 1.4379562954595562,
+      "dist_to_hole_delta_mm": -1.4850083526424478,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_070251.csv"
+    },
+    {
+      "n_samples_post_contact": 17058,
+      "disp_actual_mm_at_1s": 0.2572353008434221,
+      "disp_predicted_mm_at_1s": 1.6904705474659587,
+      "dist_to_hole_delta_mm": -1.4852404330027054,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_070507.csv"
+    },
+    {
+      "n_samples_post_contact": 17073,
+      "disp_actual_mm_at_1s": 0.058821764679416945,
+      "disp_predicted_mm_at_1s": 1.5256686011559606,
+      "dist_to_hole_delta_mm": -1.4848477706099033,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_070638.csv"
+    },
+    {
+      "n_samples_post_contact": 12607,
+      "disp_actual_mm_at_1s": 0.11343720729989894,
+      "disp_predicted_mm_at_1s": 1.5862335332527215,
+      "dist_to_hole_delta_mm": -1.4848364970741663,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_074228.csv"
+    },
+    {
+      "n_samples_post_contact": 12184,
+      "disp_actual_mm_at_1s": 0.12603570922557833,
+      "disp_predicted_mm_at_1s": 1.4389712828798409,
+      "dist_to_hole_delta_mm": -1.4707324132211905,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_074528.csv"
+    },
+    {
+      "n_samples_post_contact": 12188,
+      "disp_actual_mm_at_1s": 0.12477980605852589,
+      "disp_predicted_mm_at_1s": 1.4951906631261944,
+      "dist_to_hole_delta_mm": -1.4993805463404242,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_080834.csv"
+    },
+    {
+      "n_samples_post_contact": 12188,
+      "disp_actual_mm_at_1s": 0.29600675667963644,
+      "disp_predicted_mm_at_1s": 1.7655896607421557,
+      "dist_to_hole_delta_mm": -1.4696948231172364,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_081129.csv"
+    },
+    {
+      "n_samples_post_contact": 12386,
+      "disp_actual_mm_at_1s": 0.12954149914217586,
+      "disp_predicted_mm_at_1s": 1.4970157237881,
+      "dist_to_hole_delta_mm": -1.4867672645031675,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_081424.csv"
+    },
+    {
+      "n_samples_post_contact": 12183,
+      "disp_actual_mm_at_1s": 0.11751595636341437,
+      "disp_predicted_mm_at_1s": 1.5965450557127034,
+      "dist_to_hole_delta_mm": -1.4857397578075457,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_081721.csv"
+    },
+    {
+      "n_samples_post_contact": 12109,
+      "disp_actual_mm_at_1s": 0.7162304098542706,
+      "disp_predicted_mm_at_1s": 2.0345667200716786,
+      "dist_to_hole_delta_mm": -1.4991941728058162,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_082604.csv"
+    },
+    {
+      "n_samples_post_contact": 12112,
+      "disp_actual_mm_at_1s": 0.09806120537705307,
+      "disp_predicted_mm_at_1s": 1.5711391723982566,
+      "dist_to_hole_delta_mm": -1.514840873885169,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_084451.csv"
+    },
+    {
+      "n_samples_post_contact": 3480,
+      "disp_actual_mm_at_1s": 0.07902531240051718,
+      "disp_predicted_mm_at_1s": 1.5647753724034146,
+      "dist_to_hole_delta_mm": -1.4996884094880207,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_084746.csv"
+    },
+    {
+      "n_samples_post_contact": 3482,
+      "disp_actual_mm_at_1s": 0.2319180889883339,
+      "disp_predicted_mm_at_1s": 1.4191706642258441,
+      "dist_to_hole_delta_mm": -1.4994855677403722,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_084915.csv"
+    },
+    {
+      "n_samples_post_contact": 3286,
+      "disp_actual_mm_at_1s": 0.11111255554616575,
+      "disp_predicted_mm_at_1s": 1.4151358374514018,
+      "dist_to_hole_delta_mm": -1.4836191177146438,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_085043.csv"
+    },
+    {
+      "n_samples_post_contact": 2683,
+      "disp_actual_mm_at_1s": 0.15582361823549484,
+      "disp_predicted_mm_at_1s": 1.597822716202909,
+      "dist_to_hole_delta_mm": -1.5149741026425947,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_085537.csv"
+    },
+    {
+      "n_samples_post_contact": 6482,
+      "disp_actual_mm_at_1s": 0.026400757564881982,
+      "disp_predicted_mm_at_1s": 1.5108141424852073,
+      "dist_to_hole_delta_mm": -1.4998404433958952,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_085811.csv"
+    },
+    {
+      "n_samples_post_contact": 7802,
+      "disp_actual_mm_at_1s": 0.08266196223174006,
+      "disp_predicted_mm_at_1s": 1.465682885843517,
+      "dist_to_hole_delta_mm": -1.4849928965886776,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_090212.csv"
+    },
+    {
+      "n_samples_post_contact": 7816,
+      "disp_actual_mm_at_1s": 0.066128662469479,
+      "disp_predicted_mm_at_1s": 1.4907591278851737,
+      "dist_to_hole_delta_mm": -1.499990955620683,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_091925.csv"
+    },
+    {
+      "n_samples_post_contact": 7749,
+      "disp_actual_mm_at_1s": 0.19225503894563384,
+      "disp_predicted_mm_at_1s": 1.5283946249793081,
+      "dist_to_hole_delta_mm": -1.484405482816309,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_092358.csv"
+    },
+    {
+      "n_samples_post_contact": 7676,
+      "disp_actual_mm_at_1s": 0.23644872594287308,
+      "disp_predicted_mm_at_1s": 1.305205212657603,
+      "dist_to_hole_delta_mm": -1.5155811452727541,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_093211.csv"
+    },
+    {
+      "n_samples_post_contact": 7754,
+      "disp_actual_mm_at_1s": 0.05503635162329523,
+      "disp_predicted_mm_at_1s": 1.4541611601418307,
+      "dist_to_hole_delta_mm": -1.4999992938180569,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_094024.csv"
+    },
+    {
+      "n_samples_post_contact": 7866,
+      "disp_actual_mm_at_1s": 0.13603308421115937,
+      "disp_predicted_mm_at_1s": 1.4316807309962556,
+      "dist_to_hole_delta_mm": -1.5001184734615216,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_094329.csv"
+    },
+    {
+      "n_samples_post_contact": 7759,
+      "disp_actual_mm_at_1s": 0.1619691328618021,
+      "disp_predicted_mm_at_1s": 1.639971270684525,
+      "dist_to_hole_delta_mm": -1.4998378379615764,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_095223.csv"
+    },
+    {
+      "n_samples_post_contact": 7676,
+      "disp_actual_mm_at_1s": 0.25893821656911586,
+      "disp_predicted_mm_at_1s": 1.483485380808811,
+      "dist_to_hole_delta_mm": -1.4845700871099956,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_100047.csv"
+    },
+    {
+      "n_samples_post_contact": 7854,
+      "disp_actual_mm_at_1s": 0.1799222054111147,
+      "disp_predicted_mm_at_1s": 1.6953691652137661,
+      "dist_to_hole_delta_mm": -1.5154489626385044,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_102257.csv"
+    },
+    {
+      "n_samples_post_contact": 7876,
+      "disp_actual_mm_at_1s": 0.20367866849525373,
+      "disp_predicted_mm_at_1s": 1.6253714638579992,
+      "dist_to_hole_delta_mm": -1.4554337400042792,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_102857.csv"
+    },
+    {
+      "n_samples_post_contact": 7587,
+      "disp_actual_mm_at_1s": 0.013892443989440723,
+      "disp_predicted_mm_at_1s": 1.500461487944736,
+      "dist_to_hole_delta_mm": -1.5002974592130731,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_103310.csv"
+    },
+    {
+      "n_samples_post_contact": 7839,
+      "disp_actual_mm_at_1s": 0.18564751546950164,
+      "disp_predicted_mm_at_1s": 1.4961890899464405,
+      "dist_to_hole_delta_mm": -1.484702363280823,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_103612.csv"
+    },
+    {
+      "n_samples_post_contact": 7712,
+      "disp_actual_mm_at_1s": 0.28160433235303317,
+      "disp_predicted_mm_at_1s": 1.3943641241022917,
+      "dist_to_hole_delta_mm": -1.4847410685517992,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_104043.csv"
+    },
+    {
+      "n_samples_post_contact": 438,
+      "disp_actual_mm_at_1s": 0.1756416807025113,
+      "disp_predicted_mm_at_1s": 1.535483394200909,
+      "dist_to_hole_delta_mm": -1.4702240512913851,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_104848.csv"
+    },
+    {
+      "n_samples_post_contact": 7807,
+      "disp_actual_mm_at_1s": 0.3408284025723118,
+      "disp_predicted_mm_at_1s": 1.8238330333540032,
+      "dist_to_hole_delta_mm": -1.4863470504377363,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_105027.csv"
+    },
+    {
+      "n_samples_post_contact": 7738,
+      "disp_actual_mm_at_1s": 0.28102846830884864,
+      "disp_predicted_mm_at_1s": 1.683857667919444,
+      "dist_to_hole_delta_mm": -1.4551470199964338,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_105536.csv"
+    },
+    {
+      "n_samples_post_contact": 6348,
+      "disp_actual_mm_at_1s": 0.18318296864060488,
+      "disp_predicted_mm_at_1s": 1.6838037904536192,
+      "dist_to_hole_delta_mm": -1.5289157129373157,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_112108.csv"
+    },
+    {
+      "n_samples_post_contact": 5166,
+      "disp_actual_mm_at_1s": 0.5195421060895834,
+      "disp_predicted_mm_at_1s": 1.3971604759806961,
+      "dist_to_hole_delta_mm": -1.52443063102713,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_112508.csv"
+    },
+    {
+      "n_samples_post_contact": 5385,
+      "disp_actual_mm_at_1s": 1.9778195064262178,
+      "disp_predicted_mm_at_1s": 2.5297389987224936,
+      "dist_to_hole_delta_mm": -1.4717923982360375,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_112826.csv"
+    },
+    {
+      "n_samples_post_contact": 5383,
+      "disp_actual_mm_at_1s": 0.8792820935285474,
+      "disp_predicted_mm_at_1s": 2.1239782716578994,
+      "dist_to_hole_delta_mm": -1.5125540299847327,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_113145.csv"
+    },
+    {
+      "n_samples_post_contact": 5372,
+      "disp_actual_mm_at_1s": 1.8630096618106784,
+      "disp_predicted_mm_at_1s": 2.153150725175911,
+      "dist_to_hole_delta_mm": -1.498692000511578,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_113535.csv"
+    },
+    {
+      "n_samples_post_contact": 3274,
+      "disp_actual_mm_at_1s": 0.13209844813622132,
+      "disp_predicted_mm_at_1s": 1.6169910946735453,
+      "dist_to_hole_delta_mm": -1.5170516743731148,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_113934.csv"
+    },
+    {
+      "n_samples_post_contact": 16039,
+      "disp_actual_mm_at_1s": 1.820317554714008,
+      "disp_predicted_mm_at_1s": 2.41896381047529,
+      "dist_to_hole_delta_mm": -1.4595224291073958,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_114639.csv"
+    },
+    {
+      "n_samples_post_contact": 15962,
+      "disp_actual_mm_at_1s": 3.6758699650559046,
+      "disp_predicted_mm_at_1s": 5.130602037585355,
+      "dist_to_hole_delta_mm": -1.5159955726983376,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_131046.csv"
+    },
+    {
+      "n_samples_post_contact": 15940,
+      "disp_actual_mm_at_1s": 1.6571665577122872,
+      "disp_predicted_mm_at_1s": 1.7889725009014854,
+      "dist_to_hole_delta_mm": -1.4777458322026444,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_131949.csv"
+    },
+    {
+      "n_samples_post_contact": 15907,
+      "disp_actual_mm_at_1s": 0.9749446138114819,
+      "disp_predicted_mm_at_1s": 2.173601496188604,
+      "dist_to_hole_delta_mm": -1.460961126303624,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_133121.csv"
+    },
+    {
+      "n_samples_post_contact": 20255,
+      "disp_actual_mm_at_1s": 2.3614048784568835,
+      "disp_predicted_mm_at_1s": 3.846407562545419,
+      "dist_to_hole_delta_mm": -1.4972980999121248,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_133700.csv"
+    },
+    {
+      "n_samples_post_contact": 15960,
+      "disp_actual_mm_at_1s": 1.7795215649156928,
+      "disp_predicted_mm_at_1s": 3.157703916084087,
+      "dist_to_hole_delta_mm": -1.4842365305945162,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_142909.csv"
+    },
+    {
+      "n_samples_post_contact": 19892,
+      "disp_actual_mm_at_1s": 0.8710413308219107,
+      "disp_predicted_mm_at_1s": 1.911237391331332,
+      "dist_to_hole_delta_mm": -1.4920095769637154,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_143516.csv"
+    },
+    {
+      "n_samples_post_contact": 13122,
+      "disp_actual_mm_at_1s": 0.07269112738156128,
+      "disp_predicted_mm_at_1s": 0.16448498442421075,
+      "dist_to_hole_delta_mm": -0.09704995108237788,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_144653.csv"
+    },
+    {
+      "n_samples_post_contact": 16006,
+      "disp_actual_mm_at_1s": 0.5202470566951832,
+      "disp_predicted_mm_at_1s": 1.9298905791538843,
+      "dist_to_hole_delta_mm": -1.5130205704921365,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_154720.csv"
+    },
+    {
+      "n_samples_post_contact": 15991,
+      "disp_actual_mm_at_1s": 0.1900789309734009,
+      "disp_predicted_mm_at_1s": 1.6292283535494327,
+      "dist_to_hole_delta_mm": -1.4968630180378129,
+      "predicted_in_gold_band": true,
+      "csv": "insert_u_orange_20260504_155451.csv"
+    },
+    {
+      "n_samples_post_contact": 15904,
+      "disp_actual_mm_at_1s": 0.7764083976876762,
+      "disp_predicted_mm_at_1s": 2.2690804581263384,
+      "dist_to_hole_delta_mm": -1.5070178163851906,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_160836.csv"
+    },
+    {
+      "n_samples_post_contact": 1347,
+      "disp_actual_mm_at_1s": 3.515795784740631,
+      "disp_predicted_mm_at_1s": 4.8836505070802465,
+      "dist_to_hole_delta_mm": -1.6436198655142893,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_161341.csv"
+    },
+    {
+      "n_samples_post_contact": 1344,
+      "disp_actual_mm_at_1s": 5.063046513710885,
+      "disp_predicted_mm_at_1s": 6.506205676521418,
+      "dist_to_hole_delta_mm": -1.6289246720625137,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_161528.csv"
+    },
+    {
+      "n_samples_post_contact": 1341,
+      "disp_actual_mm_at_1s": 2.1473856197711694,
+      "disp_predicted_mm_at_1s": 3.067037662827738,
+      "dist_to_hole_delta_mm": -1.6462898848088308,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_162034.csv"
+    },
+    {
+      "n_samples_post_contact": 1350,
+      "disp_actual_mm_at_1s": 2.687125787900517,
+      "disp_predicted_mm_at_1s": 4.260188019224609,
+      "dist_to_hole_delta_mm": -1.6689145123363545,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_163203.csv"
+    },
+    {
+      "n_samples_post_contact": 1347,
+      "disp_actual_mm_at_1s": 2.9870483759055144,
+      "disp_predicted_mm_at_1s": 4.362290745702936,
+      "dist_to_hole_delta_mm": -1.6392589659726258,
+      "predicted_in_gold_band": false,
+      "csv": "insert_u_orange_20260504_170144.csv"
+    }
+  ]
+}

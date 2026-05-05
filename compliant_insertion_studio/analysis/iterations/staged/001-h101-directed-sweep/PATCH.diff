@@ -1,0 +1,104 @@
+diff --git a/compliant_insertion_studio/configs/defaults.yaml b/compliant_insertion_studio/configs/defaults.yaml
+--- a/compliant_insertion_studio/configs/defaults.yaml
++++ b/compliant_insertion_studio/configs/defaults.yaml
+@@ -60,6 +60,16 @@
+   spiral_F_max_N:              10.0    # operator: more reactive (was 4)
++
++  # H101 directed sweep — replaces Stankowski spiral with operator-derived
++  # directed push toward (seat_xy - tcp_xy). Backed by I003 / I004 / I005.
++  # Default OFF so the existing spiral path is untouched until validated at-robot.
++  find_hole_use_directed_sweep:   false
++  find_hole_directed_F_N:         3.0   # 3N → ~1.5mm disp/s under empirical admittance (matches GOLD I004)
++  find_hole_directed_dwell_s:     1.5   # per-direction dwell before rotating (operator search dwell)
++  find_hole_directed_rotate_deg:  60.0  # rotate by this each dwell — 6 directions covers full circle
++  find_hole_directed_n_directions: 6    # cap on rotations
++  find_hole_directed_latch_F_N:   2.0   # if |F_lat| > this, stop rotating (peg caught chamfer)
+   find_hole_tilt_T_Nm:         0.0     # OFF per analyst: FFT of operator demos
+
+diff --git a/compliant_insertion_studio/wrapper/contact_search_fsm.py b/compliant_insertion_studio/wrapper/contact_search_fsm.py
+--- a/compliant_insertion_studio/wrapper/contact_search_fsm.py
++++ b/compliant_insertion_studio/wrapper/contact_search_fsm.py
+@@ -198,6 +198,12 @@
+         self.spiral_F_max_N           = float(self.cfg.get("spiral_F_max_N",           6.0))
++        # H101 directed sweep
++        self.find_hole_use_directed_sweep   = bool(self.cfg.get("find_hole_use_directed_sweep",   False))
++        self.find_hole_directed_F_N         = float(self.cfg.get("find_hole_directed_F_N",         3.0))
++        self.find_hole_directed_dwell_s     = float(self.cfg.get("find_hole_directed_dwell_s",     1.5))
++        self.find_hole_directed_rotate_deg  = float(self.cfg.get("find_hole_directed_rotate_deg",  60.0))
++        self.find_hole_directed_n_directions = int(self.cfg.get("find_hole_directed_n_directions", 6))
++        self.find_hole_directed_latch_F_N   = float(self.cfg.get("find_hole_directed_latch_F_N",   2.0))
+         # Optional tilt rocking during search (Tx/Ty oscillation)
+         self.find_hole_tilt_T_Nm      = float(self.cfg.get("find_hole_tilt_T_Nm",      0.0))
+@@ -373,6 +379,53 @@
+
++    def _find_hole_directed_wrench(self, t: float, tcp_xy: tuple[float, float],
++                                   F_lat_baselink: tuple[float, float]
++                                   ) -> tuple[tuple, float, float, tuple, dict]:
++        """H101: directed sweep — push toward (seat_xy - tcp_xy), rotate every dwell.
++
++        Backed by I003 (operator direction = c→s), I004 (1.2-1.7 mm disp), I005 (2-3 N
++        reaction). Replay-tuned magnitude 3 N produces 1.6 mm disp at 1 s, matching GOLD
++        median. If no Fz collapse latches, rotate direction by `rotate_deg` each
++        `dwell_s` for up to `n_directions`.
++        """
++        # Seat prior: prefer override (hole_xy_prior), else CAD-derived predicted xy.
++        if self.spiral_origin_override is not None:
++            seat_xy = (float(self.spiral_origin_override[0]),
++                       float(self.spiral_origin_override[1]))
++        elif self.predicted_tcp_xy is not None:
++            seat_xy = (float(self.predicted_tcp_xy[0]),
++                       float(self.predicted_tcp_xy[1]))
++        else:
++            # No seat prior available — fall back to spiral.
++            return self._find_hole_wrench_spiral(t, tcp_xy)
++
++        if self._find_hole_start_t is None:
++            t_post = 0.0
++        else:
++            t_post = max(0.0, t - self._find_hole_start_t)
++
++        dx = seat_xy[0] - tcp_xy[0]
++        dy = seat_xy[1] - tcp_xy[1]
++        dist = math.hypot(dx, dy)
++        if dist < 1e-4:
++            ux, uy = 0.0, 0.0
++        else:
++            ux, uy = dx / dist, dy / dist
++
++        f_lat_mag = math.hypot(F_lat_baselink[0], F_lat_baselink[1])
++        latched = f_lat_mag > self.find_hole_directed_latch_F_N
++        if not latched and dist >= 1e-4:
++            idx = min(int(t_post / max(self.find_hole_directed_dwell_s, 1e-3)),
++                      self.find_hole_directed_n_directions - 1)
++            theta = math.radians(idx * self.find_hole_directed_rotate_deg)
++            c, s = math.cos(theta), math.sin(theta)
++            ux, uy = (c * ux - s * uy, s * ux + c * uy)
++
++        # base → base_link sign flip (matches existing convention in _find_hole_wrench)
++        Fx = -self.find_hole_directed_F_N * ux
++        Fy = -self.find_hole_directed_F_N * uy
++        wrench = (Fx, Fy, -self.find_hole_fz_N, 0.0, 0.0, 0.0)
++        sel = (True, True, True, True, True, True)
++        info = {
++            "directed_seat_xy_m": seat_xy,
++            "directed_dir_baselink": (ux, uy),
++            "directed_latched": latched,
++            "directed_dist_to_seat_mm": dist * 1000.0,
++        }
++        return wrench, self.gain_find_hole, self.damping_find_hole, sel, info
++
+     def _find_hole_wrench(self, t: float, tcp_xy: tuple[float, float]) -> tuple[tuple, float, float, tuple, dict]:
+         """FIND_HOLE wrench: PD-derived spiral xy + Fz. Stankowski Archimedean."""
++        if self.find_hole_use_directed_sweep:
++            # Use cached F_lat_baselink from the latest update() call (set in update()).
++            F_lat = getattr(self, "_last_F_lat_baselink", (0.0, 0.0))
++            return self._find_hole_directed_wrench(t, tcp_xy, F_lat)
+         # Initialize spiral state on first tick
+
+NOTE for operator applying this patch:
+  In `update()` (around the call site that invokes `_find_hole_wrench`), add a single
+  line BEFORE the call to cache F_lat_baselink so the directed-sweep code can read it:
+      self._last_F_lat_baselink = F_lat_baselink
+  This avoids changing the `_find_hole_wrench` signature (which is called from
+  multiple sites in the existing FSM). One-line change, idempotent, safe to leave
+  in place even if the directed-sweep flag is later disabled.
