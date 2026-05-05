@@ -1,0 +1,38 @@
+{
+  "iteration": "001-i006-cross-object-portability",
+  "type": "discovery",
+  "open_question_addressed": "Does I006 (path/bbox) generalize to u_brown/inv_u_yellow/line_green?",
+  "verdict": "REFUTED",
+  "summary": "GOLD u_orange (ratio=2.82, bbox=4.67mm) is the outlier; GOLD u_brown/inv_u_yellow/line_green (ratio 4.82-6.26, bbox 2.1-2.6mm) overlap FAIL u_orange (ratio=5.38, bbox=2.17mm). No universal threshold exists on path/bbox.",
+  "window_s": 10.0,
+  "groups": {
+    "GOLD u_orange":    {"n": 10, "path_len_mm_p50": 13.66, "bbox_diag_mm_p50": 4.67, "path_bbox_ratio_p50": 2.82},
+    "GOLD u_brown":     {"n": 10, "path_len_mm_p50": 13.12, "bbox_diag_mm_p50": 2.11, "path_bbox_ratio_p50": 6.26},
+    "GOLD inv_u_yellow":{"n": 20, "path_len_mm_p50": 12.69, "bbox_diag_mm_p50": 2.18, "path_bbox_ratio_p50": 5.98},
+    "GOLD line_green":  {"n": 20, "path_len_mm_p50": 12.64, "bbox_diag_mm_p50": 2.61, "path_bbox_ratio_p50": 4.82},
+    "FAIL u_orange":    {"n": 69, "path_len_mm_p50": 11.37, "bbox_diag_mm_p50": 2.17, "path_bbox_ratio_p50": 5.38}
+  },
+  "portability": {
+    "gold_ratio_min": 2.82,
+    "gold_ratio_max": 6.26,
+    "gold_ratio_spread": 3.44,
+    "fail_u_orange_ratio": 5.38,
+    "all_gold_below_fail": false,
+    "gold_fail_gap": -0.88,
+    "decision": "I006 NOT portable; ratio is geometry-dominated"
+  },
+  "state_json_deltas": {
+    "open_questions_removed": ["Does I006 (path/bbox) generalize to u_brown/inv_u_yellow/line_green? Need to compute on those datasets."],
+    "known_invariants_modified": [
+      {"id": "I006", "field": "portability", "new_value": "verified_u_orange_only_REFUTED_other_objects"}
+    ],
+    "tried_and_refuted_added": [
+      {"id": "H010", "summary": "Use path/bbox ratio as universal cross-object stuck-vs-search discriminator", "evidence": "iterations/discovery/001-i006-cross-object-portability — GOLD u_brown/inv_u_yellow/line_green overlap FAIL u_orange on this metric"}
+    ]
+  },
+  "implications_for_staged": {
+    "H103": "Drop path/bbox ratio component; xy_disp<1mm gate still useful",
+    "H101": "Unaffected — backed by I003+I004+I005, not I006",
+    "H106": "Unaffected — different signal (F_lat at +50ms, not bbox over 10s)"
+  }
+}

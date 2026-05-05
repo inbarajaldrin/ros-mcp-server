@@ -1,0 +1,11 @@
+{
+  "iteration": "000-baseline-from-185-episode-corpus",
+  "headline": "durable_collapse_rate",
+  "metrics": {
+    "n_episodes": 185,
+    "seated_rate": 0.2864864864864865,
+    "durable_collapse_rate": 0.43783783783783786,
+    "median_final_z_drop_mm": 2.6399999999999757
+  },
+  "prior": null
+}

@@ -1,0 +1,51 @@
+{
+  "_comment": "Mined from Claude Code session de911604-fb3 (2026-05-03/04, 24 MB) via browse-chat-history. Each entry is one ralph-loop iteration the prior agent ran. Use as labeled training data for hypothesis quality — every REFUTED row saves a robot run.",
+  "source_session": "de911604-fb35-4f72-90f3-984527ac7031",
+  "extraction_date": "2026-05-05",
+  "iterations": [
+    {"v": "v82", "change": "T_partcenter dynamic r recomputed each tick from current TCP quat (vs static canonical)", "expected": "WEDGE_RECOVERY counter-torque correctly senses moment about part center", "observed": "still aborts at correction ceiling", "verdict": "NEUTRAL — fix necessary but not sufficient"},
+    {"v": "v83", "change": "ORIENTATION FEEDBACK: WEDGE_RECOVERY T_cmd = -kp * tilt_err to drive EE face-down. engaged_tilt_max=1.5°, relevel_kp=2.0, wedge_Tx_max=0.4 Nm", "expected": "Active relevel during wedge breaks tilt-coupled stuck state", "observed": "tilt 1.5° too tight for actual demo (3.29°)", "verdict": "REFUTED — tilt threshold wrong"},
+    {"v": "v84", "change": "engaged_tilt_max 1.5→3.5°, insert_tilt_abort 5.0°, insert_fz_N 4N, relevel_kp 2.0", "expected": "Calibrated to today's demo tilt envelope", "observed": "still no seat", "verdict": "NEUTRAL — calibration kept, not the bottleneck"},
+    {"v": "v85", "change": "spiral_F_max 6→12N, recovery_F_max 5→10N", "expected": "Bigger lateral force = stronger lever to chamfer", "observed": "no improvement", "verdict": "REFUTED — magnitude not the issue"},
+    {"v": "v86", "change": "Fixed seating predicate to accept 25mm-from-surface (was 5mm-post-hole)", "expected": "Late-commit cases now register as success", "observed": "predicate now accepts genuine seats", "verdict": "VALIDATED — predicate fix kept"},
+    {"v": "v87", "change": "State-independent GLOBAL SEAT detector — fires when z_drop≥20mm + |dz/dt|<0.5mm/s + tilt<5° sustained 1s, regardless of FSM state", "expected": "Bypasses FSM-bouncing reset of local sustain timer", "observed": "Verified offline on FAIL_INSERT CSV — would have fired correctly", "verdict": "VALIDATED — kept"},
+    {"v": "v88", "change": "(no notes captured — minor)", "expected": "?", "observed": "?", "verdict": "UNKNOWN"},
+    {"v": "v89", "change": "spiral_F_max=4N (middle ground between 6 and 12)", "expected": "Less aggressive search avoids destabilizing peg", "observed": "still no seat", "verdict": "REFUTED — magnitude sweep didn't help"},
+    {"v": "v90", "change": "Reactive bump: find_hole_fz 4→8N, spiral_F 4→10N, recovery_F 2→5N, insert_fz 4→8N, gain 0.7→1.0, damping 0.5→0.3 (find_hole), 0.3 (insert)", "expected": "Higher force + lower damping = more responsive admittance", "observed": "still no seat", "verdict": "REFUTED — parameter sweep exhausted"},
+    {"v": "v91", "change": "selection_vector: XY position-tracked in APPROACH/FIND_HOLE/ENTRY_SETTLE/INSERT (only WEDGE_RECOVERY keeps full force control)", "expected": "Lock XY laterally still while Fz pushes down — emulates operator's hand", "observed": "Peg cannot find chamfer when XY is position-tracked", "verdict": "REFUTED — admittance is required"},
+    {"v": "v92", "change": "Reverted selection_vector to all-force-controlled (admittance everywhere). spiral_F 10N, Fz 8N, global seat detector", "expected": "Operator-mimicking: lateral compliance + downward push", "observed": "Ran 130s+ at z_drop=0.1mm — no progress, peg pressed on rim", "verdict": "NEUTRAL — admittance restored; bottleneck still present"},
+    {"v": "v93", "change": "Aggressive stuck detection: abort if z_drop<1mm after 15s. find_hole_max_duration 180→60s", "expected": "Saves test time + reduces URCap stress", "observed": "Aborts now fire fast — but pegs still stuck on rim", "verdict": "VALIDATED for stress-mitigation only — does NOT solve seating"},
+    {"v": "v94", "change": "spiral_v 0.0015→0.0003 (5× slower; each xy gets ~2s for peg to drop)", "expected": "Slower spiral gives peg time to find chamfer", "observed": "still aborts", "verdict": "REFUTED — speed not the issue"},
+    {"v": "v95", "change": "INITIAL_PRESS phase: first 1.5s of FIND_HOLE = sustained 10N directed push toward predicted_xy, then slow spiral", "expected": "Mimics operator's sustained push during search", "observed": "Direction was AWAY from operator-demo direction (predicted_xy had 5-17mm CAD error pointing wrong way)", "verdict": "REFUTED — direction inferred from CAD was wrong"},
+    {"v": "v96", "change": "INITIAL_PRESS = fixed +Y baselink (5N, 1.5s) — matches operator demo walk direction", "expected": "Hard-coded direction matches what we measured", "observed": "Worked some attempts; still inconsistent — direction is hard-coded but seat xy is per-base", "verdict": "PARTIAL — confirmed the directed-push idea, but direction must be data-derived per-attempt"},
+    {"v": "v97", "change": "hole_xy_prior updated from contact xy (rim) to demo SEAT xy (+0.0341, -0.3635)", "expected": "Spiral now points at slot center, not rim", "observed": "outcome unknown — session paused", "verdict": "PENDING_VALIDATION — this is the v97 in flight at session pause"}
+  ],
+  "agent_meta_lessons": [
+    {
+      "lesson": "Tuning parameters before deriving control law from data leads to thrashing (16+ iterations, ~1 productive)",
+      "evidence": "v85 / v89 / v90 / v94 all swept force/speed magnitudes; none worked. The breakthrough came from cross-run CSV analysis at session END.",
+      "action": "Default to write CSV analyzer FIRST every iteration. Reserve monitors for state-transition events."
+    },
+    {
+      "lesson": "Direction prior matters more than magnitude",
+      "evidence": "v95 (CAD-derived direction) failed; v96 (measured operator direction) worked partially; v97 (corrected seat xy prior) launched.",
+      "action": "Algorithm needs a seat_xy source — either prior demo, CAD chain, or dynamic estimation from F_lat reaction direction."
+    },
+    {
+      "lesson": "Counter-residual direction is wrong",
+      "evidence": "Sensed F_lat is the rim's reaction (Newton's 3rd law); commanding force in -F_residual pushes AWAY from seat.",
+      "action": "Use TOWARD-seat direction (CAD/demo-derived) for active corrections."
+    },
+    {
+      "lesson": "Locking XY via selection_vector breaks chamfer engagement",
+      "evidence": "v91 — peg can't find chamfer when XY position-tracked. Operator demos have 4mm xy motion during descent.",
+      "action": "All-force-controlled selection_vector. Don't 'optimize' by locking DOFs."
+    }
+  ],
+  "discovery_loop_seed_hypotheses": [
+    "H201: At t=+0.05s post-contact, FAIL F_lat_base = 0.65N vs GOLD 1.09N (band [0.66, 1.57]). Discriminator at +50ms: is the algorithm applying enough lateral force in the FIRST 50 ms?",
+    "H202: At t=+1.6s, FAIL tilt_deg = 0.90° vs GOLD 1.56°. Lower tilt in FAIL means peg is NOT being driven into chamfer geometry. Tilt is a positive sign of progress, not a failure mode (within 5° envelope).",
+    "H203: At contact (t=0), FAIL fz_t = 7.20N vs GOLD 6.00N. Failures hit the rim harder. Approach velocity may be too high or contact xy may differ.",
+    "H204: 132 failure trajectories form a cluster in (state, action) space. Train a logistic classifier on aligned post-contact windows; identify which features matter most for discriminating early."
+  ]
+}

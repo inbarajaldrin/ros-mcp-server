@@ -1,0 +1,124 @@
+{
+  "version": "2.0",
+  "mode": "discovery",
+  "_mode_doc": "Each iteration must surface a NEW relation (not in known_invariants). Hypothesis-test mode is the fallback when discovery yields no candidates. Loop terminates when residuals can't be reduced further.",
+  "headline_metric": "durable_collapse_rate",
+  "headline_definition": "|Fz_t (smoothed 0.5s)| < 2 N AND dz/dt < -2 mm/s sustained 0.5 s post-contact",
+  "secondary_metric": "first_divergence_time_s",
+  "_secondary_doc": "Time post-contact at which the FAIL-class median feature trajectory first leaves the GOLD-class [p25, p75] band. Higher = better algorithm (lasted longer before diverging). Currently 0.00s (fz_t) — algorithm diverges immediately.",
+  "best_known": {
+    "iteration": "000-baseline-from-185-episode-corpus",
+    "durable_collapse_rate": 0.438,
+    "n_episodes": 185,
+    "note": "Baseline across 60 GOLD operator demos + 132 May-04 u_orange autonomous attempts. GOLD subset rate = 0.83; autonomous u_orange subset rate = 0.20."
+  },
+  "current_target": {
+    "object": "u_orange",
+    "base": "base1",
+    "grasp_id": 1,
+    "predicted_seat_xy_m": [0.0341, -0.3635],
+    "note": "Use SEAT xy as hole_xy_prior. Source: insert_u_orange_20260504_145614.csv operator-assisted seat point."
+  },
+  "data_inventory": {
+    "GOLD_demos": {"n": 60, "objects": ["u_orange (10)", "u_brown (10)", "line_green (20)", "inv_u_yellow (20)"], "session": "May-3"},
+    "AUTO_attempts_u_orange": {"n": 132, "session": "May-4", "outcomes": "47 success / 77 abort / 7 timeout"},
+    "FAIL_aligned_negatives": {"n": 69, "purpose": "Trajectories cropped to [-1s, +6s] around contact serve as 132 negative-class probes of state-action space (~40k samples at 100Hz)."},
+    "transcript_history_v82_v97": {"file": "v82_v97_iteration_history.json", "purpose": "Labeled hypothesis→outcome pairs from prior session — saves re-running refuted hypotheses."}
+  },
+  "known_invariants": [
+    {"id": "I001", "claim": "Fz_t collapse from ~9N to <2N marks slot entry across all 4 FMB1 objects", "evidence": "FINDINGS.md §1, n=60 GOLD demos", "portability": "verified_4_objects"},
+    {"id": "I002", "claim": "Post-collapse dz/dt = -6.4 mm/s (constant, geometry-independent, with cmd_fz=-9N)", "evidence": "FINDINGS.md §1; iterations/discovery/002-line-green-geometric-floor confirms line_green truncates at 7.3mm geometric floor not premature seat", "portability": "verified_4_objects"},
+    {"id": "I003", "claim": "Operator search-phase TCP motion direction = (seat_xy - contact_xy).normalized within 5-15°", "evidence": "FINDINGS.md §2, scripts/04_direction_vs_seat.py", "portability": "verified_4_objects (subject to c→s magnitude > 2 mm)"},
+    {"id": "I004", "claim": "Operator TCP displacement = 1.2-1.7 mm over ~1s during search phase", "evidence": "FINDINGS.md §2", "portability": "verified_4_objects"},
+    {"id": "I005", "claim": "Operator F_lat reaction = 2.0-2.9 N (sensor reads opposite of motion direction by Newton's 3rd law)", "evidence": "FINDINGS.md §2", "portability": "verified_4_objects"},
+    {"id": "I006", "claim": "Search-phase path/bbox ratio: GOLD u_orange ≈ 2.8 (wide arc), FAIL u_orange ≈ 5.4 (tight spiral). u_orange-specific.", "evidence": "FINDINGS.md §3; cross-object refutation iterations/discovery/001-i006-cross-object-portability", "portability": "verified_u_orange_only_REFUTED_other_objects (GOLD u_brown 6.26 / inv_u_yellow 5.98 / line_green 4.82 overlap FAIL u_orange 5.38)"},
+    {"id": "I007", "claim": "FAIL F_lat_base diverges from GOLD band at t=+50ms post-contact (0.65N vs band [0.66, 1.57])", "evidence": "scripts/07_align_on_contact.py output", "portability": "u_orange_only — needs cross-object verification", "discovered": "2026-05-05"},
+    {"id": "I008", "claim": "FAIL has lower tilt than GOLD at t=+1.6s (0.90° vs 1.56°). Tilt is a POSITIVE progress sign within 5° envelope.", "evidence": "scripts/07_align_on_contact.py output", "portability": "u_orange_only — needs cross-object verification", "discovered": "2026-05-05"},
+    {"id": "I009", "claim": "FAIL fz_t at contact (7.20N) > GOLD fz_t at contact (6.00N) — failures land harder on rim", "evidence": "scripts/07_align_on_contact.py output", "portability": "u_orange_only — needs cross-object verification", "discovered": "2026-05-05"},
+    {"id": "I010", "claim": "line_green seat depth is a geometric constant: 7.3 ± 0.4 mm (n=18 GOLD, IQR=0.35mm), vs ~31mm for the other 3 FMB1 objects. Universal seat predicates must use per-object or fraction-of-expected depth, not a hardcoded ≥25mm threshold.", "evidence": "iterations/discovery/002-line-green-geometric-floor/metrics.json; scripts/11_line_green_seat_depth.py", "portability": "object-specific (line_green); finding-pattern generalizes (every object has a CAD-determined seat depth)", "discovered": "2026-05-05"}
+  ],
+  "tried_and_refuted": [
+    {"id": "H001", "summary": "Spiral 1-2 mm radius", "evidence": "GOLD bbox=4.7mm, FAIL bbox=2.2mm"},
+    {"id": "H002", "summary": "INITIAL_PRESS at fixed +Y baselink", "evidence": "transcript v96: partial — direction must be per-attempt-derived"},
+    {"id": "H003", "summary": "Counter-residual direction", "evidence": "Newton's 3rd law: sensed F_lat is opposite TCP motion (I005)"},
+    {"id": "H004", "summary": "Lock XY via selection_vector", "evidence": "transcript v91: peg can't find chamfer"},
+    {"id": "H005", "summary": "Fz→T compensation at TCP", "evidence": "transcript v77/v78: destabilizing Z-rotation cross-coupling"},
+    {"id": "H006", "summary": "Higher cmd_fz (>9N)", "evidence": "Operator demo Fz_t=0 mid-descent (I001)"},
+    {"id": "H007", "summary": "spiral_F_max 4N / 6N / 10N / 12N", "evidence": "transcript v85/v89: magnitude sweep ineffective"},
+    {"id": "H008", "summary": "spiral_v 0.0003-0.0015 m/s", "evidence": "transcript v94: speed sweep ineffective"},
+    {"id": "H009", "summary": "engaged_tilt_max 1.5° (too tight)", "evidence": "transcript v83→v84: real demo 3.29°"},
+    {"id": "H010", "summary": "Use path/bbox ratio as universal cross-object stuck-vs-search discriminator", "evidence": "iterations/discovery/001-i006-cross-object-portability: GOLD u_brown/inv_u_yellow/line_green ratio 4.82-6.26 overlaps FAIL u_orange 5.38; only u_orange GOLD shows the wide-arc 2.82 signature"}
+  ],
+  "pending_hypotheses_discovery": [
+    {"id": "H101", "summary": "Replace spiral with directed sweep: 5N for 2s in (seat_xy - tcp_xy) direction; rotate 60° if no collapse, retry up to 6 directions", "predicted_delta": "+0.40 on durable_collapse_rate", "rationale": "I003+I004+I006: sustained directed push, not tight spiral"},
+    {"id": "H102", "summary": "Replace z_drop engagement gate with Fz_t-collapse gate", "predicted_delta": "+0.10 on seated_rate", "rationale": "I001: Fz_t collapse is cause, z_drop is symptom"},
+    {"id": "H103", "summary": "Stuck-at-rim auto-replan: if Fz_t > 6N for 2s with xy_disp < 1mm, command 3mm jog in c→s direction at 5 mm/s", "predicted_delta": "+0.15", "rationale": "I006: failure is winding spiral, forced translation breaks loop"},
+    {"id": "H105", "summary": "Approach-velocity reduction at contact: ramp cmd_fz from 0 to -9N over 200ms instead of step", "predicted_delta": "+0.05", "rationale": "I009: failures land harder on rim — softer contact may give chamfer geometry time to engage"},
+    {"id": "H106", "summary": "Train logistic regression on aligned post-contact windows (positive=GOLD, negative=FAIL) at t=+50ms; predict success probability before search even completes", "predicted_delta": "early-warning signal, not parameter change", "rationale": "I007: F_lat_base diverges at t=+50ms — fast-fail signal possible"},
+    {"id": "H107", "summary": "Cross-check FSM-claimed events vs CSV ground truth using raw_fsm_logs/. For each attempt: parse FSM stdout for 'engagement_confirmed' / 'STUCK' / 'GLOBAL SEAT' / 'abort' events with timestamps, compare to physics-derived events (Fz collapse / z_drop / dz_dt) at the same wall-clock time. Disagreements identify FSM detection bugs.", "predicted_delta": "categorize FSM detection bugs by frequency; rank-order which gate is most often wrong", "rationale": "User insight: FSM detection logic was guessed thresholds, not physics. The same logic that produced stagnant iterations is also generating its own stdout claims. Treat FSM logs as a HYPOTHESIS to falsify, not a label."},
+    {"id": "H108", "summary": "Build (csv, fsm_config) pairing table: parse loop_attempt_NNN.log for startup config (spiral_F_max, find_hole_fz, engaged_tilt_max_deg, hole_xy_prior), pair with the CSV produced. Label is the OBSERVED outcome from CSV (final_z_drop_mm ≥ 20mm), NOT the FSM-claimed outcome.", "predicted_delta": "132 May-4 failures gain config labels → can run config-vs-outcome regression", "rationale": "FSM CONFIG (startup parameters) IS reliable; FSM DETECTION (runtime claims) is not. Separate the two."}
+  ],
+  "trust_hierarchy": {
+    "_doc": "What can be trusted as ground truth, in descending order. Discovery loop must respect this.",
+    "1_fully_trusted": ["raw CSV columns (TCP pose, sensed wrench, gripper, commanded_fz, target pose)", "meta.json:force_mode_params (static config sent to controller)", "meta.json:assist_level + outcome metadata", "loop_attempt_NNN.log STARTUP config block (FSM parameters at run start)"],
+    "2_derived_trusted": ["Fz collapse, dz/dt, xy excursion, tilt — all computed FROM raw CSV columns by analysis scripts", "physics-derived phase boundaries (contact / engagement / seated) per scripts/01_extract.py"],
+    "3_NEVER_trust": ["FSM stdout claims of 'engagement_confirmed', 'STUCK', 'GLOBAL SEAT', 'seat_detected'", "FSM-reported outcome (success/abort/timeout) — was based on guessed predicates", "any signals.json field other than the raw thresholds (segmentation methods M1-M5 used baselines that are themselves derived from prior data — circular if treated as labels)"],
+    "rationale": "The 16-iteration v82-v97 stagnation was caused by FSM detection thresholds being wrong. Its stdout claims and outcome flags reflect the same wrong thresholds. Re-using them as labels recreates the original bug."
+  },
+  "open_questions": [
+    "When no prior demo exists, where does seat_xy come from? CAD has 5-17mm error — needs an estimator.",
+    "Is the c→s direction from CAD reliable enough as a SEED prior, or should the algorithm tumble through 6 directions before settling?",
+    "What's the right approach-velocity for first contact? Operators land at ~6.0N median; algorithm at ~7.2N — 20% harder.",
+    "These specific questions need schema bump for FUTURE answers (see G001-G004), but the discovery loop has plenty of unblocked work on the existing 60 GOLD + 132 AUTO data. Apply schema fix only when next data collection happens anyway — do NOT re-collect existing demos."
+  ],
+  "data_recording_gaps": [
+    {"id": "G001", "name": "joint_states never subscribed", "severity": "high", "impact": "Cannot reconstruct TCP via FK as cross-check. Cannot detect joint-near-singularity moments. Cannot recover commanded joint trajectory the controller produced from the force-mode wrench. Cannot diagnose rotation-axis bias in operator nudges (e.g. wrist twist vs base twist).", "fix": "Add `self.create_subscription(JointState, '/joint_states', self._joint_cb, sensor_qos)` to wrapper. Stream to a sidecar `<basename>.joints_raw.csv` at native rate (~125 Hz UR native), one row per message, with native header.stamp."},
+    {"id": "G002", "name": "Per-sample 6-axis cmd not logged", "severity": "high (May-4 only)", "impact": "May-4 v82-v97 attempts had FSM-driven dynamic cmd_fx/fy/tx/ty/tz; only cmd_fz logged. Failures are uninterpretable at the lateral-command level. May-3 GOLD is fine (cmd was static, in meta).", "fix": "Schema v1.2 bump: add `cmd_fx, cmd_fy, cmd_tx, cmd_ty, cmd_tz` columns. Track all 6 on `self` in `_call_set_force_mode`. ~5 floats × 100 Hz = ~80 KB/s extra. Trivial."},
+    {"id": "G003", "name": "Wrench downsampled 5x with no native-rate archive", "severity": "medium", "impact": "Native 500 Hz wrench → 100 Hz CSV drops 80% of samples. Sub-10ms transients (peg-rim impact spikes, controller bandwidth artifacts) aliased. Brief contact events that may be diagnostic of approach-velocity (G004 hypothesis I009) are smoothed out.", "fix": "Sidecar `<basename>.wrench_raw.csv` written from the wrench callback at native rate. ~24 bytes × 500 Hz = 12 KB/s. Keep the 100 Hz CSV for dashboard simplicity; raw is for forensics."},
+    {"id": "G004", "name": "force_mode_controller state not subscribed", "severity": "medium", "impact": "Controller's view of 'what wrench did I actually apply this tick' (vs. what was commanded) is invisible. Cannot diagnose controller saturation, gain/damping mismatch, or velocity-limit clipping.", "fix": "Subscribe to `/force_mode_controller/state` (or whichever status topic the controller publishes). Sidecar CSV at native rate."},
+    {"id": "G005", "name": "Native per-topic timestamps replaced by single 100Hz timer clock", "severity": "low", "impact": "Time alignment between wrench and pose is fixed at the 100 Hz timer cadence (10 ms granularity). Real wrench-to-pose lag (controller delay) cannot be measured from CSV.", "fix": "Adding G001-G004 sidecars implicitly fixes this — each sidecar uses native header.stamp."}
+  ],
+  "blockers_active": [
+    {"name": "URCap external control stops after >170s force-mode runs", "mitigation": "15s aggressive stuck detector"},
+    {"name": "Operator pendant manual PLAY required after each abort", "mitigation": "operator-in-the-loop"},
+    {"name": "Schema-bump-v1.2 should be applied BEFORE the NEXT collection session — but existing 60 GOLD demos do NOT need re-collection. The current data supports operator-nudge behavioral cloning, all 9 invariants, cross-object portability tests, and many discovery iterations. Re-collect only when collecting new objects or validating a successful FSM change."}
+  ],
+  "schema_bump_v1_2_proposed": {
+    "csv_new_columns": ["cmd_fx", "cmd_fy", "cmd_tx", "cmd_ty", "cmd_tz"],
+    "new_sidecars": [
+      "<basename>.joints_raw.csv  -- /joint_states at native rate, header: stamp_sec,stamp_nsec,j0..j5 pos,j0..j5 vel,j0..j5 eff",
+      "<basename>.wrench_raw.csv  -- /force_torque_sensor_broadcaster/wrench at 500 Hz native, header: stamp_sec,stamp_nsec,fx,fy,fz,tx,ty,tz,frame_id",
+      "<basename>.fmstate_raw.csv -- /force_mode_controller/state at native, header: stamp_sec,stamp_nsec,applied_fx..tz,velocity_xyz,rpy_speed"
+    ],
+    "wrapper_changes_required": [
+      "Add JointState + force-mode-controller-state subscriptions in __init__",
+      "Track full 6-axis intent_baselink on self (rename self.commanded_fz -> self.commanded_wrench_baselink as a 6-tuple)",
+      "Open three additional file handles in episode start; write per callback; close in episode end",
+      "Bump schema_version in schema_v1.py to 1.2"
+    ],
+    "estimated_effort_loc": "~60 lines",
+    "disk_overhead_per_episode": "~5 MB (mostly the 500 Hz wrench)"
+  },
+  "convergence_criteria": {
+    "_doc": "Two-phase. Phase A is the ralph loop's job (away-from-robot). Phase B is the operator's at-robot validation. Loop stops at Phase A; operator runs Phase B in one robot session.",
+    "phase_A_away_from_robot": {
+      "completion_promise": "<promise>RALPH_CONVERGED</promise> written into a final discovery iteration's RESULTS.md when all sub-criteria below are met",
+      "criteria_all_required": [
+        "open_questions empty (or remaining items tagged needs_robot_data)",
+        ">=1 iterations/staged/<NNN>/evidence_score.json with confidence='high'",
+        "all pending_hypotheses_discovery entries either staged or marked unstageable with reason",
+        "known_invariants cover >=3 of (u_orange, u_brown, line_green, inv_u_yellow)"
+      ]
+    },
+    "phase_B_at_robot": {
+      "trigger": "operator runs `bash analysis/scripts/ralph.sh apply <staged_name>` with the top-ranked staged patch",
+      "primary": "durable_collapse_rate >= 0.80 on a fresh 5-attempt batch for the active object",
+      "secondary": "first_divergence_time_s > 2.0s",
+      "model_completeness": "every failure in fresh batch maps to a known invariant or v82_v97_iteration_history failure mode",
+      "outcome_pass": "promote staged/<name> -> validated/<name>, commit FSM change",
+      "outcome_fail": "revert wrapper/configs, append to tried_and_refuted with ROBOT_REFUTED tag, fresh CSVs feed Phase A again"
+    }
+  },
+  "last_updated": "2026-05-05",
+  "schema_version": 2
+}
