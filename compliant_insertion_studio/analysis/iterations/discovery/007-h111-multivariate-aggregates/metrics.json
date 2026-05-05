@@ -1,0 +1,99 @@
+{
+  "object": "u_orange",
+  "session_tag": "20260504",
+  "window_s": 5.0,
+  "n_AUTO_success": 19,
+  "n_AUTO_fail": 100,
+  "skipped": {
+    "no_per_sample": 0,
+    "no_window": 0,
+    "wrong_class": 66,
+    "no_contact_t_s": 0,
+    "nan_features": 0
+  },
+  "feature_set": [
+    "max_F_lat_base_N",
+    "max_r_cop_m",
+    "max_abs_fz_t_N",
+    "time_tilt_above_1deg_s",
+    "max_tilt_deg"
+  ],
+  "thresholds": {
+    "auc_strong": 0.8,
+    "auc_moderate": 0.7
+  },
+  "univariate_auc_same_subset": {
+    "max_F_lat_base_N": 0.6405263157894737,
+    "max_r_cop_m": 0.6331578947368421,
+    "max_abs_fz_t_N": 0.6231578947368421,
+    "time_tilt_above_1deg_s": 0.6142105263157894,
+    "max_tilt_deg": 0.6094736842105263
+  },
+  "lda_loo_auc": 0.63,
+  "logreg_loo_auc": 0.6152631578947368,
+  "lda_full_fit": {
+    "feature_means_train": [
+      12.707357450361666,
+      0.3181226128549921,
+      11.878287394957983,
+      2.146996638655462,
+      1.3350224971189681
+    ],
+    "feature_stds_train": [
+      3.5345015767906043,
+      0.1250531384439824,
+      2.007713695421309,
+      2.2273057703069146,
+      1.0815886658642706
+    ],
+    "lda_weight_standardized": [
+      0.4156949906086183,
+      0.23658856679417806,
+      0.41534152155485804,
+      0.278002106330078,
+      0.1914430899258088
+    ],
+    "lda_threshold_standardized": 0.24438887530789594,
+    "feature_names": [
+      "max_F_lat_base_N",
+      "max_r_cop_m",
+      "max_abs_fz_t_N",
+      "time_tilt_above_1deg_s",
+      "max_tilt_deg"
+    ]
+  },
+  "logreg_full_fit": {
+    "feature_means_train": [
+      12.707357450361666,
+      0.3181226128549921,
+      11.878287394957983,
+      2.146996638655462,
+      1.3350224971189681
+    ],
+    "feature_stds_train": [
+      3.5345015767906043,
+      0.1250531384439824,
+      2.007713695421309,
+      2.2273057703069146,
+      1.0815886658642706
+    ],
+    "logreg_beta_standardized": [
+      0.3993624003859191,
+      0.2535658493141225,
+      0.29672684745586714,
+      0.2643269165623448,
+      0.1788654688429137
+    ],
+    "logreg_bias_standardized": -1.8592990028098961,
+    "feature_names": [
+      "max_F_lat_base_N",
+      "max_r_cop_m",
+      "max_abs_fz_t_N",
+      "time_tilt_above_1deg_s",
+      "max_tilt_deg"
+    ]
+  },
+  "verdict": "WEAK",
+  "interpretation": "WEAK: best LOO AUC=0.630 < 0.70. The 5-feature linear combination does NOT discriminate. Combined with I012 (no per-timepoint median band leaving), I013 (no at-contact xy separation), and I014 (no univariate aggregate >= 0.65), the elimination chain now extends through multivariate space on the top-5 features. The success/fail discriminator is NOT in the currently-recorded features \u2014 the discriminator must lie in signals not yet logged. Promote G001-G004 (joint_states / native-rate wrench / per-sample 6-axis cmd / force_mode_controller state) from PROPOSED to REQUIRED-PRE-CONDITION for any further discriminator-discovery iteration.",
+  "selection_bias_note": "Top-5 features were chosen on this same dataset in discovery 006, so the LOO AUC reported here is an upper bound on out-of-sample performance. A truly held-out test would need a fresh autonomous batch (needs_robot_data). Adequate for the binary 'does the joint signal exist?' question."
+}
