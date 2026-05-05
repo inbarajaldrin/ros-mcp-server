@@ -1,0 +1,449 @@
+# Compliant Insertion Studio — UNIVERSAL config (Phase 5 v1, 2026-05-04).
+#
+# Single config for ALL FMB1 parts. Per-shape YAMLs are deleted — the
+# termination predicate is shape-agnostic via the CAD chain:
+#   predicted_tcp_at_seat = base_world ∘ assembly_index[base][object] ∘
+#                            grasp_points[object][grasp_id] ∘ flange_offset
+# computed live by `compliant_insertion_studio/wrapper/cad_lookup.py` using
+# the camera-captured base pose passed via --base-world-pose.
+#
+# Strategy: pure compliance (Mode A) — empirical 88-100% of episodes had ≥5 s
+# quiet tail post-last-nudge. Operator nudges turned out to be one-time kicks
+# to break geometric stuck states, not continuous control. Force-mode params
+# (fz=-9, gain=1.0, damping=0.7, lin_speed=0.54) are the ones the operator
+# manually tuned in Phase 3 collection. The optional `correction:` block adds
+# active wrench updates IF Mode A fails on a specific shape.
+
+schema_version: 2
+
+# === Phase 5 v3 ContactSearchFSM (2026-05-04 PM) ===
+# Replaces the term_eval + correction_eval Mode B architecture. Follows the
+# canonical ConnTact pattern: APPROACH (descend until contact) → FIND_HOLE
+# (spiral on surface until z drops) → INSERT (push down with full compliance
+# to seat). All thresholds are MEASURED-relative (surface_z, hole_z) — no
+# hardcoded absolute z targets.
+#
+# Reference: github.com/swri-robotics/ConnTact (architecture)
+# Reference: github.com/danielstankw/UR5e-robot-control (Archimedean spiral)
+fsm:
+  # APPROACH — descend in air under light Fz until peg contacts surface
+  approach_fz_N:               6.0     # gentle so we don't blast into rim
+  approach_max_duration_s:     30.0
+  contact_threshold_N:         6.0     # base-frame Fz reading triggers contact
+  fz_smooth_window_s:          0.3     # smooth Fz before threshold compare
+
+  # FIND_HOLE — spiral xy on surface until peg drops into chamfer
+  find_hole_fz_N:              8.0     # was 4 — operator: more reactive
+  # 2026-05-04 PM v2: REVERTED to 0.8mm (CANDIDATE entry only). Per GPT review,
+  # full engagement check happens in ENTRY_SETTLE state via force/torque after
+  # spiral is stopped. The drop threshold here is just "peg moved past rim",
+  # which is necessary but not sufficient — ENTRY_SETTLE confirms via F/T.
+  find_hole_drop_thresh_m:     0.0008  # 0.8mm — candidate entry trigger
+  find_hole_max_radius_m:      0.012   # 12mm spiral radius cap
+  # 2026-05-04 PM: bumped 60→180s. Slow Stankowski spiral (v=1.5,p=0.6)
+  # only reaches r=4mm in 60s. With max_radius=12mm, need ~3min to fully
+  # explore. v61 happened to find chamfer at r=2.5mm; subsequent attempts
+  # land on "wall side" of asymmetric U-slot and need full radius coverage.
+  find_hole_max_duration_s:    60.0    # was 180 — operator demo seats in 30s,
+                                       # 60s is 2× margin
+  find_hole_stuck_window_s:    15.0    # abort if no progress after this long
+  find_hole_stuck_z_drop_m:    0.001   # 1mm: operator hits 10mm in 5s
+  # 2026-05-04 PM v3: REVERTED to slow Stankowski (v=1.5, p=0.6). Faster
+  # spiral (v=2.5, p=1.0) didn't find chamfer in 60s though it covered more
+  # radius — peg didn't dwell long enough at each position to engage. v61
+  # found chamfer in <10s with slow params. Slow lets peg settle into
+  # chamfer rim before spiral force pushes it past.
+  spiral_v_m_s:                0.0003  # was 0.0015 — 5× slower so each xy point gets ~2s
+                                        # for peg to find chamfer (operator demo timescale)
+  spiral_pitch_m:              0.0006
+  spiral_kp_N_per_m:           1500.0  # PD gain on position error
+  spiral_F_max_N:              10.0    # operator: more reactive (was 4)
+  find_hole_tilt_T_Nm:         0.0     # OFF per analyst: FFT of operator demos
+                                       # shows NO peak at 1-2Hz. Operator does
+                                       # NOT rock. Continuous Tx/Ty rocking
+                                       # lever-arms part center, burns moment
+                                       # budget. Geometric self-alignment via
+                                       # chamfer is what works.
+  find_hole_tilt_freq_hz:      1.5
+  # Tz wiggle DISABLED in FIND_HOLE (2026-05-04): tested 0.3 Nm @ 0.4 Hz
+  # but peg's yaw barely changed (stiction held it at canonical) and Tz
+  # interfered with the natural chamfer-engagement that the slow spiral
+  # provides. Yaw alignment relies on rotate_object's canonical face-down
+  # being approximately correct for the slot. If yaw is wrong, no amount
+  # of search will help — needs upstream fix in rotate_object's snap.
+  find_hole_tz_T_Nm:           0.0
+  find_hole_tz_freq_hz:        0.4
+
+  # Engagement signal thresholds (used by ENTRY_SETTLE to confirm full
+  # engagement after FIND_HOLE detects candidate z drop). Geometry-agnostic.
+  engaged_F_lat_max_N:         3.0    # smoothed F_lat below = no rim push
+  engaged_T_lat_max_Nm:        0.15   # |T_lat| below = peg flush, not tilted
+  engaged_v_xy_max_m_s:        0.003  # 3mm/s — was 1mm/s, too tight given
+                                       # Tz wiggle naturally moves grasp point xy
+  engaged_sustain_s:           0.5
+  # ENTRY_SETTLE state — between FIND_HOLE and INSERT (per GPT review)
+  entry_settle_fz_N:           4.0    # gentle hold while settling
+  entry_settle_wait_s:         0.3    # was 0.2 — bigger window for transients
+  entry_settle_verify_s:       0.1    # was 0.2 — catch fleeting passes
+  entry_settle_max_s:          2.0    # was 1.5 — more time for slow settle
+  entry_settle_gain:           1.0
+  entry_settle_damping:        0.7
+
+  # Predicted-pose recovery leash + engagement gate (per GPT 2026-05-04 review).
+  # GLOBAL plausibility anchor — augments local F_lat/T_lat checks. Even
+  # with mm-scale CAD error, large drift (20mm seen) means peg isn't in slot.
+  recovery_r_free_m:           0.006   # 6mm — no leash inside (let spiral search)
+  recovery_r_full_m:           0.012   # 12mm — leash at full strength here
+  recovery_F_max_N:            5.0     # operator: more reactive (was 2)
+                                       # 2N is too weak vs static friction once
+                                       # peg starts rim-walking; 5N pulls it back
+                                       # toward predicted while spiral sweeps.
+  engagement_dist_thresh_m:    0.006   # 6mm — ENTRY_SETTLE distance gate (CAD-xy)
+  engaged_z_drop_dominant_m:   0.020   # 20mm — z-drop dominance shortcut. If
+                                       # peg has descended this far past surface_z,
+                                       # consider engagement unambiguous regardless
+                                       # of CAD-xy distance gate. Fixes case where
+                                       # CAD prediction has 15-20mm error but
+                                       # peg is clearly seated.
+
+  # WEDGE_RECOVERY — counter-torque on Tx to lift stuck prong (per GPT review +
+  # 60-demo data validation). Triggered from ENTRY_SETTLE failure when Tx
+  # is dominant. Sign convention verified from operator demos: Tx_decay
+  # 0.06-0.33 → 0.01-0.04 Nm during peg unwedge, 50-96% sign persistence.
+  wedge_min_Tx_Nm:             0.05    # threshold for "wedge signal credible"
+  wedge_dominance_ratio:       1.5     # |Tx| > ratio · |Ty| to confirm side-specific
+  wedge_kp_torque:             0.7     # commanded = -kp × Tx_filtered (counter-torque)
+  wedge_cmd_Tx_max_Nm:         0.4     # cap commanded torque magnitude
+  wedge_filter_window_s:       0.1     # 100ms low-pass on Tx
+  wedge_fz_N:                  2.5     # REDUCED Fz during recovery (avoid pinning stuck prong)
+  wedge_duration_s:            1.5     # then re-evaluate via ENTRY_SETTLE
+  wedge_max_attempts:          3       # before falling back to FIND_HOLE permanently
+
+  # INSERT — push down to bottom-out with rocking (2026-05-04 PM tune).
+  # Visual observation from operator: when hole detected, ONE prong dropped
+  # into slot while the OTHER stuck on rim → peg half-engaged + tilted.
+  # Need strong tilt torque to LIFT stuck prong. Operator demos peaked at
+  # 0.7-1.0 Nm; old 0.20 Nm was 5x too weak to unwedge.
+  insert_fz_N:                 8.0     # operator: more reactive (was 4)
+  insert_tilt_T_Nm:            0.0     # OFF (per GPT review). Was 0.80 → ran tilt
+                                       # 4.4° → 10.4° in 60s by lever-arming the
+                                       # part around 28mm grasp offset. Nominal
+                                       # INSERT should be passive; rocking is
+                                       # explicit recovery only (WEDGE_RECOVERY).
+  insert_tilt_freq_hz:         1.0
+  insert_tz_T_Nm:              0.0     # OFF — same lever-arm concern.
+  insert_tz_freq_hz:           0.7
+  engaged_tilt_max_deg:        3.5     # ENTRY_SETTLE engagement gate.
+                                       # Today's u_orange demo: max 3.29°
+                                       # (median 2.04°) — natural tilt during
+                                       # operator-assisted successful descent.
+                                       # 3.5° = small margin over today's max.
+                                       # The tilt is GEOMETRIC (part/slot pair),
+                                       # not a wedge — must be tolerated.
+  insert_tilt_abort_deg:       5.0     # INSERT → WEDGE_RECOVERY on runaway.
+                                       # Tightened from 4 (would block today's
+                                       # natural 2-3° descent tilt). 5° catches
+                                       # actual runaway (>3.5° + growing).
+  wedge_retract_fz_N:          6.0     # +Fz when wedge_attempts maxed out;
+                                       # lifts EE off rim to break wedge contact,
+                                       # then resumes FIND_HOLE from surface_z.
+  insert_motion_window_s:      1.5
+  insert_motion_thresh_m_s:    0.0005
+  insert_max_duration_s:       60.0    # was 30s — peg's slow creep needs time
+  insert_min_descent_m:        0.005   # require ≥5mm post-hole-entry to declare seated
+
+  # Universal safety
+  abort_F_lat_N:               30.0    # safety: abort if lateral force spikes
+                                       # to part-damaging levels. Operator demos
+                                       # peaked at 14N — anything 30N+ means
+                                       # algorithm pushed peg into rim too hard.
+                                       # Fix the CAUSE, don't raise the limit.
+
+  # Per-state UR force_mode gain/damping
+  gain_approach:               1.0
+  damping_approach:            0.7
+  gain_find_hole:              1.0     # max (was 0.7) — more reactive
+  damping_find_hole:           0.3     # less damped (was 0.5)
+  gain_insert:                 1.0
+  damping_insert:              0.4     # less damped (was 0.7)
+
+
+# ROS2 force_mode_controller setpoints (Phase 3 locked values). Re-call
+# SetForceMode on entry to ACTIVE; do not modulate during run unless
+# `correction:` enables.
+force_mode:
+  task_frame: base_link
+  type: 2                     # NO_TRANSFORM (raw base-frame wrench command)
+  selection_vector: [true, true, true, true, true, true]
+  wrench:
+    fx: 0.0
+    fy: 0.0
+    fz: -9.0                  # base-frame "push down"
+    tx: 0.0
+    ty: 0.0
+    tz: 0.0
+  speed_limits:
+    linear_xyz_m_s:  [0.54, 0.54, 0.54]
+    angular_xyz_r_s: [0.20, 0.20, 0.20]
+  gain_scaling:    1.0
+  # 2026-05-04 PM: bumped 0.7→0.95 to suppress pre-contact xy drift, but
+  # that ALSO suppressed post-contact lateral motion needed by the spiral
+  # to find the chamfer. Reverted to 0.7. Operator framing (msg #103):
+  # force-mode pose variation IS by design — accept some pre-contact
+  # variance, let post-contact motion happen freely.
+  damping_factor:  0.7
+  override_fz_cap: true       # operator-approved override of the 5N convention
+
+# Contact predicate — used by the evaluator to capture contact_z (state) and
+# by the wrapper for first-contact telemetry annotation. Tool-frame fz: peg
+# pushing back along its long axis is positive.
+contact:
+  fz_threshold_N: 6.0
+  sustain_ms: 100             # = 10 samples at 100 Hz
+  smooth_window_samples: 5
+
+# Termination predicate (UNIVERSAL — same for every shape).
+#
+# Three predicates AND-coupled:
+#   1. tcp_z_reached_predicted: |tcp_z - predicted_tcp_z_at_seat| ≤ 5 mm.
+#      The CAD-derived target (Phase 5 v1). Only enabled when the wrapper
+#      receives --base-world-pose; otherwise auto-degrades to descended_post_contact.
+#   2. motion_stopped: lateral AND vertical TCP velocity below thresholds.
+#   3. descended_post_contact: TCP descended ≥ 25 mm past first-contact z
+#      (universal sanity check — every successful insert has substantial
+#      post-contact descent; rules out chamfer-rest false positives).
+#
+# All three must hold simultaneously sustained 1 s.
+termination:
+  combinator: AND
+  must_agree: true
+  sustain_s: 1.0
+  predicates:
+    motion_stopped:
+      enabled: true
+      v_lat_max_m_s:  0.010     # 10 mm/s — was 5 mm/s. Live diagnostic on a
+                                # confirmed seated peg (dpc=31.5mm, at_seat=True)
+                                # showed v_lat_ema oscillating between 3-5.2 mm/s
+                                # due to force-mode jiggle from Mode B spiral
+                                # cycling on. Even one >5mm/s spike resets the
+                                # sustain timer; predicate never fires. 10mm/s
+                                # covers force-mode oscillation noise floor while
+                                # still well below "actively descending" rates.
+      v_z_max_m_s:    0.005     # 5 mm/s — was 2mm/s but EMA noise in force mode
+                                # scatter-failed enough to never accumulate 1s
+                                # sustain. Predicate stayed dark while peg sat
+                                # 1.6 mm from predicted seat for 200+ s.
+    tcp_z_reached_predicted:
+      enabled: true             # auto-disabled when no --base-world-pose
+      tolerance_m: 0.020        # 20 mm — was 5mm. 60-demo analysis showed CAD
+                                # vs operator-demo seat z disagrees by up to
+                                # 16.3mm for u_orange (CAD=0.2008, operator
+                                # seat=0.2171). Tightening to 5mm makes the
+                                # predicate unreachable when CAD chain has any
+                                # slot-position error. 20mm is the smallest
+                                # tolerance that admits all 4 objects.
+    descended_post_contact:
+      enabled: true
+      min_m: 0.005              # 5 mm — was 25mm. Operator-demo descent across
+                                # 50 successful inserts: u_brown=24mm,
+                                # line_green=6.7mm, inv_u_yellow=27mm,
+                                # u_orange=13mm. line_green seats with only
+                                # 6.7mm descent → 25mm threshold = unreachable.
+                                # 5mm covers all 4 with margin. Wedge guard is
+                                # motion_stopped + tcp_z_reached_predicted; today's
+                                # ABORTs all show descent 0–4mm so 5mm rules
+                                # them out cleanly.
+
+# Hard ceilings (safety / operator-attention).
+max_active_duration_s: 90       # ABORT if neither termination nor correction has fired
+abort_on_excessive_lateral_force_N: 30   # ABORT if |F_lat| spikes above this — peg jammed
+
+# Mode B — active back-off-on-stuck correction.
+#
+# Empirically, pure compliance can't escape geometric wedges: once the peg
+# is tilted onto the rim, force-mode pushes harder which deepens the wedge.
+# The operator's nudges in the dataset broke these states by applying
+# COUNTER force/torque (push the peg AWAY from the wall it's pressed
+# against, counter-rotate against the tilt). This block automates that
+# pattern from telemetry.
+#
+# State machine: NORMAL → (stuck detected) → CORRECTING (re-call SetForceMode
+# with delta wrench opposite to residual) → COOLDOWN (revert to default
+# wrench, settle) → NORMAL. Up to `max_corrections` per episode; ABORT after.
+correction:
+  # Stuck detection — based on NET descent over a window, NOT instantaneous v_z.
+  # Force-mode compliance jiggle spikes v_z momentarily even during 3-min wedges,
+  # so EMA-based detection never triggered. Net descent over a 2 s window
+  # rejects bounce and catches genuine no-progress states.
+  stuck:
+    fz_min_N:               6.0      # peg in contact (commanded fz=-9, expect actual fz>6)
+    descent_window_s:       2.0      # window over which net descent is computed
+    fz_smooth_window_s:     0.5      # smooth instantaneous fz over this window (anti-jitter)
+    # Iteration 3: bumped from 0.0001 (0.1 mm/s) → 0.0005 (0.5 mm/s). Iter 2 data
+    # showed actual descent of 0.07-0.1 mm/s during "stuck" — peg slowly grinding
+    # but not making meaningful progress. Operator: "if it's barely moving, it's
+    # stuck". 0.5 mm/s threshold = trigger when 30+ seconds to descend any further.
+    min_descent_rate_m_s:   0.0005
+    sustain_s:              2.0      # stuck condition must hold this long before acting
+    warmup_after_contact_s: 0.5      # ignore first-contact transient
+
+  # Direction-finding floors — below these, the residual is too small/noisy to give
+  # a meaningful direction; correction switches to cardinal exploration cycling.
+  trigger:
+    F_direction_floor_N:  1.0
+    T_direction_floor_Nm: 0.05
+
+  # Iteration 5 (2026-05-04, Mode B v2): switched action mode "poke" → "spiral".
+  # Iter 1-4 (poke mode: harder downward Fz + cardinal lateral pokes) ABORTED
+  # all 4 times. Per GPT research /tmp/gpt-task-result-123444.txt + Chhatpar
+  # 2001 + FANUC + Robotiq spiral-search practice: pushing harder deepens
+  # peg-on-rim wedges; the right action is retract + lower-Fz + continuous
+  # spiral search at lower force-mode gain/damping. r_cop validation on iter-4
+  # CSV showed median 5.5 mm with consistent direction (-1.0, -5.4 mm in y) —
+  # rim-contact lever-arm scale, real direction signal we weren't using.
+  action:
+    mode: spiral                     # "spiral" (v2 — recommended) | "poke" (v1 legacy)
+
+    # --- Spiral mode (v2) parameters ---
+    # Burst structure: [retract_phase_s] unload, then continuous spiral
+    # search of (duration_s - retract_phase_s) at search_fz with rotating
+    # lateral force amplitude growing from start to end.
+    # 2026-05-04 PM: phase-decomposed drift analysis showed peg is jammed into
+    # rim with up to 20N reaction force during NORMAL — 5x more than spiral's
+    # commanded 4N. The 0.15s retract at +2N didn't actually unload the rim
+    # contact before search began. GPT's canonical recovery: retract → unload
+    # Fz≈0 for 100-200ms → re-approach. Lengthening retract + raising upward
+    # force should fully dissipate rim-contact before spiral.
+    retract_phase_s:           0.5   # was 0.15
+    retract_fz_N:              5.0   # was 2.0 (stronger upward unload)
+    # GPT/Tang2016/UR-script-manual review (2026-05-04): UR force-mode precision is
+    # ~±10N. Search Fz=3N is below that floor so it's effectively noise. Bumping to
+    # -5N (mid-range) gives reproducible preload while still being below the seating
+    # Fz=-9N. Reduces the "park on rim with no descent" bias.
+    search_fz_N:               5.0   # was 3.0
+    # 2026-05-04 PM: tested 3/8N spiral (matching operator PEAK) — caused
+    # 40mm drift away from hole. Operator's STD=1.0-1.5N (peaks rare, not
+    # continuous). My continuous-spiral at peak is fundamentally different
+    # from operator's occasional-peak pattern. Reverted to 1.5/4N (proven
+    # to seat in v3u att1, 31.5mm descent).
+    search_F_lat_start_N:      1.5
+    search_F_lat_end_N:        4.0
+    # v3 (iter 6, 2026-05-04): rotating TORQUE alongside force. Iter 4-5
+    # showed persistent mean Tx, Ty bias ~0.018 Nm in same direction across
+    # both runs — peg is TILTED, not just laterally offset. Pure lateral force
+    # spiral (v2) couldn't right the tilt. v3 adds a torque vector spiraling
+    # with the force vector at the same freq; one rotation samples all phase
+    # combinations of (push_dir, tilt_dir).
+    # GPT recommendation /tmp/gpt-task-result-123444.txt: counter-torque
+    # 0.10–0.18 Nm. Our measured bias is 0.018 Nm; correction is ~10× residual
+    # per GPT/Tang 2016 three-point-contact analysis.
+    # Reverted from 0.30/1.0 which caused drift. Operator STD was 0.10-0.14 Nm,
+    # so these values match operator's TYPICAL torque (matters more than peak
+    # for continuous-spiral algorithm).
+    search_T_lat_start_Nm:     0.10
+    search_T_lat_end_Nm:       0.30
+    # 2026-05-04 PM: GPT recommended 0.3 Hz citing 2-5 mm/s tangential. Tried it,
+    # peg DRIFTED 13mm AWAY from hole (att3 vs att1 same start: lat_travel 4mm
+    # under 1.5 Hz vs 15mm under 0.3 Hz). At 0.3 Hz each direction is held for
+    # ~1.7s; under 4N + bias the peg drifts ~10mm before the rotation flips. UR
+    # force-mode compliance gives uncontrolled radius — fast oscillation BOUNDS
+    # drift, slow oscillation AMPLIFIES it. Counter to GPT's general guidance,
+    # 1.5 Hz is right for this setup. Reverted.
+    search_freq_hz:            1.5
+    gain_search:               0.5   # force-mode gain_scaling during search (vs 1.0 nominal)
+    # Damping bumped 0.20 → 0.50 (still < 0.7 nominal). 0.20 was promoting
+    # "coasting" — the EE drifted past detected chamfers before settling. 0.50
+    # damps faster while preserving the lower stiffness needed for compliance.
+    damping_search:            0.50  # was 0.20
+    spiral_command_period_s:   0.05  # rate-limit re-issue of SetForceMode (20 Hz)
+
+    # === POSITION-SPIRAL (2026-05-04 PM, from danielstankw/UR5e-robot-control) ===
+    # Reference Stankowski impl drives the spiral as a POSITION REFERENCE via PD
+    # controller (kp ≈ 4500), not as oscillating force. Tangential speed and
+    # ring pitch satisfy Chhatpar 2001 constraint p ≤ 2·clearance. This is
+    # mathematically guaranteed to sweep through the chamfer entry zone.
+    # Replaces the force-oscillation spiral when enabled.
+    position_spiral_enabled:    true
+    spiral_tangential_speed_m_s: 0.0015   # 1.5 mm/s (Stankowski default)
+    spiral_pitch_m:              0.0006   # 0.6 mm — must be ≤ 2× radial clearance
+    spiral_position_kp_N_per_m:  1500.0   # PD gain on position error (lower than
+                                           # Stankowski's 4500 because UR force_mode
+                                           # already has internal stiffness)
+    spiral_F_pos_max_N:          8.0      # cap PD-derived force at this magnitude
+
+    # === TILT ROCKING (orientation alignment for asymmetric pegs) ===
+    # Operator demos showed Tx/Ty (tilt) was the dominant orientation signal,
+    # NOT Tz (yaw). For U-shaped pegs in U-slots, tilt rocking lets peg-prongs
+    # navigate asymmetric chamfer entry. Pure circular spiral assumes round
+    # geometry; rocking handles the rest.
+    # Operator-demo std for Tx/Ty was ~0.10-0.14 Nm; peaks ±1 Nm. We pick a
+    # mid-range continuous amplitude.
+    tilt_rock_T_amp_Nm:          0.30
+    tilt_rock_freq_hz:           1.5
+
+    # === YAW_UNLOCK (2026-05-04 PM, GPT/Li2021/Yao&Cheng followup) ===
+    # u_orange and similar asymmetric (U/key/square) parts are SE(2) inserts:
+    # x, y, AND yaw-about-peg-axis must align. XY spiral can localize the peg
+    # to within a few mm of the slot but cannot resolve yaw lock — peg-tip
+    # engages chamfer but U-arms hit slot walls, blocking z descent while
+    # still allowing tangential slide. Operator demos succeeded by twisting
+    # the peg manually; algorithm needs equivalent.
+    #
+    # When stuck-detection fires AND xy_offset to target is within
+    # `xy_threshold_mm`, burst switches from XY spiral to YAW_UNLOCK:
+    # zero F_xy, light Fz, oscillating Tz at `freq_hz` and `T_amp_Nm`.
+    yaw_unlock:
+      # Disabled 2026-05-04 PM (final): position-spiral algorithm replaces
+      # both XY search AND rotational search. Spiral starts at radius=0 and
+      # expands to cover chamfer entry zone — sweeps through any yaw alignment
+      # the peg needs. yaw_unlock was preventing position-spiral from running
+      # when peg landed within xy_threshold_mm of target, causing att2 to ABORT
+      # (peg sat at 1.96mm from truth doing only Tz oscillation, never moved
+      # laterally to escape rim).
+      enabled:           false
+      # Bumped 3.0 → 6.0 (2026-05-04 PM): with damping=0.95 reducing pre-contact
+      # drift, peg now lands ~3.6mm from truth_hole. CAD-predicted hole xy
+      # itself is ~4mm offset from observed truth, so even a "correctly
+      # localized" peg sits 3-5mm from the bias target. 6mm threshold lets
+      # yaw_unlock fire when peg is within "chamfer engagement zone" (~5-6mm
+      # for u_orange) without requiring perfect xy precision.
+      xy_threshold_mm:   6.0
+      # 2026-05-04 PM iter: peg got within 1.42mm of truth during yaw_unlock
+      # but didn't seat. Bumping per GPT escalation ("step up to ±0.4–0.6 Nm
+      # max"). Also raising fz during yaw scan from 3 → 6N so once yaw aligns,
+      # the downward push is enough to drive the peg into the slot.
+      T_amp_Nm:          0.50   # was 0.30 (GPT escalation range)
+      freq_hz:           1.5    # 1-2 Hz reciprocating yaw scan
+      fz_N:              6.0    # was 3.0 — stronger push to seat once aligned
+      gain:              0.5    # force-mode gain during yaw scan
+      damping:           0.5    # damping during yaw scan
+      duration_s:        2.5    # longer than XY spiral to give yaw time to scan
+
+    # --- Common to both modes ---
+    # Reverted to 1.5s alongside freq=1.5Hz (= ~2 revolutions per burst).
+    duration_s:           1.5
+    cooldown_s:           0.3        # then revert and wait this long before re-checking (was 1.0)
+
+    # --- Poke mode (v1 legacy) parameters — kept for A/B comparison ---
+    F_gain:               0.5        # delta_F_mag = max(min_perturb_N, F_gain × |F_lat|)
+    T_gain:               1.0        # delta_T_mag = max(min_perturb_Nm, T_gain × |T_lat|)
+    min_perturb_N:        6.0        # lateral push amplitude (poke mode)
+    min_perturb_Nm:       0.3        # counter-torque amplitude (poke mode)
+    max_delta_F_N:        6.0        # safety clamp (poke mode)
+    max_delta_T_Nm:       0.5        # safety clamp (poke mode)
+
+  # 2026-05-04 PM: 5 was too tight. Empirical data from the same-day SUCCESS
+  # run (insert_u_orange_20260504_084310): peg required 9 corrections of
+  # 1.5Hz spiral bursts to walk into the chamfer and seat. GPT's bounded-5
+  # ceiling is appropriate for SLOW spirals (one full revolution per burst)
+  # but not for the fast spiral we reverted to (~2 revolutions per 1.5s burst,
+  # tinier per-burst lateral coverage). 15 = above the proven-working 9,
+  # below the original 30 which was clearly excessive.
+  max_corrections: 15
+
+# Wrapper-level knobs (NOT force-mode; affect lifecycle).
+wrapper:
+  hover_offset_z_m: 0.10
+  step_back_seconds: 5
+  ft_zero_drift_check_seconds: 1.0
+  skip_home_on_done: false

@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-04T07:04:18-07:00",
+  "timestamp": "2026-05-04T17:06:00",
   "phase": "05",
   "phase_name": "algorithm-derivation",
   "phase_dir": ".planning/phases/05-algorithm-derivation/",
@@ -8,64 +8,75 @@
   "task": null,
   "total_tasks": null,
   "status": "in_progress",
-  "milestone": "v1.0",
+  "milestone": "v97 — autonomous insert NOT achieving 5/5; analytical breakthrough captured but not yet validated",
+  "session_notes_2026_05_04": "12-hour session. Many iterations (v82-v97) of FSM tweaks. Operator-assisted demos succeed; autonomous fails. Late-day analytical research (insert_algorithm_research_2026-05-04.md) and cross-run signal comparison identified that algorithm IS sometimes seating peg mechanically but failing to RECOGNIZE it (engagement-dist gate, motion_stopped_first_t reset). Latest iterations focus on aggressive stuck detection + INITIAL_PRESS directed-push phase. Persistent late-day failure: peg stuck on rim, cannot mechanically engage chamfer despite many directions/forces tried.",
   "completed_tasks": [
-    {"name": "rotate_object IK selection cost gate", "status": "done", "note": "Tightened IK acceptance to ≤0.025 cost (~1.4° angle accuracy). Without this, IK returned current joints with ~5° pose error as 'valid'."},
-    {"name": "cad_lookup v2 refactor (fold-symmetry + grasp transform)", "status": "done", "note": "Mirrors translate_object real-mode flow. Takes held_quat + ee_orientation as inputs. v1 had 228mm flange-offset bug."},
-    {"name": "Mode B v3 spiral (force + torque rotation)", "status": "done", "note": "1.5s burst with retract phase + spiral search at lower gain/damping. Bias toward target_xy keeps peg from drifting."},
-    {"name": "Descent-spike detector + early Mode B exit", "status": "done", "note": "100ms-windowed z-descent rate; threshold 0.5 mm/s during spiral → records hole_observed_xy + reverts to default wrench."},
-    {"name": "Cross-attempt persistence (hole_xy_prior)", "status": "done", "note": "iterate_insert reads previous meta JSON for hole_observed.xy_m, forwards as --hole-xy-prior. Wrapper uses it as target_xy."},
-    {"name": "at_seat gate", "status": "done", "note": "Wrapper computes at_seat from |tcp_z - predicted_seat_z| ≤ 5mm, passes to correction_eval. Suppresses new Mode B triggers when at seat so predicate can fire."},
-    {"name": "Rotate-every-attempt loop pattern", "status": "done", "note": "loop_iterate always uses --already-held for attempts 2+ → run_assembly_step rotates EE to canonical face-down before each wrapper attempt. Eliminates accumulated tilt drift."},
-    {"name": "60-demo base offset analysis", "status": "done", "note": "Confirmed DEFAULT_BASE_POSITION = (0, -0.4, -0.0625) is authoritative. u_orange has ~6mm -y slot offset; other 3 objects within ~1mm. Spiral absorbs per-object variance."}
+    {"name": "Research analysis (insert_algorithm_research_2026-05-04.md)", "status": "done", "note": "735-line analytical doc identified 5 specific failure mechanisms + recommended single-loop adaptive controller redesign."},
+    {"name": "State-independent global seat detector", "status": "done", "note": "Runs every tick; bypasses FSM bouncing that resets local sustain timer. Verified offline on FAIL_INSERT CSV — would have fired."},
+    {"name": "Aggressive stuck detector (15s vs 180s)", "status": "done", "note": "Aborts in 15s if z_drop<1mm. Reduces URCap stress + saves test time."},
+    {"name": "INITIAL_PRESS directed-push phase", "status": "done", "note": "Cross-run analysis: successes had 5N sustained F_lat at t=1-1.5s; failures had 0.6N. Now applies fixed 5N at +Y baselink for 1.5s."},
+    {"name": "T_partcenter dynamic r computation", "status": "done", "note": "Senses moment about part center using TCP→part_center vector that updates with EE quat each tick."},
+    {"name": "Cross-attempt prior chaining (hole_observed)", "status": "done", "note": "iterate_insert reads previous meta.hole_observed.xy_m, forwards as --hole-xy-prior."},
+    {"name": "Tilt gate calibrated to today demo (3.5°)", "status": "done", "note": "Today's demo max tilt 3.29° vs May-3 demos 1.36°. Workspace-dependent; today's hardware exhibits 2× higher natural tilt during descent."},
+    {"name": "Cleanup retry for stop_force_mode", "status": "done", "note": "3 retries with backoff; helps with URCap sync after long force-mode runs (still imperfect)."},
+    {"name": "Found: hole_xy_prior should be SEAT not contact xy", "status": "done", "note": "v97 finding: APPROACH lands TCP at chamfer rim contact (+28.4 X today); demo SEAT was at +34.1 X. 5.7mm offset. Was targeting wrong xy whole session."}
   ],
   "remaining_tasks": [
-    {"name": "Drive u_orange to 5 consecutive successful inserts", "status": "in_progress", "note": "Loop is running with bias re-enabled (search_bias_kp_N_per_m=400). Track outcome in /tmp/loop_v3l.log."},
-    {"name": "Drive u_brown to 5 consecutive successes", "status": "not_started"},
-    {"name": "Drive line_green to 5 consecutive successes", "status": "not_started"},
-    {"name": "Drive inverted_u_yellow to 5 consecutive successes", "status": "not_started"},
+    {"name": "Re-baseline operator demo on current hardware", "status": "blocked", "note": "Confirm operator can still seat by hand. Capture today's chamfer entry + seat xy. Update hole_xy_prior."},
+    {"name": "Drive u_orange to 5 consecutive autonomous seats", "status": "in_progress", "note": "v97 just launched with hole_xy_prior=(+0.0341, -0.3635) — demo's actual seat xy. Outcome unknown."},
+    {"name": "If still failing: implement single-loop adaptive controller", "status": "not_started", "note": "Per analyst's §5: replace FSM with depth-keyed Fz schedule + selection_vector trick (XY position-tracked, only Z force-controlled)."},
+    {"name": "Drive u_brown / line_green / inverted_u_yellow to 5/5", "status": "not_started"},
     {"name": "Update STATE.md, run /gsd-progress to close Phase 5", "status": "not_started"}
   ],
   "decisions": [
-    {"decision": "DEFAULT_BASE_POSITION is authoritative; do NOT use camera for base1", "rationale": "Operator decision based on observation that camera has mm-scale noise. Base is physically pinned at (0, -0.4, -0.0625)."},
-    {"decision": "Bias spiral toward target_xy (best-available estimate)", "rationale": "Pure exploratory spiral can drift away from the hole. Bias keeps peg anchored. Generalizes: target_xy = hole_xy_prior if known, else CAD-derived predicted xy."},
-    {"decision": "Do NOT bake u_orange's 6mm slot offset into fmb_assembly1.json", "rationale": "Spiral should absorb it; tuning the JSON would mask a class of per-object variance the primitive needs to handle generally."},
-    {"decision": "rotate_object every attempt (not setup-once-then-wrapper-only)", "rationale": "Post-cleanup retract holds whatever orientation the prior wedge ended in; tilt accumulates without re-rotation. Each rotate is ~3s and idempotent."},
-    {"decision": "max_corrections=30 (was 12)", "rationale": "30 gives spiral enough budget to break through chamfer in pathological grasps. 12 was too aggressive a safety ceiling."},
-    {"decision": "Use module mode (python3 -m primitives.X) for ALL primitive subprocess invocations", "rationale": "Script-path mode (python3 primitives/X.py) fails silently with ModuleNotFoundError when primitives import siblings."},
-    {"decision": "Spike detection threshold 0.5 mm/s (lowered from initial 5 mm/s)", "rationale": "Successful breakthroughs have peak descent ~0.1-0.5 mm/s, not 5 mm/s. Initial threshold was orders too high."}
+    {"decision": "Use full T_partcenter (Tx, Ty) for WEDGE_RECOVERY, not Tx-only", "rationale": "Tilt is 2D; Tx-only counter-torque can't flatten arbitrary tilts."},
+    {"decision": "REVERTED Fz→T compensation (v77/v78)", "rationale": "Produced destabilizing Z-rotation cross-coupling. Sensed T transformation kept; wrench compensation rejected."},
+    {"decision": "engaged_tilt_max_deg = 3.5° (was 1.5°)", "rationale": "Today's operator-assisted demo had max tilt 3.29° during successful descent."},
+    {"decision": "find_hole_max_duration_s = 60s (was 180s)", "rationale": "Operator demo seats in 30s; 60s is 2× margin."},
+    {"decision": "Stuck detector: abort at 15s if z_drop<1mm", "rationale": "Operator demos descend 10mm+ in 5s; 15s without 1mm = genuinely stuck. Saves test time + reduces URCap stress."},
+    {"decision": "INITIAL_PRESS = fixed 5N at +Y baselink direction (90°) for 1.5s", "rationale": "Cross-run analysis: successes had 5N sustained F_lat at t=1-1.5s causing 2mm xy excursion."},
+    {"decision": "hole_xy_prior should be SEAT xy, not contact xy", "rationale": "Contact lands on rim; SEAT is slot center. Use today's demo seat (+0.0341, -0.3635)."},
+    {"decision": "Selection_vector all-True (force-controlled), NOT XY position-tracked", "rationale": "Tested in v91: locking XY made peg unable to find chamfer. Operator demo had 4mm xy motion during descent — admittance allows that, position-track doesn't."},
+    {"decision": "Drop find_hole_tilt rocking and Tz wiggle entirely", "rationale": "FFT of operator demos shows NO peak at 1-2Hz. Operator does NOT rock. Continuous rocking burns moment budget."}
   ],
-  "blockers": [],
+  "blockers": [
+    {
+      "description": "Peg cannot mechanically engage chamfer in late-day attempts despite many algorithm variations. Operator demo at 14:56 succeeded with same hardware (z_drop=25mm in 30s).",
+      "type": "hardware_or_setup",
+      "workaround": "Re-do operator-assisted demo at session start to confirm hardware functional + capture fresh chamfer entry xy."
+    },
+    {
+      "description": "URCap external control program stops after long force-mode runs (170s+) requiring manual pendant PLAY",
+      "type": "external",
+      "workaround": "Aggressive stuck detector now aborts in 15s, reducing URCap stress. Still requires manual play after each abort."
+    }
+  ],
   "human_actions_pending": [
-    {"action": "Operator places part in pickup area before each new-object loop", "context": "Camera detector must see the part before move_to_grasp queries", "blocking": false},
-    {"action": "Operator monitors visually during initial attempts", "context": "Distinguish 'peg in chamfer wedge' from 'peg seated' — current Mode B handles both via descent-spike detection but visual confirmation reduces noise", "blocking": false}
+    {"action": "Press PLAY on UR pendant after FSM aborts", "context": "URCap stops external control program; can't auto-restart in Local mode", "blocking": true},
+    {"action": "Re-baseline operator demo at session start", "context": "Confirm current hardware can still be hand-seated; capture today's chamfer entry xy", "blocking": true}
   ],
   "background_processes": [
-    {"name": "loop_iterate u_orange tuning", "command": "python3 -m compliant_insertion_studio.scripts.loop_iterate --object-name u_orange --base-name base1 --grasp-id 1 --target-success-count 3 --first-held-quat 0.753200 0.146100 -0.047800 -0.639600", "log": "/tmp/loop_v3l.log", "pid_file": "/tmp/loop.pid"},
     {"name": "ROS2 bringup (UR5e + RG2 + cameras)", "command": "ros2 launch compliant_insertion_studio/launch/ur5e_with_rg2.launch.py rviz:=true use_fake_hardware:=false robot_ip:=192.168.1.111", "note": "Must be running for any robot motion"}
   ],
   "uncommitted_files": [
-    "compliant_insertion_studio/wrapper/cad_lookup.py",
-    "compliant_insertion_studio/wrapper/compliant_insert.py",
-    "compliant_insertion_studio/wrapper/insert_config.py",
-    "compliant_insertion_studio/wrapper/schema_v1.py",
-    "compliant_insertion_studio/scripts/iterate_insert.py",
-    "compliant_insertion_studio/scripts/loop_iterate.py",
-    "compliant_insertion_studio/scripts/run_assembly_step.py",
-    "compliant_insertion_studio/configs/defaults.yaml",
-    "primitives/rotate_object.py",
-    "CLAUDE.md",
-    ".claude/skills/compliant-insertion-iterate/SKILL.md",
-    ".claude/skills/compliant-insertion-iterate/scripts/analyze_episode.py",
-    ".claude/skills/compliant-insertion-iterate/scripts/compare_runs.py",
-    ".claude/skills/compliant-insertion-iterate/scripts/trajectory_drift.py"
+    "compliant_insertion_studio/wrapper/contact_search_fsm.py (heavy mods this session)",
+    "compliant_insertion_studio/wrapper/compliant_insert.py (modified)",
+    "compliant_insertion_studio/configs/defaults.yaml (heavy mods this session)",
+    "CLAUDE.md (modified)",
+    ".planning/insert_algorithm_research_2026-05-04.md (NEW — analyst doc)"
   ],
   "blocking_constraints": [
     {
-      "name": "Always use --already-held in loop attempts 2+",
-      "description": "Skipping rotate_object between attempts lets EE tilt accumulate. Operator observed iter 7 had 4.7° pitch tilt after just a few attempts.",
+      "name": "Read research doc before iterating on parameters",
+      "description": ".planning/insert_algorithm_research_2026-05-04.md identifies 5 specific failure mechanisms. Tuning parameters without reading it leads to thrashing — verified across 16+ iterations this session.",
       "severity": "blocking",
-      "mitigation": "loop_iterate enforces this; do not bypass with a 'wrapper-only' shortcut."
+      "mitigation": "First action of next session: read .planning/insert_algorithm_research_2026-05-04.md end-to-end."
+    },
+    {
+      "name": "Cross-run analysis is more useful than monitoring logs",
+      "description": "I spent hours iterating on monitor events instead of doing cross-run signal analysis on the CSVs. The breakthrough findings (5N sustained at t=1s in successes, contact-vs-seat xy offset) came from cross-run analysis at the END of the session.",
+      "severity": "blocking",
+      "mitigation": "Default to writing analysis scripts that read CSV data; reserve monitors for state-transition events only."
     },
     {
       "name": "Module mode for primitive subprocess invocations",
@@ -74,24 +85,24 @@
       "mitigation": "All callsites already converted; new code must follow."
     },
     {
-      "name": "Do not use camera for base1 pose",
-      "description": "Camera has mm-scale noise; base is fixed. iterate_insert._config_base_pose() returns DEFAULT_BASE_POSITION from primitives/shared/config.py.",
-      "severity": "blocking",
-      "mitigation": "Already wired; do not introduce a 'fall back to camera' path."
-    },
-    {
       "name": "rotate_object IK cost threshold ≤ 0.025",
       "description": "Loosening this re-introduces the bug where IK returns current joints (with 5° pose error) as 'valid'.",
       "severity": "blocking",
       "mitigation": "Keep SELECTION_COST_THRESHOLD at 0.025 in primitives/rotate_object.py:_select_best."
     },
     {
-      "name": "Mode B action TYPE matters more than magnitude",
-      "description": "Pushing harder Fz + cardinal pokes deepens peg-on-rim wedges. Verified empirically: 4 iterations × 12 corrections = ABORT each time.",
-      "severity": "advisory",
-      "mitigation": "v3 spiral (retract + low-Fz search + lateral force/torque rotation + bias) replaces poke. Don't revert to poke mode without a strong reason."
+      "name": "Do NOT lock XY via selection_vector",
+      "description": "Tested in v91: peg can't find chamfer when XY is position-tracked. Operator demos have 4mm xy motion during descent — admittance allows that.",
+      "severity": "blocking",
+      "mitigation": "Keep selection_vector all-True (force-controlled in all DOFs). Don't 'optimize' by adding selection_vector tricks without testing on actual hardware."
+    },
+    {
+      "name": "URCap external control stops after long force-mode runs",
+      "description": "Force-mode runs >170s tend to leave URCap in stopped state, requiring manual pendant PLAY. Forces operator interaction.",
+      "severity": "blocking",
+      "mitigation": "Aggressive 15s stuck detector mitigates by failing fast. Don't increase find_hole_max_duration_s past 60s without addressing this."
     }
   ],
-  "next_action": "Read .planning/phases/05-algorithm-derivation/.continue-here.md end-to-end. Then check /tmp/loop_v3l.log for current attempt status; decide whether to tune (§6 knobs) or let loop run to 5/5 on u_orange.",
-  "context_notes": "Phase 5 is the FINAL phase. The compliant insert primitive is structurally complete (rotate-every-attempt + cad_lookup v2 + Mode B v3 + spike detection + cross-attempt learning + at_seat gate + bias toward target). Whether it converges to 5/5 per object is now a tuning exercise on the knobs in §6 of the .continue-here.md."
+  "next_action": "1) Read .planning/insert_algorithm_research_2026-05-04.md end-to-end. 2) Operator does fresh manual demo to confirm hardware + capture today's chamfer xy. 3) If still failing autonomously, implement single-loop adaptive controller per analyst §5 (replaces FSM, depth-keyed Fz schedule).",
+  "context_notes": "Operator was at robot 12 hours. Session ended in disappointment after many iterations. The KEY analytical insights came in the LAST hour (research agent + cross-run analysis), suggesting the next session should START with analysis and only then write code. Most fundamental finding: contact-xy ≠ seat-xy (5.7mm offset for u_orange today), so we may have been targeting wrong location all along. v97 launched with seat xy as prior — outcome unknown at session pause."
 }

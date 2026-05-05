@@ -32,6 +32,7 @@ informed the force_mode RPC patterns and zero/settle ordering.
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -138,6 +139,25 @@ def _parse_args(argv=None):
                    help="ACTIVE-phase max duration before clean exit as 'timeout'")
     p.add_argument("--bias-warn-n", type=float, default=DEFAULT_BIAS_WARN_N,
                    help="warn (not abort) if any axis post-zero bias exceeds this")
+    # Phase 5: per-shape termination config
+    p.add_argument("--config", default=None,
+                   help="path to a per-shape YAML in compliant_insertion_studio/configs/. "
+                        "If unset, auto-resolves to configs/<object>.yaml; if that file "
+                        "is also missing, falls back to legacy --timeout-only ACTIVE exit.")
+    # Phase 5 v1: CAD-derived target via base world pose (camera, captured by
+    # iterate_insert.py before grasp). Wrapper composes with assembly_index +
+    # grasp_points to predict TCP at seat. Universal across all FMB1 parts.
+    p.add_argument("--base-world-pose", nargs=7, type=float, default=None,
+                   metavar=("X", "Y", "Z", "QX", "QY", "QZ", "QW"),
+                   help="Base's pose in world (base_link) frame as captured from "
+                        "/objects_poses_real BEFORE the gripper occluded the camera. "
+                        "Enables CAD-derived predicted_tcp_at_seat in the termination predicate.")
+    p.add_argument("--hole-xy-prior", nargs=2, type=float, default=None,
+                   metavar=("X", "Y"),
+                   help="Observed hole xy from a prior attempt (when the spiral "
+                        "detected a z-descent spike). Replaces CAD-derived target_xy "
+                        "for Mode B's TOWARD-target direction. Use this when the "
+                        "physical slot is offset from CAD prediction (per-grasp variance).")
     # Calibration provenance (passed through to meta JSON)
     p.add_argument("--cal-yaml", default=None,
                    help="path to foundational calibration YAML (recorded in meta JSON)")
@@ -147,6 +167,9 @@ def _parse_args(argv=None):
     # Misc
     p.add_argument("--no-prompt-notes", action="store_true",
                    help="do not prompt for user_notes at end (useful for unattended dispatcher runs)")
+    p.add_argument("--skip-home-on-done", action="store_true",
+                   help="skip the final move_home in cleanup (saves ~5s during tuning; "
+                        "still does stop force mode + switch + safe_height)")
     p.add_argument("--wrapper-version", default=None,
                    help="version tag for meta JSON (default: 'compliant_insert.py@<git-sha>')")
     return p.parse_args(argv)
@@ -183,10 +206,16 @@ def _switch_controllers(activate, deactivate, logger=None) -> bool:
     return result.returncode == 0
 
 
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
 def _list_active_controllers() -> set:
     """Poll `ros2 control list_controllers` and return set of active controller names.
 
     WRAP-07: switch_controller RPC success != actual controller transition complete.
+    Strips ANSI color escape codes — `ros2 control list_controllers` emits color
+    even when stdout is a pipe, which would otherwise leave `parts[-1]` as
+    `'\\x1b[0m'` and silently break the active-set detection.
     """
     try:
         result = subprocess.run(
@@ -198,15 +227,18 @@ def _list_active_controllers() -> set:
     if result.returncode != 0:
         return set()
     active = set()
-    for line in result.stdout.splitlines():
-        # Format: "<name> <type> <state>" — state is "active" or "inactive"
-        parts = line.split()
+    for raw_line in result.stdout.splitlines():
+        line = _ANSI_ESCAPE_RE.sub('', raw_line).strip()
+        # Format after stripping: "<name>  <type>  <state>" — state is
+        # "active" or "inactive". Trailing whitespace is preserved by the
+        # CLI so we strip per-token below.
+        parts = [p for p in line.split() if p]
         if len(parts) >= 3 and parts[-1] == "active":
             active.add(parts[0])
     return active
 
 
-def _await_controller_active(name: str, *, timeout_s: float = 2.0,
+def _await_controller_active(name: str, *, timeout_s: float = 5.0,
                              logger=None) -> bool:
     """WRAP-07: poll list_controllers until `name` shows as active or timeout."""
     deadline = time.time() + timeout_s
@@ -267,6 +299,11 @@ class CompliantInsertEpisode(Node):
         self.target_quat: tuple[float, float, float, float] | None = None
         self.commanded_fz: float = 0.0
         self.in_force_mode: bool = False
+
+        # v1.1: object-pose tracking — set after HOVER lands. The wrapper carries
+        # the operator-provided `current_object_orientation` as ground truth at
+        # HOVER end; per-row obj_q* in CSV is `R_tcp_now × R_tcp_to_object`.
+        self.tcp_to_object_quat: tuple[float, float, float, float] | None = None
 
         # ROS QoS — match force_torque_sensor_broadcaster (RELIABLE, KEEP_LAST(1), VOLATILE)
         sensor_qos = QoSProfile(
@@ -368,6 +405,18 @@ class CompliantInsertEpisode(Node):
         p = self.tcp.pose.position
         q = self.tcp.pose.orientation
 
+        # v1.1: object-pose estimate. Position copies TCP (Phase 5 can apply
+        # gripper-to-object-center offset from per-object models if needed).
+        # Orientation = R_tcp_now × R_tcp_to_object (constant transform set
+        # at HOVER end from operator-provided current_object_orientation).
+        if self.tcp_to_object_quat is not None:
+            R_tcp = _SciRot.from_quat([q.x, q.y, q.z, q.w])
+            R_t2o = _SciRot.from_quat(list(self.tcp_to_object_quat))
+            R_obj = R_tcp * R_t2o
+            obj_qx, obj_qy, obj_qz, obj_qw = R_obj.as_quat().tolist()
+        else:
+            obj_qx = obj_qy = obj_qz = obj_qw = float("nan")
+
         row = {
             "t_s": t, "phase": self.phase,
             "event_marker": self.event_marker_counter,
@@ -383,6 +432,10 @@ class CompliantInsertEpisode(Node):
             "tx": t_x, "ty": t_y, "tz": t_z,
             "gripper_width": self.gripper_width_v,
             "commanded_fz": self.commanded_fz,
+            # --- v1.1 columns ---
+            "wrench_frame_id": (self.wrench.header.frame_id or ""),
+            "obj_x": p.x, "obj_y": p.y, "obj_z": p.z,
+            "obj_qx": obj_qx, "obj_qy": obj_qy, "obj_qz": obj_qz, "obj_qw": obj_qw,
         }
         self.csv_writer.write(row)
         self.zero_event_pending = 0   # one-shot flag
@@ -418,7 +471,22 @@ class CompliantInsertEpisode(Node):
         return {"Fx": f_x, "Fy": f_y, "Fz": f_z, "Tx": t_x, "Ty": t_y, "Tz": t_z}
 
     # ------------------- start/stop force mode ----------------------------
-    def _start_force_mode(self, sel_vec: list[bool]) -> bool:
+    def _start_force_mode(self, sel_vec: list[bool],
+                           override_wrench_baselink: tuple | None = None,
+                           gain_override: float | None = None,
+                           damping_override: float | None = None,
+                           quiet: bool = False) -> bool:
+        """Call SetForceMode. Default wrench = (0, 0, -fz, 0, 0, 0) in base_link
+        (operator's intent: push down). When `override_wrench_baselink` is
+        provided as (Fx, Fy, Fz, Tx, Ty, Tz), use those values directly —
+        used by Phase 5 Mode B to apply correction wrench deltas during ACTIVE.
+
+        Phase 5 Mode B v2 (spiral search) uses gain_override/damping_override
+        to drop force-mode gain/damping during search bursts (per GPT/Chhatpar/
+        FANUC research: search wants gain ~0.5 + damping ~0.2 vs nominal 1.0/0.7).
+        Set quiet=True to skip the per-call log (used inside spiral re-call loop
+        to avoid log spam at 20 Hz).
+        """
         if not self.start_fm.wait_for_service(timeout_sec=3.0):
             self.get_logger().error("start_force_mode service unavailable")
             return False
@@ -450,21 +518,28 @@ class CompliantInsertEpisode(Node):
         req.selection_vector_ry = sel_vec[4]
         req.selection_vector_rz = sel_vec[5]
 
-        # Operator's intent (in base_link): push down with Fz N along base_link -Z axis.
-        # Convert base_link wrench → base wrench: X and Y signs flipped, Z preserved.
-        # For Phase 2 today the only commanded component is fz (along base_link -Z),
-        # so the conversion is trivially Z = Z. The X/Y flip code is here for the
-        # future case (e.g. lateral nudge during compliance) so the conversion is
-        # correct end-to-end.
-        intent_baselink = (0.0, 0.0, -fz)   # (Fx, Fy, Fz) commanded in base_link
-        wrench_in_base = (-intent_baselink[0], -intent_baselink[1], intent_baselink[2])
+        # Operator's intent (in base_link): default = push down with Fz N along
+        # base_link -Z axis, no lateral / torque. Phase 5 Mode B can override via
+        # `override_wrench_baselink` to apply correction deltas (lateral push +
+        # counter-torque) for stuck-state escape.
+        # Convert base_link wrench → base wrench: X and Y signs flipped, Z preserved
+        # (verified empirically 2026-05-03 by verify_baselink_motion.py).
+        if override_wrench_baselink is not None:
+            intent_baselink = tuple(float(v) for v in override_wrench_baselink)
+        else:
+            # Default: push down only
+            intent_baselink = (0.0, 0.0, -fz, 0.0, 0.0, 0.0)
+        wrench_in_base = (
+            -intent_baselink[0], -intent_baselink[1], intent_baselink[2],
+            -intent_baselink[3], -intent_baselink[4], intent_baselink[5],
+        )
 
-        req.wrench.force.x = wrench_in_base[0]
-        req.wrench.force.y = wrench_in_base[1]
-        req.wrench.force.z = wrench_in_base[2]
-        req.wrench.torque.x = 0.0
-        req.wrench.torque.y = 0.0
-        req.wrench.torque.z = 0.0
+        req.wrench.force.x  = wrench_in_base[0]
+        req.wrench.force.y  = wrench_in_base[1]
+        req.wrench.force.z  = wrench_in_base[2]
+        req.wrench.torque.x = wrench_in_base[3]
+        req.wrench.torque.y = wrench_in_base[4]
+        req.wrench.torque.z = wrench_in_base[5]
 
         req.type = SetForceMode.Request.NO_TRANSFORM   # = 2
 
@@ -475,8 +550,10 @@ class CompliantInsertEpisode(Node):
         req.speed_limits.angular.y = float(self.args.ang_speed)
         req.speed_limits.angular.z = float(self.args.ang_speed)
 
-        req.gain_scaling = float(self.args.gain)
-        req.damping_factor = float(self.args.damping)
+        gain_eff    = float(gain_override)    if gain_override    is not None else float(self.args.gain)
+        damping_eff = float(damping_override) if damping_override is not None else float(self.args.damping)
+        req.gain_scaling = gain_eff
+        req.damping_factor = damping_eff
 
         future = self.start_fm.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
@@ -485,23 +562,46 @@ class CompliantInsertEpisode(Node):
             self.get_logger().error("start_force_mode call failed")
             return False
         self.in_force_mode = True
-        self.commanded_fz = -fz
-        self.get_logger().info(
-            f"Force mode active: Fz={-fz} N, sel={sel_vec}, gain={self.args.gain} damp={self.args.damping}"
-        )
+        self.commanded_fz = intent_baselink[2]
+        if not quiet:
+            self.get_logger().info(
+                f"Force mode active: wrench={intent_baselink}, sel={sel_vec}, "
+                f"gain={gain_eff} damp={damping_eff}"
+            )
         return True
 
     def _stop_force_mode(self) -> None:
         if not self.in_force_mode:
             return
-        if self.stop_fm.wait_for_service(timeout_sec=2.0):
-            future = self.stop_fm.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-            r = future.result()
-            if r is None or not r.success:
-                self.get_logger().warn(f"stop_force_mode reported: {getattr(r, 'message', 'no response')}")
-            else:
-                self.get_logger().info("Force mode stopped")
+        # Send a zero-wrench first to settle the controller before stop. After
+        # long force-mode runs (170s+) the controller can be busy/unresponsive
+        # to the immediate stop call, leaving URCap in a stopped state. The
+        # zero-wrench gives controller a brief idle frame to acknowledge.
+        try:
+            self._start_force_mode([False, False, False, False, False, False],
+                                   override_wrench_baselink=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            time.sleep(0.5)
+        except Exception as e:
+            self.get_logger().debug(f"zero-wrench prep failed (non-fatal): {e}")
+
+        # Up to 3 retries with backoff
+        stopped_cleanly = False
+        for attempt in range(3):
+            if self.stop_fm.wait_for_service(timeout_sec=2.0):
+                future = self.stop_fm.call_async(Trigger.Request())
+                rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+                r = future.result()
+                if r is not None and r.success:
+                    self.get_logger().info(f"Force mode stopped (attempt {attempt+1})")
+                    stopped_cleanly = True
+                    break
+                self.get_logger().warn(
+                    f"stop_force_mode attempt {attempt+1} reported: "
+                    f"{getattr(r, 'message', 'no response')}"
+                )
+            time.sleep(0.5)
+        if not stopped_cleanly:
+            self.get_logger().warn("stop_force_mode never confirmed; proceeding")
         self.in_force_mode = False
         self.commanded_fz = 0.0
 
@@ -700,7 +800,30 @@ def run_hover(ep: CompliantInsertEpisode) -> str:
     ep.target_xyz = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
     ep.target_quat = (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
     ep.meta.set_assembly_target(list(ep.target_xyz), list(ep.target_quat))
+    # v1.1: hover_pose_world is now required (was optional in v1.0).
     ep.meta.set_optional("hover_pose_world", {"xyz_m": list(ep.target_xyz), "quat_xyzw": list(ep.target_quat)})
+
+    # v1.1: derive TCP-to-object rotation transform. Operator-provided
+    # current_object_orientation is treated as ground-truth at HOVER end (the
+    # camera can't see the held part reliably, so this is the chain anchor).
+    # Per-row obj_q* in CSV = R_tcp_now × R_tcp_to_object.
+    try:
+        cobj = ep.args.current_object_orientation
+        if cobj is not None and len(cobj) == 4:
+            R_tcp_hover = _SciRot.from_quat(list(ep.target_quat))
+            R_obj_input = _SciRot.from_quat([float(c) for c in cobj])
+            R_tcp_to_obj = R_tcp_hover.inv() * R_obj_input
+            ep.tcp_to_object_quat = tuple(R_tcp_to_obj.as_quat().tolist())
+            ep.meta.set_optional("current_object_orientation_input", [float(c) for c in cobj])
+            ep.meta.set_optional("tcp_to_object_transform", {
+                "tcp_xyz_at_hover": list(ep.target_xyz),
+                "tcp_quat_at_hover": list(ep.target_quat),
+                "tcp_to_object_quat_xyzw": list(ep.tcp_to_object_quat),
+                "convention": "R_object_now = R_tcp_now * R_tcp_to_object",
+                "position_note": "obj_xyz in CSV copies TCP xyz; gripper-to-object-center offset is per-object (apply in Phase 5)",
+            })
+    except Exception as _e:
+        ep.get_logger().warn(f"tcp_to_object_quat derivation failed: {_e}")
 
     # Loud warning: target = HOVER pose for v1 — not the actual hole. dx/dy/dz
     # in the CSV will look like noise around zero (descent) and any in-plane
@@ -735,7 +858,7 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         return s.PHASE_ABORT
 
     # WRAP-07: verify the switch actually took effect, not just RPC success
-    if not _await_controller_active(FORCE_CTRL, timeout_s=2.0, logger=ep.get_logger()):
+    if not _await_controller_active(FORCE_CTRL, timeout_s=5.0, logger=ep.get_logger()):
         ep.meta.set_outcome(s.OUTCOME_ABORT, "force_mode_controller_did_not_activate")
         return s.PHASE_ABORT
 
@@ -799,9 +922,212 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
 
 
 def run_active(ep: CompliantInsertEpisode) -> str:
-    """ACTIVE phase (WRAP-06 + WRAP-07). Loop until SIGTERM / SIGABRT / timeout."""
+    """ACTIVE phase (WRAP-06 + WRAP-07).
+
+    Phase 5: if a per-shape config (defaults.yaml + configs/<object>.yaml) is
+    available, the loop also evaluates a termination predicate each tick and
+    exits as success when it fires sustainedly. Falls back to SIGTERM /
+    SIGABRT / --timeout if no config is present.
+    """
     ep.phase = s.PHASE_ACTIVE
     ep.get_logger().info("=== ACTIVE: enter force mode, log telemetry until exit ===")
+
+    # Resolve per-shape config (Phase 5). None = legacy timeout-only behaviour.
+    term_eval = None
+    correction_eval = None
+    fsm = None       # ContactSearchFSM (Phase 5 v3, replaces term_eval+correction_eval)
+    cfg_path = None
+    cfg = None
+    predicted_tcp_z_at_seat = None
+    try:
+        from compliant_insertion_studio.wrapper.insert_config import (
+            load_config, resolve_config_for_object,
+            TerminationEvaluator, CorrectionEvaluator,
+        )
+        from compliant_insertion_studio.wrapper.contact_search_fsm import ContactSearchFSM
+        if ep.args.config:
+            cfg_path = Path(ep.args.config)
+        else:
+            cfg_path = resolve_config_for_object(ep.args.object_name)
+        if cfg_path is not None:
+            cfg = load_config(cfg_path)
+            hover_z = ep.target_xyz[2] if ep.target_xyz else None
+
+            # Phase 5 v1: CAD-derived universal target. If --base-world-pose was
+            # provided, compose with assembly_index + grasp_points to predict
+            # the exact TCP-at-seat z. Otherwise fall back to hover_z + per-
+            # shape descended_min_m (Phase 5 v0).
+            if ep.args.base_world_pose is not None:
+                try:
+                    from compliant_insertion_studio.wrapper.cad_lookup import (
+                        predict_tcp_at_seat,
+                    )
+                    bp = ep.args.base_world_pose
+                    # Phase 5 v2 (2026-05-04): cad_lookup now needs held_quat
+                    # (object orientation in world) and EE orientation in world
+                    # so it can apply fold-symmetry equivalents and project the
+                    # flange offset along the gripper's tool-Z (not the object's
+                    # rotated Z, which was the v1 bug — see cad_lookup docstring).
+                    held_quat = ep.args.current_object_orientation
+                    if held_quat is None:
+                        raise ValueError(
+                            "predict_tcp_at_seat requires --current-object-orientation"
+                        )
+                    # EE orientation at PRE — usually face-down already (set by
+                    # the rotate_object primitive during setup). The wrapper
+                    # samples ep.tcp from /tcp_pose_broadcaster.
+                    if ep.tcp is None:
+                        # Spin a few times to populate
+                        import time as _time
+                        for _ in range(50):
+                            rclpy.spin_once(ep, timeout_sec=0.05)
+                            if ep.tcp is not None:
+                                break
+                            _time.sleep(0.02)
+                    if ep.tcp is None:
+                        raise ValueError(
+                            "EE pose not available from /tcp_pose_broadcaster"
+                        )
+                    ee_q = ep.tcp.pose.orientation
+                    ee_quat = [float(ee_q.x), float(ee_q.y), float(ee_q.z), float(ee_q.w)]
+                    pred = predict_tcp_at_seat(
+                        base_name=ep.args.base_name,
+                        object_name=ep.args.object_name,
+                        grasp_id=int(ep.args.grasp_id),
+                        base_world_xyz=bp[:3],
+                        base_world_quat_xyzw=bp[3:],
+                        held_quat_xyzw=list(held_quat),
+                        ee_orientation_xyzw=ee_quat,
+                    )
+                    predicted_tcp_z_at_seat = pred["predicted_tcp_at_seat"]["xyz_m"][2]
+                    fs = pred.get("fold_symmetry_used", {})
+                    ep.get_logger().info(
+                        f"Phase 5 v2 CAD-derived predicted_tcp_z_at_seat = "
+                        f"{predicted_tcp_z_at_seat:.4f} m  "
+                        f"(hover_z={hover_z:.4f}, expected descent="
+                        f"{(hover_z - predicted_tcp_z_at_seat) * 1000:.1f} mm; "
+                        f"fold_sym pos_err={fs.get('pos_error_mm', 0):.2f}mm "
+                        f"ang_err={fs.get('angle_error_deg', 0):.1f}°)"
+                    )
+                    ep.meta.set_optional("cad_prediction", pred)
+                except Exception as e:
+                    ep.get_logger().error(
+                        f"cad_lookup failed ({e}) — predicate falls back to v0 hover-relative"
+                    )
+
+            # Phase 5 v3 (2026-05-04 PM): ContactSearchFSM replaces the
+            # term_eval + correction_eval architecture. The FSM follows
+            # the canonical ConnTact pattern (APPROACH → FIND_HOLE → INSERT)
+            # with measured (not assumed) state transitions. This honors
+            # operator's "no hard z" requirement and the per-part agnostic
+            # design — surface_z is measured at APPROACH exit, hole-drop is
+            # detected as a relative z descent below surface_z, INSERT exits
+            # on motion-stopped post-hole-entry.
+            fsm_cfg = (cfg.get("fsm") or {}) if cfg else {}
+            # Pass hole_xy_prior as spiral origin override (cross-attempt learning).
+            # If a previous run found the hole xy via z-drop detection, anchor
+            # this spiral search there rather than peg's random contact xy.
+            spiral_origin_override = None
+            if ep.args.hole_xy_prior is not None:
+                spiral_origin_override = (float(ep.args.hole_xy_prior[0]),
+                                          float(ep.args.hole_xy_prior[1]))
+            # Predicted TCP xy: target the FSM uses for recovery leash and
+            # engagement distance gate. Priority: observed truth > CAD prediction.
+            # When --hole-xy-prior is supplied (cross-attempt observed seat OR
+            # operator-injected truth), use it as the leash target — observed
+            # data is more reliable than CAD which can have 15-20mm error per
+            # u_orange empirics. Falls back to CAD chain otherwise.
+            predicted_tcp_xy = None
+            if ep.args.hole_xy_prior is not None:
+                predicted_tcp_xy = (float(ep.args.hole_xy_prior[0]),
+                                    float(ep.args.hole_xy_prior[1]))
+            else:
+                try:
+                    cad = ep.meta._meta.get("cad_prediction") if hasattr(ep.meta, "_meta") else None
+                    if isinstance(cad, dict):
+                        pt = cad.get("predicted_tcp_at_seat", {}).get("xyz_m")
+                        if pt and len(pt) >= 2:
+                            predicted_tcp_xy = (float(pt[0]), float(pt[1]))
+                except Exception:
+                    pass
+
+            # Vector from TCP to part_center (object origin) in WORLD frame
+            # at canonical seat. Used by FSM to compensate Fz→Ty lever-arm
+            # moment that creates spurious tilt around part center even with
+            # no commanded torques. Operator's geometric insight: grasp is
+            # offset ~28mm from part center; pure Fz at TCP becomes
+            # F + (r × F) torque at part center, biasing tilt.
+            r_grasp_to_partcenter_world = (0.0, 0.0, 0.0)
+            try:
+                cad = ep.meta._meta.get("cad_prediction") if hasattr(ep.meta, "_meta") else None
+                if isinstance(cad, dict):
+                    tcp = cad.get("predicted_tcp_at_seat", {}).get("xyz_m")
+                    obj = cad.get("T_world_object_seat", {}).get("xyz_m")
+                    if tcp and obj and len(tcp) >= 2 and len(obj) >= 2:
+                        r_grasp_to_partcenter_world = (
+                            float(obj[0]) - float(tcp[0]),
+                            float(obj[1]) - float(tcp[1]),
+                            float(obj[2]) - float(tcp[2]) if len(tcp) >= 3 and len(obj) >= 3 else 0.0,
+                        )
+                        ep.get_logger().info(
+                            f"r_grasp_to_partcenter_world (CAD-derived): "
+                            f"({r_grasp_to_partcenter_world[0]*1000:+.1f}, "
+                            f"{r_grasp_to_partcenter_world[1]*1000:+.1f}, "
+                            f"{r_grasp_to_partcenter_world[2]*1000:+.1f}) mm — "
+                            f"used for Fz→T lever-arm compensation"
+                        )
+            except Exception as e:
+                ep.get_logger().warn(f"Failed to compute r_grasp_to_partcenter: {e}")
+            try:
+                # Compute object_origin in EE frame from CAD r_world. CAD
+                # gives r_world at canonical face-down EE [0,-1,0,0] (rotation
+                # matrix = diag(-1, 1, -1)). To get object_origin_in_EE,
+                # apply inverse rotation (= self for diagonal ±1): just
+                # negate x and z components of r_world.
+                object_origin_in_EE = (
+                    -r_grasp_to_partcenter_world[0],
+                    +r_grasp_to_partcenter_world[1],
+                    -r_grasp_to_partcenter_world[2],
+                )
+                fsm = ContactSearchFSM(fsm_cfg,
+                                       spiral_origin_override=spiral_origin_override,
+                                       predicted_tcp_xy=predicted_tcp_xy,
+                                       r_grasp_to_partcenter_world=r_grasp_to_partcenter_world,
+                                       object_origin_in_EE=object_origin_in_EE)
+                _orig_str = (f"override=({spiral_origin_override[0]:+.4f},"
+                             f"{spiral_origin_override[1]:+.4f})"
+                             if spiral_origin_override is not None else "= contact_xy")
+                _pred_str = (f"predicted_xy=({predicted_tcp_xy[0]:+.4f},{predicted_tcp_xy[1]:+.4f})"
+                             if predicted_tcp_xy is not None else "predicted_xy=None")
+                ep.get_logger().info(
+                    f"Phase 5 v3 FSM active — APPROACH → FIND_HOLE → ENTRY_SETTLE → INSERT "
+                    f"(spiral v={fsm.spiral_v_m_s*1000:.1f}mm/s p={fsm.spiral_pitch_m*1000:.1f}mm "
+                    f"max_radius={fsm.find_hole_max_radius_m*1000:.0f}mm origin {_orig_str}, {_pred_str}, "
+                    f"recovery r_free={fsm.recovery_r_free_m*1000:.0f}mm r_full={fsm.recovery_r_full_m*1000:.0f}mm "
+                    f"F_max={fsm.recovery_F_max_N:.1f}N, engagement_dist_gate={fsm.engagement_dist_thresh_m*1000:.0f}mm)"
+                )
+                ep.meta.set_optional("fsm_config", fsm_cfg)
+            except Exception as _e:
+                ep.get_logger().error(f"FSM init failed ({_e}) — falling back to --timeout")
+                fsm = None
+        else:
+            ep.get_logger().info(
+                f"No config found for object={ep.args.object_name!r} — "
+                "running legacy --timeout-only ACTIVE loop."
+            )
+    except Exception as e:
+        ep.get_logger().warn(f"Config load failed ({e}) — legacy mode.")
+
+    # v1.1: snapshot TCP world pose at the moment ACTIVE begins. Phase 5
+    # uses this as the time-zero anchor for all per-row alignment / signature
+    # extraction (e.g., descent depth = tcp_z(t) - tcp_z(active_start)).
+    if ep.tcp is not None:
+        _p = ep.tcp.pose.position
+        _q = ep.tcp.pose.orientation
+        ep.meta.set_optional("tcp_pose_at_active_start", {
+            "xyz_m": [_p.x, _p.y, _p.z],
+            "quat_xyzw": [_q.x, _q.y, _q.z, _q.w],
+        })
 
     sel_vec = _parse_selection(ep.args.selection)
     if not ep._start_force_mode(sel_vec):
@@ -855,7 +1181,281 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     ep.meta.set_outcome(s.OUTCOME_ABORT, "restart_force_mode_after_rezero_failed")
                     return s.PHASE_ABORT
 
-        # Timeout
+        # ====================================================================
+        # Phase 5 v3 — ContactSearchFSM dispatch (replaces term_eval + Mode B)
+        # ====================================================================
+        if fsm is not None and ep.tcp is not None and ep.wrench is not None:
+            t_now_fsm = time.time()
+            _p = ep.tcp.pose.position
+            _q = ep.tcp.pose.orientation
+            (Fx_b, Fy_b, Fz_b), (Tx_b, Ty_b, Tz_b) = ep._wrench_in_base(ep.wrench)
+            fsm_action = fsm.update(
+                t_now_fsm, _p.x, _p.y, _p.z, Fz_b,
+                F_lat_baselink=(Fx_b, Fy_b),
+                T_lat_baselink=(Tx_b, Ty_b),
+                tcp_quat_xyzw=(float(_q.x), float(_q.y), float(_q.z), float(_q.w)),
+            )
+
+            # Throttled diagnostic
+            if not hasattr(ep, '_last_fsm_diag_t'):
+                ep._last_fsm_diag_t = 0.0
+            if (t_now_fsm - ep._last_fsm_diag_t) >= 1.0:
+                ep._last_fsm_diag_t = t_now_fsm
+                if fsm_action.msg:
+                    ep.get_logger().info(fsm_action.msg)
+
+            # State-transition log (always)
+            if fsm_action.transitioned:
+                ep.get_logger().warn(
+                    f"=== FSM → {fsm_action.new_state}: {fsm_action.transition_msg}"
+                )
+
+            # Terminal lifecycles
+            if fsm_action.kind == "exit_done":
+                ep.get_logger().info(
+                    f"FSM SEATED: surface_z={fsm.surface_z}, hole_xy={fsm.hole_xy}, "
+                    f"hole_z={fsm.hole_z}, final_z={_p.z:.4f}, "
+                    f"descent_post_hole_mm="
+                    f"{((fsm.hole_z - _p.z)*1000) if fsm.hole_z is not None else None}"
+                )
+                ep.meta.set_outcome(s.OUTCOME_SUCCESS, "fsm_seated")
+                ep.meta.set_optional("fsm_result", {
+                    "surface_z_m":            fsm.surface_z,
+                    "hole_xy_m":              list(fsm.hole_xy) if fsm.hole_xy else None,
+                    "hole_z_m":               fsm.hole_z,
+                    "final_tcp_z_m":          float(_p.z),
+                    "descent_post_hole_m":    (fsm.hole_z - _p.z) if fsm.hole_z is not None else None,
+                    "transition_msg":         fsm_action.transition_msg,
+                })
+                # Persist hole_xy for cross-attempt learning (iterate_insert reads this)
+                if fsm.hole_xy is not None:
+                    ep.meta.set_optional("hole_observed", {
+                        "xy_m":   list(fsm.hole_xy),
+                        "z_m":    float(fsm.hole_z) if fsm.hole_z is not None else 0.0,
+                        "source": "fsm_find_hole",
+                    })
+                return s.PHASE_DONE
+
+            if fsm_action.kind == "exit_abort":
+                ep.get_logger().error(
+                    f"FSM ABORT in {fsm.state}: {fsm_action.abort_reason}"
+                )
+                ep.meta.set_outcome(s.OUTCOME_ABORT, f"fsm_abort:{fsm_action.abort_reason[:80]}")
+                ep.meta.set_optional("fsm_result", {
+                    "abort_state":   fsm.state,
+                    "abort_reason":  fsm_action.abort_reason,
+                    "surface_z_m":   fsm.surface_z,
+                    "hole_xy_m":     list(fsm.hole_xy) if fsm.hole_xy else None,
+                    "hole_z_m":      fsm.hole_z,
+                    "final_tcp_z_m": float(_p.z),
+                })
+                return s.PHASE_ABORT
+
+            # Wrench update if needed (PD-spiral re-issues every tick during FIND_HOLE)
+            if fsm_action.new_wrench:
+                ep._start_force_mode(
+                    list(fsm_action.selection_vector),
+                    override_wrench_baselink=fsm_action.wrench_baselink,
+                    gain_override=fsm_action.gain,
+                    damping_override=fsm_action.damping,
+                    quiet=True,
+                )
+
+            # Skip the legacy term_eval / Mode B path below
+            term_eval = None
+            correction_eval = None
+
+        # === Legacy paths (only run if FSM is None, e.g. config-less mode) ===
+        # Phase 5 — termination predicate (autonomous exit)
+        if term_eval is not None and ep.tcp is not None:
+            _p = ep.tcp.pose.position
+            # Pass current fz so the evaluator can auto-detect contact.
+            # IMPORTANT: contact threshold expects BASE-frame Fz (peg pushed up = +Z).
+            # Raw ep.wrench is in tool0_controller frame and has the OPPOSITE sign for
+            # face-down EE — using raw fz would silently disable contact detection,
+            # which in turn gates off Mode B and the diag prints. Use _wrench_in_base.
+            fz_now = None
+            if ep.wrench is not None:
+                (_fx, _fy, _fz), _ = ep._wrench_in_base(ep.wrench)
+                fz_now = _fz
+            fired, dbg = term_eval.eval(_p.x, _p.y, _p.z, time.time(),
+                                         fz_smoothed=fz_now)
+            # Notify correction evaluator on first contact (so its warmup timer starts)
+            if correction_eval is not None and term_eval.contact_z is not None:
+                correction_eval.note_contact(time.time())
+            # Predicate-state diagnostic — print every 1 s so we can see WHY
+            # the predicate hasn't fired (which sub-condition is failing).
+            _t_now_diag = time.time()
+            if not hasattr(ep, '_last_pred_diag_t'):
+                ep._last_pred_diag_t = 0.0
+            if (_t_now_diag - ep._last_pred_diag_t) >= 1.0:
+                ep._last_pred_diag_t = _t_now_diag
+                _r = dbg.get('results', {})
+                _v_lat = dbg.get('v_lat', 0.0) * 1000
+                _v_z = dbg.get('v_z', 0.0) * 1000
+                _dpc = dbg.get('descended_post_contact')
+                _dpc_mm = (_dpc * 1000) if _dpc is not None else None
+                _sustained = dbg.get('sustained_s', 0.0)
+                ep.get_logger().info(
+                    f"Predicate: motion={_r.get('motion_stopped','?')} "
+                    f"at_seat={_r.get('tcp_z_reached_predicted','?')} "
+                    f"dpc={_r.get('descended_post_contact','?')} | "
+                    f"v_lat={_v_lat:.2f}mm/s v_z={_v_z:+.2f}mm/s "
+                    f"tcp_z={_p.z:.4f} dpc_mm={_dpc_mm} "
+                    f"sustained={_sustained:.2f}/{term_eval.sustain_s:.1f}s"
+                )
+            if fired:
+                _desc_hover = dbg.get('descended_from_hover', 0.0) or 0.0
+                _desc_pc = dbg.get('descended_post_contact')
+                _desc_pc_str = f"{_desc_pc:.4f}" if _desc_pc is not None else "n/a"
+                ep.get_logger().info(
+                    f"Termination predicate fired: descended_from_hover={_desc_hover:.4f} m, "
+                    f"descended_post_contact={_desc_pc_str} m, "
+                    f"v_lat={dbg.get('v_lat', 0.0):.4f} m/s, "
+                    f"sustained={dbg.get('sustained_s', 0.0):.2f} s, "
+                    f"results={dbg.get('results', {})}"
+                )
+                ep.meta.set_outcome(s.OUTCOME_SUCCESS, "predicate_met")
+                ep.meta.set_optional("termination_fire_debug", {
+                    "v_lat_at_fire_m_s": float(dbg.get("v_lat", 0.0)),
+                    "descended_from_hover_at_fire_m": float(_desc_hover),
+                    "descended_post_contact_at_fire_m": (
+                        float(_desc_pc) if _desc_pc is not None else None
+                    ),
+                    "sustained_s": float(dbg.get("sustained_s", 0.0)),
+                    "predicate_results": dbg.get("results", {}),
+                })
+                return s.PHASE_DONE
+
+        # Phase 5 Mode B — active correction (back-off-on-stuck + exploration)
+        if correction_eval is not None and ep.tcp is not None and ep.wrench is not None:
+            t_now = time.time()
+            tcp_z_now = ep.tcp.pose.position.z
+            # Sample current state in BASE_LINK frame
+            (Fx_b, Fy_b, Fz_b), (Tx_b, Ty_b, Tz_b) = ep._wrench_in_base(ep.wrench)
+            # Diagnostic — once per second so operator can SEE detection state
+            diag = correction_eval.get_diag(t_now, Fz_b, tcp_z_now, (Fx_b, Fy_b), (Tx_b, Ty_b))
+            if diag:
+                ep.get_logger().info(diag)
+            # Pass target xy if CAD prediction is available — Mode B uses this
+            # for TOWARD-TARGET directional correction (much better than
+            # counter-residual; analysis showed counter-residual pointed AWAY
+            # from target 58% of corrections in iter3).
+            tcp_xy_now = (ep.tcp.pose.position.x, ep.tcp.pose.position.y)
+            target_xy = None
+            # Highest-priority: --hole-xy-prior override (from a prior attempt
+            # where the spiral detected the actual hole). This is the most
+            # accurate target_xy because it accounts for per-grasp variance.
+            if ep.args.hole_xy_prior is not None:
+                target_xy = (float(ep.args.hole_xy_prior[0]), float(ep.args.hole_xy_prior[1]))
+            # Otherwise fall back to CAD-derived prediction
+            if target_xy is None and predicted_tcp_z_at_seat is not None:
+                cad = (ep.meta._meta.get("cad_prediction") if hasattr(ep.meta, "_meta") else None)
+                if isinstance(cad, dict):
+                    pt = cad.get("predicted_tcp_at_seat", {}).get("xyz_m")
+                    if pt and len(pt) >= 2:
+                        target_xy = (float(pt[0]), float(pt[1]))
+            # Final fallback: ep.target_xyz (hover xy ≈ assembly center xy)
+            if target_xy is None and ep.target_xyz is not None:
+                target_xy = (float(ep.target_xyz[0]), float(ep.target_xyz[1]))
+
+            # at_seat: if predicted seat z is known and tcp_z is within 5mm,
+            # suppress new Mode B triggers (predicate will fire as peg settles).
+            at_seat = False
+            if predicted_tcp_z_at_seat is not None:
+                at_seat = abs(tcp_z_now - predicted_tcp_z_at_seat) <= 0.005
+            action, payload = correction_eval.update(
+                t_now, Fz_b, tcp_z_now, (Fx_b, Fy_b), (Tx_b, Ty_b),
+                tcp_xy=tcp_xy_now, target_xy=target_xy, at_seat=at_seat,
+            )
+            if action == "apply":
+                # Poke mode (v1 legacy): one-shot delta wrench
+                dfx, dfy, dtx, dty = payload["delta"]
+                fz_default = -float(ep.args.fz)  # base_link frame: push down = -|fz|
+                ep.get_logger().warn(
+                    f"=== Mode B #{payload['n']} ({payload['mode']}): "
+                    f"residual F={payload['residual_F_N']:.2f}N T={payload['residual_T_Nm']:.3f}Nm "
+                    f"net_descent={payload['net_descent_rate_mm_s']:.3f}mm/s → "
+                    f"delta F=({dfx:+.2f},{dfy:+.2f})N T=({dtx:+.3f},{dty:+.3f})Nm for "
+                    f"{correction_cfg.get('action',{}).get('duration_s', 0.4):.2f}s"
+                )
+                ep._start_force_mode(
+                    sel_vec,
+                    override_wrench_baselink=(dfx, dfy, fz_default, dtx, dty, 0.0),
+                )
+            elif action == "apply_spiral":
+                # Spiral mode (v2): full base-link wrench setpoint with lower
+                # gain/damping. Re-issued at spiral_command_period_s during burst.
+                wrench = payload["wrench_baselink"]
+                # Log only the FIRST setpoint of each burst (when 'n' is in payload)
+                # OR when phase changes from retract→search. All other re-issues
+                # are quiet to avoid log spam at 20 Hz.
+                first_in_burst = "n" in payload
+                if first_in_burst:
+                    ep.get_logger().warn(
+                        f"=== Mode B #{payload['n']} ({payload['mode']}): "
+                        f"residual F={payload['residual_F_N']:.2f}N T={payload['residual_T_Nm']:.3f}Nm "
+                        f"net_descent={payload['net_descent_rate_mm_s']:.3f}mm/s → "
+                        f"wrench={wrench} gain={payload['gain']} damp={payload['damping']} "
+                        f"for {correction_cfg.get('action',{}).get('duration_s', 1.5):.2f}s"
+                    )
+                ep._start_force_mode(
+                    sel_vec,
+                    override_wrench_baselink=wrench,
+                    gain_override=payload["gain"],
+                    damping_override=payload["damping"],
+                    quiet=not first_in_burst,
+                )
+            elif action == "revert":
+                # Two flavors of revert:
+                # (a) normal end-of-burst (payload=None): cooldown after spiral completes
+                # (b) early-exit hole-detected (payload={hole_xy, hole_z, rate, ...}):
+                #     CorrectionEvaluator detected z-descent spike → peg found
+                #     chamfer/slot. Stop the spiral, command default wrench (-Fz),
+                #     let peg drop into hole. Termination predicate then fires
+                #     when settled.
+                if isinstance(payload, dict) and payload.get("reason") == "hole_detected":
+                    hxy = payload["hole_xy"]
+                    ep.get_logger().warn(
+                        f"=== HOLE DETECTED at correction #{payload['correction']}: "
+                        f"descent rate spiked to {payload['rate_mm_s']:.1f} mm/s; "
+                        f"hole xy = ({hxy[0]:+.4f}, {hxy[1]:+.4f}) m, "
+                        f"z = {payload['hole_z']:.4f} m. "
+                        f"Reverting to default wrench so peg can settle."
+                    )
+                    # Compute predicted xy for traceability (delta = grasp variance)
+                    predicted_xy = [None, None]
+                    cad_pred = (ep.meta._meta.get("cad_prediction")
+                                if hasattr(ep.meta, "_meta") else None)
+                    if isinstance(cad_pred, dict):
+                        pt = cad_pred.get("predicted_tcp_at_seat", {}).get("xyz_m")
+                        if pt and len(pt) >= 2:
+                            predicted_xy = [float(pt[0]), float(pt[1])]
+                    # Persist for cross-attempt learning + analysis
+                    ep.meta.set_optional("hole_observed", {
+                        "xy_m":           list(hxy),
+                        "z_m":            float(payload["hole_z"]),
+                        "rate_mm_s":      float(payload["rate_mm_s"]),
+                        "correction":     int(payload["correction"]),
+                        "predicted_xy_m": predicted_xy,
+                    })
+                else:
+                    ep.get_logger().info(
+                        f"=== Mode B revert — back to default wrench (fz={ep.args.fz}, lat=0, T=0) "
+                        f"+ nominal gain/damping ({ep.args.gain}/{ep.args.damping})"
+                    )
+                # Default wrench AND default gain/damping (nominal)
+                ep._start_force_mode(sel_vec)
+            elif action == "abort":
+                ep.get_logger().error(f"Mode B abort: {payload}")
+                ep.meta.set_outcome(s.OUTCOME_ABORT, f"correction_failed:{payload}")
+                ep.meta.set_optional("termination_fire_debug", {
+                    "correction_count": correction_eval.correction_count,
+                    "abort_reason": str(payload),
+                })
+                return s.PHASE_ABORT
+
+        # Timeout (legacy fallback or hard ceiling)
         if time.time() >= active_deadline:
             ep.get_logger().info(f"Timeout {ep.args.timeout}s reached — exiting as 'timeout'")
             ep.meta.set_outcome(s.OUTCOME_TIMEOUT, "timeout_reached")
@@ -882,32 +1482,70 @@ def run_done(ep: CompliantInsertEpisode) -> None:
     except Exception as e:
         ep.get_logger().error(f"stop_force_mode error: {e}")
 
-    # 2. Switch back to position controller (idempotent — even if already switched)
+    # 2. Switch back to position controller (idempotent — even if already switched).
+    # CRITICAL: verify the switch actually took effect via _await_controller_active.
+    # Previously this return value was ignored, leaving force_mode_controller active
+    # while the wrapper plowed ahead to issue position-controlled trajectories that
+    # were silently rejected — robot stayed where it was, operator got no warning.
+    controller_ok = False
     try:
-        _switch_controllers(activate=[POS_CTRL], deactivate=[FORCE_CTRL], logger=ep.get_logger())
-        _await_controller_active(POS_CTRL, timeout_s=2.0, logger=ep.get_logger())
+        switched = _switch_controllers(
+            activate=[POS_CTRL], deactivate=[FORCE_CTRL], logger=ep.get_logger())
+        if switched:
+            controller_ok = _await_controller_active(
+                POS_CTRL, timeout_s=5.0, logger=ep.get_logger())
+        if not controller_ok:
+            ep.get_logger().error(
+                f"=== {ep.phase}: switch to {POS_CTRL} did NOT take effect — "
+                f"SKIPPING safe-height/home moves. Robot is at last commanded pose; "
+                f"{FORCE_CTRL} may still be active. Manually clear with:\n"
+                f"  ros2 service call /force_mode_controller/stop_force_mode std_srvs/srv/Trigger\n"
+                f"  ros2 control switch_controllers --activate {POS_CTRL} --deactivate {FORCE_CTRL}"
+            )
     except Exception as e:
         ep.get_logger().error(f"switch back to position controller error: {e}")
 
-    # 3. move_to_safe_height FIRST (avoids straight-line through inserted base)
-    try:
-        ep.get_logger().info("Subprocess: move_to_safe_height")
-        subprocess.run(
-            [sys.executable, str(_REPO_ROOT / "primitives" / "move_to_safe_height.py")],
-            capture_output=True, text=True, timeout=60, cwd=str(_REPO_ROOT),
-        )
-    except Exception as e:
-        ep.get_logger().error(f"move_to_safe_height subprocess error: {e}")
+    # 3. move_to_safe_height FIRST (avoids straight-line through inserted base).
+    # Gated on controller_ok — useless otherwise, trajectory would be silently rejected.
+    # Use python -m module mode (NOT script-path) so the primitive's
+    # `from primitives.shared.config import ...` import resolves.
+    if controller_ok and not getattr(ep.args, "skip_home_on_done", False):
+        # safe_height runs even with --skip-home-on-done; the flag only skips home
+        pass
+    if controller_ok:
+        try:
+            ep.get_logger().info("Subprocess: move_to_safe_height")
+            res = subprocess.run(
+                [sys.executable, "-m", "primitives.move_to_safe_height", "--mode", "real"],
+                capture_output=True, text=True, timeout=60, cwd=str(_REPO_ROOT),
+            )
+            if res.returncode != 0:
+                ep.get_logger().error(
+                    f"move_to_safe_height rc={res.returncode}; "
+                    f"stderr tail: {res.stderr.splitlines()[-3:] if res.stderr else '(empty)'}"
+                )
+        except Exception as e:
+            ep.get_logger().error(f"move_to_safe_height subprocess error: {e}")
 
-    # 4. move_home
-    try:
-        ep.get_logger().info("Subprocess: move_home")
-        subprocess.run(
-            [sys.executable, str(_REPO_ROOT / "primitives" / "move_home.py")],
-            capture_output=True, text=True, timeout=60, cwd=str(_REPO_ROOT),
-        )
-    except Exception as e:
-        ep.get_logger().error(f"move_home subprocess error: {e}")
+    # 4. move_home (optional — skipped during tuning to save ~5s).
+    # Gated on controller_ok like safe_height; same module-mode fix.
+    if getattr(ep.args, "skip_home_on_done", False):
+        ep.get_logger().info("Subprocess: move_home SKIPPED (--skip-home-on-done)")
+    elif controller_ok:
+        try:
+            ep.get_logger().info("Subprocess: move_home")
+            res = subprocess.run(
+                [sys.executable, "-m", "primitives.move_home", "--joint-space",
+                 "--mode", "real"],
+                capture_output=True, text=True, timeout=60, cwd=str(_REPO_ROOT),
+            )
+            if res.returncode != 0:
+                ep.get_logger().error(
+                    f"move_home rc={res.returncode}; "
+                    f"stderr tail: {res.stderr.splitlines()[-3:] if res.stderr else '(empty)'}"
+                )
+        except Exception as e:
+            ep.get_logger().error(f"move_home subprocess error: {e}")
 
     ep.hands_off = 0
 

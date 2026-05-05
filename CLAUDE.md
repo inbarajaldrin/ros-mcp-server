@@ -111,6 +111,9 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 - `ros2 topic hz /force_torque_sensor_broadcaster/wrench` — **~500 Hz** sustained (not 125 Hz — important for CSV-writer sizing).
 - `python3 -c "import numpy, pandas, yaml; print(...)"` — numpy 2.2.6, pandas 2.2.3, PyYAML 6.0.2 all present.
 - `apt list --installed | grep ros-humble` — driver 2.12.0, ur_msgs 2.3.0, controller_manager 2.48.0 confirmed.
+- **WRAP-VERIFY end-to-end PASSED on u_brown** (2026-05-03): FSM walks PRE → HOVER → ZERO → ACTIVE → DONE; 15,177 telemetry samples per run; CSV+meta JSON written to `compliant_insertion_studio/logs/`.
+- **F/T payload calibration recovered** (2026-05-03): mass=2.1109 kg, CoG=[-0.0032, +0.0031, -0.0318]m. Pasted into bringup as `set_target_payload(2.1109, [-0.0032, 0.0031, -0.0318])`.
+- **Reusable orchestrator script validated**: `compliant_insertion_studio/scripts/run_assembly_step.py` works for u_brown grasp_id=1. Other 3 FMB1 grasp_ids need 5-min verification before Phase 3 collection.
 ## Sources
 - [Universal_Robots_ROS2_Driver — humble branch](https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver/tree/humble) — current Humble release verified, 2.13.0 (April 2026) — **HIGH** (official repo, version verified against locally installed 2.12.0).
 - [UR ROS2 Driver releases page](https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver/releases) — release dates and notes for 2.12.0 → 2.13.0 — **HIGH**.
@@ -145,6 +148,10 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 - **`_references/` and `compliant_insertion_studio/logs/` are gitignored**: never commit reference repos or telemetry.
 - **Ask the operator before**: adding a new top-level dependency, writing > 200 LOC without checkpoint, performing any robot motion, modifying primitives outside `compliant_insertion_studio/`, departing from a documented decision in PROJECT/REQUIREMENTS/ROADMAP.
 - **Two execution tracks — away-from-robot and at-robot**: every requirement is tagged either `[N]` (no-robot — can be done from anywhere with the codebase) or `[R]` (robot-required — needs the physical UR5e + bringup). When the operator is away from the robot, work the `[N]` track. When the operator is at the robot, work the `[R]` track and any `[N]` items needed to unblock it. **`.planning/TRACKS.md` is the live list of what's ready in each track right now.** Update it whenever a task transitions states (ready → in-progress → done, or new requirements get tagged).
+- **Bring-up runbook**: `compliant_insertion_studio/docs/SETUP.md` is the full cold-start guide (repos, processes, per-task commands, troubleshooting). Read it before doing anything at-robot.
+- **Phase 3 entry point**: `python3 -m compliant_insertion_studio.scripts.run_assembly_step --object-name X --base-name base1 --grasp-id N` runs the full canonical pick→rotate→place→regrasp→rotate→insert sequence. One CLI per assembly step. Use `--already-held --current-object-orientation QX QY QZ QW` to skip pick/regrasp.
+- **Held-object pose chains, not reads**: when the gripper holds a part, NEVER read its pose from `/objects_poses_real` (camera occluded by gripper). Chain `current_object_orientation` from the previous primitive's `__RESULT_JSON__` output.
+- **Strip ANSI before parsing ROS2 CLI output**: `ros2 control list_controllers` (and likely others) emit `\x1b[…m` color escapes even when stdout is a pipe. Use `re.sub(r'\x1b\[[0-9;]*m', '', line)` before tokenizing. Silently breaks naïve parsers.
 ## Anti-patterns — explicit "don't"
 - Writing 100-line SOPs based on extrapolation rather than documented procedures
 - Confusing similar-sounding concepts (e.g., "calibration" vs "bias offset" — they are different things on a UR5e)
@@ -155,6 +162,15 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 - Putting project deliverables outside `compliant_insertion_studio/`
 - Treating `zero_ftsensor` as a substitute for correct payload identification
 - Code that assumes Remote pendant mode or dashboard recovery automation
+- Killing the gripper bridge with `pkill -f gripper_control` (won't match — actual cmdline is `python3 /opt/ros/humble/bin/ros2 run …`). Use `pkill -f "socat.*ttyUR"` or `kill -9 <PID>` after `ps aux | grep gripper_control`.
+- Restarting socat-using processes without 5+ second wait between kill and respawn (PTY/termios race produces `(22, 'Invalid argument')` on next pyserial open).
+- Treating `translate_object --insert` as the insert path. The new `compliant_insert` wrapper is the replacement (FSM: PRE→HOVER→ZERO→ACTIVE→DONE). The legacy CLI doesn't split HOVER from ACTIVE.
+- Launching primitives subprocesses by script path (`python3 primitives/move_to_safe_height.py`). Use module mode (`python3 -m primitives.move_to_safe_height`) — the script-path form fails with ModuleNotFoundError because primitives import siblings, and the failure is often swallowed inside cleanup paths.
+- Treating wrench data as `base_link` frame. The CSV `wrench_frame_id` column says `tool0_controller`. Direction-aware features (r_cop = ‖(-Ty/Fz, Tx/Fz)‖, F_lat in operator's intuitive frame) MUST be computed in tool frame; raw `Tx, Ty` magnitudes look small (~0.05 Nm) until normalized by Fz.
+- Using counter-residual direction for force corrections during wedge-breaking. When the peg is wedged at one corner, the wrist sensor reads the OPPOSITE direction (the part is pressed into the rim edge on the other side). Counter-residual = AWAY from target. Use CAD-derived TOWARD-target direction (`target_xy − tcp_xy`) instead.
+- Pushing harder downward / cardinal force pokes to break peg-on-rim wedges. Empirically (4 iterations × 12 corrections = ABORT each time on 2026-05-04) it deepens the wedge. The right action is retract 0.5–1.5 mm + drop Fz to -2 to -4 N + 1.5–2.0 s spiral search at lower `gain_scaling` (0.4–0.7) and `damping_factor` (0.15–0.30). Sources: Chhatpar 2001, FANUC, Robotiq.
+- Detecting "stuck" from instantaneous v_z. Force-mode oscillation makes v_z dip momentarily even mid-wedge. Use net z-descent over a 2 s window with Fz smoothed over 0.5 s.
+- **Self-matching `pgrep -f` in `until` loops.** A bash one-liner like `until ! pgrep -f "loop_iterate.*u_orange" >/dev/null; do sleep 2; done` (run via Bash-tool `eval`) **never exits** because the spawning bash itself contains the literal pattern in its cmdline — pgrep matches its own host shell, returns 0 forever. Failure mode observed 2026-05-04: 7 monitors leaked across one session, all with status "running" but pegged on `pgrep`. Fixes: (a) match the python invocation specifically with `pgrep -f "python3.*loop_iterate"`, (b) wait on a known PID with `while kill -0 <PID> 2>/dev/null; do sleep 2; done`, or (c) use the Monitor tool which streams events out-of-band. Don't use `pgrep -f` to wait on processes spawned via Bash tool.
 ## Decision matrix — copy / modify / write-fresh
 | Decision | When to use |
 |---|---|
@@ -162,6 +178,11 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 | **Modify after copying** | Mostly fits, needs only surface tweaks (paths, message types, function names) |
 | **Write fresh from algorithm/pattern** | Reference is in different language/framework/era, but the algorithm or pattern is sound — translate the *idea*, not the lines |
 | **Skip** | Reference is well-known but doesn't fit our stack/scope (e.g., a node requiring an accelerometer we don't have) |
+## OnRobot RG2 firmware quirks (verified 2026-05-03)
+- **No precise positioning mode**: only modes 1 (grip), 8 (stop), 16 (grip_w_offset). Both 1 and 16 are GRIP commands — close past target by 1-5mm depending on direction. Mode 16 (default in our bridge) overshoots ±3-5mm; mode 1 ±2mm but targets RAW width (caller must add ~9.2mm fingertip offset). Width-based grasp checks must tolerate ≥5mm error (already widened in `move_to_grasp.py:888`).
+- **Safety circuit latch**: bits 3, 5 of status reg 268 (`safety_circuit_1/2`). Per OnRobot docs: "can only be reset by power cycling." Software path: Modbus write `unit=63 addr=0 value=2` triggers Compute Box power-cycle (~10s); requires pendant STOP+PLAY after to re-attach URCap. NOT in local `onrobot.py`; documented in upstream `Osaka-University-Harada-Laboratory/onrobot.restartPowerCycle()`.
+- **Width topics differ by 9.2mm**: `/gripper_width` is RAW mechanism, `/gripper_width_offset` is jaw-tip-to-jaw-tip gap (raw − 2 × 4.6mm fingertip). For grasping, use `/gripper_width_offset`.
+
 ## When to use which calibration layer
 | Layer | Frequency | What it does | Trigger |
 |---|---|---|---|
@@ -211,7 +232,137 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
 ## Architecture
 
-Architecture not yet mapped. Follow existing patterns found in the codebase.
+### Phase 5 iterative-loop workflow (live as of 2026-05-04)
+
+Three-script chain for tuning the insert primitive on one object:
+
+```
+loop_iterate.py  →  iterate_insert.py  →  compliant_insert.py (wrapper)
+   harness            one-attempt              FSM: PRE→HOVER→ZERO→ACTIVE→DONE/ABORT
+   N consecutive       delegates setup to
+   successes           run_assembly_step --setup-only
+                       then launches wrapper
+```
+
+Canonical command (one object, ≥5 consecutive successes):
+
+```
+python3 -m compliant_insertion_studio.scripts.loop_iterate \
+  --object-name u_orange --base-name base1 --grasp-id 1
+```
+
+Tighter target / specific first held quat:
+
+```
+python3 -m compliant_insertion_studio.scripts.loop_iterate \
+  --object-name u_orange --base-name base1 --grasp-id 1 \
+  --target-success-count 3 \
+  --first-held-quat 0.0062 -0.6494 0.7604 0.0055
+```
+
+`iterate_insert.py` (one attempt) flow:
+1. Capture base1 world pose from `/objects_poses_real` BEFORE grasp (camera unobstructed by gripper)
+2. Run `run_assembly_step.py --setup-only` → executes pick → rotate → place → regrasp → rotate, prints `PARSED HELD_QUAT [...]` on stdout
+3. Launch the wrapper with `--base-world-pose X Y Z QX QY QZ QW` (CAD-derived predicted target) and `--use-default-base-position` and the held quat
+4. Wrapper FSM runs to DONE (predicate met) or ABORT (timeout / max-corrections / safety)
+
+`loop_iterate.py` chains across attempts: parses `PARSED HELD_QUAT` from attempt 1's stdout and passes it to attempts 2+ as `--already-held --held-quat <captured>`. Attempt 1 does the full canonical sequence (pick → rotate → place → regrasp → rotate). Attempts 2..N do **rotate-only** via `run_assembly_step --already-held --setup-only` (jumps straight to step 12 = rotate_object). **The gripper stays closed across every iteration** — no release, no regrasp. But **rotate_object IS called every attempt**, re-snapping EE orientation to canonical face-down.
+
+Why the every-attempt rotate is critical: the wrapper's cleanup retracts holding whatever EE orientation the prior insert left, which is typically tilted by a few degrees because peg/slot tolerance lets the held part rotate slightly during force-mode wedging. Without re-rotating, the next attempt starts tilted (we measured a 4.5° baked-in tilt on 2026-05-04 iter 7 because we wrongly skipped rotate) and burns 20+ corrections fighting the angle instead of just inserting. Calling `rotate_object` is cheap (~3 s, one trajectory) and idempotent (snaps to nearest fold-equivalent of canonical).
+
+Why every release+regrasp cycle is bad: (a) wastes ~30 s, (b) the place-down disturbs the part on the table, (c) `run_assembly_step` opens the gripper as its first action when NOT in `--already-held` mode, dropping any held part wherever the robot currently is. We hit this on 2026-05-04 (iter 5 + iter 6 setups failed at `move_to_grasp` because the part had drifted). Keeping the part held end-to-end + re-rotating each attempt is the canonical pattern.
+
+### Wrapper key APIs
+
+- `cad_lookup.predict_tcp_at_seat(base, object, grasp_id, base_world_xyz, base_world_quat_xyzw, flange_offset_m=0.2286)` — full chain `T_world_base ∘ T_base_object_seat ∘ T_object_grasp_point ∘ T_grasp_point_tcp`. Reads `~/Documents/aruco-grasp-annotator/data/fmb_assembly1.json` + `grasp_points/<obj>_grasp_points.json`.
+- `--config <yaml>` — defaults to `compliant_insertion_studio/configs/defaults.yaml` (universal, shape-agnostic). Per-shape YAMLs are deleted; the termination predicate is derived from CAD chain, not shape geometry.
+- `--use-default-base-position` — required when `--base-position` is not passed; computes hover/insert targets from CAD chain.
+
+### Cancel-safety chain (REQUIRES idempotent process-group cleanup)
+
+```
+Operator Ctrl+C
+  → loop_iterate SIGTERM handler
+    → os.killpg(iterate_insert pgid, SIGTERM)
+      → iterate_insert SIGTERM handler
+        → os.killpg(wrapper pgid, SIGTERM)
+          → wrapper run_done():
+              stop_force_mode → switch to scaled_joint_trajectory_controller
+              → _await_controller_active (gates the next step)
+              → python3 -m primitives.move_to_safe_height
+              → exit
+```
+
+Each layer wraps the child in `os.setsid` (`preexec_fn=os.setsid` in `subprocess.Popen`) so SIGTERM hits the whole pgroup. The wrapper's `_await_controller_active` is what makes the safe-height subprocess actually run — without it, the script-mode invocation can fail silently (ModuleNotFoundError swallowed) leaving force_mode_controller active.
+
+### Engagement gate must allow z-drop dominance (2026-05-04 PM)
+
+The CAD-derived predicted xy can be 15–20 mm off the actual seat (observed on iter v70: peg seated at xy=(0.0301,−0.3598), CAD-predicted (0.0257,−0.3560), error ~17 mm even after spiral recentering). A strict 6 mm `engagement_dist_thresh_m` then wrongly rejects a peg that's clearly inside the slot. Add a z-drop dominance shortcut in ENTRY_SETTLE: if `surface_z − tcp_z ≥ engaged_z_drop_dominant_m` (default 20 mm), accept engagement regardless of CAD-xy distance. Operator-demo full descent is 25–30 mm, so 20 mm is a safe "definitely inside" threshold. The dist gate still catches metastable low-force states where peg sits on top of rim (z_drop ≪ 20 mm).
+
+### Contact xy ≠ Seat xy (2026-05-04 evening)
+
+Critical late-session finding (likely root cause of an entire 12-hour failed iteration session): the **first-contact xy** (where peg first hits Fz>5N) is NOT the **seat xy** (where peg ends up after descending through chamfer). For u_orange today: contact at (+0.0308, -0.3554), seat at (+0.0341, -0.3635). 5.7mm offset in X, 8mm in Y. The first contact lands on the **rim**, the seat is the **slot center**. **`hole_xy_prior` should be the SEAT xy**, not the contact xy. Using contact xy as the spiral target points the search at the rim, where the peg can't drop in.
+
+For each operator demo, extract BOTH values; use SEAT xy as the prior:
+- contact_xy = first ACTIVE row with `fz > 5N`
+- seat_xy = LAST ACTIVE row (or row where descent rate drops to 0 with z near predicted seat z)
+
+### State-independent global seat detector (2026-05-04 evening)
+
+The FSM's local `_motion_stopped_first_t` resets on every state transition (ENTRY_SETTLE↔FIND_HOLE↔INSERT). With our gate flapping under marginal conditions, this means a SEATED peg can sit motionless for 60+ seconds without ever accumulating the 0.75s sustain needed for the local seat predicate to fire. **Add a state-independent seat detector that runs every tick regardless of FSM state** (in `update()` before state dispatch): if `surface_z - tcp_z >= 20mm AND |dz/dt| < 0.5mm/s AND tilt < 5°` for 1.0s sustained, declare exit_done. Verified offline on FAIL_INSERT CSV: would have correctly fired at t=74.75s when peg had been seated for 60s.
+
+### Cross-run signal analysis findings (2026-05-04 evening)
+
+Comparing 6 successful vs 122 failed u_orange attempts at each timepoint post-contact:
+- **t=1.0s: success has F_lat=3.5N + xy_excursion=0.9mm; failure has F_lat=0.6N + xy=0.3mm.**
+- **t=1.5s: success F_lat=4.7N, xy=2.1mm; failure 0.8N, 0.4mm.**
+- t=2.0s: success z_drop=2.2mm; failure 0.16mm.
+- Successes have ~5N sustained F_lat for 1-1.5s causing 2mm xy excursion, then peg drops at t=2s.
+- Failures don't accumulate this lateral motion → never engage chamfer.
+
+Implication: an `INITIAL_PRESS` phase commanding 5N sustained for 1.5s in a fixed direction is the missing mechanism. The spiral PD only generates 0.5-2N sustained because PD is reactive — error stays small. Operator's hand applies sustained directed push that algorithm doesn't replicate. Implemented in FSM as `find_hole_press_*` knobs.
+
+### Anti-pattern: tuning parameters without first analyzing data
+
+12-hour session in 2026-05-04 wasted hours on parameter iteration (16+ versions v82-v97) before doing the analytical work that should have come first. **Rule for next sessions: write a CSV cross-run analyzer FIRST. Iterate parameters only after the data has revealed the actual failure mechanism.** Monitor commands are for state-transition events, not for diagnosing why peg isn't moving.
+
+### Mode A vs Mode B (Phase 5)
+
+- **Mode A** = pure compliance with universal termination predicate:
+  `motion_stopped AND tcp_z_reached_predicted (CAD-derived) AND descended_post_contact ≥ 25 mm`, sustained 1 s.
+- **Mode B** = active correction triggered by stuck-detection:
+  `net z-descent over 2 s window < 0.5 mm/s AND smoothed Fz > 6 N`, sustained 2 s. State machine: NORMAL → CORRECTING → COOLDOWN → NORMAL. Up to `max_corrections=12` per episode, then ABORT.
+
+### Mode B action-type research (2026-05-04, /tmp/gpt-task-result-123444.txt)
+
+We tested 4 iterations of "push harder" Mode B (downward Fz=-9N + lateral force pokes 6N + counter-torque 0.3Nm). All 4 ABORT at 12 corrections. The peg is geometrically wedged on the rim; pushing deeper deepens the wedge. **Action type matters more than action magnitude.**
+
+Right action for peg-on-rim wedge:
+1. Retract 0.5–1.5 mm to unload static friction
+2. Drop Fz to -2 to -4 N during search (NOT -9 N)
+3. Run continuous spiral search 1.5–2.0 s, radius 0.25 → 1.0 mm
+4. Lower force-mode gain during search: `gain_scaling=0.4–0.7` (vs nominal 1.0), `damping_factor=0.15–0.30` (vs nominal 0.7)
+5. Restore nominal Fz/gains after correction
+
+Sources GPT cited: Chhatpar & Branicky (2001) — spiral pitch = clearance; FANUC force-control manual — switch to search when error > chamfer + clearance/2; Robotiq spiral-search practice; Tang et al. (2016) on three-point contact.
+
+### Wrench-feature hierarchy (verified empirically on iter-4 dataset)
+
+- **Wrench frame is `tool0_controller`**, NOT `base_link`. Telemetry CSV column `wrench_frame_id` confirms. Direction-aware features (r_cop, F_lat in operator's intuitive frame) MUST be computed in tool frame, then optionally transformed via TCP quaternion if needed for base-frame analysis.
+- **r_cop = ‖(-Ty/Fz, Tx/Fz)‖** is the missing direction signal. On iter-4 ACTIVE phase: median r_cop = 5.5 mm, mean COP vector = (-1.0, -5.4) mm (consistent direction, not noise) — for a ~22 mm peg, that's rim-contact-scale lever arm. Raw `Tx, Ty` look "tiny" (~0.05 Nm) until you normalize by Fz.
+- **Counter-residual is geometrically wrong for wedges**. When peg is wedged at (-X,-Y) corner, wrist sensor reads (+X,+Y) because the part is being pressed into the (+X,+Y) rim edge. Counter-residual direction = AWAY from target. **Use TOWARD-TARGET direction** (CAD-derived `target_xy − tcp_xy`) for force corrections.
+- **Stuck-detection: net z-descent over 2 s window**, NOT instantaneous v_z. Smooth Fz over 0.5 s window before threshold-checking — force-mode oscillation makes instantaneous fz dip below threshold momentarily, breaking sustain timers.
+
+### Subprocess invocation rule
+
+Inside the wrapper / orchestrator scripts, ALWAYS launch primitives via module mode:
+
+```
+python3 -m primitives.move_to_safe_height ...    # CORRECT
+python3 primitives/move_to_safe_height.py ...    # WRONG: ModuleNotFoundError
+```
+
+The script-path form fails because primitives import sibling modules from the `primitives` package. We hit this twice on 2026-05-04 — once swallowed silently inside the cleanup path, leaving force_mode_controller active after ABORT.
 <!-- GSD:architecture-end -->
 
 <!-- GSD:skills-start source:skills/ -->
