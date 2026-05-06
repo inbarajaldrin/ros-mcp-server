@@ -27,7 +27,9 @@ REPO_ROOT="$(cd "$ANALYSIS_DIR/../.." && pwd)"
 PROMPT_FILE="$ANALYSIS_DIR/PROMPT.md"
 STATE_FILE="$ANALYSIS_DIR/STATE.json"
 ITER_ROOT="$ANALYSIS_DIR/iterations"
-PROMISE='<promise>RALPH_CONVERGED</promise>'
+# Convergence is signaled by a flag file the agent touches when ALL phase-A criteria are met.
+# (The previous string-grep approach was poisoned by narrative prose containing the literal tag.)
+CONVERGED_FLAG="$ITER_ROOT/.RALPH_CONVERGED"
 
 mode="${1:-help}"
 
@@ -113,10 +115,10 @@ print('known invariants:', len(s.get('known_invariants', [])))
       }
       # Refresh derived data so newly added iterations are reflected
       python3 "$SCRIPT_DIR/run_all.py" >/dev/null 2>&1 || true
-      # Check convergence
-      if grep -rq "$PROMISE" "$ITER_ROOT" 2>/dev/null; then
+      # Check convergence: a flag file (not a string match) so narrative prose can't trigger it.
+      if [ -f "$CONVERGED_FLAG" ]; then
         echo
-        echo "$PROMISE found → converged in $iter iterations"
+        echo "$CONVERGED_FLAG present → converged in $iter iterations"
         break
       fi
       # Auto-commit analysis-only artifacts

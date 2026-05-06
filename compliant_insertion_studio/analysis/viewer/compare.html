@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Insertion Episode Compare — compliant_insertion_studio</title>
+<script src="https://cdn.plot.ly/plotly-cartesian-3.5.1.min.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; padding: 16px; background: #f7f7f8; color: #1a1a1a; }
+  h1 { margin: 0 0 6px; font-size: 18px; }
+  .lede { color: #666; font-size: 13px; margin-bottom: 12px; }
+  .drop { border: 2px dashed #c0c0c8; border-radius: 8px; padding: 18px; text-align: center; background: #fff; cursor: pointer; }
+  .drop.over { border-color: #5a7; background: #f3f9f5; }
+  .drop input { display: none; }
+  .drop label { color: #36a; font-weight: 500; cursor: pointer; }
+  .pair { display: flex; gap: 12px; margin: 12px 0; }
+  .slot { flex: 1; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; font-size: 13px; min-height: 48px; }
+  .slot strong { color: #036; }
+  .slot .meta { font-family: monospace; font-size: 11.5px; color: #555; line-height: 1.55; }
+  .clear { background: #eee; border: 1px solid #ccc; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .plot { background: #fff; border: 1px solid #ddd; border-radius: 6px; min-height: 320px; }
+  .plot.full { grid-column: 1 / -1; }
+  .controls { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; margin-top: 8px; font-size: 12px; }
+  .controls label { display: inline-block; margin-right: 14px; }
+  .legend-key { display: inline-block; padding: 1px 6px; border-radius: 3px; margin-right: 4px; font-weight: 600; font-size: 11px; }
+  .legend-A { background: #1f77b4; color: white; }
+  .legend-B { background: #d62728; color: white; }
+</style>
+</head>
+<body>
+<h1>Insertion Episode Compare</h1>
+<div class="lede">
+  Drag two episode JSONs from <code>compliant_insertion_studio/analysis/data/viewer_*.json</code> (one to Slot&nbsp;A, one to Slot&nbsp;B). Or use the file pickers. Plots align both episodes on the contact moment (t=0).
+</div>
+
+<div class="pair">
+  <div class="slot" id="slotA">
+    <strong>Slot A <span class="legend-key legend-A">A</span></strong>
+    <div class="drop" data-slot="A">
+      <span>Drop JSON here, or </span>
+      <label>browse<input type="file" accept=".json" data-slot="A"></label>
+    </div>
+    <div class="meta" id="metaA"></div>
+  </div>
+  <div class="slot" id="slotB">
+    <strong>Slot B <span class="legend-key legend-B">B</span></strong>
+    <div class="drop" data-slot="B">
+      <span>Drop JSON here, or </span>
+      <label>browse<input type="file" accept=".json" data-slot="B"></label>
+    </div>
+    <div class="meta" id="metaB"></div>
+  </div>
+</div>
+
+<div class="controls">
+  <label><input type="checkbox" id="alignContact" checked> Align both on first contact (Fz crosses ±5N)</label>
+  <label><input type="checkbox" id="showRaw"> Overlay native-rate wrench (500 Hz)</label>
+  <label><input type="checkbox" id="showJoints"> Show joint torque plot</label>
+  <button class="clear" onclick="reset()">Reset</button>
+</div>
+
+<div class="row">
+  <div class="plot" id="plot_xy"></div>
+  <div class="plot" id="plot_z"></div>
+  <div class="plot" id="plot_tilt"></div>
+  <div class="plot" id="plot_yaw"></div>
+  <div class="plot" id="plot_flat"></div>
+  <div class="plot" id="plot_fz"></div>
+  <div class="plot" id="plot_tlat"></div>
+  <div class="plot" id="plot_cmd_lat"></div>
+  <div class="plot full" id="plot_obj_xyz"></div>
+  <div class="plot full" id="plot_joints" style="display:none"></div>
+</div>
+
+<script>
+const SLOTS = { A: null, B: null };
+const COLORS = { A: '#1f77b4', B: '#d62728' };
+const ALPHA = { A: 0.85, B: 0.85 };
+const RAW_ALPHA = { A: 0.35, B: 0.35 };
+
+document.querySelectorAll('.drop').forEach(d => {
+  d.addEventListener('dragover', e => { e.preventDefault(); d.classList.add('over'); });
+  d.addEventListener('dragleave', e => d.classList.remove('over'));
+  d.addEventListener('drop', e => {
+    e.preventDefault(); d.classList.remove('over');
+    const f = e.dataTransfer.files[0]; if (f) loadJson(d.dataset.slot, f);
+  });
+});
+document.querySelectorAll('input[type=file]').forEach(i => {
+  i.addEventListener('change', e => {
+    const f = e.target.files[0]; if (f) loadJson(e.target.dataset.slot, f);
+  });
+});
+['alignContact', 'showRaw', 'showJoints'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => {
+    document.getElementById('plot_joints').style.display = document.getElementById('showJoints').checked ? '' : 'none';
+    redraw();
+  });
+});
+
+function loadJson(slot, file) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      SLOTS[slot] = JSON.parse(r.result);
+      renderMeta(slot);
+      redraw();
+    } catch (e) {
+      alert('Failed to parse JSON: ' + e);
+    }
+  };
+  r.readAsText(file);
+}
+function renderMeta(slot) {
+  const d = SLOTS[slot]; if (!d) { document.getElementById('meta'+slot).innerHTML = ''; return; }
+  const fmp = d.force_mode_params || {};
+  const wrench = fmp.wrench || {};
+  document.getElementById('meta'+slot).innerHTML = `
+    <div><strong>${d.basename}</strong></div>
+    <div>${d.object} grasp_id=${d.grasp_id} schema_v${d.schema_version} • ${d.assist_level || 'autonomous'}</div>
+    <div><b>${d.outcome}</b>: ${(d.outcome_reason || '').substring(0, 80)}</div>
+    <div>cmd_fz=${(wrench.fz ?? '?')}N gain=${fmp.gain_scaling} damp=${fmp.damping_factor}</div>
+    <div>contact: ${d.contact?.idx ? `idx=${d.contact.idx} t=${d.contact.t_s?.toFixed(2)}s xyz=(${d.contact.tcp_xyz_m?.map(v=>(v*1000).toFixed(1)).join(',')})mm yaw=${d.contact.tcp_yaw_deg?.toFixed(1)}°` : '—'}</div>
+    <div>n_active=${d.active.n} • CAD seat=(${d.predicted_tcp_at_seat_m?.map(v => (v*1000).toFixed(1)).join(',')})mm</div>
+    <div>grasp_offset_in_obj=(${d.grasp_offset_in_object_m?.map(v => (v*1000).toFixed(1)).join(',')})mm</div>
+  `;
+}
+function reset() { SLOTS.A = SLOTS.B = null; ['A','B'].forEach(s => document.getElementById('meta'+s).innerHTML=''); redraw(); }
+
+function alignTime(d) {
+  if (!d || !d.active) return null;
+  const t = d.active.t_s.slice();
+  const align = document.getElementById('alignContact').checked;
+  const t0 = align ? (d.contact?.t_s ?? t[0]) : t[0];
+  return t.map(x => x - t0);
+}
+function activeTrace(d, slot, yField, yLabel, yTransform) {
+  if (!d) return null;
+  const t = alignTime(d);
+  let y = d.active[yField] ?? [];
+  if (yTransform) y = y.map(yTransform);
+  return {
+    x: t, y, type: 'scattergl', mode: 'lines', name: `${slot}: ${yLabel}`,
+    line: { color: COLORS[slot], width: 1.5 }, opacity: ALPHA[slot],
+  };
+}
+function rawWrenchTrace(d, slot, axis) {
+  if (!d || !d.wrench_raw || d.wrench_raw.n === 0) return null;
+  if (!document.getElementById('showRaw').checked) return null;
+  const t_active = d.active.t_s;
+  const t_raw = d.wrench_raw.t_s;
+  const t0_raw = t_raw[0];
+  const dt0_active = t_active[0];
+  const t0_offset = (d.contact?.t_s ?? t_active[0]);
+  const aligned = t_raw.map(x => (x - t0_raw) + dt0_active - t0_offset);
+  return {
+    x: aligned, y: d.wrench_raw[axis] ?? [], type: 'scattergl', mode: 'lines',
+    name: `${slot}: ${axis} (raw)`, line: { color: COLORS[slot], width: 0.6 }, opacity: RAW_ALPHA[slot],
+  };
+}
+
+function plotLine(divId, traces, layout) {
+  const xs = traces.flatMap(t => t.x.length > 0 ? [t.x[0], t.x[t.x.length-1]] : []);
+  Plotly.react(divId, traces, Object.assign({
+    margin: { l: 50, r: 10, t: 30, b: 35 },
+    legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
+    showlegend: true,
+  }, layout), { responsive: true, displaylogo: false });
+}
+
+function redraw() {
+  // Top-down xy trajectory
+  const xyTraces = [];
+  ['A','B'].forEach(slot => {
+    const d = SLOTS[slot]; if (!d) return;
+    const ci = d.contact?.idx ?? 0;
+    xyTraces.push({
+      x: d.active.tcp_x.slice(ci).map(v => v*1000),
+      y: d.active.tcp_y.slice(ci).map(v => v*1000),
+      type: 'scattergl', mode: 'lines+markers',
+      name: `${slot}: TCP xy (post-contact)`,
+      line: { color: COLORS[slot], width: 1.5 }, marker: { size: 3 }, opacity: 0.7,
+    });
+    if (d.predicted_tcp_at_seat_m) {
+      xyTraces.push({
+        x: [d.predicted_tcp_at_seat_m[0]*1000], y: [d.predicted_tcp_at_seat_m[1]*1000],
+        type: 'scatter', mode: 'markers+text',
+        name: `${slot}: CAD seat`,
+        marker: { color: COLORS[slot], size: 14, symbol: 'star' },
+        text: [`${slot} CAD`], textposition: 'top center',
+      });
+    }
+    // mark contact
+    xyTraces.push({
+      x: [d.active.tcp_x[ci]*1000], y: [d.active.tcp_y[ci]*1000],
+      type: 'scatter', mode: 'markers',
+      name: `${slot}: contact`, marker: { color: COLORS[slot], size: 12, symbol: 'circle-open', line: { width: 2 } },
+    });
+  });
+  plotLine('plot_xy', xyTraces, { title: 'TCP top-down xy (post-contact)', xaxis: { title: 'tcp_x mm', scaleanchor: 'y' }, yaxis: { title: 'tcp_y mm' } });
+
+  // tcp_z over time
+  const zTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'tcp_z', 'tcp_z', v => v*1000); if (t) zTraces.push(t); });
+  plotLine('plot_z', zTraces, { title: 'TCP z (mm) — drop_so_far', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'tcp_z (mm)' } });
+
+  // tilt
+  const tiltTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'tilt_deg', 'tilt'); if (t) tiltTraces.push(t); });
+  plotLine('plot_tilt', tiltTraces, { title: 'TCP tilt from canonical face-down (deg)', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'tilt (°)' } });
+
+  // yaw
+  const yawTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'yaw_deg', 'yaw'); if (t) yawTraces.push(t); });
+  plotLine('plot_yaw', yawTraces, { title: 'TCP yaw (rotation about EE Z) — peg arc indicator', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'yaw (°)' } });
+
+  // F_lat magnitude (tool)
+  const flatTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'F_lat_tool_N', '|F_lat|'); if (t) flatTraces.push(t); });
+  ['A','B'].forEach(slot => {
+    const r = rawWrenchTrace(SLOTS[slot], slot, 'fx'); if (r) flatTraces.push(r);
+  });
+  plotLine('plot_flat', flatTraces, { title: '|F_lat| sensed (tool frame, N)', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'N' } });
+
+  // F_z (tool frame)
+  const fzTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'fz_tool', 'fz'); if (t) fzTraces.push(t); });
+  ['A','B'].forEach(slot => {
+    const r = rawWrenchTrace(SLOTS[slot], slot, 'fz'); if (r) fzTraces.push(r);
+  });
+  plotLine('plot_fz', fzTraces, { title: 'fz sensed (tool frame, N) — peg axis force', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'N' } });
+
+  // T_lat magnitude
+  const tlatTraces = [];
+  ['A','B'].forEach(slot => { const t = activeTrace(SLOTS[slot], slot, 'T_lat_tool_Nm', '|T_lat|'); if (t) tlatTraces.push(t); });
+  plotLine('plot_tlat', tlatTraces, { title: '|T_lat| sensed (tool, Nm) — operator relax-then-engage signature', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'Nm' } });
+
+  // commanded F_lat events
+  const cmdLatTraces = [];
+  ['A','B'].forEach(slot => {
+    const d = SLOTS[slot]; if (!d || !d.cmd_wrench_raw || d.cmd_wrench_raw.n === 0) return;
+    const t0 = (d.contact?.t_s ?? d.active.t_s[0]);
+    const x = d.cmd_wrench_raw.t_s.map(v => v - t0);
+    const yMag = d.cmd_wrench_raw.cmd_fx.map((fx, i) => Math.hypot(fx ?? 0, d.cmd_wrench_raw.cmd_fy[i] ?? 0));
+    cmdLatTraces.push({
+      x, y: yMag, type: 'scattergl', mode: 'markers', name: `${slot}: |cmd_F_lat|`,
+      marker: { color: COLORS[slot], size: 4 }, opacity: 0.7,
+    });
+  });
+  plotLine('plot_cmd_lat', cmdLatTraces, { title: '|cmd_F_lat| events (algorithm intent)', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'N' } });
+
+  // Object xyz over time (verified chain)
+  const objTraces = [];
+  ['A','B'].forEach(slot => {
+    const d = SLOTS[slot]; if (!d) return;
+    const t = alignTime(d);
+    const ox = d.active.obj_xyz_m.map(v => v && !isNaN(v[0]) ? v[0]*1000 : null);
+    const oy = d.active.obj_xyz_m.map(v => v && !isNaN(v[1]) ? v[1]*1000 : null);
+    const oz = d.active.obj_xyz_m.map(v => v && !isNaN(v[2]) ? v[2]*1000 : null);
+    objTraces.push({ x: t, y: ox, type: 'scattergl', mode: 'lines', name: `${slot}: obj_x`, line: { color: COLORS[slot], width: 1.5 } });
+    objTraces.push({ x: t, y: oy, type: 'scattergl', mode: 'lines', name: `${slot}: obj_y`, line: { color: COLORS[slot], width: 1.5, dash: 'dot' } });
+    objTraces.push({ x: t, y: oz, type: 'scattergl', mode: 'lines', name: `${slot}: obj_z`, line: { color: COLORS[slot], width: 1.5, dash: 'dash' } });
+  });
+  plotLine('plot_obj_xyz', objTraces, { title: 'OBJECT xyz (mm) — via verified cad_lookup chain (TCP + grasp_offset)', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'mm' } });
+
+  // joints
+  if (document.getElementById('showJoints').checked) {
+    const jointTraces = [];
+    ['A','B'].forEach(slot => {
+      const d = SLOTS[slot]; if (!d || !d.joints_raw || d.joints_raw.n === 0) return;
+      const t0_raw = d.joints_raw.t_s[0];
+      const dt0_active = d.active.t_s[0];
+      const t0_offset = (d.contact?.t_s ?? d.active.t_s[0]);
+      const aligned = d.joints_raw.t_s.map(x => (x - t0_raw) + dt0_active - t0_offset);
+      for (let j = 0; j < 6; j++) {
+        jointTraces.push({
+          x: aligned, y: d.joints_raw[`j${j}_eff`] ?? [],
+          type: 'scattergl', mode: 'lines',
+          name: `${slot}: j${j}_eff`,
+          line: { color: COLORS[slot], width: 0.7 }, opacity: 0.4 + j * 0.1,
+        });
+      }
+    });
+    plotLine('plot_joints', jointTraces, { title: 'Joint torques j0..j5 (Nm)', xaxis: { title: 't aligned (s)' }, yaxis: { title: 'Nm' } });
+  }
+}
+
+redraw();
+</script>
+</body>
+</html>

@@ -1,8 +1,10 @@
 # Reverse-engineered Insert Algorithm — Findings from Raw Telemetry
 
-**Dataset:** 185 episodes across 4 FMB1 parts (60 May-3 operator demos + 132 May-4 u_orange).
-Tools: per-sample feature extraction, depth-banded pooling, cross-run divergence analysis.
-All scripts under `/tmp/insert_analyzer/`.
+> **READ FIRST:** `compliant_insertion_studio/.claude/skills/insertion-control-law-derivation/SKILL.md` is the authoritative methodology. Findings below were captured in chronological order; some early sections (§1–§9) used **z_drop-only metrics and treated `hole_xy_prior` as a hard target** — both refuted in the May-5 session. The orientation-feedback model in the skill supersedes those framings. Sections marked `<!-- STALE_PER_SKILL_v2 -->` should be re-validated against the v1.2 sidecar pair (`insert_u_orange_20260505_193645` GOLD + `insert_u_orange_20260505_193941` FAIL) before being cited as findings.
+
+**Dataset:** 185 episodes across 4 FMB1 parts (60 May-3 operator demos schema_v1.1 + 132 May-4 u_orange schema_v1.1 + 4 May-5 episodes schema_v1.2 with full sidecars).
+Tools: per-sample feature extraction, depth-banded pooling, cross-run divergence analysis, 3-way pose comparison (GOLD ↔ FAIL ↔ PROJECTED CAD).
+All scripts under `compliant_insertion_studio/analysis/scripts/`.
 
 ---
 
@@ -60,6 +62,8 @@ Both move TCP about the same arc length. **GOLD sweeps it across 4.7 mm of physi
 | u_orange autonomous timeout | 7 | 0% | 0% |
 
 **98% recall, 1 FN/185 episodes.** Safer than the existing FSM's z-drop predicate, which trips on metastable rim-perched states.
+
+<!-- STALE_PER_SKILL_v2: §5 (control-law pseudocode) was based on z_drop-only signals and treated hole_xy_prior as hard. Superseded by the orientation-feedback design in the skill (Section 13). The Fz-collapse predicate at the bottom of this section IS still valid as a state-transition signal, but cannot be the sole control law for tight-clearance pegs. -->
 
 ## 5. Reverse-engineered control law
 
@@ -252,3 +256,37 @@ forces productive search regardless of where contact landed. The negative discri
 result strengthens the case for H101 as the top staged-patch candidate.
 
 Iteration: `analysis/iterations/discovery/005-h109-initial-xy-offset/`
+
+---
+
+## §12 — Canonical A/B pair: matched-compliance gap (added 2026-05-05, discovery 008)
+
+First A/B pair with **schema v1.2 sidecars** (joints_raw, native-rate wrench, per-tick cmd_wrench, fm_events):
+
+- **GOLD** `insert_u_orange_20260505_193645` — operator-driven success
+- **FAIL** `insert_u_orange_20260505_193941` — autonomous abort (FIND_HOLE STUCK)
+- **Same** `force_mode_params` (gain=1.0, damping=0.7, selection_vector all-True, fz=-9N)
+- **Same** FSM-commanded wrench history (verified row-by-row in cmd_wrench_raw.csv): both transition through (-9, then -6 Fz approach), then a one-tick (-6, +14)N transient, then sustained (0, +5)N Fy at gain=1.0/damping=0.3 in find_hole.
+
+The mechanism cannot be the FSM logic itself or the commanded wrench. It must be the operator's hand. Quantifying the gap, post-contact 5s window:
+
+| Feature | GOLD | FAIL | ratio |
+|---|---|---|---|
+| xy_excursion max (mm) | 15.91 | 7.01 | 2.27× |
+| F_lat_base median (N) | 1.98 | 1.09 | 1.82× |
+| r_cop median (mm) | **22.3** | **12.8** | 1.74× |
+| v_xy median (mm/s) | 2.35 | 1.25 | 1.88× |
+| operator-nudge residual (mm/s) | 3.21 | 1.15 | 2.80× |
+| Time-of-divergence F_lat_base (s) | — | 0.17 | — |
+| Time-of-divergence v_xy (s) | — | 0.41 | — |
+
+**FAIL never leaves the 0-1mm depth band** (1340 samples there, 0 elsewhere); GOLD progresses through 0→1→2→5→15→30→60mm bands continuously.
+
+**Joint-effort xcor (NEW signal from joints_raw):** GOLD j0 (base rotation) shows corr(eff_j0, |v_xy|) = +0.53 with peak |eff_j0| = 2.40 Nm. FAIL j0: 0.12 corr / 1.11 Nm. **The operator pushes through the base joint** to generate distal sweep at the wrist; force-mode admittance generates motion at the TCP frame and cannot recreate the same kinematic profile within the rule-capped 6 N lateral force budget at gain=1.0/damping=0.3.
+
+**Promoted to I016.** Practical levers within hard-rule envelope:
+- Lower `damping_factor` during find_hole from 0.3 → 0.15-0.20 to raise admittance velocity per N.
+- Sustain the directed push longer at multiple angles (already in H101).
+- The maximum F_lat reactions are similar in both runs (~17-18 N peak) — the difference is **sustained median**, not peak. Algorithms that achieve a couple of brief 17 N peaks aren't enough; the median post-contact F_lat needs to stay near 2 N for several seconds.
+
+Iteration: `analysis/iterations/discovery/008-v12-canonical-pair-diff/`

@@ -1,0 +1,23 @@
+{
+  "score": 6.0,
+  "confidence": "medium",
+  "backing_invariants_valid": [
+    "I016",
+    "I004",
+    "I003"
+  ],
+  "backing_invariants_invalid": [],
+  "n_backing_invariants": 3,
+  "rule_violations": 0,
+  "replay": {
+    "n_failures_replayed": 69,
+    "fraction_in_gold_band": 0.0,
+    "fraction_closer_to_hole": 1.0
+  },
+  "weights": {
+    "W_INVARIANTS": 1.0,
+    "W_REPLAY_BAND": 5.0,
+    "W_REPLAY_CLOSER": 3.0,
+    "PENALTY_RULE_VIOLATION": 100.0
+  }
+}

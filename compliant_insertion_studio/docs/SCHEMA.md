@@ -69,18 +69,29 @@ gripper_width,commanded_fz
 | 16–19 | `target_qx`, `target_qy`, `target_qz`, `target_qw` | float | unit quat | all | Assembly target orientation. Same fixed-per-episode logic as position. |
 | 20–22 | `dx`, `dy`, `dz` | float | meters | all | `tcp - target` linear error per axis. Sign-preserving. |
 | 23–25 | `droll`, `dpitch`, `dyaw` | float | radians | all | Relative rotation `target⁻¹ · tcp` decomposed as XYZ extrinsic Euler via `scipy.spatial.transform.Rotation.from_quat(...).as_euler('xyz')`. Convention is fixed in `schema_v1.py`. |
-| 26–28 | `fx`, `fy`, `fz` | float | newtons | all | Wrench force in `base_link` frame, **transformed by the wrapper** from `/force_torque_sensor_broadcaster/wrench` (which publishes in `tool0_controller`, the wrist frame). Sign convention: positive Z is up (= robot is pulling away from a downward push), so contact during a downward `commanded_fz` shows up as **positive** `fz` magnitude on contact. The wrapper transforms tool→base per sample using the live TF; if TF lookup fails (rare), raw tool-frame values are logged as a fallback and a warning is emitted. |
-| 29–31 | `tx`, `ty`, `tz` | float | newton-meters | all | Wrench torque, same frame and transform pipeline as force columns above. |
+| 26–28 | `fx`, `fy`, `fz` | float | newtons | all | Wrench force, logged **in the `tool0_controller` (wrist) frame** as published by `/force_torque_sensor_broadcaster/wrench`. The wrench is **NOT transformed to `base_link`** by the wrapper — the row's `wrench_frame_id` column records the actual frame (always `tool0_controller` in v1.1 data). Tool-frame Fz aligns with the gripper's long axis, which nominally points down; with a vertical TCP and `commanded_fz < 0` (push down in base frame), contact shows up as **positive** `fz` here (peg pushing back along the tool's long axis). For Phase 5 / dashboard analysis: prefer plotting/thresholding on the **tool-frame raw values**; if base-frame analysis is needed, transform live in the consumer using the per-row TCP quaternion. |
+| 29–31 | `tx`, `ty`, `tz` | float | newton-meters | all | Wrench torque, same frame as force columns above (`tool0_controller`). |
 | 32 | `gripper_width` | float | meters | all | Latest gripper width from `/gripper_width`. NaN if topic not yet seen. |
 | 33 | `commanded_fz` | float | newtons | mostly 0 | The Fz value commanded into `force_mode_controller` at this sample. 0 outside `ACTIVE`. Negative = pushing down. Useful for distinguishing dwell rows from push rows in the dashboard. |
 
 ### Sign conventions cheat-sheet (frequent foot-gun)
 
-- **Z-up** in `base_link` (UR convention)
-- **Pushing down** = negative `commanded_fz`
-- **Felt contact pushing back** = positive `fz` (resists the downward push)
-- **Quaternion**: scalar-LAST (`x, y, z, w`), matching `geometry_msgs/Quaternion` and scipy's default
+- **Wrench frame**: `tool0_controller` (wrist frame, NOT base_link). The `wrench_frame_id` column documents this per row.
+- **`commanded_fz`** is in the **task frame** of `force_mode_controller` (= `base_link` per `force_mode_params.task_frame`). So `commanded_fz < 0` means "push down in world Z".
+- **Logged `fz`** is the wrist-frame Z-component. With a nominally vertical gripper, tool-Z points world-down, so `commanded_fz = -9` (world-down) shows up as `fz ≈ +9` (positive along tool-Z, i.e. peg pushing back along its long axis).
+- **Felt contact pushing back along peg's long axis** = positive `fz` in the logged data.
+- **Quaternion**: scalar-LAST (`x, y, z, w`), matching `geometry_msgs/Quaternion` and scipy's default.
 - **Euler decomposition**: XYZ extrinsic (the scipy default for `as_euler('xyz')`). A rotation about world X is `droll`, about world Y is `dpitch`, about world Z is `dyaw`.
+
+### `tcp_to_object_transform` convention (v1.1)
+
+The `tcp_to_object_transform` meta JSON field is **rotation-only** and uses the convention:
+
+```
+R_object_world = R_tcp_world * R_tcp_to_object
+```
+
+Position is **not** modeled — `obj_xyz` in CSV rows simply copies `tcp_xyz` (gripper-tip-to-object-center linear offset is treated as zero for the lateral analysis; the `obj_z` column should be interpreted accordingly). The orientation column `obj_q*` is the per-row product of the live TCP quaternion with the captured `tcp_to_object_quat_xyzw`. Lateral grasp error analysis should use `tcp_xy − target_xy` directly.
 
 ### Float formatting
 

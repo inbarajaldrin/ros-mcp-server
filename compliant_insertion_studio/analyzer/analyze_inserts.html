@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<!--
+  Compliant Insertion Studio — analyzer dashboard (Phase 4 v0)
+
+  Single-page, file:// or http://-loadable. Drop a CSV + .meta.json + .signals.json
+  triple to render the trace with all 3 segmentation methods overlaid for visual
+  review. The signals.json is produced by analyzer/preprocess.py and contains
+  the per-episode start / first-contact / nudge / termination indices for each
+  of the 3 methods (M1 force-domain, M2 kinematic, M3 energetic).
+
+  Design philosophy: this is an EXPLORATION tool. The 3-method overlay is the
+  primary view — but the "extra plots" section (F-vs-Z phase, TCP top-down,
+  raw-column picker) exists so the operator can investigate hypotheses the
+  preprocessor didn't anticipate.
+
+  No build step. CDN-loaded Plotly + PapaParse. Functional UI only.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Compliant Insertion — Analyzer v0</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.5.3/papaparse.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 0; padding: 12px; background: #0e1117; color: #e6edf3; }
+  h1 { font-size: 18px; margin: 0 0 8px 0; }
+  h2 { font-size: 14px; margin: 16px 0 4px 0; color: #58a6ff; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+          padding: 10px; }
+  .small { font-size: 12px; color: #8b949e; }
+  .ok { color: #3fb950; } .warn { color: #d29922; } .bad { color: #f85149; }
+  .auto { color: #58a6ff; } .ass { color: #d29922; }
+  table { border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 4px 8px; border-bottom: 1px solid #30363d; text-align: left; }
+  th { color: #8b949e; font-weight: normal; }
+  button { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+           padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+  button:hover { background: #30363d; }
+  button.active { background: #1f6feb; border-color: #58a6ff; }
+  .tabnav { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid #30363d; }
+  .tabnav button { border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent;
+                   padding: 8px 16px; font-weight: 500; }
+  .tabnav button.active { background: #161b22; border-color: #58a6ff; border-bottom-color: #161b22;
+                          margin-bottom: -1px; color: #58a6ff; }
+  .scatter-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+                      padding: 8px; background: #161b22; border-radius: 4px;
+                      margin-bottom: 8px; font-size: 12px; }
+  .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .compare-grid > div { background: #161b22; padding: 6px; border-radius: 4px; }
+  .drop { border: 2px dashed #30363d; padding: 20px; text-align: center;
+          border-radius: 6px; margin-bottom: 12px; }
+  .drop.over { border-color: #58a6ff; background: #161b22; }
+  .plot { width: 100%; height: 250px; }
+  .plot-wide { width: 100%; height: 360px; }
+  .meta { font-size: 12px; }
+  .meta b { color: #8b949e; font-weight: normal; }
+  .legend { display: flex; gap: 12px; font-size: 12px; }
+  .legend span { display: inline-block; padding: 2px 6px; border-radius: 3px; }
+  select, input[type=text] { background: #21262d; color: #e6edf3;
+    border: 1px solid #30363d; padding: 4px; border-radius: 4px; font: inherit; }
+</style>
+</head>
+<body>
+
+<h1>Compliant Insertion — Analyzer (Phase 4 v0)</h1>
+<p class="small">If served via http://, the dashboard auto-loads <code>manifest.json</code> and lets you pick an episode. If opened via file://, drop the CSV+meta+signals JSON triple instead.</p>
+
+<div class="tabnav">
+  <button id="tab-single" class="active">Single Episode</button>
+  <button id="tab-cross">Cross-Episode</button>
+</div>
+
+<div id="view-single">
+
+<div class="card" id="picker-row" style="margin-bottom: 12px;">
+  <label class="small">Episode:
+    <select id="ep-pick" style="min-width: 480px;"></select>
+  </label>
+  <label class="small" style="margin-left: 8px;">
+    Sort: <select id="ep-sort">
+      <option value="basename">file order</option>
+      <option value="shape">shape</option>
+      <option value="assist">assist_level</option>
+      <option value="m1">M1 nudges (most first)</option>
+      <option value="m2">M2 nudges (most first)</option>
+      <option value="m3">M3 nudges (most first)</option>
+      <option value="drift">drift_mm (most first)</option>
+    </select>
+  </label>
+  <label class="small" style="margin-left: 8px;">
+    Filter shape: <select id="ep-shape">
+      <option value="">all</option>
+      <option value="u_shape">u_shape</option>
+      <option value="line_green">line_green</option>
+      <option value="inverted_u_yellow">inverted_u_yellow</option>
+    </select>
+  </label>
+  <label class="small" style="margin-left: 8px;">
+    Filter assist: <select id="ep-assist">
+      <option value="">all</option>
+      <option value="autonomous">autonomous</option>
+      <option value="assisted">assisted</option>
+    </select>
+  </label>
+  <span class="small" id="ep-count" style="margin-left: 12px;"></span>
+</div>
+
+<div id="drop" class="drop">
+  <input type="file" id="picker" multiple accept=".csv,.json"
+         style="display:block; margin:0 auto;">
+  <p class="small">Or drag &amp; drop the 3 files anywhere on the page (file:// mode).</p>
+</div>
+
+<div id="status" class="small"></div>
+<div id="content" style="display:none;">
+
+  <div class="row" style="align-items: stretch;">
+    <div class="card meta" style="flex: 2 1 380px;">
+      <h2 style="margin-top:0;">Episode</h2>
+      <div id="metaPanel"></div>
+    </div>
+    <div class="card meta" style="flex: 1 1 280px;">
+      <h2 style="margin-top:0;">Method comparison</h2>
+      <div id="methodTable"></div>
+    </div>
+    <div class="card meta" style="flex: 1 1 220px;">
+      <h2 style="margin-top:0;">Drift signature</h2>
+      <div id="driftPanel"></div>
+    </div>
+  </div>
+
+  <h2>Time series — Method overlays</h2>
+  <div class="legend">
+    <span style="background:#1f6feb;">M1 force</span>
+    <span style="background:#d29922;">M2 kinematic</span>
+    <span style="background:#3fb950;">M3 energetic</span>
+    <span style="background:#bc8cff;">M5 torque-motion</span>
+    <span style="background:#ff7b72;">M7 obj slip</span>
+    <span style="background:#6e7681;">phase bands</span>
+    <span style="margin-left: auto;">
+      <button id="tog-m1" class="active">M1</button>
+      <button id="tog-m2" class="active">M2</button>
+      <button id="tog-m3" class="active">M3</button>
+      <button id="tog-m5" class="active">M5</button>
+      <button id="tog-m7" class="active">M7</button>
+      <button id="tog-phase" class="active">phase bg</button>
+    </span>
+  </div>
+  <div id="ts-fz" class="plot"></div>
+  <div id="ts-flat" class="plot"></div>
+  <div id="ts-tlat" class="plot"></div>
+  <div id="ts-tcpz" class="plot"></div>
+  <div id="ts-vlat" class="plot"></div>
+  <div id="ts-power" class="plot"></div>
+
+  <h2>Phase plots</h2>
+  <div class="row">
+    <div class="card" style="flex: 1 1 480px;">
+      <div class="small">F<sub>z</sub> vs descent depth (the classic peg-in-hole signature)</div>
+      <div id="fz-vs-z" class="plot"></div>
+    </div>
+    <div class="card" style="flex: 1 1 480px;">
+      <div class="small">TCP top-down trajectory (xy plane, target marked)</div>
+      <div id="tcp-xy" class="plot"></div>
+    </div>
+  </div>
+
+  <h2>Raw column explorer</h2>
+  <div class="card">
+    <p class="small">Pick any column from the CSV to plot vs time. Use this to investigate hypotheses outside the 3 methods.</p>
+    <label class="small">Column: <select id="col-pick"></select></label>
+    <label class="small" style="margin-left: 12px;">
+      Range: <select id="col-range">
+        <option value="all">whole episode</option>
+        <option value="active" selected>ACTIVE only</option>
+        <option value="handsoff">ACTIVE + hands_off</option>
+      </select>
+    </label>
+    <div id="ts-raw" class="plot-wide"></div>
+  </div>
+</div><!-- /#content -->
+</div><!-- /#view-single -->
+
+<div id="view-cross" style="display:none;">
+  <div class="card">
+    <h2 style="margin-top:0;">Per-episode feature scatter</h2>
+    <p class="small">All 60 episodes plotted as points. Pick X/Y axes to look for clean separations (e.g., max_F_lat vs total_work_J, or m1_nudges vs drift_mm). Color = shape, marker = autonomous vs assisted. Click a point to load that episode in the Single Episode tab.</p>
+    <div class="scatter-controls">
+      <label>X: <select id="sx"></select></label>
+      <label>Y: <select id="sy"></select></label>
+      <label>Filter shape: <select id="sf-shape">
+        <option value="">all</option>
+        <option value="u_shape">u_shape</option>
+        <option value="line_green">line_green</option>
+        <option value="inverted_u_yellow">inverted_u_yellow</option>
+      </select></label>
+      <span class="small" id="scatter-stats"></span>
+    </div>
+    <div id="cross-scatter" class="plot-wide" style="height: 480px;"></div>
+  </div>
+
+  <div class="card" style="margin-top: 12px;">
+    <h2 style="margin-top:0;">Two-episode compare</h2>
+    <p class="small">Overlay the same channels from two episodes. Use cases: pick a clean autonomous trace and a heavily-assisted one of the same shape; compare a u_orange and u_brown to validate the shape pooling decision.</p>
+    <div class="scatter-controls">
+      <label>A: <select id="cmpA" style="min-width: 360px;"></select></label>
+      <label>B: <select id="cmpB" style="min-width: 360px;"></select></label>
+      <label>Align: <select id="cmpAlign">
+        <option value="raw">raw t (absolute)</option>
+        <option value="active">t since ACTIVE start</option>
+        <option value="contact" selected>t since first_contact (M1)</option>
+      </select></label>
+      <button id="cmpReload">render</button>
+    </div>
+    <div class="compare-grid">
+      <div><div class="small">F<sub>z</sub></div><div id="cmp-fz" class="plot"></div></div>
+      <div><div class="small">|F_lat|</div><div id="cmp-flat" class="plot"></div></div>
+      <div><div class="small">|T_lat|</div><div id="cmp-tlat" class="plot"></div></div>
+      <div><div class="small">v_lat</div><div id="cmp-vlat" class="plot"></div></div>
+      <div><div class="small">power_lat (smoothed |F·v|)</div><div id="cmp-power" class="plot"></div></div>
+      <div><div class="small">tcp_z</div><div id="cmp-tcpz" class="plot"></div></div>
+    </div>
+  </div>
+</div><!-- /#view-cross -->
+
+<script>
+"use strict";
+
+// ===========================================================================
+// State
+// ===========================================================================
+const STATE = {
+  csv: null,         // PapaParse parsed object
+  meta: null,
+  signals: null,
+  rows: null,        // array of typed row objects
+  headers: null,
+  show: { m1: true, m2: true, m3: true, m5: true, m7: true, phase: true },
+  view: "single",   // "single" | "cross"
+};
+
+const METHOD_COLORS = {
+  M1_force:  "#1f6feb",
+  M2_motion: "#d29922",
+  M3_energy: "#3fb950",
+  M5_torque: "#bc8cff",
+  M7_slip:   "#ff7b72",
+};
+const METHOD_LABELS = {
+  M1_force:  "M1 force-domain (vs baseline p99)",
+  M2_motion: "M2 kinematic (motion derivatives, force-blind)",
+  M3_energy: "M3 energetic (|F·v| external work)",
+  M5_torque: "M5 torque-motion coupling (rotational power)",
+  M7_slip:   "M7 object/TCP slip (above-wrist + grasp slip)",
+};
+const SHAPE_COLORS = {
+  u_shape:           "#1f6feb",
+  line_green:        "#3fb950",
+  inverted_u_yellow: "#d29922",
+};
+const SCATTER_FIELDS = [
+  "drift_mm", "duration_s", "active_dur_s", "z_descent_m", "xy_travel_m",
+  "max_F_lat", "max_T_lat", "max_v_lat", "max_power_lat", "max_rot_power",
+  "max_slip_lat", "median_fz", "total_work_J",
+  "m1_nudges", "m2_nudges", "m3_nudges", "m5_nudges", "m7_nudges",
+];
+const PHASE_COLORS = {
+  PRE:    "rgba(110,118,129,0.10)",
+  HOVER:  "rgba(110,118,129,0.18)",
+  ZERO:   "rgba(160,170,200,0.30)",
+  ACTIVE: "rgba(31,111,235,0.10)",
+  DONE:   "rgba(63,185,113,0.18)",
+  ABORT:  "rgba(248,81,73,0.18)",
+};
+
+// ===========================================================================
+// File loading
+// ===========================================================================
+function setStatus(msg, cls) {
+  const el = document.getElementById("status");
+  el.className = "small " + (cls || "");
+  el.textContent = msg;
+}
+
+async function loadFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsText(file);
+  });
+}
+
+async function ingestFiles(files) {
+  let csv = null, meta = null, signals = null;
+  for (const f of files) {
+    if (f.name.endsWith(".signals.json")) signals = JSON.parse(await loadFile(f));
+    else if (f.name.endsWith(".meta.json")) meta = JSON.parse(await loadFile(f));
+    else if (f.name.endsWith(".csv"))      csv = Papa.parse(await loadFile(f), { header: true, dynamicTyping: true, skipEmptyLines: true });
+  }
+  if (!csv)     return setStatus("Need the .csv file too.", "bad");
+  if (!meta)    return setStatus("Need the .meta.json file too.", "bad");
+  if (!signals) return setStatus("Need the .signals.json file (run preprocess.py first).", "warn");
+
+  STATE.csv = csv;
+  STATE.meta = meta;
+  STATE.signals = signals;
+  STATE.rows = csv.data;
+  STATE.headers = csv.meta.fields;
+  // Add derived columns the preprocessor uses (mirror its math so the dashboard
+  // can plot exactly what the methods saw).
+  addDerivedColumns(STATE.rows);
+  setStatus(`Loaded ${STATE.rows.length} rows from ${csv.meta.fields.length} columns.`, "ok");
+  document.getElementById("content").style.display = "";
+  render();
+}
+
+function addDerivedColumns(rows) {
+  // Mirror preprocess.add_derived: tool-frame magnitudes + base-frame
+  // transform of wrench using TCP quaternion + signed lateral power.
+  let prev = null;
+  for (const r of rows) {
+    r.F_lat = Math.hypot(r.fx, r.fy);
+    r.T_lat = Math.hypot(r.tx, r.ty);
+    r.Tz_abs = Math.abs(r.tz);
+    if (prev) {
+      const dt = Math.max(r.t_s - prev.t_s, 1e-4);
+      r.v_x = (r.tcp_x - prev.tcp_x) / dt;
+      r.v_y = (r.tcp_y - prev.tcp_y) / dt;
+      r.v_z = (r.tcp_z - prev.tcp_z) / dt;
+    } else {
+      r.v_x = 0; r.v_y = 0; r.v_z = 0;
+    }
+    r.v_lat = Math.hypot(r.v_x, r.v_y);
+
+    // Quaternion-rotate force from tool0_controller -> base_link.
+    // q = (qx, qy, qz, qw); v_rot = q * v * q^-1 via the standard formula
+    //   v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + qw * v)
+    const qx = r.tcp_qx, qy = r.tcp_qy, qz = r.tcp_qz, qw = r.tcp_qw;
+    [["fx_base","fy_base","fz_base","fx","fy","fz"],
+     ["tx_base","ty_base","tz_base","tx","ty","tz"]].forEach(([ox, oy, oz, ix, iy, iz]) => {
+      const vx = r[ix], vy = r[iy], vz = r[iz];
+      const tx2 = 2 * (qy * vz - qz * vy);
+      const ty2 = 2 * (qz * vx - qx * vz);
+      const tz2 = 2 * (qx * vy - qy * vx);
+      r[ox] = vx + qw * tx2 + (qy * tz2 - qz * ty2);
+      r[oy] = vy + qw * ty2 + (qz * tx2 - qx * tz2);
+      r[oz] = vz + qw * tz2 + (qx * ty2 - qy * tx2);
+    });
+    r.F_lat_base = Math.hypot(r.fx_base, r.fy_base);
+    // Signed lateral power = dot product F_base · v in base_link xy plane (W)
+    r.power_lat_signed = r.fx_base * r.v_x + r.fy_base * r.v_y;
+    r.power_lat = Math.abs(r.power_lat_signed);
+    prev = r;
+  }
+  // Smooth |power_lat| with 11-sample centered window (matches preprocessor)
+  const n = rows.length;
+  const w = 11, half = Math.floor(w / 2);
+  const ps = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0, c = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(n - 1, i + half); j++) {
+      s += rows[j].power_lat; c++;
+    }
+    ps[i] = s / c;
+  }
+  for (let i = 0; i < n; i++) rows[i].power_lat_smoothed = ps[i];
+}
+
+// ===========================================================================
+// Rendering
+// ===========================================================================
+function findPhaseBands() {
+  const bands = [];
+  let curr = null;
+  for (let i = 0; i < STATE.rows.length; i++) {
+    const r = STATE.rows[i];
+    if (r.phase !== curr?.phase) {
+      if (curr) bands.push({ phase: curr.phase, t0: curr.t0, t1: STATE.rows[i - 1].t_s });
+      curr = { phase: r.phase, t0: r.t_s };
+    }
+  }
+  if (curr) bands.push({ phase: curr.phase, t0: curr.t0, t1: STATE.rows[STATE.rows.length - 1].t_s });
+  return bands;
+}
+
+function methodShapesForPlot(methods, yref) {
+  const shapes = [];
+  for (const m of methods) {
+    const tag = m.method.split("_")[0].toLowerCase();  // "m1","m2","m3","m5","m7"
+    if (!STATE.show[tag]) continue;
+    const color = METHOD_COLORS[m.method] || "#fff";
+    // Vertical lines for start / first_contact / termination
+    if (m.start_t != null) shapes.push(vline(m.start_t, color, "dot", 0.8));
+    if (m.first_contact_t != null) shapes.push(vline(m.first_contact_t, color, "solid", 1.5));
+    if (m.termination_t != null) shapes.push(vline(m.termination_t, color, "dash", 0.8));
+    // Nudge interval bands (semi-transparent boxes)
+    for (const [t0, t1] of (m.nudge_intervals_t || [])) {
+      if (t0 == null || t1 == null) continue;
+      shapes.push({
+        type: "rect", xref: "x", yref: yref || "paper",
+        x0: t0, x1: t1, y0: 0, y1: 1,
+        fillcolor: hexToRgba(color, 0.15),
+        line: { width: 0 },
+        layer: "below",
+      });
+    }
+  }
+  return shapes;
+}
+
+function phaseShapesForPlot() {
+  if (!STATE.show.phase) return [];
+  const bands = findPhaseBands();
+  return bands.map(b => ({
+    type: "rect", xref: "x", yref: "paper",
+    x0: b.t0, x1: b.t1, y0: 0, y1: 1,
+    fillcolor: PHASE_COLORS[b.phase] || "rgba(0,0,0,0)",
+    line: { width: 0 },
+    layer: "below",
+  }));
+}
+
+function vline(x, color, dash, width) {
+  return {
+    type: "line", xref: "x", yref: "paper",
+    x0: x, x1: x, y0: 0, y1: 1,
+    line: { color, width: width || 1, dash: dash || "solid" },
+  };
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+const COMMON_LAYOUT = {
+  paper_bgcolor: "#0e1117", plot_bgcolor: "#0e1117",
+  font: { color: "#e6edf3", size: 11 },
+  margin: { l: 50, r: 10, t: 24, b: 30 },
+  showlegend: false,
+  xaxis: { gridcolor: "#21262d", zerolinecolor: "#30363d" },
+  yaxis: { gridcolor: "#21262d", zerolinecolor: "#30363d" },
+};
+
+function tsLine(div, title, x, y, yLabel, methods, baseLines) {
+  const layout = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+  layout.title = { text: title, x: 0.01 };
+  layout.xaxis.title = "t (s)";
+  layout.yaxis.title = yLabel || "";
+  layout.shapes = phaseShapesForPlot().concat(methodShapesForPlot(methods, "paper"));
+  // Add horizontal baseline reference lines if provided
+  if (baseLines) for (const line of baseLines) {
+    layout.shapes.push({
+      type: "line", xref: "paper", yref: "y",
+      x0: 0, x1: 1, y0: line.value, y1: line.value,
+      line: { color: line.color || "#8b949e", dash: "dot", width: 1 },
+    });
+  }
+  Plotly.react(div, [{
+    x, y, type: "scattergl", mode: "lines",
+    line: { color: "#e6edf3", width: 1 },
+    hovertemplate: "%{x:.2f}s<br>%{y:.4f}<extra></extra>",
+  }], layout, { displayModeBar: false, responsive: true });
+}
+
+function render() {
+  if (!STATE.rows) return;
+  renderMetaPanel();
+  renderMethodTable();
+  renderDriftPanel();
+
+  const t = STATE.rows.map(r => r.t_s);
+  const fz = STATE.rows.map(r => r.fz);
+  const F_lat = STATE.rows.map(r => r.F_lat);
+  const T_lat = STATE.rows.map(r => r.T_lat);
+  const tcp_z = STATE.rows.map(r => r.tcp_z);
+  const v_lat = STATE.rows.map(r => r.v_lat);
+  const power = STATE.rows.map(r => r.power_lat_smoothed);
+  const methods = STATE.signals.methods || [];
+  const thr = STATE.signals.baseline_used.thresholds || {};
+
+  // Pull EACH method's actual threshold values (not just baseline p99) so the
+  // operator sees the real reference line. M2 uses 1.5× p99 (floor 4 mm/s),
+  // M3 uses 3× p99 (floor 5 mW), M1 uses raw p99 with channel-specific floors.
+  const m1 = methods.find(m => m.method === "M1_force") || {};
+  const m2 = methods.find(m => m.method === "M2_motion") || {};
+  const m3 = methods.find(m => m.method === "M3_energy") || {};
+
+  tsLine("ts-fz",    "Fz (tool frame, +ve = peg pushing back)", t, fz, "N", methods,
+    [{ value: m1.fz_contact_threshold ?? thr.fz?.p99 ?? 0, color: METHOD_COLORS.M1_force, label: "M1 contact" }]);
+  tsLine("ts-flat",  "|F_lat| = √(fx² + fy²)",                   t, F_lat, "N", methods,
+    [{ value: m1.thresholds_used?.F_lat ?? thr.F_lat?.p99 ?? 0, color: METHOD_COLORS.M1_force, label: "M1" }]);
+  tsLine("ts-tlat",  "|T_lat| = √(tx² + ty²)",                    t, T_lat, "N·m", methods,
+    [{ value: m1.thresholds_used?.T_lat ?? thr.T_lat?.p99 ?? 0, color: METHOD_COLORS.M1_force, label: "M1" }]);
+  tsLine("ts-tcpz",  "tcp_z (m)",                                  t, tcp_z, "m", methods);
+  tsLine("ts-vlat",  "v_lat (m/s) — lateral TCP velocity",         t, v_lat, "m/s", methods,
+    [
+      { value: m1.thresholds_used?.v_lat ?? thr.v_lat?.p99 ?? 0, color: METHOD_COLORS.M1_force, label: "M1" },
+      { value: m2.v_lat_threshold_m_s ?? 0, color: METHOD_COLORS.M2_motion, label: "M2" },
+    ]);
+  tsLine("ts-power", "|F_lat · v_lat| smoothed (W) — lateral mechanical power", t, power, "W", methods,
+    [{ value: m3.p_ext_threshold_W ?? 0, color: METHOD_COLORS.M3_energy, label: "M3" }]);
+
+  renderFzVsZ();
+  renderTcpXy();
+  renderRawColumnPicker();
+}
+
+function renderMetaPanel() {
+  const ep = STATE.signals.episode;
+  const m = STATE.meta;
+  const shape = ep.logical_shape;
+  const assist = ep.assist_level;
+  const html = `
+    <table>
+      <tr><th>basename</th><td>${ep.csv_basename}</td></tr>
+      <tr><th>shape (logical)</th><td>${shape} <span class="small">(file: ${ep.object})</span></td></tr>
+      <tr><th>assist_level</th><td class="${assist === 'autonomous' ? 'auto' : 'ass'}">${assist}</td></tr>
+      <tr><th>outcome</th><td>${ep.outcome}</td></tr>
+      <tr><th>duration</th><td>${ep.duration_s?.toFixed(2)} s</td></tr>
+      <tr><th>force-mode</th><td>fz=${m.force_mode_params?.wrench?.fz} N, gain=${m.force_mode_params?.gain_scaling}, damp=${m.force_mode_params?.damping_factor}, lin_speed=${m.force_mode_params?.speed_limits?.linear_xyz_m_s?.[0]}</td></tr>
+      <tr><th>user_notes</th><td>${(ep.user_notes || "").replace(/</g, "&lt;")}</td></tr>
+      <tr><th>baseline (this shape)</th><td>${STATE.signals.baseline_used.n_baseline_traces} traces (${STATE.signals.baseline_used.n_autonomous} auto, ${STATE.signals.baseline_used.n_bootstrap} bootstrap)</td></tr>
+    </table>`;
+  document.getElementById("metaPanel").innerHTML = html;
+}
+
+function renderMethodTable() {
+  const methods = STATE.signals.methods || [];
+  const fmt = v => (v == null) ? '<span class="small">—</span>' : `${v.toFixed(2)}s`;
+  const rows = methods.map(m => `
+    <tr>
+      <td style="color:${METHOD_COLORS[m.method]};">${m.method.split('_')[0]}</td>
+      <td>${fmt(m.start_t)}</td>
+      <td>${fmt(m.first_contact_t)}</td>
+      <td>${fmt(m.termination_t)}</td>
+      <td>${(m.nudge_intervals || []).length}</td>
+      <td class="small">${methodExtras(m)}</td>
+    </tr>
+  `).join("");
+  document.getElementById("methodTable").innerHTML = `
+    <table>
+      <thead>
+        <tr><th></th><th>start</th><th>contact</th><th>term</th><th>nudges</th><th>note</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function methodExtras(m) {
+  if (m.method === "M1_force") {
+    const t = m.thresholds_used || {};
+    return `F_lat>${t.F_lat?.toFixed(1)}N, T_lat>${t.T_lat?.toFixed(2)}Nm, v_lat>${(t.v_lat || 0).toFixed(4)}m/s`;
+  }
+  if (m.method === "M2_motion") {
+    return `v_lat>${(m.v_lat_threshold_m_s || 0).toFixed(4)}m/s, free_desc=${(m.free_descent_rate_m_s || 0).toFixed(4)}m/s`;
+  }
+  if (m.method === "M3_energy") {
+    return `|F·v|>${((m.p_ext_threshold_W || 0) * 1000).toFixed(2)}mW, total_work=${((m.cumulative_external_work_J || 0) * 1000).toFixed(1)}mJ`;
+  }
+  if (m.method === "M5_torque") {
+    return `rot_power>${((m.rot_power_threshold_W || 0) * 1000).toFixed(2)}mW (torque×ω, robust median+5×MAD)`;
+  }
+  if (m.method === "M7_slip") {
+    return `slip>${((m.slip_threshold_m_s || 0) * 1000).toFixed(2)}mm/s (obj−tcp lateral rate)`;
+  }
+  return "";
+}
+
+function renderDriftPanel() {
+  const d = STATE.signals.drift || {};
+  const lat = d.lateral_xy_drift_m;
+  const xyz = d.tcp_minus_target_xyz_m;
+  const rpy = d.obj_rpy_drift_deg;
+  // Use != null so a true 0.0 mm drift doesn't display as —
+  document.getElementById("driftPanel").innerHTML = `
+    <table>
+      <tr><th>lat_xy_drift</th><td>${lat != null ? (lat * 1000).toFixed(2) + " mm" : "—"}</td></tr>
+      <tr><th>tcp − target xyz</th><td>${xyz != null ? xyz.map(v => (v * 1000).toFixed(1)).join(", ") + " mm" : "—"}</td></tr>
+      <tr><th>obj rpy drift</th><td>${rpy != null ? rpy.map(v => v.toFixed(1)).join(", ") + "°" : "—"}</td></tr>
+    </table>`;
+}
+
+function renderFzVsZ() {
+  const rows = STATE.rows.filter(r => r.phase === "ACTIVE");
+  const tcp_z = rows.map(r => r.tcp_z);
+  const fz = rows.map(r => r.fz);
+  const layout = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+  layout.title = { text: "Fz vs tcp_z (the peg-in-hole signature)", x: 0.01 };
+  layout.xaxis.title = "tcp_z (m)";
+  layout.yaxis.title = "Fz (N)";
+  Plotly.react("fz-vs-z", [{
+    x: tcp_z, y: fz, type: "scattergl", mode: "lines+markers",
+    line: { color: "#1f6feb", width: 1 },
+    marker: { color: rows.map(r => r.t_s), colorscale: "Viridis", size: 3, showscale: true,
+              colorbar: { title: "t (s)", titlefont: { size: 10 } } },
+    hovertemplate: "z=%{x:.3f}m<br>Fz=%{y:.2f}N<br>t=%{marker.color:.1f}s<extra></extra>",
+  }], layout, { displayModeBar: false, responsive: true });
+}
+
+function renderTcpXy() {
+  const rows = STATE.rows.filter(r => r.phase === "ACTIVE");
+  const tcp_x = rows.map(r => r.tcp_x);
+  const tcp_y = rows.map(r => r.tcp_y);
+  const target_x = STATE.meta.assembly_target_world.xyz_m[0];
+  const target_y = STATE.meta.assembly_target_world.xyz_m[1];
+  const layout = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+  layout.title = { text: "TCP xy trajectory during ACTIVE (top-down)", x: 0.01 };
+  layout.xaxis.title = "tcp_x (m)";
+  layout.yaxis.title = "tcp_y (m)";
+  layout.yaxis.scaleanchor = "x"; layout.yaxis.scaleratio = 1;
+  // Mark nudge intervals as red dots overlaid
+  const traces = [{
+    x: tcp_x, y: tcp_y, type: "scattergl", mode: "lines+markers",
+    line: { color: "#1f6feb", width: 1 },
+    marker: { color: rows.map(r => r.t_s), colorscale: "Viridis", size: 3 },
+    name: "TCP path",
+    hovertemplate: "x=%{x:.4f}<br>y=%{y:.4f}<br>t=%{marker.color:.1f}s<extra></extra>",
+  }, {
+    x: [target_x], y: [target_y], type: "scatter", mode: "markers",
+    marker: { color: "#3fb950", size: 14, symbol: "x" }, name: "target",
+    hovertemplate: `target<br>x=${target_x.toFixed(4)}<br>y=${target_y.toFixed(4)}<extra></extra>`,
+  }];
+  // Overlay each method's nudge intervals as red points if rows in those intervals
+  Plotly.react("tcp-xy", traces, layout, { displayModeBar: false, responsive: true });
+}
+
+function renderRawColumnPicker() {
+  const sel = document.getElementById("col-pick");
+  const cur = sel.value;
+  sel.innerHTML = "";
+  // Filter to numeric columns only — Number()-coercing string columns like
+  // `phase` or `wrench_frame_id` produces useless NaN plots.
+  const SKIP = new Set(["phase", "wrench_frame_id"]);
+  const sample = STATE.rows.find(r => r) || {};
+  const numericHeaders = STATE.headers.filter(h => {
+    if (SKIP.has(h)) return false;
+    const v = sample[h];
+    return typeof v === "number" || (typeof v === "string" && !isNaN(parseFloat(v)));
+  });
+  // Add derived columns we computed in JS so they can be plotted too
+  const derivedHeaders = ["F_lat", "T_lat", "Tz_abs", "v_x", "v_y", "v_z", "v_lat", "power_lat", "power_lat_smoothed"];
+  for (const h of [...numericHeaders, ...derivedHeaders]) {
+    const opt = document.createElement("option");
+    opt.value = h; opt.text = h;
+    sel.appendChild(opt);
+  }
+  if (cur && [...numericHeaders, ...derivedHeaders].includes(cur)) sel.value = cur;
+  else sel.value = "fz";
+  redrawRawColumn();
+}
+
+function redrawRawColumn() {
+  const col = document.getElementById("col-pick").value;
+  const range = document.getElementById("col-range").value;
+  let rows = STATE.rows;
+  if (range === "active") rows = rows.filter(r => r.phase === "ACTIVE");
+  else if (range === "handsoff") rows = rows.filter(r => r.phase === "ACTIVE" && Number(r.hands_off) === 1);
+  const t = rows.map(r => r.t_s);
+  const y = rows.map(r => Number(r[col]));
+  const methods = STATE.signals.methods || [];
+  const layout = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+  layout.title = { text: `Raw column: ${col}`, x: 0.01 };
+  layout.xaxis.title = "t (s)";
+  layout.yaxis.title = col;
+  layout.shapes = phaseShapesForPlot().concat(methodShapesForPlot(methods, "paper"));
+  Plotly.react("ts-raw", [{
+    x: t, y, type: "scattergl", mode: "lines",
+    line: { color: "#e6edf3", width: 1 },
+  }], layout, { displayModeBar: false, responsive: true });
+}
+
+// ===========================================================================
+// UI wiring
+// ===========================================================================
+document.getElementById("picker").addEventListener("change", e => ingestFiles(e.target.files));
+
+// ===========================================================================
+// Auto-load via manifest.json (http:// mode)
+// ===========================================================================
+let MANIFEST = null;
+
+async function tryLoadManifest() {
+  try {
+    const r = await fetch("manifest.json");
+    if (!r.ok) throw new Error(r.status);
+    MANIFEST = await r.json();
+    document.getElementById("drop").style.display = "none";
+    refreshEpisodePicker();
+    setStatus(`Manifest loaded — ${MANIFEST.n_episodes} episodes available. Pick one.`, "ok");
+    // Auto-load first episode by default for instant feedback
+    if (MANIFEST.episodes.length) loadFromManifest(MANIFEST.episodes[0]);
+  } catch (e) {
+    setStatus("No manifest.json found (file:// mode). Use the file picker or drag-drop.", "warn");
+  }
+}
+
+function refreshEpisodePicker() {
+  if (!MANIFEST) return;
+  const shape = document.getElementById("ep-shape").value;
+  const assist = document.getElementById("ep-assist").value;
+  const sort = document.getElementById("ep-sort").value;
+  let list = MANIFEST.episodes.filter(e =>
+    (!shape || e.logical_shape === shape) &&
+    (!assist || e.assist_level === assist));
+  const cmp = {
+    basename: (a, b) => a.basename.localeCompare(b.basename),
+    shape:    (a, b) => a.logical_shape.localeCompare(b.logical_shape) || a.basename.localeCompare(b.basename),
+    assist:   (a, b) => a.assist_level.localeCompare(b.assist_level) || a.basename.localeCompare(b.basename),
+    m1:       (a, b) => b.m1_nudges - a.m1_nudges,
+    m2:       (a, b) => b.m2_nudges - a.m2_nudges,
+    m3:       (a, b) => b.m3_nudges - a.m3_nudges,
+    drift:    (a, b) => b.drift_mm - a.drift_mm,
+  }[sort];
+  list.sort(cmp);
+  const sel = document.getElementById("ep-pick");
+  const cur = sel.value;
+  sel.innerHTML = list.map(e => {
+    const tag = `[${e.logical_shape}/${e.assist_level === "autonomous" ? "auto" : "ass"} M1=${e.m1_nudges} M2=${e.m2_nudges} M3=${e.m3_nudges} drift=${e.drift_mm.toFixed(1)}mm]`;
+    return `<option value="${e.basename}">${e.basename} ${tag}</option>`;
+  }).join("");
+  if (cur && list.find(e => e.basename === cur)) sel.value = cur;
+  document.getElementById("ep-count").textContent = `${list.length} of ${MANIFEST.episodes.length} match filters`;
+}
+
+async function loadFromManifest(ep) {
+  setStatus(`Loading ${ep.basename}…`, "");
+  try {
+    const [csvText, metaText, sigText] = await Promise.all([
+      fetch("../" + ep.csv).then(r => r.text()),
+      fetch("../" + ep.meta).then(r => r.text()),
+      fetch("../" + ep.signals).then(r => r.text()),
+    ]);
+    const csv = Papa.parse(csvText, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    const meta = JSON.parse(metaText);
+    const signals = JSON.parse(sigText);
+    STATE.csv = csv;
+    STATE.meta = meta;
+    STATE.signals = signals;
+    STATE.rows = csv.data;
+    STATE.headers = csv.meta.fields;
+    addDerivedColumns(STATE.rows);
+    setStatus(`Loaded ${ep.basename} — ${STATE.rows.length} rows.`, "ok");
+    document.getElementById("content").style.display = "";
+    render();
+  } catch (e) {
+    setStatus(`Load failed: ${e.message}`, "bad");
+    console.error(e);
+  }
+}
+
+document.getElementById("ep-pick").addEventListener("change", e => {
+  const basename = e.target.value;
+  const ep = MANIFEST.episodes.find(x => x.basename === basename);
+  if (ep) loadFromManifest(ep);
+});
+for (const id of ["ep-sort", "ep-shape", "ep-assist"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    refreshEpisodePicker();
+    const sel = document.getElementById("ep-pick");
+    if (sel.value) {
+      const ep = MANIFEST.episodes.find(x => x.basename === sel.value);
+      if (ep) loadFromManifest(ep);
+    }
+  });
+}
+
+tryLoadManifest();
+
+// ===========================================================================
+// Tab navigation + cross-episode views
+// ===========================================================================
+
+function switchView(view) {
+  STATE.view = view;
+  document.getElementById("view-single").style.display = (view === "single") ? "" : "none";
+  document.getElementById("view-cross").style.display  = (view === "cross")  ? "" : "none";
+  document.getElementById("tab-single").classList.toggle("active", view === "single");
+  document.getElementById("tab-cross" ).classList.toggle("active", view === "cross");
+  if (view === "cross") refreshCrossView();
+}
+document.getElementById("tab-single").addEventListener("click", () => switchView("single"));
+document.getElementById("tab-cross" ).addEventListener("click", () => switchView("cross"));
+
+// Populate the scatter axis pickers from SCATTER_FIELDS
+function populateScatterPickers() {
+  for (const id of ["sx", "sy"]) {
+    const sel = document.getElementById(id);
+    if (sel.options.length) continue;
+    for (const f of SCATTER_FIELDS) {
+      const opt = document.createElement("option");
+      opt.value = f; opt.text = f;
+      sel.appendChild(opt);
+    }
+  }
+  document.getElementById("sx").value = "max_F_lat";
+  document.getElementById("sy").value = "drift_mm";
+}
+
+function populateCmpPickers() {
+  if (!MANIFEST) return;
+  for (const id of ["cmpA", "cmpB"]) {
+    const sel = document.getElementById(id);
+    if (sel.options.length) continue;
+    for (const e of MANIFEST.episodes) {
+      const opt = document.createElement("option");
+      opt.value = e.basename;
+      opt.text = `${e.basename} [${e.logical_shape}/${e.assist_level==="autonomous"?"auto":"ass"} M1=${e.m1_nudges} M3=${e.m3_nudges}]`;
+      sel.appendChild(opt);
+    }
+  }
+  // Default: pick a clean autonomous and a high-drift assisted from same shape
+  const auto = MANIFEST.episodes.find(e => e.assist_level === "autonomous" && e.logical_shape === "u_shape");
+  const ass  = [...MANIFEST.episodes].filter(e => e.assist_level === "assisted" && e.logical_shape === "u_shape")
+                                     .sort((a,b) => b.drift_mm - a.drift_mm)[0];
+  if (auto) document.getElementById("cmpA").value = auto.basename;
+  if (ass)  document.getElementById("cmpB").value = ass.basename;
+}
+
+async function refreshCrossView() {
+  if (!MANIFEST) return;
+  populateScatterPickers();
+  populateCmpPickers();
+  drawScatter();
+  // Auto-render compare on first switch (subsequent switches are no-op if A/B already loaded)
+  const a = document.getElementById("cmpA").value;
+  const b = document.getElementById("cmpB").value;
+  if (a && b && (!CMP_A || CMP_A.ep?.basename !== a || !CMP_B || CMP_B.ep?.basename !== b)) {
+    setStatus(`Loading compare: ${a} vs ${b}…`, "");
+    [CMP_A, CMP_B] = await Promise.all([loadEpisodeRaw(a), loadEpisodeRaw(b)]);
+    renderCompare();
+    setStatus(`Compare ready: ${a} vs ${b}.`, "ok");
+  }
+}
+
+function drawScatter() {
+  if (!MANIFEST) return;
+  const xf = document.getElementById("sx").value;
+  const yf = document.getElementById("sy").value;
+  const shapeFilter = document.getElementById("sf-shape").value;
+  const eps = MANIFEST.episodes.filter(e => !shapeFilter || e.logical_shape === shapeFilter);
+  // One trace per (shape, assist) bucket so legend works
+  const buckets = {};
+  for (const e of eps) {
+    const key = `${e.logical_shape}/${e.assist_level}`;
+    (buckets[key] ||= []).push(e);
+  }
+  const traces = [];
+  for (const [key, list] of Object.entries(buckets)) {
+    const [shape, assist] = key.split("/");
+    traces.push({
+      x: list.map(e => e[xf]),
+      y: list.map(e => e[yf]),
+      text: list.map(e => `${e.basename}<br>${e.user_notes || ""}<br>M1=${e.m1_nudges} M2=${e.m2_nudges} M3=${e.m3_nudges} M5=${e.m5_nudges} M7=${e.m7_nudges}<br>drift=${e.drift_mm.toFixed(2)}mm`),
+      customdata: list.map(e => e.basename),
+      type: "scattergl",
+      mode: "markers",
+      name: key,
+      marker: {
+        color: SHAPE_COLORS[shape] || "#888",
+        size: assist === "autonomous" ? 12 : 8,
+        symbol: assist === "autonomous" ? "diamond" : "circle",
+        line: { color: "#fff", width: assist === "autonomous" ? 1.5 : 0.5 },
+        opacity: 0.85,
+      },
+      hovertemplate: "%{text}<br>" + xf + "=%{x:.4f}<br>" + yf + "=%{y:.4f}<extra>" + key + "</extra>",
+    });
+  }
+  const layout = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+  layout.title = { text: `${yf} vs ${xf} (n=${eps.length})`, x: 0.01 };
+  layout.xaxis.title = xf;
+  layout.yaxis.title = yf;
+  layout.showlegend = true;
+  layout.legend = { font: { size: 10 }, x: 1.02, y: 1 };
+  layout.margin = { l: 60, r: 200, t: 40, b: 50 };
+  Plotly.react("cross-scatter", traces, layout, { responsive: true });
+  document.getElementById("scatter-stats").textContent =
+    `${eps.length} episodes; click a point to load it in the Single Episode tab`;
+
+  document.getElementById("cross-scatter").on("plotly_click", evt => {
+    const basename = evt.points?.[0]?.customdata;
+    if (!basename) return;
+    const ep = MANIFEST.episodes.find(x => x.basename === basename);
+    if (ep) {
+      switchView("single");
+      document.getElementById("ep-pick").value = basename;
+      loadFromManifest(ep);
+    }
+  });
+}
+
+for (const id of ["sx", "sy", "sf-shape"]) {
+  document.getElementById(id).addEventListener("change", drawScatter);
+}
+
+// --- Compare view ---
+
+let CMP_A = null;  // {csv, meta, signals, rows}
+let CMP_B = null;
+
+async function loadEpisodeRaw(basename) {
+  const ep = MANIFEST.episodes.find(e => e.basename === basename);
+  if (!ep) return null;
+  const [csvText, metaText, sigText] = await Promise.all([
+    fetch("../" + ep.csv).then(r => r.text()),
+    fetch("../" + ep.meta).then(r => r.text()),
+    fetch("../" + ep.signals).then(r => r.text()),
+  ]);
+  const csv = Papa.parse(csvText, { header: true, dynamicTyping: true, skipEmptyLines: true });
+  const rows = csv.data;
+  addDerivedColumns(rows);
+  return { ep, csv, meta: JSON.parse(metaText), signals: JSON.parse(sigText), rows };
+}
+
+function getAnchorT(state, mode) {
+  if (mode === "raw") return 0;
+  const m1 = (state.signals.methods || []).find(m => m.method === "M1_force");
+  const m2 = (state.signals.methods || []).find(m => m.method === "M2_motion");
+  const startT = (m1 && m1.start_t != null) ? m1.start_t : (m2?.start_t ?? 0);
+  const contactT = (m1 && m1.first_contact_t != null) ? m1.first_contact_t :
+                   (m2?.first_contact_t ?? startT);
+  return mode === "active" ? startT : contactT;
+}
+
+function cmpTrace(state, getter, color, name, anchor) {
+  const t0 = anchor;
+  return {
+    x: state.rows.map(r => r.t_s - t0),
+    y: state.rows.map(getter),
+    type: "scattergl", mode: "lines",
+    line: { color, width: 1 },
+    name,
+    hovertemplate: "%{x:.2f}s<br>%{y:.4f}<extra>" + name + "</extra>",
+  };
+}
+
+function renderCompare() {
+  if (!CMP_A || !CMP_B) return;
+  const mode = document.getElementById("cmpAlign").value;
+  const aA = getAnchorT(CMP_A, mode);
+  const aB = getAnchorT(CMP_B, mode);
+  const layout = (title) => {
+    const l = JSON.parse(JSON.stringify(COMMON_LAYOUT));
+    l.title = { text: title, x: 0.01 };
+    l.xaxis.title = mode === "raw" ? "t (s)" : (mode === "active" ? "t since ACTIVE start" : "t since first_contact");
+    l.showlegend = true;
+    l.legend = { font: { size: 10 } };
+    l.margin = { l: 50, r: 10, t: 30, b: 40 };
+    return l;
+  };
+  const cfg = { displayModeBar: false, responsive: true };
+  const A = METHOD_COLORS.M1_force;  // blue for A
+  const B = METHOD_COLORS.M3_energy; // green for B
+  Plotly.react("cmp-fz",   [cmpTrace(CMP_A, r => r.fz, A, "A:fz", aA), cmpTrace(CMP_B, r => r.fz, B, "B:fz", aB)], layout("Fz"), cfg);
+  Plotly.react("cmp-flat", [cmpTrace(CMP_A, r => r.F_lat, A, "A:F_lat", aA), cmpTrace(CMP_B, r => r.F_lat, B, "B:F_lat", aB)], layout("|F_lat|"), cfg);
+  Plotly.react("cmp-tlat", [cmpTrace(CMP_A, r => r.T_lat, A, "A:T_lat", aA), cmpTrace(CMP_B, r => r.T_lat, B, "B:T_lat", aB)], layout("|T_lat|"), cfg);
+  Plotly.react("cmp-vlat", [cmpTrace(CMP_A, r => r.v_lat, A, "A:v_lat", aA), cmpTrace(CMP_B, r => r.v_lat, B, "B:v_lat", aB)], layout("v_lat"), cfg);
+  Plotly.react("cmp-power",[cmpTrace(CMP_A, r => r.power_lat_smoothed, A, "A:power", aA), cmpTrace(CMP_B, r => r.power_lat_smoothed, B, "B:power", aB)], layout("|F·v| smoothed"), cfg);
+  Plotly.react("cmp-tcpz", [cmpTrace(CMP_A, r => r.tcp_z, A, "A:tcp_z", aA), cmpTrace(CMP_B, r => r.tcp_z, B, "B:tcp_z", aB)], layout("tcp_z"), cfg);
+}
+
+document.getElementById("cmpReload").addEventListener("click", async () => {
+  const a = document.getElementById("cmpA").value;
+  const b = document.getElementById("cmpB").value;
+  setStatus(`Loading compare: ${a} vs ${b}…`, "");
+  CMP_A = await loadEpisodeRaw(a);
+  CMP_B = await loadEpisodeRaw(b);
+  renderCompare();
+  setStatus(`Compare: ${a} vs ${b} (${CMP_A?.rows?.length || 0} & ${CMP_B?.rows?.length || 0} rows).`, "ok");
+});
+document.getElementById("cmpAlign").addEventListener("change", renderCompare);
+
+const drop = document.getElementById("drop");
+["dragenter", "dragover"].forEach(ev => {
+  document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); });
+});
+["dragleave", "drop"].forEach(ev => {
+  document.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); });
+});
+document.addEventListener("drop", e => {
+  if (e.dataTransfer?.files?.length) ingestFiles(Array.from(e.dataTransfer.files));
+});
+
+for (const k of ["m1", "m2", "m3", "m5", "m7", "phase"]) {
+  document.getElementById(`tog-${k}`).addEventListener("click", e => {
+    STATE.show[k] = !STATE.show[k];
+    e.target.classList.toggle("active", STATE.show[k]);
+    if (STATE.rows) render();
+  });
+}
+document.getElementById("col-pick").addEventListener("change", redrawRawColumn);
+document.getElementById("col-range").addEventListener("change", redrawRawColumn);
+
+setStatus("No data loaded.");
+</script>
+</body>
+</html>

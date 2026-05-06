@@ -1,0 +1,21 @@
+diff --git a/compliant_insertion_studio/configs/defaults.yaml b/compliant_insertion_studio/configs/defaults.yaml
+--- a/compliant_insertion_studio/configs/defaults.yaml
++++ b/compliant_insertion_studio/configs/defaults.yaml
+@@ -163,7 +163,7 @@ fsm:
+   gain_approach:               1.0
+   damping_approach:            0.7
+   gain_find_hole:              1.0     # max (was 0.7) — more reactive
+-  damping_find_hole:           0.3     # less damped (was 0.5)
++  damping_find_hole:           0.18    # was 0.3 (staged patch 002, I016)
+   gain_insert:                 1.0
+   damping_insert:              0.4     # less damped (was 0.7)
+
+@@ -354,7 +354,7 @@ correction:
+     # Damping bumped 0.20 → 0.50 (still < 0.7 nominal). 0.20 was promoting
+     # "coasting" — the EE drifted past detected chamfers before settling. 0.50
+     # damps faster while preserving the lower stiffness needed for compliance.
+-    damping_search:            0.50  # was 0.20
++    damping_search:            0.30  # was 0.50 (staged patch 002, I016)
+     spiral_command_period_s:   0.05  # rate-limit re-issue of SetForceMode (20 Hz)
+
+     # === POSITION-SPIRAL (2026-05-04 PM, from danielstankw/UR5e-robot-control) ===

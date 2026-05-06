@@ -1,5 +1,7 @@
 # Ralph Loop — Insert Algorithm Reverse-Engineering (Staged-Patch Model)
 
+> **AUTO-TRIGGER:** before any iteration on this loop, READ the project skill at `compliant_insertion_studio/.claude/skills/insertion-control-law-derivation/SKILL.md`. It contains the canonical methodology for data-derived control-law derivation, the trust hierarchy, the 3-way pose comparison procedure, and the 10 anti-patterns that must not be repeated. The instructions in this PROMPT.md are subordinate to that skill — if anything here contradicts it, the skill wins.
+
 You are iterating to decode a force-compliant peg-in-hole primitive from operator-demo telemetry. The robot is unavailable to you. Your job is to produce a **queue of FSM patches**, ranked by evidence, that will work first-try when the operator returns to the robot.
 
 ## Modes
@@ -58,11 +60,13 @@ You are iterating to decode a force-compliant peg-in-hole primitive from operato
 
 ## Convergence
 
-**Phase A (this loop's job — away-from-robot):** STOP and write `<promise>RALPH_CONVERGED</promise>` when ALL of:
+**Phase A (this loop's job — away-from-robot):** STOP by `touch iterations/.RALPH_CONVERGED` (a flag file the bash loop watches for) when ALL of:
 - `open_questions` is empty (or remaining items are explicitly tagged "needs new robot data")
 - ≥1 `iterations/staged/<NNN>-<slug>/` has `evidence_score.json:confidence == "high"`
 - All current `pending_hypotheses_discovery` entries are either staged or marked unstageable (with reason)
 - `known_invariants` cover ≥3 of (u_orange, u_brown, line_green, inv_u_yellow) — portability sanity check
+
+**DO NOT write the literal string `<` `promise>RALPH_CONVERGED<` `/promise>` (or any close variant) into ANY file as narrative or example.** Only the bash-watched flag file `iterations/.RALPH_CONVERGED` triggers convergence. Earlier prompts had a string-grep trigger that was poisoned by self-referential prose; the flag file is the only authoritative signal now.
 
 **Phase B (operator's job — at-robot, NOT in this loop):** operator applies the top-ranked staged patch via `ralph.sh apply <name>`, runs ≥5 attempts, scores. Pass → `validated/`. Fail → fresh CSVs feed Phase A's next round.
 

@@ -1,0 +1,88 @@
+{
+  "iteration": "008-v12-canonical-pair-diff",
+  "discovered": "2026-05-05",
+  "object": "u_orange",
+  "pair": {
+    "GOLD": "insert_u_orange_20260505_193645",
+    "FAIL": "insert_u_orange_20260505_193941"
+  },
+  "matched_force_mode_params": true,
+  "matched_cmd_wrench_history": true,
+  "post_contact_5s_window": {
+    "xy_excursion_max_mm": {"GOLD": 15.91, "FAIL": 7.01, "ratio": 2.27, "delta_mm": 8.90},
+    "F_lat_base_median_N": {"GOLD": 1.98, "FAIL": 1.09, "ratio": 1.82, "delta_N": 0.89},
+    "F_lat_tool_median_N": {"GOLD": 2.14, "FAIL": 1.06, "ratio": 2.02, "delta_N": 1.08},
+    "r_cop_median_mm": {"GOLD": 22.3, "FAIL": 12.8, "ratio": 1.74, "delta_mm": 9.5},
+    "v_xy_median_mm_s": {"GOLD": 2.35, "FAIL": 1.25, "ratio": 1.88, "delta_mm_s": 1.10},
+    "operator_nudge_residual_median_mm_s": {"GOLD": 3.21, "FAIL": 1.15, "ratio": 2.80, "delta_mm_s": 2.06},
+    "operator_nudge_residual_p75_mm_s": {"GOLD": 4.81, "FAIL": 3.23, "ratio": 1.49},
+    "operator_nudge_residual_max_mm_s": {"GOLD": 11.24, "FAIL": 7.93, "ratio": 1.42},
+    "tilt_median_deg": {"GOLD": 1.99, "FAIL": 2.05, "ratio": 0.97},
+    "fz_t_max_N": {"GOLD": 11.12, "FAIL": 11.17, "ratio": 1.00},
+    "F_lat_base_max_N": {"GOLD": 18.11, "FAIL": 16.62, "ratio": 1.09}
+  },
+  "post_contact_1s_window": {
+    "F_lat_base_median_N": {"GOLD": 1.77, "FAIL": 1.40},
+    "tilt_median_deg": {"GOLD": 0.49, "FAIL": 0.94},
+    "r_cop_median_mm": {"GOLD": 22.1, "FAIL": 26.9},
+    "xy_excursion_mm": {"GOLD_max": 2.48, "FAIL_max": 2.89}
+  },
+  "depth_band_0_1mm_medians": {
+    "GOLD_n_samples": 879,
+    "FAIL_n_samples": 1340,
+    "GOLD_F_lat_base_N": 1.93,
+    "FAIL_F_lat_base_N": 0.76,
+    "GOLD_r_cop_m": 0.0199,
+    "FAIL_r_cop_m": 0.0049,
+    "GOLD_v_xy_m_s": 0.00126,
+    "FAIL_v_xy_m_s": 0.00063
+  },
+  "FAIL_never_left_0_1mm_band": true,
+  "GOLD_progressed_to_60mm_band": true,
+  "time_of_divergence_post_contact_s": {
+    "tcp_z": 0.00,
+    "dz_dt_mm_s": 0.04,
+    "fz_t": 0.04,
+    "F_lat_base": 0.17,
+    "F_lat_tool": 0.17,
+    "r_cop_m": 0.17,
+    "v_xy_m_s": 0.41
+  },
+  "joint_xcor_eff_vs_v_xy": {
+    "GOLD": {
+      "j0": {"corr": 0.53, "lag_samples": 22, "abs_max_eff_Nm": 2.40},
+      "j1": {"corr": -0.27, "lag_samples": -4, "abs_max_eff_Nm": 1.44},
+      "j2": {"corr": -0.22, "lag_samples": -21, "abs_max_eff_Nm": 0.59},
+      "j3": {"corr": -0.43, "lag_samples": 25, "abs_max_eff_Nm": 0.18},
+      "j4": {"corr": 0.36, "lag_samples": 14, "abs_max_eff_Nm": 0.19},
+      "j5": {"corr": 0.48, "lag_samples": -25, "abs_max_eff_Nm": 0.88}
+    },
+    "FAIL": {
+      "j0": {"corr": 0.12, "lag_samples": 8, "abs_max_eff_Nm": 1.11},
+      "j1": {"corr": 0.19, "lag_samples": -1, "abs_max_eff_Nm": 2.27},
+      "j2": {"corr": 0.33, "lag_samples": -19, "abs_max_eff_Nm": 0.24},
+      "j3": {"corr": -0.18, "lag_samples": -25, "abs_max_eff_Nm": 0.14},
+      "j4": {"corr": 0.78, "lag_samples": 5, "abs_max_eff_Nm": 0.11},
+      "j5": {"corr": 0.15, "lag_samples": 8, "abs_max_eff_Nm": 0.77}
+    }
+  },
+  "joint_load_decomposition": {
+    "GOLD_dominant_lateral_joint": "j0_base_rotation",
+    "FAIL_dominant_lateral_joint": "j1_shoulder_lift",
+    "interpretation": "GOLD operator pushes laterally through j0 (base rotation), generating distal arc at wrist. FAIL controller cannot replicate base-joint motion through TCP-frame admittance; loads j1 fighting Z-reaction without lateral progress."
+  },
+  "admittance_corr_F_v_post_contact_5s": {
+    "GOLD": {"corr_Fx_vx": -0.30, "corr_Fy_vy": 0.23, "ratio_v_obs_to_v_pred": 2.38},
+    "FAIL": {"corr_Fx_vx": -0.20, "corr_Fy_vy": 0.25, "ratio_v_obs_to_v_pred": 2.31}
+  },
+  "promotion": {
+    "I016_proposed": "Operator-vs-autonomous gap (matched compliance, matched cmd_wrench): 2.3x xy excursion, 1.8x F_lat_base, 1.7x r_cop, 2.8x admittance-residual TCP velocity over 5s post-contact. Operator pushes through j0 (base joint), generating sustained lateral arc that the controller's force-mode lateral command cannot replicate at the cap-allowed magnitudes (≤6N) at the current gain/damping settings."
+  },
+  "open_questions_addressed": [
+    "Q: 'When no prior demo exists, where does seat_xy come from?' — orthogonal; this iteration shows that even WITH the right seat_xy direction, the algorithm under-delivers by 2.3x in xy excursion. Direction alone isn't enough.",
+    "Q: 'Is c->s direction reliable as a SEED prior?' — the FAIL run's directed Fy=+5N is consistent with a c->s prior (peg seat is in -Y direction from contact for u_orange/base1). Direction wasn't the problem; magnitude/duration/compliance was."
+  ],
+  "open_questions_added": [
+    "Can lowering damping_factor during find_hole (e.g. 0.15-0.20 vs current 0.3) increase TCP lateral velocity per N of cmd_F_lat enough to close the 2x gap? Tuning needs robot data."
+  ]
+}

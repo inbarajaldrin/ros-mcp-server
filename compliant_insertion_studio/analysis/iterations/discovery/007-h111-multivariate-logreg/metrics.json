@@ -1,0 +1,42 @@
+{
+  "object": "u_orange",
+  "session_tag": "20260504",
+  "window_s": 5.0,
+  "n_AUTO_success": 19,
+  "n_AUTO_fail": 100,
+  "features": [
+    "max_F_lat_base_N",
+    "max_r_cop_m",
+    "max_abs_fz_t_N",
+    "time_tilt_above_1deg_s",
+    "max_tilt_deg"
+  ],
+  "model": {
+    "type": "logistic_regression",
+    "regularization": {
+      "l2_lambda": 0.5
+    },
+    "optimizer": {
+      "method": "full_batch_gd",
+      "lr": 0.1,
+      "n_iter": 2000
+    }
+  },
+  "in_sample_auc": 0.7289473684210527,
+  "loo_auc": 0.5989473684210527,
+  "loo_mannwhitney_one_sided_p": 0.08630025223801852,
+  "weights_standardized": {
+    "max_F_lat_base_N": 0.11505684840634049,
+    "max_r_cop_m": 0.06685373505359139,
+    "max_abs_fz_t_N": 0.10335530081518074,
+    "time_tilt_above_1deg_s": 0.0699460736286613,
+    "max_tilt_deg": 0.05231730017769927
+  },
+  "bias_standardized_full_fit": -1.679270202787794,
+  "thresholds": {
+    "strong": 0.75,
+    "moderate": 0.7
+  },
+  "decision": "REFUTED",
+  "interpretation": "Joint LOO AUC = 0.599 < 0.70. Multivariate H111 refuted. Combined with I012 (no median band leaving), I013 (no at-contact xy separation), and I014 (no univariate aggregate above 0.65), this closes the elimination chain over the currently-recorded post-contact signal space. Schema bump G001-G004 (joint_states / native-rate wrench / cmd_fxy) is now the only remaining source of new signal for u_orange success/fail discrimination."
+}
