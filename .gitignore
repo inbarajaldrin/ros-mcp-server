@@ -194,4 +194,29 @@ compliant_insertion_studio/logs/insert_*.csv
 compliant_insertion_studio/logs/insert_*.meta.json
 compliant_insertion_studio/logs/validation_*
 compliant_insertion_studio/logs/diagnostics/
+compliant_insertion_studio/analysis/data/
 _references/
+
+# Per-episode telemetry sidecars (regenerated each run, large)
+compliant_insertion_studio/logs/*.signals.json
+compliant_insertion_studio/logs/*.joints_raw.csv
+compliant_insertion_studio/logs/*.wrench_raw.csv
+compliant_insertion_studio/logs/*.cmd_wrench_raw.csv
+compliant_insertion_studio/logs/*.fm_events.csv
+compliant_insertion_studio/logs/regime_collection_*.json
+compliant_insertion_studio/logs/motion_test_*
+
+# Stray ROS log dir
+logs/
+
+# RALPH discover/iterate loop scratch (auto-generated per iteration)
+.planning/phases/05-algorithm-derivation/loop_u_orange_*/
+.planning/phases/05-algorithm-derivation/loop_iterate_*/
+.planning/phases/05-algorithm-derivation/events.json
+
+# Pre-wrapper real-mode code stash (kept on disk for reference, not in repo)
+primitives/_real_mode_stash/
+
+# Per-user Claude harness state (top-level only — project-local skills under
+# compliant_insertion_studio/.claude/ ARE tracked)
+/.claude/
