@@ -3,33 +3,41 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 1 [R]-half ✅ DONE this session (CAL-03/04/06..08); Phase 2 [R]-half (WRAP-VERIFY) outstanding — needs operator to set up u_brown
-last_updated: "2026-05-03T11:55:00.000Z"
-last_activity: 2026-05-03 at-robot session — F/T payload calibration ran successfully (mass 2.11 kg, CoG ≈ origin), smoke test passed, paused before WRAP-VERIFY (needs physical part setup).
+stopped_at: Phase 4 COMPLETE (analyzer dashboard shipped — 5 segmentation methods + cross-episode tab). Phase 1 + 2 + 3 + 4 + 7 = 5 of 7 phases (71%). Phase 5 (Algorithm Derivation) is next; operator now at-robot.
+last_updated: "2026-05-04T19:00:00.000Z"
+last_activity: 2026-05-04 at-away dashboard session — built two-stage analyzer (preprocess.py + analyze_inserts.html) with 5 segmentation methods (M1 force, M2 kinematic, M3 energetic, M5 torque-motion, M7 object slip), per-shape baselines via iterative quiet-window pooling (10-25× larger sample base), Cross-Episode tab with feature scatter (18 axes) + contact-aligned compare. GPT adversarial review caught + fixed 6 issues including critical M3 frame mismatch (wrench tool0 × velocity base) and baseline pollution from "autonomous" traces self-triggering M1.
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 5
   total_plans: 0
   completed_plans: 0
-  percent: 28
+  percent: 71
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-01, gripper-name fix 2026-05-02)
+See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Replace the failing `--insert` real-mode path with a force-compliant insert primitive that works reliably across every FMB1 part and is a one-config-file extension to any new part.
-**Current focus:** WRAP-VERIFY (the only remaining at-robot task before Phase 3 data collection). Operator needs to physically place u_brown on FMB1 base + grasp it before next session. See `.planning/TRACKS.md` for the live checklist.
+**Current focus:** Phase 4 — Analyzer Dashboard (at-away). Build static HTML with Plotly + PapaParse against the 60 collected CSVs in `compliant_insertion_studio/logs/`. See `.planning/.continue-here.md` for the live handoff or `.planning/HANDOFF.json` for structured state.
 
 ## Current Position
 
-Phase: Phase 1 ✅ DONE 2026-05-03 (foundational F/T payload calibration recovered + smoke test passed); Phase 7 ✅ shipped 2026-05-02 (RG2 URDF + dual-RobotModel RViz). Phase 2 [N]-half shipped, [R]-half (WRAP-VERIFY) is the next at-robot task. 2 of 7 phases formally complete.
-Most recent work: 2026-05-03 — CAL-03 (mass 2.11 kg, CoG ≈ [-0.003, +0.003, -0.032]), CAL-04 (all 8 poses reachable), CAL-06..08 (smoke test PASS), HOME_JOINTS introduced, wrapper frame-conversion bug fixed, workspace convention +X = robot's RIGHT empirically verified.
-Next at-robot session goal: WRAP-VERIFY end-to-end on u_brown (~15 min including induced-failure tests), then Phase 3 data collection.
+**Phase 1, Phase 2, Phase 3, Phase 4, Phase 7 ✅ DONE** (5 of 7 phases complete = 71%).
 
-Progress: [██░░░░░░░░] 28% (2 of 7 phases formally complete; Phase 2 [N]-half done — only [R]-half WRAP-VERIFY remains)
+- **Phase 1 (Foundation Setup + F/T Calibration)** — done 2026-05-03 (foundational F/T payload calibration recovered, smoke test passed: mass=2.11 kg, CoG ≈ origin-aligned, 32 mm into tool).
+- **Phase 2 (Episode Wrapper + Telemetry Schema)** — done 2026-05-03 (WRAP-VERIFY end-to-end on u_brown: 15,177 telemetry samples, FSM walks PRE→HOVER→ZERO→ACTIVE→DONE).
+- **Phase 3 (20-Episode FMB1 Data Collection)** — done 2026-05-03 (60 demos: u_brown 10 + u_orange 10 + line_green 20 + inverted_u_yellow 20; 7 autonomous + 53 assisted; all schema_v1.1).
+- **Phase 4 (Analyzer Dashboard)** — done 2026-05-04 (5 segmentation methods, cross-episode scatter+compare, see `.planning/phases/04-analyzer-dashboard/04-SUMMARY.md`).
+- **Phase 7 (Gripper URDF + RViz)** — done 2026-05-02.
+
+Most recent work: 2026-05-04 — analyzer dashboard delivered with 5 segmentation methods (M1 force, M2 kinematic, M3 energetic with proper base-frame transform, M5 torque-motion, M7 object slip), iterative quiet-window baseline (95% of samples pass through), Cross-Episode tab with 18-feature scatter + 2-episode contact-aligned compare. GPT adversarial review caught the critical M3 frame mismatch + baseline pollution.
+
+Next session goal: **Phase 5 — Algorithm Derivation + Per-Object Configs**. Operator is at-robot. Highest-leverage at-robot work for Phase 5: (a) review dashboard signatures to derive per-shape termination predicates, (b) write `configs/defaults.yaml` + per-shape YAMLs, (c) wire wrapper to read configs and auto-terminate, (d) test ≥5 consecutive autonomous successes per shape.
+
+Progress: [██████████░░░░] 71% (5 of 7 phases formally complete)
 
 ## Performance Metrics
 
@@ -49,48 +57,50 @@ Progress: [██░░░░░░░░] 28% (2 of 7 phases formally complete;
 | 4. Analyzer Dashboard | 0 | — | — |
 | 5. Algorithm Derivation + Per-Object Configs | 0 | — | — |
 | 6. Dispatcher Integration + Generalization Validation | 0 | — | — |
+| 7. Gripper URDF + RViz Visualization | 0 | — | — |
 
 **Recent Trend:**
 
 - Last 5 plans: —
 - Trend: —
 
-*Updated after each plan completion*
-
 ## Accumulated Context
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
+Decisions are logged in PROJECT.md Key Decisions table. **Decisions added 2026-05-03:**
 
-- Initialization: Termination criterion treated as a Phase 5 deliverable, not an input — operator honestly cannot pre-answer which signal (force-absorbed / z-reached / motion-stopped) is most reliable; data will reveal it.
-- Initialization: Parametric universal algorithm + per-object YAML, not per-object scripts — all FMB1 objects are peg-in-hole; differences are tolerances, force levels, axis choices.
-- Initialization: Single static HTML dashboard (Plotly.js + PapaParse from CDN) — sole user is the operator; functional plots beat polish.
-- Initialization: Existing `_real_mode_stash/` is reference-only, not foundation — stale import paths, untracked, overcomplicated; re-derive cleanly using stash's force-mode RPC patterns as guidance.
+- **Termination criterion stays Phase 5 work** — wrapper's only ACTIVE exit today is `timeout` (line 869 of `compliant_insert.py`). The 15,177 samples per WRAP-VERIFY run are the dataset Phase 5 will mine for force-saturation / Z-target / motion-stopped signals.
+- **Tolerance widened from 2mm to 5mm** in `move_to_grasp.py:888` to match OnRobot RG2's inherent ~3-5mm grip-mode-16 overshoot. Researched 2 reference repos (takuya-ki/onrobot-rg, tonydle/OnRobot_ROS2_Driver) + official docs — confirmed firmware has NO precise positioning mode (only mode 1 grip, 8 stop, 16 grip_w_offset; both 1 and 16 are GRIP modes with overshoot).
+- **OnRobot bridge fix kept**: `Circuit1`/`Circuit2` fields now visible in `/gripper_status` (was hidden, made the long-standing safety-latch bug invisible). Source: `~/Desktop/ros2_ws/src/onrobot_ros/onrobot_ros/rg_gripper.py`.
+- **Discovered Modbus power-cycle for safety latch**: Write `unit=63 addr=0 value=2` triggers tool-power cycle that clears latched safety circuits. Documented in upstream Osaka-University-Harada-Laboratory/onrobot lib but missing from local custom_libraries/onrobot.py. NOT yet wired in (requires URCap re-attach via pendant STOP+PLAY after the reboot).
+- **Reusable orchestrator script committed**: `compliant_insertion_studio/scripts/run_assembly_step.py` implements the canonical pick→rotate→place→regrasp→rotate→insert sequence per `ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json`. Step 13 of the canonical (the legacy `translate_object --insert`) is replaced by the new compliant_insert wrapper. Two entry modes: full sequence (object on table) and `--already-held` (skip pick/place/regrasp).
 
 ### Pending Todos
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
-None yet. Build-order interlocks (per research SUMMARY.md) are baked into phase ordering — no parallel-phase risks at this point.
+- None blocking Phase 3 entry. All upstream verifications complete.
+- **Soft concern**: F/T payload calibration mild residual warnings (0.86 N / 0.062 Nm vs 0.5 N / 0.05 Nm "optimal"). Probably sensor warm-up. Operator can re-run after 10-30 min idle warmup if Phase 3 data shows orientation-dependent bias.
+- **Known firmware quirk**: RG2 mode 16 has ±3-5mm grip overshoot. Width-based grasp checks must tolerate this (already widened in `move_to_grasp.py:888`). Mode 1 has tighter ±2mm but targets raw mechanism width — inconvenient caller semantics, no functional benefit at current tolerances.
 
 ### Roadmap Evolution
 
-- 2026-05-02: Phase 7 added: Gripper URDF + RViz Visualization (USD→URDF conversion + integrate OnRobot RG2 into UR5e URDF for accurate RViz preview and ros2_control collision-checking; replaces custom DH-based `GRIPPER_CENTER_TOOL_OFFSET`). Per CONVENTIONS §6, this phase is decoupled from Phases 1–6 and recommended to be pulled forward to BEFORE the first real-hardware Phase 1 calibration run, so operator can verify calibration poses with full gripper geometry visible in RViz.
+- 2026-05-02: Phase 7 added (Gripper URDF + RViz Visualization).
+- 2026-05-03: WRAP-VERIFY validation extended to include the FULL canonical pick-rotate-place-regrasp-rotate-insert sequence (not just hover-zero-active). Driven by the discovery that the ground-truth `Assembly_fmb_assembly_1_results.json` requires this longer chain. New orchestrator script institutionalizes it for Phase 3 collection.
 
 ## Deferred Items
 
-Items acknowledged and carried forward from previous milestone close:
-
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| *(none — initial milestone)* | | | |
+| Wrapper validation | **Induced-failure tests** (SIGTERM/SIGABRT/SIGKILL mid-ACTIVE on 3 fresh wrapper runs) | Deferred to early Phase 3 — operator preferred to advance to data collection rather than burn another hour on signal-handling tests this session | 2026-05-03 |
+| Bridge fix | Wire `restartPowerCycle` Modbus command into `onrobot_ros` (auto-clears safety latch when stuck-gripper detected) | Documented in HANDOFF, deferred until next time the safety latch trips | 2026-05-03 |
+| Bug fix | The 6 wrapper-side bug fixes from this session (move_to_grasp tolerance, _run_hover mode arg, ANSI strip, controller-await timeout, re import, run_assembly_step.py, launch_camera.sh) are NOT yet committed — operator approval needed for the commit | Pending operator review | 2026-05-03 |
 
 ## Session Continuity
 
-Last session: 2026-05-03T11:55:00.000Z
-Stopped at: Clean session-pause after Phase 1 [R]-half completion. All ROS processes shut down via close_robot.sh. Operator declined skinny WRAP-VERIFY in favor of resuming next at-robot session with u_brown physically set up.
-Resume file: .planning/TRACKS.md (live at-robot checklist) + .planning/HANDOFF.json (decisions + next_action block)
+Last session: 2026-05-04T19:00:00.000Z
+Stopped at: Phase 4 closed; operator back at-robot for Phase 5 entry.
+Resume action: open dashboard at `http://localhost:8766/analyzer/analyze_inserts.html` (Cross-Episode tab) → derive per-shape termination predicates from feature scatter → write `configs/defaults.yaml` + per-shape YAMLs → wire wrapper → test on robot.

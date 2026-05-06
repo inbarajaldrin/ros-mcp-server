@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Foundation Setup + F/T Calibration** - Hardware/driver upgrade, folder scaffold, F/T smoke-test primitive, SOP docs
 - [ ] **Phase 2: Episode Wrapper + Telemetry Schema** - Lock the CSV+meta data contract; wrapper owns full lifecycle
 - [ ] **Phase 3: 20-Episode FMB1 Data Collection** - 5 demos x 4 FMB1 objects with mandatory failure-mode quota
-- [ ] **Phase 4: Analyzer Dashboard** - Static HTML dashboard built against real Phase 3 traces
+- [x] **Phase 4: Analyzer Dashboard** - Static HTML dashboard built against real Phase 3 traces ✅ shipped 2026-05-04
 - [ ] **Phase 5: Algorithm Derivation + Per-Object Configs** - Universal algorithm + per-object YAMLs + termination criterion derived from data
 - [ ] **Phase 6: Dispatcher Integration + Generalization Validation** - Single-line integration at translate_object.py:1085 + ≥5 consecutive autonomous successes per object + second-assembly proof
 - [x] **Phase 7: Gripper URDF + RViz Visualization** - Standalone RG2 URDF + static TF tool0→rg2_base_link, RViz visualization-only. Offset migration + ros2_control collision integration explicitly deferred (CONTEXT.md D-6, D-8).
@@ -27,10 +27,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Nothing (first phase)
 **Requirements**: SETUP-01..07, CAL-01..10 (17 reqs total)
 **Success Criteria** (what must be TRUE):
-  1. **Foundational payload calibration**: `python3 compliant_insertion_studio/shared/ft_calibration.py --gripper-id <name>` runs ≥ 8 poses, recovers payload mass + CoG + 6-axis bias, writes versioned YAML to `configs/`, prints `set_target_payload(mass, cog)` line for paste into bringup. Operator pastes + commits + restarts bringup. After this, force mode behaves correctly across orientations (no per-pose re-zeroing needed).
+  1. **Foundational payload calibration**: `python3 compliant_insertion_studio/shared/ft_calibration.py --gripper-id <name>` runs ≥ 8 poses, recovers payload mass + CoG + 6-axis bias, writes versioned YAML to `configs/`. **As of 2026-05-06, `launch_robot.sh real` then automatically calls `/io_and_status_controller/set_payload`** at bringup, sourcing values from the latest YAML. Operator just commits the new YAML — no manual launch-file paste. After this, force mode behaves correctly across orientations (no per-pose re-zeroing needed). Earlier convention required pasting `set_target_payload(...)` into the launch file but that was never actually done; the omission caused ~8mm of TCP drift per APPROACH from project start through 2026-05-05.
   2. **Session-level smoke test**: `python3 compliant_insertion_studio/shared/ft_smoke_test.py` standalone reports pass/fail with per-axis residual bias < 2 N, |T| < 0.3 Nm, drift < 0.5 N/s.
   3. **Folder scaffold**: `compliant_insertion_studio/` tree exists with all subdirectories (wrapper, dispatcher, shared, configs, analyzer, logs, docs) and a top-level README describing standalone use.
-  4. **Driver state**: `ur_robot_driver` reports version ≥ 2.13.0, `pyproject.toml` numpy pin reconciled with runtime numpy 2.2.6, `set_target_payload` documented as bringup-only single source of truth.
+  4. **Driver state**: `ur_robot_driver` reports version ≥ 2.13.0, `pyproject.toml` numpy pin reconciled with runtime numpy 2.2.6. Payload single source of truth = latest `compliant_insertion_studio/configs/ft_calibration_*.yaml`, applied automatically by `launch_robot.sh real` via `/io_and_status_controller/set_payload`.
   5. **Migration done**: existing `primitives/compliant_insert.py` migrated to `compliant_insertion_studio/wrapper/compliant_insert.py` with import paths working.
   6. **SOP doc**: `docs/ft_calibration_sop.md` covers all three calibration layers (foundational / session / per-pose), warm-up window, when-to-re-run, what-to-do-on-failure, and the URCap Measure wizard alternative.
   7. **Gitignore**: excludes `compliant_insertion_studio/logs/insert_*.csv`, `*.meta.json`, and `_references/` so binary-ish telemetry and reference repos never enter the repo.
@@ -112,7 +112,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Foundation Setup + F/T Calibration | 0/TBD | Not started | - |
 | 2. Episode Wrapper + Telemetry Schema | 0/TBD | Not started | - |
 | 3. 20-Episode FMB1 Data Collection | 0/TBD | Not started | - |
-| 4. Analyzer Dashboard | 0/TBD | Not started | - |
+| 4. Analyzer Dashboard | 1/1 | ✅ Shipped | 2026-05-04 |
 | 5. Algorithm Derivation + Per-Object Configs | 0/TBD | Not started | - |
 | 6. Dispatcher Integration + Generalization Validation | 0/TBD | Not started | - |
 | 7. Gripper URDF + RViz Visualization (decoupled — can pull forward) | 0/TBD | Not started | - |
