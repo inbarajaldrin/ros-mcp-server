@@ -749,7 +749,13 @@ class ReorientForAssembly(Node):
             # L-BFGS-B may drift to a wrist-flip; this ensures the wrist_3-only
             # solution is always available for _select_best to prefer.
             raw_cost = ik_objective_quaternion(yaw_adjusted_seed, target_pose)
-            if raw_cost < 0.1 and (collision_checker is None or not collision_checker(yaw_adjusted_seed)):
+            # Tightened from 0.1 → 0.025 (2026-05-04): the old loose threshold
+            # accepted raw seeds with up to ~6° angle error as "solutions".
+            # When current EE was off-cardinal by 3-5°, _select_best preferred
+            # this raw-seed (= current joints with tilt) and rotate_object
+            # produced a no-op trajectory leaving the EE tilted. 0.025 → max
+            # 2.5mm position error or ~1.4° angle error.
+            if raw_cost < 0.025 and (collision_checker is None or not collision_checker(yaw_adjusted_seed)):
                 all_solutions.append((yaw_adjusted_seed.copy(), raw_cost))
 
             yaw_results = solver.solve_collect(
@@ -805,9 +811,26 @@ class ReorientForAssembly(Node):
 
             Optimization: only compute expensive _min_link_clearance for top 5 candidates
             after initial sorting by cheap metrics (wrist_1 quality, max_change).
+
+            Cost gate (added 2026-05-04): pre-filter to solutions with cost
+            < SELECTION_COST_THRESHOLD so we never pick a "solution" that
+            doesn't actually match the target pose. Cost = 10*pos_err_m +
+            angle_err_rad; threshold 0.025 ≈ max 2.5mm position OR ~1.4° angle.
+            Without this, L-BFGS-B converged-but-high-cost results (e.g., the
+            seed itself if it's at a local min) would compete with truly-
+            accurate solutions, and the wrist_1-quality sort below would
+            pick whichever was closest to current joints — yielding a no-op
+            trajectory when current EE was off-cardinal.
             """
             if not solutions:
                 return None
+
+            SELECTION_COST_THRESHOLD = 0.025
+            accurate = [(j, c) for j, c in solutions if c < SELECTION_COST_THRESHOLD]
+            if accurate:
+                solutions = accurate
+            # else: fall through with all solutions; caller may notice the
+            # high alignment_error_deg and warn. Avoids hard-failing edge cases.
 
             # Phase 1: Score by cheap metrics only
             prescored = []
@@ -1173,7 +1196,28 @@ class ReorientForAssembly(Node):
         
         # === Calculate grasp rotation ===
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
-        R_grasp = R_EE_current.T @ R_object_current
+        #
+        # 2026-05-04 PM bugfix: previously used `R_EE_current` (FK from current
+        # joints). That drifts across loop iterations because force-mode
+        # compliance + retract leaves the EE at a slightly different orientation
+        # than the prior rotate's commanded target. The drift compounds:
+        # iter N's R_grasp is recomputed from a stale R_object_current input
+        # combined with a drifted R_EE_current, the IK selects a slightly
+        # different cardinal, the new resulting_object_R is fed forward as next
+        # iter's R_object_current, and so on. After ~10 iterations the IK can
+        # snap to a non-canonical fold-equivalent (gimbal-lock case observed
+        # 2026-05-04: EE RPY [135,-90,0] instead of [180,0,180]).
+        #
+        # Fix: use the CANONICAL face-down EE rotation as the reference for
+        # R_grasp computation. R_grasp is a geometric constant (where the
+        # gripper grabs the part) and must not depend on the noisy FK-derived
+        # current EE pose. The canonical face-down quaternion is [0,-1,0,0]
+        # which is the operator-verified TCP orientation at start of every
+        # ACTIVE phase (see CSV `tcp_qx,tcp_qy,tcp_qz,tcp_qw` columns).
+        # IK seed and trajectory generation continue to use the actual
+        # R_EE_current; only R_grasp computation is canonicalized.
+        R_EE_canonical_face_down = R.from_quat([0.0, -1.0, 0.0, 0.0]).as_matrix()
+        R_grasp = R_EE_canonical_face_down.T @ R_object_current
         
         # === Transform target to world frame ===
         # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.

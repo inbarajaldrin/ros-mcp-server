@@ -7,11 +7,15 @@ The dashboard depends on the EXACT column names and order defined here.
 Spec: ../docs/SCHEMA.md
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 1.2  # 2026-05-05: adds 4 sidecar files (joints_raw, wrench_raw, cmd_wrench_raw, fm_events) — see G001-G004 in analysis/STATE.json. Main CSV unchanged.
 
 # CSV header — ORDER IS PART OF THE CONTRACT.
 # Adding a column at the end is non-breaking (dashboard reads by name).
 # Reordering or renaming is a v2 schema bump (see SCHEMA.md).
+#
+# v1.1 (2026-05-03): added wrench_frame_id (str) + obj_x..obj_qw (object pose
+# estimate, computed per-row as TCP × tcp_to_object_transform). Both append
+# at end → backward-compatible for dashboards that read by header name.
 CSV_COLUMNS: tuple[str, ...] = (
     "t_s", "phase", "event_marker", "hands_off", "zero_event",
     "tcp_x", "tcp_y", "tcp_z", "tcp_qx", "tcp_qy", "tcp_qz", "tcp_qw",
@@ -19,6 +23,9 @@ CSV_COLUMNS: tuple[str, ...] = (
     "dx", "dy", "dz", "droll", "dpitch", "dyaw",
     "fx", "fy", "fz", "tx", "ty", "tz",
     "gripper_width", "commanded_fz",
+    # --- v1.1 additions ---
+    "wrench_frame_id",
+    "obj_x", "obj_y", "obj_z", "obj_qx", "obj_qy", "obj_qz", "obj_qw",
 )
 
 # Phase FSM values. EXACT strings written to the CSV `phase` column.
@@ -72,16 +79,46 @@ META_REQUIRED_KEYS: tuple[str, ...] = (
     "hands_off_window",
     "mid_episode_zero_events",
     "user_notes",
+    # --- v1.1 additions (required) ---
+    "assist_level",                      # "autonomous" | "assisted" — operator tag at end-of-episode
+    "current_object_orientation_input",  # quat the wrapper was launched with (CLI arg)
+    "tcp_pose_at_active_start",          # snapshot of TCP world pose at the moment ACTIVE began
+    "hover_pose_world",                  # promoted from optional in v1.0
+    "tcp_to_object_transform",           # 4x4 (or {pos,quat}) used to derive per-row obj_* in CSV
 )
 
 # Optional / recommended meta JSON keys. Dashboard uses if present, ignores if missing.
+# NOTE: also includes v1.1 'required' keys so they're settable via set_optional()
+# without a separate setter API. The REQUIRED list is documentation-only;
+# OPTIONAL is the runtime validation set for the setter.
 META_OPTIONAL_KEYS: tuple[str, ...] = (
     "session_warmup_minutes",
     "ros_distro", "ur_driver_version", "ur_msgs_version",
     "controller_at_start", "controllers_loaded",
     "joint_state_at_active_start",
-    "hover_pose_world",
     "ik_pre_check",
+    # --- v1.1 (also in META_REQUIRED_KEYS — documented as required for Phase 3) ---
+    "assist_level",
+    "current_object_orientation_input",
+    "tcp_pose_at_active_start",
+    "hover_pose_world",
+    "tcp_to_object_transform",
+    # --- v1.2 (Phase 5) ---
+    "termination_config",     # which YAML drove termination + the predicate dict
+    "termination_fire_debug", # actual values at the moment the predicate fired
+    "cad_prediction",         # CAD-derived predicted_tcp_at_seat + provenance
+    "hole_observed",          # tcp_xy at the moment z-descent spike detected
+                              # during spiral search (peg found chamfer/slot)
+    # --- v1.3 (Phase 5 v3 — ContactSearchFSM, 2026-05-04 PM) ---
+    "fsm_config",             # FSM tunables loaded from defaults.yaml
+    "fsm_result",             # surface_z, hole_xy, hole_z, descent_post_hole_m, etc.
+    # --- v1.4 (GUIDED mode for regime-decoding data collection, 2026-05-06) ---
+    "hole_observed_operator", # tcp_xy at SIGUSR1 (operator's hand at the hole)
+    # --- v1.5 (v4 Found Hole predicate validation, 2026-05-06) ---
+    "hole_observed_v4_predicate", # tcp_xy at the tick the v4 |fz| state-transition
+                                  # predicate fired (analysis/CONTROL_LAW.md). Logged
+                                  # in stage 3a (parallel to SIGUSR1); also triggers
+                                  # the GUIDED→INSERT_DESCENT transition in stage 3b.
 )
 
 
@@ -111,6 +148,12 @@ def empty_meta_template() -> dict:
         "hands_off_window": None,
         "mid_episode_zero_events": [],
         "user_notes": "",
+        # --- v1.1 additions ---
+        "assist_level": None,
+        "current_object_orientation_input": None,
+        "tcp_pose_at_active_start": None,
+        "hover_pose_world": None,
+        "tcp_to_object_transform": None,
     }
 
 

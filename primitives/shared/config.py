@@ -10,7 +10,12 @@ SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (mete
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # Base object orientation [x, y, z, w] quaternion (identity = no rotation)
-DEFAULT_BASE_POSITION = [0.0, -0.4, TABLE_HEIGHT + 0.0175]  # Default base object position [x, y, z] in robot base frame (meters)
+# Calibrated 2026-05-06: empirical bias (+1.52, -3.78) mm derived from a
+# centered-grasp u_brown GUIDED demo. The (0.0, -0.4) starting value put CAD
+# predictions ~5mm off the physical fixture; this corrected value puts CAD
+# directly on actual slot positions and removes the need for FSM-side bias
+# correction in autonomous SEARCH.
+DEFAULT_BASE_POSITION = [0.00152, -0.40378, TABLE_HEIGHT + 0.0175]  # Default base object position [x, y, z] in robot base frame (meters)
 
 # UR5e motion limits — two independent constraints, compute_duration takes the max.
 # Cartesian limits govern translation speed (reference: safe_height ↔ table = 0.32m → 5.0s).
@@ -50,3 +55,65 @@ DH_PARAMS = [
     (0,  0.0997,  0,    -np.pi/2),
     (0,  0.0996,  0,     0)
 ]
+
+
+# --- Gripper width lookup from fmb1_assembly.json ---
+# Source of truth for per-object/per-grasp gripper-width-before-pick.
+# Loaded lazily on first call. Used by:
+#   - compliant_insertion_studio/scripts/run_assembly_step.py
+#   - compliant_insertion_studio/scripts/regrasp_held_object.py
+#   - compliant_insertion_studio/scripts/loop_autonomous_insert.sh (via above)
+#
+# If the file or entry is missing, callers get None and fall back to their
+# own default (35 mm).
+import json as _json
+import os as _os
+
+_ASSEMBLY_JSON_PATHS = [
+    _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+                  "ablations", "eval_resources", "fmb1_assembly.json"),
+]
+_GRASP_WIDTH_CACHE: dict | None = None  # populated on first lookup
+
+
+def _load_grasp_width_table() -> dict:
+    """Returns {(object_name, grasp_id): gripper_width_mm} from fmb1_assembly.json.
+    Empty dict if file not found / parse failed."""
+    global _GRASP_WIDTH_CACHE
+    if _GRASP_WIDTH_CACHE is not None:
+        return _GRASP_WIDTH_CACHE
+    table: dict = {}
+    for path in _ASSEMBLY_JSON_PATHS:
+        if not _os.path.exists(path):
+            continue
+        try:
+            d = _json.load(open(path))
+            for step in d.get("assembly_order", []):
+                obj = step.get("object_name")
+                gid = step.get("grasp_id")
+                w = step.get("gripper_width_mm")
+                if obj is not None and gid is not None and w is not None:
+                    table[(obj, int(gid))] = float(w)
+        except Exception:
+            pass
+    _GRASP_WIDTH_CACHE = table
+    return table
+
+
+def get_gripper_width_mm(object_name: str, grasp_id: int,
+                         default_mm: float | None = None) -> float | None:
+    """Lookup gripper_width_mm for (object_name, grasp_id) from fmb1_assembly.json.
+    Returns default_mm (caller-supplied) if entry not found, or None if the
+    caller didn't provide a default and the entry is missing."""
+    return _load_grasp_width_table().get((object_name, int(grasp_id)), default_mm)
+
+
+def get_grasp_id_for_assembly(object_name: str) -> int | None:
+    """Returns the grasp_id used in the FMB1 assembly for `object_name`, or
+    None if the object isn't in the assembly. Used by loop scripts so
+    callers don't need to remember per-object grasp_ids."""
+    for (obj, gid) in _load_grasp_width_table().keys():
+        if obj == object_name:
+            return int(gid)
+    return None
+

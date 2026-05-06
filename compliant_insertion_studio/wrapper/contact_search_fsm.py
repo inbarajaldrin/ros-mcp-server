@@ -43,7 +43,7 @@ class FSMAction:
     # Wrench update for force_mode_controller
     new_wrench: bool = False         # True -> wrapper should re-call SetForceMode
     wrench_baselink: tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    selection_vector: tuple[bool, bool, bool, bool, bool, bool] = (True, True, True, True, True, True)
+    selection_vector: tuple[bool, bool, bool, bool, bool, bool] = (True, True, True, False, False, False)
     gain: float = 1.0
     damping: float = 0.7
 
@@ -57,6 +57,356 @@ class FSMAction:
     transition_msg: str = ""
 
 
+class SearchDirector:
+    """Active search director — Archimedean spiral with PD position-tracking.
+
+    v3 control law (analysis/SEARCH_CONTROL_LAW.md, iteration 3):
+
+    Generates a spiral reference path centered on the first-contact xy and
+    drives the peg along it via a saturated PD lateral force command, until
+    the v4 detector fires the rim-cross transition.
+
+    Why spiral and not F/T direction-following:
+      Cross-demo analysis (10 GUIDED demos) shows F/T direction signals
+      (-r_cop, -F_lat) are noise on flat rim (Q1 alignment +0.16 / -0.13)
+      and only become directional at chamfer edge (Q4 +0.77 / +0.61). In
+      autonomous force-mode, -F_lat suffers a friction positive-feedback
+      confound (sensed F_lat opposes commanded F_lat in equilibrium, so
+      -F_lat reinforces whatever direction the controller started in).
+      Iter 1+2 demonstrated this empirically: peg drifted in a self-
+      confirming direction, never crossed the rim.
+
+      Spiral search with v4 detection is the published-evidence-backed
+      answer when early F/T direction is ambiguous (Chhatpar & Branicky
+      2001; Jasim et al. 2014). v4's empirical 10/10 success removes the
+      historical pain point of spiral search (knowing when the hole is
+      found).
+
+    Reference path (spiral):
+      Center: tcp_xy at first SEARCH tick.
+      Radius: r(theta) = r0 + (pitch / 2π) * theta  [Archimedean]
+      Tangential path speed: v_s   (constant arc-length rate).
+      Termination: v4 fires (FSM-side), or radius >= R_max (abort), or
+      stall detector trips (abort).
+
+    Outer loop (force command, base_link):
+      e = p_ref - p_tcp
+      Fxy_cmd = sat( Kp * e - Kd * v_tcp , Fmax )
+      Fz_cmd  = -F_press
+      Selection vector: (T,T,T,F,F,F) — XYZ compliant, rotation locked.
+    """
+
+    def __init__(self,
+                 r0_m: float = 0.0015,              # initial spiral radius (1.5mm — avoids peg-at-center stall)
+                 pitch_m: float = 0.002,            # spiral pitch (per turn)
+                 v_s_m_s: float = 0.005,            # tangential speed
+                 R_max_m: float = 0.008,            # abort radius
+                 Kp_xy_N_per_m: float = 350.0,
+                 Kd_xy_N_per_m_per_s: float = 40.0,
+                 Fmax_N: float = 3.0,
+                 F_press_N: float = 9.0,
+                 fz_gate_low_N: float = 3.0,
+                 stall_progress_ratio: float = 0.15,
+                 stall_window_s: float = 1.0,
+                 lag_pause_thresh_m: float = 0.002,
+                 near_miss_fz_thresh_N: float = 4.0):
+        self.r0 = float(r0_m)
+        self.pitch = float(pitch_m)
+        self.v_s = float(v_s_m_s)
+        self.R_max = float(R_max_m)
+        self.Kp = float(Kp_xy_N_per_m)
+        self.Kd = float(Kd_xy_N_per_m_per_s)
+        self.Fmax = float(Fmax_N)
+        self.F_press = float(F_press_N)
+        self.fz_gate = float(fz_gate_low_N)
+        self.stall_progress_ratio = float(stall_progress_ratio)
+        self.stall_window_s = float(stall_window_s)
+        self.lag_pause_thresh_m = float(lag_pause_thresh_m)
+        self.near_miss_fz_thresh_N = float(near_miss_fz_thresh_N)
+
+        # Reset state
+        self._center_xy: Optional[tuple[float, float]] = None
+        self._theta: float = 0.0
+        self._spiral_path_len: float = 0.0
+        self._last_t: Optional[float] = None
+        self._tcp_buf: deque = deque(maxlen=10)  # last 10 samples for velocity (~100ms at 100Hz)
+        # |fz| history for gradient-following (chamfer-deepening direction):
+        # when |fz| drops, the peg is moving from rim into chamfer — keep going
+        # in the same direction instead of letting spiral pull peg back to rim.
+        self._fz_buf: deque = deque()  # (t, |fz|) over a 200ms window
+
+        # Stall-tracker: actual peg progress vs spiral arc-length progress
+        self._t_stall_start: Optional[float] = None
+        self._spiral_arc_at_stall_start: float = 0.0
+        self._tcp_pos_at_stall_start: Optional[tuple[float, float]] = None
+
+        # Telemetry
+        self.last_radius_m: float = 0.0
+        self.last_p_ref: Optional[tuple[float, float]] = None
+        self.last_e_m: tuple[float, float] = (0.0, 0.0)
+        self.last_v_tcp: tuple[float, float] = (0.0, 0.0)
+        self.last_cmd_base: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.last_mode: str = "uninit"
+        self.abort_reason: Optional[str] = None  # set when stall/radius abort
+
+    def set_center(self, center_xy_base: tuple[float, float]) -> None:
+        """FSM calls this on first SEARCH tick with current TCP xy as spiral origin."""
+        self._center_xy = (float(center_xy_base[0]), float(center_xy_base[1]))
+        self._theta = 0.0
+        self._spiral_path_len = 0.0
+        self._t_stall_start = None
+        self._spiral_arc_at_stall_start = 0.0
+        self._tcp_pos_at_stall_start = None
+        self._fz_buf.clear()
+
+    def _estimate_velocity(self, t: float, tcp_x: float, tcp_y: float
+                            ) -> tuple[float, float]:
+        """Backward finite difference over the buffered window."""
+        self._tcp_buf.append((t, tcp_x, tcp_y))
+        if len(self._tcp_buf) < 3:
+            return 0.0, 0.0
+        t0, x0, y0 = self._tcp_buf[0]
+        dt = t - t0
+        if dt <= 1e-4:
+            return 0.0, 0.0
+        return (tcp_x - x0) / dt, (tcp_y - y0) / dt
+
+    def update(self, t: float, fz_smoothed_base: float,
+               tcp_x_base: float, tcp_y_base: float
+               ) -> tuple[float, float, float]:
+        """Returns (Fx_cmd, Fy_cmd, Fz_cmd) in base_link frame, or sets
+        self.abort_reason if the search should be aborted."""
+        Fz_cmd = -self.F_press
+        self.abort_reason = None
+
+        # Center must be set by FSM at first tick; if not, default to current.
+        if self._center_xy is None:
+            self.set_center((tcp_x_base, tcp_y_base))
+
+        # First-tick init of last_t
+        if self._last_t is None:
+            self._last_t = t
+            self._tcp_buf.append((t, tcp_x_base, tcp_y_base))
+            self.last_mode = "spiral_init"
+            self.last_cmd_base = (0.0, 0.0, Fz_cmd)
+            return 0.0, 0.0, Fz_cmd
+
+        dt = t - self._last_t
+        self._last_t = t
+        if dt <= 0:
+            self.last_mode = "spiral_zero_dt"
+            return self.last_cmd_base[0], self.last_cmd_base[1], Fz_cmd
+
+        # If peg is off-rim (small fz), the v4 detector handles transition.
+        # Director still commands Fz_press to keep peg pressed; lateral
+        # command is reduced (peg may already be falling into chamfer).
+        if abs(fz_smoothed_base) < self.fz_gate:
+            self.last_mode = "spiral_off_rim"
+            self.last_cmd_base = (0.0, 0.0, Fz_cmd)
+            # Don't advance theta when off rim (peg doesn't need to spiral)
+            return 0.0, 0.0, Fz_cmd
+
+        # Advance spiral parameter ONLY when peg is keeping up with ref.
+        # If position error > lag_pause_thresh, hold theta until peg catches up.
+        # This makes the peg control the spiral expansion rate — guarantees
+        # peg actually traces the spiral disk, not a smaller-radius shadow of it.
+        # Critical when spiral center is offset from actual hole — peg has to
+        # physically reach the radius where the hole is, not just spiral ref.
+        cur_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
+        cur_r_safe = max(cur_r, self.r0)
+
+        # Compute current peg-to-ref error magnitude (before advancing)
+        prev_p_ref_x = self._center_xy[0] + cur_r * math.cos(self._theta)
+        prev_p_ref_y = self._center_xy[1] + cur_r * math.sin(self._theta)
+        prev_e_mag = math.hypot(prev_p_ref_x - tcp_x_base, prev_p_ref_y - tcp_y_base)
+
+        spiral_advanced = False
+        if prev_e_mag <= self.lag_pause_thresh_m:
+            # Peg is at ref → advance spiral
+            theta_dot = self.v_s / cur_r_safe
+            self._theta += theta_dot * dt
+            spiral_advanced = True
+        # else: peg is lagging — hold theta until peg catches up.
+
+        new_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
+        self.last_radius_m = new_r
+
+        # Abort: spiral exhausted
+        if new_r > self.R_max:
+            self.abort_reason = f"spiral_exhausted (r={1000*new_r:.1f}mm > R_max={1000*self.R_max:.1f}mm)"
+            self.last_mode = "abort_spiral_exhausted"
+            self.last_cmd_base = (0.0, 0.0, Fz_cmd)
+            return 0.0, 0.0, Fz_cmd
+
+        # Reference position
+        cx, cy = self._center_xy
+        p_ref_x = cx + new_r * math.cos(self._theta)
+        p_ref_y = cy + new_r * math.sin(self._theta)
+        self.last_p_ref = (p_ref_x, p_ref_y)
+
+        # Position error
+        e_x = p_ref_x - tcp_x_base
+        e_y = p_ref_y - tcp_y_base
+        self.last_e_m = (e_x, e_y)
+        e_mag = math.hypot(e_x, e_y)
+
+        # TCP velocity (for telemetry / damping option)
+        v_x, v_y = self._estimate_velocity(t, tcp_x_base, tcp_y_base)
+        self.last_v_tcp = (v_x, v_y)
+
+        # Maintain |fz| history for gradient-following.
+        abs_fz = abs(fz_smoothed_base)
+        self._fz_buf.append((t, abs_fz))
+        while self._fz_buf and (t - self._fz_buf[0][0]) > 0.2:
+            self._fz_buf.popleft()
+        d_fz_dt = 0.0
+        if len(self._fz_buf) >= 3:
+            t0, fz0 = self._fz_buf[0]
+            window_dt = t - t0
+            if window_dt > 1e-3:
+                d_fz_dt = (abs_fz - fz0) / window_dt  # N/s
+
+        # GRADIENT-FOLLOWING OVERRIDE: when |fz| is dropping AND already low
+        # (peg moving from rim into chamfer), continue in the direction of
+        # recent peg velocity instead of chasing the spiral ref. This pushes
+        # peg deeper into the chamfer where it dropped instead of letting the
+        # spiral yank it back onto the rim. Active control kicks in as the
+        # peg approaches the chamfer edge.
+        v_mag = math.hypot(v_x, v_y)
+        gradient_active = (d_fz_dt < -3.0           # fz dropping > 3 N/s
+                           and abs_fz < 6.0          # already at/near chamfer threshold
+                           and v_mag > 5e-4)         # peg actually moving (>0.5mm/s)
+
+        if gradient_active:
+            # Continue in current peg-velocity direction at full Fmax.
+            # Sign-flip: cmd opposite of desired motion direction.
+            v_dir_x = v_x / v_mag
+            v_dir_y = v_y / v_mag
+            Fx_cmd = -self.Fmax * v_dir_x
+            Fy_cmd = -self.Fmax * v_dir_y
+        elif e_mag > 1e-6:
+            ux_e = e_x / e_mag
+            uy_e = e_y / e_mag
+            # CONSTANT-FORCE tracking (replaces PD): always command Fmax magnitude
+            # in the direction of the reference position. PD with default Kp=350 N/m
+            # gave only ~1.3N of commanded force at typical position errors (0.5–4 mm),
+            # well below stiction threshold → immediate stall. Constant-force always
+            # engages Fmax — guarantees stiction break, spiral reference pulls peg
+            # along path. Damping subtracted to prevent overshoot when peg is moving.
+            #
+            # IMPORTANT (iter 7 finding): peg moves OPPOSITE direction of commanded
+            # F_lat in base_link. To make peg approach p_ref, command F_lat in the
+            # OPPOSITE of (p_ref - p_tcp).
+            #
+            # NEGATIVE sign: move-toward-target requires opposite-direction commanded F_lat
+            Fx_cmd = -self.Fmax * ux_e - self.Kd * v_x
+            Fy_cmd = -self.Fmax * uy_e - self.Kd * v_y
+            # Re-saturate at 1.25*Fmax (allows damping headroom)
+            F_mag = math.hypot(Fx_cmd, Fy_cmd)
+            cap = self.Fmax * 1.25
+            if F_mag > cap:
+                scale = cap / F_mag
+                Fx_cmd *= scale
+                Fy_cmd *= scale
+        else:
+            Fx_cmd = 0.0
+            Fy_cmd = 0.0
+
+        # Spiral arc-length tracking for stall detection.
+        # Only count when spiral was allowed to advance (peg keeping up). When
+        # peg is lagging and theta is held, the stall comparison is meaningless.
+        if spiral_advanced:
+            self._spiral_path_len += self.v_s * dt
+
+        # Stall detector: actual TCP progress vs spiral path length
+        if self._t_stall_start is None:
+            self._t_stall_start = t
+            self._spiral_arc_at_stall_start = self._spiral_path_len
+            self._tcp_pos_at_stall_start = (tcp_x_base, tcp_y_base)
+        elif (t - self._t_stall_start) >= self.stall_window_s:
+            arc_elapsed = self._spiral_path_len - self._spiral_arc_at_stall_start
+            tcp_progress = math.hypot(
+                tcp_x_base - self._tcp_pos_at_stall_start[0],
+                tcp_y_base - self._tcp_pos_at_stall_start[1])
+            if arc_elapsed > 1e-4 and tcp_progress / arc_elapsed < self.stall_progress_ratio:
+                self.abort_reason = (
+                    f"lateral_stall (tcp_progress={1000*tcp_progress:.2f}mm vs "
+                    f"spiral_arc={1000*arc_elapsed:.2f}mm in {self.stall_window_s:.2f}s)"
+                )
+                self.last_mode = "abort_stall"
+            # Reset window
+            self._t_stall_start = t
+            self._spiral_arc_at_stall_start = self._spiral_path_len
+            self._tcp_pos_at_stall_start = (tcp_x_base, tcp_y_base)
+
+        self.last_cmd_base = (Fx_cmd, Fy_cmd, Fz_cmd)
+        self.last_mode = f"spiral r={1000*new_r:.2f}mm θ={math.degrees(self._theta):.0f}°"
+        return Fx_cmd, Fy_cmd, Fz_cmd
+
+
+class FoundHoleDetector:
+    """v4 rim-cross state-transition predicate.
+
+    Fires when |fz_smoothed| has been below `rim_low_thresh` for at least
+    `off_sustain_s` seconds, AND was above `rim_high_thresh` at any point
+    in the previous `recent_window_s` seconds.
+
+    Time-based windows (not sample counts), so robust to tick rate variation.
+    Sticky single-shot — `update()` returns True only on the firing tick.
+
+    Derived from cross-demo analysis of 10 GUIDED demos in 3 directions
+    (analysis/CONTROL_LAW.md). Default thresholds verified 10/10 + robust
+    across 94/96 parameter combos in the sweep.
+    """
+
+    def __init__(self, rim_high_thresh: float = 4.0,
+                 rim_low_thresh: float = 3.0,
+                 off_sustain_s: float = 0.30,
+                 recent_window_s: float = 2.5):
+        self.rim_high = float(rim_high_thresh)
+        self.rim_low = float(rim_low_thresh)
+        self.off_sustain_s = float(off_sustain_s)
+        self.recent_window_s = float(recent_window_s)
+        self._on_rim_history: deque = deque()  # (t, was_on_rim)
+        self._off_run_start: Optional[float] = None
+        self._fired = False
+
+    def reset(self):
+        self._on_rim_history.clear()
+        self._off_run_start = None
+        self._fired = False
+
+    @property
+    def fired(self) -> bool:
+        return self._fired
+
+    def update(self, t: float, fz_smoothed: float) -> bool:
+        """Returns True on the tick the predicate first fires; False after."""
+        if self._fired:
+            return False
+        abs_fz = abs(fz_smoothed)
+        on_rim_now = abs_fz > self.rim_high
+        off_rim_now = abs_fz < self.rim_low
+
+        self._on_rim_history.append((t, on_rim_now))
+        while (self._on_rim_history
+               and (t - self._on_rim_history[0][0]) > self.recent_window_s):
+            self._on_rim_history.popleft()
+
+        if off_rim_now:
+            if self._off_run_start is None:
+                self._off_run_start = t
+        else:
+            self._off_run_start = None
+
+        if (self._off_run_start is not None
+            and (t - self._off_run_start) >= self.off_sustain_s
+            and any(on_rim for _, on_rim in self._on_rim_history)):
+            self._fired = True
+            return True
+        return False
+
+
 class ContactSearchFSM:
     APPROACH        = "APPROACH"
     FIND_HOLE       = "FIND_HOLE"
@@ -65,10 +415,14 @@ class ContactSearchFSM:
     INSERT          = "INSERT"
     DONE            = "DONE"
     SAFETY_RETRACT  = "SAFETY_RETRACT"
+    GUIDED          = "GUIDED"           # operator-drag mode for GOLD data collection
+    SEARCH          = "SEARCH"           # autonomous F/T-driven search (replaces operator drag)
+    INSERT_DESCENT  = "INSERT_DESCENT"   # post-GUIDED Z-descent at captured hole_xy
 
     def __init__(self, cfg: Optional[dict] = None,
                  spiral_origin_override: Optional[tuple[float, float]] = None,
                  predicted_tcp_xy: Optional[tuple[float, float]] = None,
+                 predicted_tcp_z: Optional[float] = None,
                  r_grasp_to_partcenter_world: tuple[float, float, float] = (0.0, 0.0, 0.0),
                  object_origin_in_EE: Optional[tuple[float, float, float]] = None):
         self.cfg = cfg or {}
@@ -80,6 +434,12 @@ class ContactSearchFSM:
         # Predicted TCP xy at hole (from CAD chain). Used as a GLOBAL
         # PLAUSIBILITY ANCHOR — separate concept from spiral_center_xy.
         self.predicted_tcp_xy = predicted_tcp_xy
+        # Predicted TCP z at seat (from CAD chain). Used as the absolute
+        # reference for the "At Target" marker. Absolute is correct because
+        # multi-contact insertions (peg encountering features along the way)
+        # would re-latch surface_z and erase relative-descent metrics, but
+        # absolute target-z stays valid throughout.
+        self.predicted_tcp_z = predicted_tcp_z
         # Vector from TCP to part_center (object origin) in WORLD frame.
         # Computed from CAD predicted_tcp_at_seat - T_world_object_seat.
         # Used for Fz→T lever-arm compensation: pure Fz at TCP creates
@@ -103,7 +463,69 @@ class ContactSearchFSM:
         self.hole_z: Optional[float] = None
         self.hole_t: Optional[float] = None
         self.insert_start_t: Optional[float] = None
+
+        # GUIDED-mode state (operator-drag data collection):
+        self.guided_mode: bool = bool(self.cfg.get("guided_mode", False))
+        # Operator signals "above hole now" by setting this flag (the wrapper
+        # sets it on receiving SIGUSR1). FSM checks each tick during GUIDED
+        # state — when True, captures TCP and transitions to INSERT_DESCENT.
+        self._guided_hole_marked: bool = False
+        # Captured at the moment of the operator's signal (= GUIDED→INSERT_DESCENT transition):
+        self.hole_observed_xy: Optional[tuple[float, float]] = None
+        self.hole_observed_z:  Optional[float] = None
+        self.hole_observed_t:  Optional[float] = None
+        # GUIDED-state defaults (loose for easy operator manipulation, matching
+        # what we validated in 2026-05-06 gimbal_mode_test.py):
+        self.guided_gain    = float(self.cfg.get("guided_gain",    2.0))
+        self.guided_damping = float(self.cfg.get("guided_damping", 0.05))
+        self._guided_entered: bool = False
+        self._insert_descent_entered: bool = False
         self.insert_start_z: Optional[float] = None
+
+        # v4 Found Hole predicate detector (analysis/CONTROL_LAW.md). Runs
+        # alongside operator SIGUSR1 in GUIDED state. If `v4_autofire` is True,
+        # a v4 fire ALSO triggers GUIDED → INSERT_DESCENT (stage 3b). If False
+        # (stage 3a / default), v4 fire is logged but the operator's SIGUSR1
+        # remains the only trigger.
+        self.v4_autofire: bool = bool(self.cfg.get("v4_autofire", False))
+        self.found_hole_detector = FoundHoleDetector(
+            rim_high_thresh = float(self.cfg.get("v4_rim_high_thresh", 4.0)),
+            rim_low_thresh  = float(self.cfg.get("v4_rim_low_thresh",  3.0)),
+            off_sustain_s   = float(self.cfg.get("v4_off_sustain_s",   0.30)),
+            recent_window_s = float(self.cfg.get("v4_recent_window_s", 2.5)),
+        )
+        # Set when v4 fires (None until then). Persisted to meta on exit.
+        self.v4_predicate_fire: Optional[dict] = None
+
+        # Autonomous SEARCH (replaces operator-drag GUIDED). When True,
+        # APPROACH→Contact routes to SEARCH instead of GUIDED. SEARCH uses
+        # SearchDirector to actively command F_lat in the −r_cop direction
+        # (analysis/SEARCH_CONTROL_LAW.md). v4 detector continues to run and
+        # triggers SEARCH → INSERT_DESCENT.
+        self.autonomous_search: bool = bool(self.cfg.get("autonomous_search", False))
+        # SearchDirector v3: Archimedean spiral PD director (analysis/SEARCH_CONTROL_LAW.md).
+        # Parameters from GPT-5 analysis (gpt-temaxw-74fd8c) backed by Chhatpar/Branicky 2001
+        # and Jasim/Plapper/Voos 2014. Spiral parameters tuned for chamfer-capture not
+        # fine-clearance — paired with v4 detector for transition.
+        self.search_director = SearchDirector(
+            r0_m              = float(self.cfg.get("search_r0_m",        0.0015)),  # 1.5mm — avoids peg-at-center stall
+            pitch_m           = float(self.cfg.get("search_pitch_m",     0.002)),   # 2mm
+            v_s_m_s           = float(self.cfg.get("search_v_s_m_s",     0.005)),   # 5mm/s
+            R_max_m           = float(self.cfg.get("search_R_max_m",     0.008)),   # 8mm
+            Kp_xy_N_per_m     = float(self.cfg.get("search_Kp_N_m",      350.0)),
+            Kd_xy_N_per_m_per_s = float(self.cfg.get("search_Kd_N_s_m",  40.0)),
+            Fmax_N            = float(self.cfg.get("search_Fmax_N",      3.0)),
+            F_press_N         = float(self.cfg.get("search_F_press_N",   9.0)),
+            fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",   3.0)),
+        )
+        # Seeded by FSM at SEARCH entry (predicted_tcp_xy from CAD prior).
+        # SearchDirector's bootstrap mode drives toward this xy until |F_lat|
+        # picks up the chamfer signal.
+        self.search_max_duration_s: float = float(self.cfg.get("search_max_duration_s", 15.0))
+        self._search_entered: bool = False
+        self._search_start_t: Optional[float] = None
+        self._search_last_cmd_t: Optional[float] = None
+        self._search_cmd_period_s: float = float(self.cfg.get("search_cmd_period_s", 0.10))
 
         # FIND_HOLE spiral state
         self._spiral_origin_xy: Optional[tuple[float, float]] = None
@@ -140,6 +562,13 @@ class ContactSearchFSM:
         # APPROACH: descend under light Fz until contact
         self.approach_fz_N            = float(self.cfg.get("approach_fz_N",            6.0))
         self.approach_max_duration_s  = float(self.cfg.get("approach_max_duration_s", 30.0))
+        # Grace period at start of APPROACH before contact detection arms.
+        # Force_mode_controller startup transient + sensor noise can cause
+        # smoothed fz to briefly exceed contact_threshold_N right at ACTIVE
+        # entry, before peg has descended at all. 1s grace lets the controller
+        # settle. Verified empirically 2026-05-06 session 7 (raw fz oscillating
+        # ±5N in air during first ~0.5s of force-mode active).
+        self.approach_grace_period_s  = float(self.cfg.get("approach_grace_period_s", 1.0))
         self.contact_threshold_N      = float(self.cfg.get("contact_threshold_N",     6.0))
         self.contact_sustain_s        = float(self.cfg.get("contact_sustain_s",       0.1))
         self.fz_smooth_window_s       = float(self.cfg.get("fz_smooth_window_s",      0.3))
@@ -196,6 +625,42 @@ class ContactSearchFSM:
         self.spiral_pitch_m           = float(self.cfg.get("spiral_pitch_m",           0.0006))
         self.spiral_kp_N_per_m        = float(self.cfg.get("spiral_kp_N_per_m",        1500.0))
         self.spiral_F_max_N           = float(self.cfg.get("spiral_F_max_N",           6.0))
+        # H101: directed sweep — replaces spiral with sustained directed push
+        self.find_hole_use_directed_sweep    = bool(self.cfg.get("find_hole_use_directed_sweep",    False))
+        self.find_hole_directed_F_N          = float(self.cfg.get("find_hole_directed_F_N",          5.0))
+        self.find_hole_directed_dwell_s      = float(self.cfg.get("find_hole_directed_dwell_s",      1.5))
+        self.find_hole_directed_rotate_deg   = float(self.cfg.get("find_hole_directed_rotate_deg",  60.0))
+        self.find_hole_directed_n_directions = int(self.cfg.get("find_hole_directed_n_directions",   6))
+        self.find_hole_directed_latch_F_N    = float(self.cfg.get("find_hole_directed_latch_F_N",    2.0))
+        # Iter-2: distance-scaled P-controller params
+        self.find_hole_directed_near_dwell_mm    = float(self.cfg.get("find_hole_directed_near_dwell_mm",    3.0))
+        self.find_hole_directed_scaling_zone_mm  = float(self.cfg.get("find_hole_directed_scaling_zone_mm", 10.0))
+        self.find_hole_directed_dir_deadband_mm  = float(self.cfg.get("find_hole_directed_dir_deadband_mm", 0.5))
+        # Iter-7: pulse pattern (push/release cycle) to emulate operator's grip-release
+        # which produces T_lat relaxation moments observable in GOLD at close-pass
+        self.find_hole_directed_pulse_period_s   = float(self.cfg.get("find_hole_directed_pulse_period_s",   1.5))
+        self.find_hole_directed_pulse_release_s  = float(self.cfg.get("find_hole_directed_pulse_release_s",  0.3))
+        # Iter-9: synchronize Fz pulse with F_lat pulse — drop cmd_fz during release window
+        # so peg's pinning force on rim drops briefly → can shift into slot via gravity
+        self.find_hole_directed_release_fz_N     = float(self.cfg.get("find_hole_directed_release_fz_N",    1.0))
+        # Iter-10 (A1+A2+A3): orientation-feedback steering + online seat refinement
+        self.find_hole_tilt_tolerance_deg     = float(self.cfg.get("find_hole_tilt_tolerance_deg",     3.33))
+        self.find_hole_tilt_relax_min_deg     = float(self.cfg.get("find_hole_tilt_relax_min_deg",     0.40))
+        self.find_hole_tilt_relax_sustain_s   = float(self.cfg.get("find_hole_tilt_relax_sustain_s",   0.30))
+        self.find_hole_tilt_high_sustain_s    = float(self.cfg.get("find_hole_tilt_high_sustain_s",    0.30))
+        self.find_hole_tilt_history_window_s  = float(self.cfg.get("find_hole_tilt_history_window_s",  1.0))
+        # Iter-10 state
+        self._tilt_history: list[tuple[float, float]] = []  # (t, tilt_deg) rolling
+        self._tilt_high_first_t: float | None = None        # when tilt first crossed tolerance
+        self._tilt_running_peak_deg: float = 0.0
+        self._tilt_running_peak_t: float | None = None
+        self._tilt_relax_first_t: float | None = None       # when sustained drop from peak began
+        self._chamfer_engaged: bool = False                 # latched: peg engaged, transition to ENTRY_SETTLE
+        self._seat_xy_refined: tuple[float, float] | None = None  # online-refined seat estimate
+        self._last_F_lat_baselink: tuple[float, float] = (0.0, 0.0)
+        self._last_T_lat_baselink: tuple[float, float] = (0.0, 0.0)
+        self._last_stable_unit: tuple[float, float] = (0.0, 0.0)
+        self._find_hole_first_t: float | None = None
         # Optional tilt rocking during search (Tx/Ty oscillation)
         self.find_hole_tilt_T_Nm      = float(self.cfg.get("find_hole_tilt_T_Nm",      0.0))
         self.find_hole_tilt_freq_hz   = float(self.cfg.get("find_hole_tilt_freq_hz",   1.5))
@@ -231,6 +696,12 @@ class ContactSearchFSM:
         # distance. Operator-demo full insertion is ~25-30mm; CAD-xy can be
         # off by 5-20mm so the dist gate alone wrongly rejects real seats.
         self.engaged_z_drop_dominant_m = float(self.cfg.get("engaged_z_drop_dominant_m", 0.020))   # 20mm
+        # Absolute "At Target" tolerance: |tcp_z - predicted_tcp_z| < this.
+        # Used by the global seat detector when predicted_tcp_z is available
+        # (CAD chain). 5mm catches both peg-slightly-above-predicted (operator
+        # marked hole near edge, peg seated at slot lip) and peg-slightly-below
+        # (slot deeper than CAD; verified 1.6mm in 2026-05-06 first GUIDED demo).
+        self.at_target_z_tol_m = float(self.cfg.get("at_target_z_tol_m", 0.005))
         # Tilt thresholds (deg from canonical face-down). Operator-demo data:
         #   u_orange: max 1.36° during successful descent
         #   u_brown:  max 5.56°
@@ -305,9 +776,18 @@ class ContactSearchFSM:
         return ((x - x0) / dt, (y - y0) / dt)
 
     def _approach_wrench(self) -> tuple[tuple, float, float, tuple]:
-        """APPROACH wrench: light downward push, all compliant."""
+        """APPROACH wrench: light downward push.
+        Selection vector: X+Y LOCKED, Z compliant, rotation LOCKED.
+        2026-05-06: changed XY from compliant→locked. Without this, force-mode
+        yields to any sensed lateral force during descent (gravity moments,
+        payload mismatch residuals, encoder noise) → 0.83mm XY drift over 19s.
+        With XY locked, peg descends in a perfectly straight Z line from hover.
+        Contact happens at exactly hover_xy. Required for clean GUIDED-mode
+        data collection (we want contact_xy = hover_xy = (offset_xy + slot_xy)).
+        Rotation already locked from the prior fix.
+        """
         wrench = (0.0, 0.0, -self.approach_fz_N, 0.0, 0.0, 0.0)
-        sel = (True, True, True, True, True, True)
+        sel = (False, False, True, False, False, False)  # XY LOCKED, Z compliant, rotation LOCKED
         return wrench, self.gain_approach, self.damping_approach, sel
 
     def _partcenter_torque_correction(self, Fx: float, Fy: float, Fz: float) -> tuple[float, float, float]:
@@ -349,7 +829,7 @@ class ContactSearchFSM:
     def _entry_settle_wrench(self, t: float) -> tuple[tuple, float, float, tuple]:
         """ENTRY_SETTLE wrench: gentle Fz down, all force-controlled."""
         wrench = (0.0, 0.0, -self.entry_settle_fz_N, 0.0, 0.0, 0.0)
-        sel = (True, True, True, True, True, True)
+        sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
         return wrench, self.entry_settle_gain, self.entry_settle_damping, sel
 
     def _insert_wrench(self, t: float) -> tuple[tuple, float, float, tuple]:
@@ -368,10 +848,169 @@ class ContactSearchFSM:
             tz_theta = 2.0 * math.pi * self.insert_tz_freq_hz * t_in
             Tz = self.insert_tz_T_Nm * math.sin(tz_theta)
         wrench = (0.0, 0.0, -self.insert_fz_N, Tx, Ty, Tz)
-        sel = (True, True, True, True, True, True)
+        sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
         return wrench, self.gain_insert, self.damping_insert, sel
 
+    def _find_hole_directed_wrench(self, t: float, tcp_xy: tuple[float, float]) -> tuple[tuple, float, float, tuple, dict]:
+        """Iter-2 (post-H101): distance-scaled P-controller toward seat with near-seat dwell.
+
+        Replaces H101's rotating-fixed-magnitude design after empirical observation
+        (insert_u_orange_20260505_201537):
+          - 5N rotating: TCP overshot seat (got within 6.6mm at t+7.7s, then drifted to 17.7mm)
+          - GOLD operator R=0.88 (fixed direction); rotation pushed peg AWAY after first approach
+          - GOLD median cmd_F_lat = 1.76N, p75 = 5.00N — magnitude scaled with distance, not constant
+
+        New control law:
+          - dist > scaling_zone_mm:   F = F_max * unit(seat-tcp)             # full push toward seat
+          - near_dwell < dist < scaling_zone:  F = F_max * unit * (dist/scaling) * 0.7   # P-scaled approach
+          - dist < near_dwell_mm:     F = 0  → let cmd_fz drive peg through chamfer (operator-style settle)
+
+        Backing invariants: I001, I003, I004, I005 plus the new GOLD-vs-H101 diff.
+        """
+        # Iter-10: prefer online-refined seat estimate if we've latched one (chamfer engaged at xy=...)
+        if self._seat_xy_refined is not None:
+            seat_xy = self._seat_xy_refined
+        elif self.spiral_origin_override is not None:
+            seat_xy = (float(self.spiral_origin_override[0]),
+                       float(self.spiral_origin_override[1]))
+        elif self.predicted_tcp_xy is not None:
+            seat_xy = (float(self.predicted_tcp_xy[0]),
+                       float(self.predicted_tcp_xy[1]))
+        else:
+            return self._find_hole_wrench_spiral(t, tcp_xy)
+
+        # Iter-10 (A2+A3): orientation feedback — read tilt + tilt direction
+        # self._tilt_deg is computed in update() at the start of each tick;
+        # self._tilt_err_world = (-ee_zy, +ee_zx, 0.0) is the tilt axis in world (xy)
+        tilt_deg = getattr(self, "_tilt_deg", 0.0)
+        tilt_err = getattr(self, "_tilt_err_world", (0.0, 0.0, 0.0))
+        tilt_axis_xy_mag = math.hypot(tilt_err[0], tilt_err[1])
+
+        # Maintain rolling tilt history (last find_hole_tilt_history_window_s seconds)
+        self._tilt_history.append((t, tilt_deg))
+        cutoff = t - self.find_hole_tilt_history_window_s
+        self._tilt_history = [(tt, td) for (tt, td) in self._tilt_history if tt >= cutoff]
+        # Track running peak
+        if tilt_deg > self._tilt_running_peak_deg:
+            self._tilt_running_peak_deg = tilt_deg
+            self._tilt_running_peak_t = t
+
+        # Detect "high tilt" sustained state — peg wedged at rim edge
+        is_high_tilt = tilt_deg > self.find_hole_tilt_tolerance_deg
+        if is_high_tilt:
+            if self._tilt_high_first_t is None:
+                self._tilt_high_first_t = t
+        else:
+            self._tilt_high_first_t = None
+
+        # Detect chamfer-engagement (sustained drop from peak)
+        relaxation = self._tilt_running_peak_deg - tilt_deg
+        if (self._tilt_running_peak_deg > self.find_hole_tilt_tolerance_deg - 0.5
+            and relaxation >= self.find_hole_tilt_relax_min_deg):
+            if self._tilt_relax_first_t is None:
+                self._tilt_relax_first_t = t
+            elif (t - self._tilt_relax_first_t) >= self.find_hole_tilt_relax_sustain_s:
+                # Latch: chamfer engaged at this xy — refine the seat estimate
+                if not self._chamfer_engaged:
+                    self._chamfer_engaged = True
+                    self._seat_xy_refined = (float(tcp_xy[0]), float(tcp_xy[1]))
+        else:
+            self._tilt_relax_first_t = None
+
+        # Distance to seat
+        dx = seat_xy[0] - tcp_xy[0]
+        dy = seat_xy[1] - tcp_xy[1]
+        dist_m = math.hypot(dx, dy)
+
+        near_dwell_m = self.find_hole_directed_near_dwell_mm * 1e-3
+        scaling_m   = self.find_hole_directed_scaling_zone_mm * 1e-3
+        F_max = self.find_hole_directed_F_N
+
+        # Iter-7 structural change: pulse pattern (push/release cycle) to emulate
+        # operator's natural grip-release. From iter-6 telemetry diff vs GOLD:
+        #   - GOLD |T_lat| relaxed at close-pass: 0.184 → 0.032 Nm (operator's grip eased)
+        #   - FAIL iter-6 |T_lat| stayed at 0.1 Nm — peg never released to engage chamfer
+        #   - GOLD's fz_t went NEGATIVE at t+10s (peg fell into slot)
+        #   - FAIL iter-6 fz_t stayed at +8.5N — peg stayed pinned on rim
+        # Mechanism: brief release of lateral force lets peg's potential energy (cmd_fz=-9N)
+        # drive it through chamfer geometry. Continuous push keeps peg pinned against rim.
+        deadband_m = self.find_hole_directed_dir_deadband_mm * 1e-3
+
+        # Initialize cycle-start time (set ONCE when first entering FIND_HOLE)
+        if self._find_hole_first_t is None:
+            self._find_hole_first_t = t
+        t_in_phase = t - self._find_hole_first_t
+
+        period = max(self.find_hole_directed_pulse_period_s, 0.1)
+        release_s = max(self.find_hole_directed_pulse_release_s, 0.0)
+        push_s = period - release_s
+        in_release = (t_in_phase % period) > push_s
+
+        # Compute direction (deadband-latched) regardless of pulse phase
+        if dist_m < deadband_m:
+            if self._last_stable_unit == (0.0, 0.0):
+                self._last_stable_unit = (0.0, -1.0)
+            ux, uy = self._last_stable_unit
+        else:
+            ux, uy = dx / dist_m, dy / dist_m
+            self._last_stable_unit = (ux, uy)
+
+        # Iter-10: tilt-direction OVERRIDE.
+        # When tilt > tolerance sustained → peg is wedged at rim edge → tilt direction
+        # IS the position-error signal (tcp_top tilts +X means peg bottom held back at -X
+        # → move TCP +X to slide peg past the pinning edge).
+        # When tilt is in normal envelope → push toward seat estimate (with deadband).
+        tilt_override_active = (
+            self._tilt_high_first_t is not None
+            and (t - self._tilt_high_first_t) >= self.find_hole_tilt_high_sustain_s
+            and tilt_axis_xy_mag > 1e-4
+        )
+
+        if in_release:
+            Fx, Fy, zone = 0.0, 0.0, "PULSE_RELEASE"
+            fz_cmd = -self.find_hole_directed_release_fz_N
+        elif tilt_override_active:
+            # Push in the tilt direction to slide peg past the pinning rim edge
+            txn = tilt_err[0] / tilt_axis_xy_mag
+            tyn = tilt_err[1] / tilt_axis_xy_mag
+            # Negate per the wrapper's sign convention (Fx_b = -kp * err_x_base)
+            Fx, Fy, zone = -F_max * txn, -F_max * tyn, f"TILT_OVERRIDE_{tilt_deg:.1f}deg"
+            fz_cmd = -self.find_hole_fz_N
+        else:
+            Fx, Fy, zone = -F_max * ux, -F_max * uy, "PULSE_PUSH"
+            fz_cmd = -self.find_hole_fz_N
+
+        # Compat: keep _spiral_last_t / _spiral_origin_xy initialized for ENTRY_SETTLE checks
+        if self._spiral_last_t is None:
+            self._spiral_last_t = t
+            self._spiral_origin_xy = (float(tcp_xy[0]), float(tcp_xy[1]))
+
+        wrench = (Fx, Fy, fz_cmd, 0.0, 0.0, 0.0)
+        sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
+        info = {
+            "spiral_radius_m": 0.0,
+            "spiral_theta_rad": 0.0,
+            "spiral_target_xy_m": seat_xy,
+            "err_xy_base_mm": (dx * 1000.0, dy * 1000.0),
+            "F_lat_cmd_xy_N": (Fx, Fy),
+            "directed_seat_xy_m": seat_xy,
+            "directed_dist_to_seat_mm": dist_m * 1000.0,
+            "directed_zone": zone,
+            "directed_fz_cmd": fz_cmd,
+        }
+        return wrench, self.gain_find_hole, self.damping_find_hole, sel, info
+
+    def _find_hole_wrench_spiral(self, t: float, tcp_xy: tuple[float, float]) -> tuple[tuple, float, float, tuple, dict]:
+        """Original spiral PD implementation — kept as a fallback path when directed sweep has no seat prior."""
+        return self._find_hole_wrench_impl(t, tcp_xy)
+
     def _find_hole_wrench(self, t: float, tcp_xy: tuple[float, float]) -> tuple[tuple, float, float, tuple, dict]:
+        """Dispatcher: directed sweep (H101) if enabled, else original spiral."""
+        if self.find_hole_use_directed_sweep:
+            return self._find_hole_directed_wrench(t, tcp_xy)
+        return self._find_hole_wrench_impl(t, tcp_xy)
+
+    def _find_hole_wrench_impl(self, t: float, tcp_xy: tuple[float, float]) -> tuple[tuple, float, float, tuple, dict]:
         """FIND_HOLE wrench: PD-derived spiral xy + Fz. Stankowski Archimedean."""
         # Initialize spiral state on first tick
         if self._spiral_origin_xy is None:
@@ -459,7 +1098,7 @@ class ContactSearchFSM:
         # Spiral Fx/Fy is intentionally GENTLE (kp=1500, F_max=10) so the
         # peg can self-align via chamfer geometry under admittance.
         wrench = (Fx, Fy, -self.find_hole_fz_N, Tx, Ty, Tz)
-        sel = (True, True, True, True, True, True)
+        sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
         info = {
             "spiral_radius_m": radius,
             "spiral_theta_rad": self._spiral_theta,
@@ -493,6 +1132,10 @@ class ContactSearchFSM:
                            Gates use 3° threshold (~2× u_orange demo max).
         """
         action = FSMAction()
+        # H101: cache F_lat_baselink so directed-sweep can read it without changing _find_hole_wrench signature
+        self._last_F_lat_baselink = (float(F_lat_baselink[0]), float(F_lat_baselink[1]))
+        # SearchDirector reads base-frame torques to compute r_cop
+        self._last_T_lat_baselink = (float(T_lat_baselink[0]), float(T_lat_baselink[1]))
         # === Compute EE Z-axis in world (yaw-invariant) for orientation feedback ===
         # ee_z_world = (2*qx*qz + 2*qy*qw, 2*qy*qz - 2*qx*qw, 1 - 2*(qx² + qy²))
         # For canonical face-down: ee_z = (0, 0, -1).
@@ -583,38 +1226,64 @@ class ContactSearchFSM:
             )
             return action
 
-        # === STATE-INDEPENDENT SEAT DETECTOR (per offline replay validation) ===
-        # The FSM bouncing between ENTRY_SETTLE↔FIND_HOLE↔INSERT resets local
-        # _motion_stopped_first_t every transition, so the in-INSERT predicate
-        # never accumulates 0.75s of sustain even when peg has been seated for
-        # 60s (verified on FAIL_INSERT CSV).
-        # Solution: a global predicate that runs every tick regardless of FSM
-        # state. Once we've seen surface contact (surface_z latched) and the
-        # peg has descended enough + is stationary + level, declare seat.
-        if (self.surface_z is not None and
-                self.state in (self.FIND_HOLE, self.ENTRY_SETTLE,
-                               self.WEDGE_RECOVERY, self.INSERT)):
-            z_drop_global = self.surface_z - tcp_z
-            if z_drop_global >= self.engaged_z_drop_dominant_m:
-                v_z = self._z_velocity(t, tcp_z, self.insert_motion_window_s)
-                speed_z = abs(v_z) if v_z is not None else float('inf')
-                if (speed_z < self.insert_motion_thresh_m_s and
-                        self._tilt_deg < self.insert_tilt_abort_deg):
-                    if self._global_seat_first_t is None:
-                        self._global_seat_first_t = t
-                    elif (t - self._global_seat_first_t) >= 1.0:
-                        self.state = self.DONE
-                        action.kind = "exit_done"
-                        action.transitioned = True
-                        action.new_state = self.DONE
-                        action.transition_msg = (
-                            f"GLOBAL SEAT detector: z_drop={z_drop_global*1000:.1f}mm "
-                            f"|dz/dt|={speed_z*1000:.3f}mm/s tilt={self._tilt_deg:.2f}° "
-                            f"sustained 1.0s (state was {self.state})"
-                        )
-                        return action
-                else:
-                    self._global_seat_first_t = None
+        # === STATE-INDEPENDENT SEAT DETECTOR ===
+        # Runs every tick regardless of FSM sub-state. Two paths:
+        #   (1) ABSOLUTE (preferred): tcp_z near predicted_tcp_z (CAD seat z),
+        #       motion stopped, tilt low, sustained. Robust to multi-contact
+        #       insertions because it doesn't depend on surface_z (which
+        #       re-latches on every new Contact event).
+        #   (2) RELATIVE (fallback when predicted_tcp_z is None): z_drop from
+        #       FIRST contact ≥ engaged_z_drop_dominant_m. Original behavior;
+        #       only correct for single-contact insertions.
+        # Include SEARCH and APPROACH so a peg that drops straight through
+        # the chamfer without needing lateral search is detected as seated
+        # immediately (verified case 2026-05-06 u_brown: peg fell to slot
+        # bottom during APPROACH, then briefly bumped fz>3 entering SEARCH,
+        # then aborted on lateral_stall — but tcp_z was 1.7mm below predicted
+        # seat with motion stopped throughout).
+        if self.state in (self.APPROACH, self.FIND_HOLE, self.ENTRY_SETTLE,
+                          self.WEDGE_RECOVERY, self.INSERT,
+                          self.SEARCH,
+                          self.INSERT_DESCENT):
+            v_z = self._z_velocity(t, tcp_z, self.insert_motion_window_s)
+            speed_z = abs(v_z) if v_z is not None else float('inf')
+            motion_ok = (speed_z < self.insert_motion_thresh_m_s and
+                          self._tilt_deg < self.insert_tilt_abort_deg)
+
+            # Path (1): absolute z near predicted seat
+            absolute_at_target = False
+            if self.predicted_tcp_z is not None:
+                dz_abs = abs(tcp_z - self.predicted_tcp_z)
+                absolute_at_target = dz_abs <= self.at_target_z_tol_m
+
+            # Path (2): relative descent fallback
+            relative_seated = False
+            z_drop_global = float('inf')
+            if self.surface_z is not None:
+                z_drop_global = self.surface_z - tcp_z
+                relative_seated = z_drop_global >= self.engaged_z_drop_dominant_m
+
+            if (absolute_at_target or relative_seated) and motion_ok:
+                if self._global_seat_first_t is None:
+                    self._global_seat_first_t = t
+                elif (t - self._global_seat_first_t) >= 1.0:
+                    self.state = self.DONE
+                    action.kind = "exit_done"
+                    action.transitioned = True
+                    action.new_state = self.DONE
+                    if self.predicted_tcp_z is not None:
+                        dz = (tcp_z - self.predicted_tcp_z) * 1000
+                        criterion = (f"ABSOLUTE: tcp_z={tcp_z:.4f} predicted={self.predicted_tcp_z:.4f} "
+                                     f"Δ={dz:+.2f}mm (tol={self.at_target_z_tol_m*1000:.0f}mm)")
+                    else:
+                        criterion = (f"RELATIVE z_drop: {z_drop_global*1000:.1f}mm "
+                                     f"(tol={self.engaged_z_drop_dominant_m*1000:.0f}mm)")
+                    action.transition_msg = (
+                        f"GLOBAL SEAT detector: {criterion}, "
+                        f"|dz/dt|={speed_z*1000:.3f}mm/s tilt={self._tilt_deg:.2f}° "
+                        f"sustained 1.0s (state was {self.state})"
+                    )
+                    return action
             else:
                 self._global_seat_first_t = None
 
@@ -632,6 +1301,12 @@ class ContactSearchFSM:
                                               F_lat_baselink, T_lat_baselink, action)
         elif self.state == self.INSERT:
             return self._tick_insert(t, tcp_x, tcp_y, tcp_z, fz_smoothed, action)
+        elif self.state == self.GUIDED:
+            return self._tick_guided(t, tcp_x, tcp_y, tcp_z, fz_smoothed, action)
+        elif self.state == self.SEARCH:
+            return self._tick_search(t, tcp_x, tcp_y, tcp_z, fz_smoothed, action)
+        elif self.state == self.INSERT_DESCENT:
+            return self._tick_insert_descent(t, tcp_x, tcp_y, tcp_z, fz_smoothed, action)
         elif self.state == self.DONE:
             action.kind = "exit_done"
             return action
@@ -645,6 +1320,234 @@ class ContactSearchFSM:
             return action
 
     # ---------- State ticks ----------------------------------------------
+    def _tick_guided(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
+        """GUIDED state: operator drags EE laterally on rim until peg above hole.
+        sel=(T,T,F,F,F,F) — XY compliant, Z LOCKED, rotation LOCKED.
+        Wrench=(0,0,0,0,0,0) — no commanded force, pure compliance.
+        Loose gain+damping (operator-friendly) per gimbal_mode_test validation.
+        Exit: wrapper sets self._guided_hole_marked=True on SIGUSR1 → capture
+        TCP as hole_observed, transition to INSERT_DESCENT.
+        """
+        # First-tick entry: arm gimbal force-mode wrench
+        if not self._guided_entered:
+            self._guided_entered = True
+            wrench = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            sel = (True, True, False, False, False, False)
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            action.gain = self.guided_gain
+            action.damping = self.guided_damping
+            action.state = self.GUIDED
+            action.msg = (f"GUIDED active: drag peg laterally; Z+orientation "
+                          f"locked. Send SIGUSR1 when peg above hole.")
+            return action
+
+        # v4 Found Hole predicate (parallel to SIGUSR1). Logs on first fire;
+        # if v4_autofire enabled (stage 3b), also marks hole.
+        v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
+        if v4_fired_now:
+            self.v4_predicate_fire = {
+                "t_s": float(t),
+                "xy_m": [float(tcp_x), float(tcp_y)],
+                "z_m": float(tcp_z),
+                "fz_smoothed_at_fire_N": float(fz_smoothed),
+                "abs_fz_smoothed_at_fire_N": float(abs(fz_smoothed)),
+                "thresholds": {
+                    "rim_high_N": self.found_hole_detector.rim_high,
+                    "rim_low_N":  self.found_hole_detector.rim_low,
+                    "off_sustain_s":   self.found_hole_detector.off_sustain_s,
+                    "recent_window_s": self.found_hole_detector.recent_window_s,
+                },
+                "autofired": bool(self.v4_autofire),
+            }
+            action.msg = (f"v4 Found-Hole predicate FIRED at t={t:.2f}s "
+                          f"xy=({tcp_x:+.4f},{tcp_y:+.4f}) "
+                          f"|fz|={abs(fz_smoothed):.2f}N "
+                          f"(autofire={self.v4_autofire})")
+            if self.v4_autofire and not self._guided_hole_marked:
+                self._guided_hole_marked = True
+
+        # Wait for hole-mark signal (SIGUSR1 OR v4 autofire)
+        if self._guided_hole_marked:
+            self.hole_observed_xy = (float(tcp_x), float(tcp_y))
+            self.hole_observed_z  = float(tcp_z)
+            self.hole_observed_t  = float(t)
+            self.state = self.INSERT_DESCENT
+            # Source attribution: v4 if it fired and autofire is on AND v4
+            # fired at or before this tick; SIGUSR1 otherwise.
+            v4_was_trigger = (self.v4_autofire
+                              and self.v4_predicate_fire is not None
+                              and self.v4_predicate_fire["t_s"] <= t)
+            trigger_label = "v4 predicate" if v4_was_trigger else "SIGUSR1"
+            action.transitioned = True
+            action.new_state = self.INSERT_DESCENT
+            action.transition_msg = (
+                f"hole_observed_xy=({self.hole_observed_xy[0]:+.4f},"
+                f"{self.hole_observed_xy[1]:+.4f}) at t={t:.2f}s "
+                f"({trigger_label}) → INSERT_DESCENT"
+            )
+            action.state = self.INSERT_DESCENT
+            return action
+
+        action.state = self.GUIDED
+        return action
+
+    def _tick_search(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
+        """SEARCH state: autonomous F/T-driven director replaces operator drag.
+
+        Each tick:
+          1. SearchDirector computes (Fx, Fy, Fz) from (fz_smoothed, Tx_base,
+             Ty_base) using the −r_cop control law.
+          2. Issue new wrench (rate-limited to search_cmd_period_s).
+          3. Run v4 detector; on fire → SEARCH → INSERT_DESCENT.
+          4. Timeout: ABORT after search_max_duration_s.
+
+        Same selection vector as APPROACH/INSERT_DESCENT: X,Y,Z compliant,
+        rotation locked.
+        """
+        if not self._search_entered:
+            self._search_entered = True
+            self._search_start_t = t
+            # Seed spiral center at CAD-predicted seat. As of 2026-05-06,
+            # primitives/shared/config.py:DEFAULT_BASE_POSITION incorporates
+            # the empirical calibration. Bias correction is no longer applied
+            # in the FSM (the prior u_orange-derived bias was contaminated by
+            # off-center grasp, which does not generalize across objects).
+            # Per-grasp offset (the actual unknown at runtime) is what the
+            # spiral search must discover by sweeping outward from the predicted
+            # seat. Verified against u_brown centered-grasp demo bias = (+1.5, -4) mm.
+            if self.predicted_tcp_xy is not None:
+                self.search_director.set_center(self.predicted_tcp_xy)
+            else:
+                self.search_director.set_center((tcp_x, tcp_y))
+            Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+            wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
+            sel = (True, True, True, False, False, False)
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            action.gain = 0.5
+            action.damping = 0.7
+            action.state = self.SEARCH
+            action.msg = (f"SEARCH active (spiral): "
+                          f"center=({1000*tcp_x:+.1f},{1000*tcp_y:+.1f})mm "
+                          f"r0={1000*self.search_director.r0:.1f}mm "
+                          f"pitch={1000*self.search_director.pitch:.1f}mm "
+                          f"v_s={1000*self.search_director.v_s:.1f}mm/s "
+                          f"R_max={1000*self.search_director.R_max:.1f}mm "
+                          f"Fmax={self.search_director.Fmax:.1f}N "
+                          f"first_cmd=({Fx:+.2f},{Fy:+.2f},{Fz:+.2f})N")
+            self._search_last_cmd_t = t
+            return action
+
+        # Timeout safety
+        if t - self._search_start_t > self.search_max_duration_s:
+            action.kind = "exit_abort"
+            action.abort_reason = (
+                f"SEARCH timeout {self.search_max_duration_s}s — peg never crossed rim "
+                f"(v4 didn't fire). Likely r_cop direction reversed or peg stuck on rim corner.")
+            return action
+
+        # v4 detector — fires on rim-cross. SEARCH always autofires (v4 is the
+        # only transition trigger out of SEARCH; SIGUSR1 is not used in
+        # autonomous mode by convention).
+        v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
+        if v4_fired_now:
+            self.v4_predicate_fire = {
+                "t_s": float(t),
+                "xy_m": [float(tcp_x), float(tcp_y)],
+                "z_m": float(tcp_z),
+                "fz_smoothed_at_fire_N": float(fz_smoothed),
+                "abs_fz_smoothed_at_fire_N": float(abs(fz_smoothed)),
+                "thresholds": {
+                    "rim_high_N": self.found_hole_detector.rim_high,
+                    "rim_low_N":  self.found_hole_detector.rim_low,
+                    "off_sustain_s":   self.found_hole_detector.off_sustain_s,
+                    "recent_window_s": self.found_hole_detector.recent_window_s,
+                },
+                "autofired": True,
+                "from_state": self.SEARCH,
+            }
+            self.hole_observed_xy = (float(tcp_x), float(tcp_y))
+            self.hole_observed_z  = float(tcp_z)
+            self.hole_observed_t  = float(t)
+            self.state = self.INSERT_DESCENT
+            action.transitioned = True
+            action.new_state = self.INSERT_DESCENT
+            action.transition_msg = (
+                f"v4 predicate FIRED in SEARCH at t={t:.2f}s "
+                f"xy=({tcp_x:+.4f},{tcp_y:+.4f}) "
+                f"|fz|={abs(fz_smoothed):.2f}N "
+                f"after {t-self._search_start_t:.2f}s of search → INSERT_DESCENT"
+            )
+            action.state = self.INSERT_DESCENT
+            return action
+
+        # Per-tick spiral update (high-rate inner loop on the PD position-tracker)
+        Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+        # Director self-aborted (spiral exhausted or stall)?
+        if self.search_director.abort_reason is not None:
+            action.kind = "exit_abort"
+            action.abort_reason = (
+                f"SEARCH director: {self.search_director.abort_reason} "
+                f"after {t - self._search_start_t:.2f}s; tcp=({1000*tcp_x:+.1f},"
+                f"{1000*tcp_y:+.1f})mm radius={1000*self.search_director.last_radius_m:.2f}mm"
+            )
+            return action
+
+        # Rate-limited issue of wrench (every search_cmd_period_s)
+        if (self._search_last_cmd_t is None
+                or (t - self._search_last_cmd_t) >= self._search_cmd_period_s):
+            wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
+            sel = (True, True, True, False, False, False)
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            action.gain = 0.5
+            action.damping = 0.7
+            self._search_last_cmd_t = t
+            # Diagnostic per cmd cycle
+            action.msg = (f"SEARCH t+{t-self._search_start_t:.1f}s "
+                          f"r={1000*self.search_director.last_radius_m:.2f}mm "
+                          f"cmd=({Fx:+.2f},{Fy:+.2f})N "
+                          f"tcp=({1000*tcp_x:+.1f},{1000*tcp_y:+.1f})mm")
+
+        action.state = self.SEARCH
+        return action
+
+    def _tick_insert_descent(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
+        """Post-GUIDED Z-descent at the operator-marked hole_xy.
+        Same selection vector as APPROACH (XY locked, Z compliant, rotation
+        locked). Robot descends straight down from current TCP into the slot.
+        Termination: existing seat predicate (motion_stopped + tcp_z near
+        predicted + descent_post_contact > insert_min_descent_m) — declared
+        via the global seat detector that runs every tick before state dispatch.
+        Or: SAFETY_RETRACT if F_lat overload, or operator SIGINT for manual end.
+        """
+        if not self._insert_descent_entered:
+            self._insert_descent_entered = True
+            wrench = (0.0, 0.0, -self.insert_fz_N, 0.0, 0.0, 0.0)
+            sel = (False, False, True, False, False, False)  # XY locked, Z compliant, rotation locked
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            action.gain = self.gain_insert
+            action.damping = self.damping_insert
+            action.state = self.INSERT_DESCENT
+            action.msg = (f"INSERT_DESCENT: descending Z at xy="
+                          f"({tcp_x:+.4f},{tcp_y:+.4f})")
+            return action
+
+        action.state = self.INSERT_DESCENT
+        return action
+
+    def mark_hole(self) -> None:
+        """Wrapper calls this from its SIGUSR1 handler. Triggers GUIDED→INSERT_DESCENT
+        on the next tick if currently in GUIDED state. No-op otherwise."""
+        if self.state == self.GUIDED:
+            self._guided_hole_marked = True
+
     def _tick_approach(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
         if self._approach_start_t is None:
             self._approach_start_t = t
@@ -655,18 +1558,83 @@ class ContactSearchFSM:
             action.abort_reason = f"APPROACH timeout {self.approach_max_duration_s}s — never made contact"
             return action
 
+        # Grace period: ignore contact-detection during the first
+        # approach_grace_period_s of APPROACH. Lets force_mode_controller
+        # startup transient + sensor noise settle before we start looking
+        # for contact. Without this, ±5N noise during force-mode startup
+        # can falsely trip the 3N contact threshold at hover height.
+        in_grace = (t - self._approach_start_t) < self.approach_grace_period_s
+
         # Contact check: smoothed fz above threshold
         # In base frame, peg pushed UP by reaction = +Fz (positive)
-        if fz_smoothed > self.contact_threshold_N:
-            # Transition: APPROACH → FIND_HOLE
+        if not in_grace and fz_smoothed > self.contact_threshold_N:
+            # === Sign-sanity gate (added 2026-05-05 after fold-mirror Stage A bug) ===
+            # If override and predicted disagree by >5mm, the override is likely the
+            # mirrored fold-equivalent and will steer peg AWAY from the actual slot.
+            # Detect at contact moment when we have both signals available.
+            if (self.spiral_origin_override is not None
+                    and self.predicted_tcp_xy is not None):
+                dx_mm = (self.spiral_origin_override[0] - self.predicted_tcp_xy[0]) * 1000.0
+                dy_mm = (self.spiral_origin_override[1] - self.predicted_tcp_xy[1]) * 1000.0
+                gap_mm = (dx_mm * dx_mm + dy_mm * dy_mm) ** 0.5
+                if gap_mm > 5.0:
+                    action.override_vs_predicted_gap_mm = gap_mm
+                    action.override_vs_predicted_warning = (
+                        f"hole_xy_prior override and CAD predicted_tcp_xy disagree by "
+                        f"{gap_mm:.1f}mm (override=({self.spiral_origin_override[0]:+.4f},"
+                        f"{self.spiral_origin_override[1]:+.4f}) vs predicted=("
+                        f"{self.predicted_tcp_xy[0]:+.4f},{self.predicted_tcp_xy[1]:+.4f})). "
+                        f"This is the fold-mirror signature — override likely points to the "
+                        f"WRONG fold equivalent for this run's held_quat. Steering will go AWAY "
+                        f"from the actual slot. See SKILL.md section 11."
+                    )
+            # Capture surface_z + surface_t at the contact moment (used by all paths)
             self.surface_z = float(tcp_z)
             self.surface_t = float(t)
+            warning = getattr(action, 'override_vs_predicted_warning', None)
+
+            # Routing options on Contact:
+            #   1. autonomous_search=True  → SEARCH (active F/T-driven director)
+            #   2. guided_mode=True        → GUIDED (operator-drag data collection)
+            #   3. default                 → FIND_HOLE (legacy spiral, deprecated)
+            if self.autonomous_search:
+                self.state = self.SEARCH
+                action.transitioned = True
+                action.new_state = self.SEARCH
+                action.transition_msg = (
+                    f"surface_z={self.surface_z:.4f}m at t={t:.2f}s "
+                    f"(fz_smoothed={fz_smoothed:.2f}N > {self.contact_threshold_N}) "
+                    f"→ SEARCH (spiral PD: r0={1000*self.search_director.r0:.1f}mm "
+                    f"pitch={1000*self.search_director.pitch:.1f}mm v_s={1000*self.search_director.v_s:.1f}mm/s "
+                    f"R_max={1000*self.search_director.R_max:.1f}mm Fmax={self.search_director.Fmax:.1f}N "
+                    f"F_press={self.search_director.F_press:.1f}N timeout={self.search_max_duration_s}s)"
+                )
+                action.state = self.SEARCH
+                return action
+
+            if self.guided_mode:
+                self.state = self.GUIDED
+                action.transitioned = True
+                action.new_state = self.GUIDED
+                action.transition_msg = (
+                    f"surface_z={self.surface_z:.4f}m at t={t:.2f}s "
+                    f"(fz_smoothed={fz_smoothed:.2f}N > {self.contact_threshold_N}) "
+                    f"→ GUIDED (operator-drag); send SIGUSR1 to wrapper when peg is above hole"
+                )
+                # Trigger initial GUIDED wrench (set in _tick_guided on first entry)
+                action.state = self.GUIDED
+                return action
+
+            # Default: APPROACH → FIND_HOLE (autonomous insertion path)
             self.state = self.FIND_HOLE
             self._find_hole_start_t = t
             action.transitioned = True
             action.new_state = self.FIND_HOLE
             action.transition_msg = (f"surface_z={self.surface_z:.4f}m at t={t:.2f}s "
                                      f"(fz_smoothed={fz_smoothed:.2f}N > {self.contact_threshold_N})")
+            if warning:
+                action.transition_msg += f" || SIGN-SANITY WARNING: {warning}"
+            # H101: F_lat_baselink already cached on self at start of update() (line ~585)
             # Start FIND_HOLE wrench immediately (will fall through to next call)
             wrench, gain, damping, sel, _ = self._find_hole_wrench(t, (tcp_x, tcp_y))
             action.new_wrench = True
@@ -742,7 +1710,7 @@ class ContactSearchFSM:
                       Tx_cmd_relevel, Ty_cmd_relevel, 0.0)
             cmd_msg = (f"cmd_T=({Tx_cmd_relevel:+.3f},{Ty_cmd_relevel:+.3f})Nm "
                        f"Fz={self.wedge_fz_N}N")
-        sel = (True, True, True, True, True, True)
+        sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
 
         # Successful unwedge: tilt below engagement gate (peg level enough).
         unwedged = (self._tilt_deg <= self.engaged_tilt_max_deg)
@@ -976,7 +1944,7 @@ class ContactSearchFSM:
                              0.0, 0.0)
                 action.new_wrench = True
                 action.wrench_baselink = wrench_wr
-                action.selection_vector = (True, True, True, True, True, True)
+                action.selection_vector = (True, True, True, False, False, False)  # rotation LOCKED
                 action.gain = 0.7
                 action.damping = 0.5
                 action.state = self.WEDGE_RECOVERY
@@ -1050,15 +2018,39 @@ class ContactSearchFSM:
         # design). So FIND_HOLE → ENTRY_SETTLE on the FIRST z drop, then
         # ENTRY_SETTLE stops the spiral, settles, and only THEN checks
         # force/torque to distinguish full vs partial engagement.
-        if self.surface_z is not None and tcp_z < (self.surface_z - self.find_hole_drop_thresh_m):
+        #
+        # Iter-10 (A3): ALSO transition on tilt-relaxation event (chamfer engaged but
+        # peg hasn't dropped 0.8mm yet — common for tight-clearance pegs like u_orange).
+        # The directed wrench function sets self._chamfer_engaged when sustained tilt
+        # relaxation is detected. Fires earlier than the z_drop gate.
+        # Iter-10 (bouncing-trap fix): require TCP to be NEAR the seat estimate when
+        # firing the z_drop trigger. Otherwise random rim depressions (~1mm dips off-slot)
+        # cause infinite FIND_HOLE↔ENTRY_SETTLE bouncing. iter-10 telemetry showed this:
+        # peg drifted 35mm laterally over 280s of bouncing on a false 1mm dip.
+        z_drop_raw_gate = self.surface_z is not None and tcp_z < (self.surface_z - self.find_hole_drop_thresh_m)
+        seat_est = self._seat_xy_refined or self.spiral_origin_override or self.predicted_tcp_xy
+        if z_drop_raw_gate and seat_est is not None:
+            dist_to_seat_est = math.hypot(seat_est[0] - tcp_x, seat_est[1] - tcp_y)
+            # Only allow z_drop trigger if peg is plausibly at the seat (≤10mm from estimate).
+            # This is wider than ENTRY_SETTLE's own dist gate (6mm) so that a borderline
+            # case doesn't bounce; tight enough to reject far-off rim depressions.
+            z_drop_gate = dist_to_seat_est < 0.010
+        else:
+            z_drop_gate = z_drop_raw_gate  # fall back if no seat estimate
+        chamfer_relax_gate = bool(getattr(self, "_chamfer_engaged", False))
+        if z_drop_gate or chamfer_relax_gate:
             self.state = self.ENTRY_SETTLE
             self._entry_settle_start_t = t
             self._entry_settle_z_at_start = float(tcp_z)
             action.transitioned = True
             action.new_state = self.ENTRY_SETTLE
+            trigger = "z_drop" if z_drop_gate else "tilt_relaxation"
+            z_drop_mm = (self.surface_z - tcp_z) * 1000 if self.surface_z else 0
             action.transition_msg = (
-                f"candidate entry — z dropped {(self.surface_z-tcp_z)*1000:.2f}mm at xy="
-                f"({tcp_x:.4f},{tcp_y:.4f}); stopping spiral, will verify engagement"
+                f"candidate entry [{trigger}] — z_drop={z_drop_mm:.2f}mm "
+                f"tilt={getattr(self, '_tilt_deg', 0.0):.2f}° "
+                f"peak={self._tilt_running_peak_deg:.2f}° "
+                f"at xy=({tcp_x:.4f},{tcp_y:.4f}); stopping spiral, verifying engagement"
             )
             # Issue settle wrench (Fz only, no XY spiral)
             wrench, gain, damping, sel = self._entry_settle_wrench(t)
@@ -1079,20 +2071,40 @@ class ContactSearchFSM:
                                    f"{(self.spiral_pitch_m/(2.0*math.pi))*self._spiral_theta*1000:.2f}mm")
             return action
 
-        # AGGRESSIVE STUCK DETECTOR: operator demos descend 10mm+ in 5s. If
-        # autonomous run shows z_drop < 1mm after 15s post-contact, peg is
-        # genuinely stuck — abort fast instead of wasting 60s+ on a doomed
-        # spiral. Saves robot time + reduces wear on peg/rim.
+        # PROXIMITY-AWARE STUCK DETECTOR (iter-8):
+        # GOLD operator timeline (insert_u_orange_20260505_193645):
+        #   t+5s: at close-pass (dist=0.87mm), z_drop=0.17mm  ← old detector aborts here
+        #   t+7s: bounced to 1.12mm (chamfer engagement)
+        #   t+10s: z_drop=1.45mm (peg dropping in)
+        # The 15s/<1mm rule is right when TCP is FAR from seat (peg never aligning),
+        # but wrong when TCP is NEAR seat (peg needs time to engage chamfer). Splitting:
+        #   - If TCP > proximity_thresh: 15s timeout (fast-fail when not approaching)
+        #   - If TCP < proximity_thresh: extended timeout (give chamfer engagement time)
         if self.surface_t is not None and self.surface_z is not None:
             t_since_contact = t - self.surface_t
             z_drop_now = self.surface_z - tcp_z
-            if t_since_contact >= self.find_hole_stuck_window_s and z_drop_now < self.find_hole_stuck_z_drop_m:
+            # Compute distance to seat (use spiral_origin_override = hole_xy_prior or
+            # predicted_tcp_xy as best-known seat estimate)
+            seat_xy_for_stuck = None
+            if self.spiral_origin_override is not None:
+                seat_xy_for_stuck = self.spiral_origin_override
+            elif self.predicted_tcp_xy is not None:
+                seat_xy_for_stuck = self.predicted_tcp_xy
+            dist_to_seat_m = float("inf")
+            if seat_xy_for_stuck is not None:
+                dist_to_seat_m = math.hypot(seat_xy_for_stuck[0] - tcp_x,
+                                            seat_xy_for_stuck[1] - tcp_y)
+            # Proximity-scaled stuck window: if peg is near seat, give chamfer engagement time
+            proximity_threshold_m = 0.002  # 2mm
+            extended_window_s = 30.0
+            window_s = extended_window_s if dist_to_seat_m < proximity_threshold_m else self.find_hole_stuck_window_s
+            if t_since_contact >= window_s and z_drop_now < self.find_hole_stuck_z_drop_m:
                 action.kind = "exit_abort"
                 action.abort_reason = (
                     f"FIND_HOLE STUCK: z_drop={z_drop_now*1000:.2f}mm < "
                     f"{self.find_hole_stuck_z_drop_m*1000:.1f}mm after "
-                    f"{t_since_contact:.1f}s post-contact (operator demo: 10mm+ in 5s). "
-                    f"Aborting early; no progress."
+                    f"{t_since_contact:.1f}s (proximity {dist_to_seat_m*1000:.1f}mm, "
+                    f"window={window_s:.0f}s). Aborting; no progress."
                 )
                 return action
         radius = (self.spiral_pitch_m / (2.0 * math.pi)) * self._spiral_theta
@@ -1118,7 +2130,7 @@ class ContactSearchFSM:
             Fx_cmd = Fmag * math.cos(angle_rad)
             Fy_cmd = Fmag * math.sin(angle_rad)
             wrench = (Fx_cmd, Fy_cmd, -self.find_hole_press_fz_N, 0.0, 0.0, 0.0)
-            sel = (True, True, True, True, True, True)
+            sel = (True, True, True, False, False, False)  # rotation LOCKED — prismatic peg, no rotational compliance needed (2026-05-06)
             action.new_wrench = True
             action.wrench_baselink = wrench
             action.selection_vector = sel

@@ -27,10 +27,22 @@ schema_version: 2
 # Reference: github.com/danielstankw/UR5e-robot-control (Archimedean spiral)
 fsm:
   # APPROACH — descend in air under light Fz until peg contacts surface
-  approach_fz_N:               6.0     # gentle so we don't blast into rim
+  # 2026-05-06: bumped 6.0 → 12.0 to halve descent time (~19s → ~10s for 85mm).
+  # With contact_threshold_N=3, detection_latency~50ms, peg overshoots first
+  # contact by ~0.45mm at the higher speed (was 0.22mm). Acceptable; well under
+  # mm-scale CAD perception offset. Rotation locked via selection_vector means
+  # gravity comp must be solid (it is, per set_payload at bringup).
+  approach_fz_N:               12.0    # gentle so we don't blast into rim
   approach_max_duration_s:     30.0
-  contact_threshold_N:         6.0     # base-frame Fz reading triggers contact
-  fz_smooth_window_s:          0.3     # smooth Fz before threshold compare
+  # 2026-05-06: tightened from (6.0, 0.3) → (3.0, 0.1). Empirical: pre-contact
+  # noise floor on a properly-zeroed F/T is well under 0.5N, so 3N is firmly
+  # above noise but ~50% lower than 6N → fires earlier; 0.1s smoothing is enough
+  # to reject single-sample spikes while reducing the fz-window-lag from ~0.15s
+  # to ~0.05s. Combined: detection latency from first-real-contact (raw>1N) drops
+  # from ~0.31s to ~0.05s. surface_z marker for regime decoding becomes accurate
+  # to <0.1mm of the actual contact instant.
+  contact_threshold_N:         3.0     # base-frame Fz reading triggers contact
+  fz_smooth_window_s:          0.1     # smooth Fz before threshold compare
 
   # FIND_HOLE — spiral xy on surface until peg drops into chamfer
   find_hole_fz_N:              8.0     # was 4 — operator: more reactive
@@ -150,7 +162,14 @@ fsm:
   insert_motion_window_s:      1.5
   insert_motion_thresh_m_s:    0.0005
   insert_max_duration_s:       60.0    # was 30s — peg's slow creep needs time
-  insert_min_descent_m:        0.005   # require ≥5mm post-hole-entry to declare seated
+  # 2026-05-06: bumped 5mm → 25mm. The 5mm threshold let a false-seat slip through:
+  # F/T zero contamination caused phantom contact at force-mode entry, peg descended
+  # ~63mm through air, FSM saw "63mm of descent past contact" and declared seated
+  # despite final TCP being 22mm xy off the slot. GOLD demos consistently descend
+  # ~31mm post-contact; 25mm rejects descent-through-air (peg in air falls fast,
+  # not slowly). Combine with a planned upper-bound check (45mm max) once we have
+  # cross-demo distribution from collection.
+  insert_min_descent_m:        0.025   # require ≥25mm post-hole-entry to declare seated
 
   # Universal safety
   abort_F_lat_N:               30.0    # safety: abort if lateral force spikes
@@ -166,6 +185,29 @@ fsm:
   damping_find_hole:           0.3     # less damped (was 0.5)
   gain_insert:                 1.0
   damping_insert:              0.4     # less damped (was 0.7)
+
+  # Iter-2 directed P-controller (post-H101): distance-scaled push toward seat
+  # with near-seat dwell. Replaces H101's rotating-fixed-magnitude design after
+  # empirical observation that rotation pushed peg AWAY after first close-pass.
+  # See iterations/discovery/008-v12-canonical-pair-diff and follow-up analysis.
+  # GOLD operator: cmd_F_lat median=1.76N p75=5.0N R=0.88 (fixed dir, mag-scaled).
+  find_hole_use_directed_sweep:        true
+  find_hole_directed_F_N:              3.0   # constant F_max toward seat (iter-4: no distance scaling)
+  find_hole_directed_near_dwell_mm:    1.0   # ONLY dwell when essentially at seat — peg drops via Fz collapse
+  find_hole_directed_scaling_zone_mm:  10.0  # iter-4: unused (distance scaling removed)
+  # Iter-10 (A1+A2+A3): orientation-feedback steering + online seat refinement
+  # Per-object tilt envelope derived from 73 GOLD demos, see analysis/data/tilt_tolerance_per_object.json
+  # u_orange: GOLD p95=2.33°, peak=2.34°, seat=1.66°, FAIL seat=2.23° (NOT relaxing → wedged)
+  find_hole_tilt_tolerance_deg:        3.33   # u_orange p95 + 1° margin; over this = peg wedged at rim, override seat-prior with tilt-direction steering
+  find_hole_tilt_relax_min_deg:        0.40   # tilt drop from running peak that signals chamfer engagement (~half GOLD's typical peak-to-seat relaxation)
+  find_hole_tilt_relax_sustain_s:      0.30   # window over which relaxation must sustain
+  find_hole_tilt_high_sustain_s:       0.30   # tilt > tolerance must sustain this long before override fires (avoid noise triggers)
+  find_hole_tilt_history_window_s:     1.0    # track tilt running peak over this rolling window
+  # legacy keys (unused in iter-2 control law, kept for back-compat):
+  find_hole_directed_dwell_s:          1.5
+  find_hole_directed_rotate_deg:       60.0
+  find_hole_directed_n_directions:     6
+  find_hole_directed_latch_F_N:        2.0
 
 
 # ROS2 force_mode_controller setpoints (Phase 3 locked values). Re-call

@@ -94,6 +94,10 @@ _FORMATTERS: dict[str, str | None] = {
     "tx": s.FMT_TORQUE, "ty": s.FMT_TORQUE, "tz": s.FMT_TORQUE,
     "gripper_width": s.FMT_GRIPPER,
     "commanded_fz": s.FMT_COMMAND,
+    # --- v1.1 ---
+    "wrench_frame_id": None,            # string, no numeric format
+    "obj_x": s.FMT_POSITION, "obj_y": s.FMT_POSITION, "obj_z": s.FMT_POSITION,
+    "obj_qx": s.FMT_QUAT, "obj_qy": s.FMT_QUAT, "obj_qz": s.FMT_QUAT, "obj_qw": s.FMT_QUAT,
 }
 
 

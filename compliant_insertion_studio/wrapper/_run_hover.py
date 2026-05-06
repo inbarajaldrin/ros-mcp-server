@@ -50,7 +50,7 @@ def main():
     node = None
     result = {"result": "failure", "error": "unknown"}
     try:
-        node = TranslateObject()
+        node = TranslateObject(mode="real")
 
         # Wait for joint state + current EE pose subscriptions to populate.
         import time as _t

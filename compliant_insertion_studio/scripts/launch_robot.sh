@@ -121,6 +121,43 @@ echo "[launch_robot] Activating scaled_joint_trajectory_controller..."
 ros2 control switch_controllers --activate scaled_joint_trajectory_controller 2>&1 | tail -1
 sleep 0.5
 
+# --- set payload from foundational calibration (real mode only) ---
+# CRITICAL: without this, force_mode controller has no gravity comp for the held
+# part. UR pendant payload setting does NOT propagate to the ROS2 driver's
+# force_mode — they're separate. With 0kg payload, ~21N of gravity load on the
+# held u_orange goes uncompensated, force_mode yields, TCP drifts ~8mm during
+# APPROACH (verified empirically 2026-05-06). With set_payload at the calibrated
+# values, drift drops to <1mm. Source: ft_calibration_*.yaml in configs/.
+if [[ "$MODE" == "real" ]]; then
+    CAL_YAML=$(ls -t "$REPO_ROOT"/compliant_insertion_studio/configs/ft_calibration_*.yaml 2>/dev/null | head -1)
+    if [[ -n "$CAL_YAML" ]]; then
+        # Extract mass + cog from YAML using a one-liner python (avoid yq dependency)
+        eval "$(python3 -c "
+import yaml
+with open('$CAL_YAML') as fh: d = yaml.safe_load(fh)
+m = d['result']['mass_kg']
+c = d['result']['cog_xyz_m']
+print(f'PAYLOAD_MASS={m}')
+print(f'PAYLOAD_COG_X={c[0]}')
+print(f'PAYLOAD_COG_Y={c[1]}')
+print(f'PAYLOAD_COG_Z={c[2]}')
+" 2>/dev/null)"
+        if [[ -n "${PAYLOAD_MASS:-}" ]]; then
+            echo "[launch_robot] Setting driver payload from $(basename "$CAL_YAML"):"
+            echo "    mass=${PAYLOAD_MASS} kg  cog=(${PAYLOAD_COG_X}, ${PAYLOAD_COG_Y}, ${PAYLOAD_COG_Z}) m"
+            ros2 service call /io_and_status_controller/set_payload ur_msgs/srv/SetPayload \
+                "{mass: ${PAYLOAD_MASS}, center_of_gravity: {x: ${PAYLOAD_COG_X}, y: ${PAYLOAD_COG_Y}, z: ${PAYLOAD_COG_Z}}}" \
+                2>&1 | grep -E "success|response" | tail -2
+        else
+            echo "WARN: $(basename "$CAL_YAML") missing result.mass_kg / result.cog_xyz_m keys — payload NOT set." >&2
+            echo "      Force_mode will have ~21N of unmodeled gravity. Drift WILL be excessive." >&2
+        fi
+    else
+        echo "WARN: no ft_calibration_*.yaml in configs/ — payload NOT set." >&2
+        echo "      Run ft_calibration.py first or paste calibrated values manually." >&2
+    fi
+fi
+
 # RViz is now launched by the unified ur5e_with_rg2.launch.py via rviz:=true,
 # so no separate RViz spawn is needed regardless of real/fake mode.
 

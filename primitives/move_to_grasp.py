@@ -470,7 +470,13 @@ class DirectObjectMove(Node):
             WrenchStamped, wrench_topic, self._force_callback, 10
         )
         self.force_threshold = 50.0  # N for Fx,Fy,Tx,Ty,Tz
-        self.z_force_threshold = 10.0  # force change threshold for contact detection
+        # Threshold for contact-detection delta (N) on Fz from baseline.
+        # 2026-05-05: bumped 10 → 25 because payload changed from default 3.5kg (uncalibrated)
+        # to correct 2.11kg, exposing a calibration mismatch that lets gravity shift during
+        # canonical-pose adjustment within step 2 cross 10N. 25N still catches real crashes
+        # (which spike >40N instantly) but tolerates gravity component swings under our
+        # actual payload + reasonable orientation shifts during fine positioning.
+        self.z_force_threshold = 25.0  # force change threshold for contact detection
 
         # Gripper width monitoring and control
         self.current_gripper_width = None
@@ -885,7 +891,10 @@ class DirectObjectMove(Node):
                 else:
                     self.get_logger().warn("Gripper width topic not available. Proceeding without gripper check.")
                     self.gripper_check_done = True
-            elif self.expected_gripper_width and self.current_gripper_width < (self.expected_gripper_width - 2.0):
+            elif self.expected_gripper_width and self.current_gripper_width < (self.expected_gripper_width - 5.0):
+                # Tolerance widened from 2mm to 5mm to match OnRobot RG2's
+                # inherent ~3-5mm grip-mode variability (firmware has no
+                # pure positioning mode — see takuya-ki/onrobot-rg docs).
                 if not self._gripper_settle_pending:
                     self._gripper_settle_pending = True
                     self.get_logger().info(

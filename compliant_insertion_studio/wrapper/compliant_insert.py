@@ -44,8 +44,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped, WrenchStamped
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
+from lifecycle_msgs.msg import TransitionEvent
 from ur_msgs.srv import SetForceMode
 from scipy.spatial.transform import Rotation as _SciRot
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
@@ -158,6 +160,52 @@ def _parse_args(argv=None):
                         "detected a z-descent spike). Replaces CAD-derived target_xy "
                         "for Mode B's TOWARD-target direction. Use this when the "
                         "physical slot is offset from CAD prediction (per-grasp variance).")
+    # First-contact marker validation
+    p.add_argument("--abort-on-first-contact", action="store_true",
+                   help="Stop the wrapper IMMEDIATELY after APPROACH→FIND_HOLE transition "
+                        "fires, before any FIND_HOLE wrench applies. Cleanup runs normally "
+                        "(stop force mode + safe-height retract). Used to validate the "
+                        "contact-detection marker (regime-decoding analysis uses this exact "
+                        "instant as t=0).")
+    # GUIDED mode (operator-drag data collection)
+    p.add_argument("--guided-mode", action="store_true",
+                   help="Route APPROACH-contact to GUIDED state instead of FIND_HOLE. In "
+                        "GUIDED, force_mode is configured for operator-drag manipulation: XY "
+                        "compliant, Z LOCKED, rotation LOCKED, zero commanded wrench, loose "
+                        "gain+damping. Operator drags peg laterally on rim to reach the slot, "
+                        "then sends SIGUSR1 to mark the hole and transition to INSERT_DESCENT "
+                        "(pure Z descent at the operator-marked xy). Used for GOLD data "
+                        "collection where each demo captures contact_xy + hole_xy + seat_xy "
+                        "with full F/T trajectory across all phases.")
+    # v4 Found Hole predicate (analysis/CONTROL_LAW.md)
+    p.add_argument("--v4-autofire", action="store_true",
+                   help="If set (stage 3b), v4 Found Hole predicate firing in GUIDED state "
+                        "ALSO triggers GUIDED → INSERT_DESCENT (replacing operator's manual "
+                        "SIGUSR1). If not set (stage 3a / default), v4 fire is logged to meta "
+                        "as hole_observed_v4_predicate but only operator's SIGUSR1 triggers "
+                        "the transition. Requires --guided-mode.")
+    # Phase G: autonomous SEARCH director (analysis/SEARCH_CONTROL_LAW.md)
+    p.add_argument("--autonomous-search", action="store_true",
+                   help="Route APPROACH-contact to SEARCH state (autonomous F/T-driven "
+                        "director that replaces operator-drag in GUIDED). Commands lateral "
+                        "wrench in -r_cop direction at K=3N until v4 predicate fires the "
+                        "rim-cross transition to INSERT_DESCENT. No operator hands required. "
+                        "Mutually exclusive with --guided-mode.")
+    p.add_argument("--search-K-N", type=float, default=3.0,
+                   help="(LEGACY: ignored by spiral director).")
+    p.add_argument("--search-F-press-N", type=float, default=9.0,
+                   help="SEARCH director downward press force. Default 9.0N. Lower (7N) "
+                        "reduces friction if stall observed.")
+    p.add_argument("--search-max-duration-s", type=float, default=15.0,
+                   help="SEARCH timeout. Default 15s.")
+    p.add_argument("--search-Fmax-N", type=float, default=3.0,
+                   help="Saturated lateral force magnitude in spiral PD director. Default 3.0N.")
+    p.add_argument("--search-v-s-mm-s", type=float, default=5.0,
+                   help="Tangential path speed in spiral. Default 5 mm/s.")
+    p.add_argument("--search-pitch-mm", type=float, default=2.0,
+                   help="Spiral pitch (radial growth per turn). Default 2 mm.")
+    p.add_argument("--search-R-max-mm", type=float, default=8.0,
+                   help="Spiral max radius (abort threshold). Default 8 mm.")
     # Calibration provenance (passed through to meta JSON)
     p.add_argument("--cal-yaml", default=None,
                    help="path to foundational calibration YAML (recorded in meta JSON)")
@@ -298,6 +346,13 @@ class CompliantInsertEpisode(Node):
         self.target_xyz: tuple[float, float, float] | None = None
         self.target_quat: tuple[float, float, float, float] | None = None
         self.commanded_fz: float = 0.0
+        # Schema bump v1.2 (G002): track full 6-axis commanded wrench in base_link frame.
+        self.commanded_wrench_baselink: tuple[float, float, float, float, float, float] = (0.0,) * 6
+        # Schema bump v1.2 (G001/G003/G004): per-topic raw sidecar file handles.
+        self._joints_raw_fh = None
+        self._wrench_raw_fh = None
+        self._cmd_wrench_raw_fh = None
+        self._fm_events_fh = None
         self.in_force_mode: bool = False
 
         # v1.1: object-pose tracking — set after HOVER lands. The wrapper carries
@@ -317,6 +372,14 @@ class CompliantInsertEpisode(Node):
         self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._wrench_cb, sensor_qos)
         self.create_subscription(Float32, "/gripper_width", self._gripper_cb, 10)
 
+        # Schema bump v1.2 — raw-stream subscriptions feeding sidecar CSVs.
+        # G001: joint_states (native ~125 Hz on UR Humble) → joints_raw.csv
+        self.create_subscription(JointState, "/joint_states", self._joints_raw_cb, sensor_qos)
+        # G003: wrench at native rate (500 Hz) — separate callback so existing 100 Hz CSV path is untouched
+        self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._wrench_raw_cb, sensor_qos)
+        # G004: force_mode_controller transition events (rare) → fm_events.csv
+        self.create_subscription(TransitionEvent, "/force_mode_controller/transition_event", self._fm_event_cb, 10)
+
         self.start_fm = self.create_client(SetForceMode, "/force_mode_controller/start_force_mode")
         self.stop_fm = self.create_client(Trigger, "/force_mode_controller/stop_force_mode")
 
@@ -335,6 +398,99 @@ class CompliantInsertEpisode(Node):
             self.gripper_width_v = float(msg.data)
         except Exception:
             pass
+
+    # ----- Schema v1.2 sidecar callbacks ----------------------------------
+    def _joints_raw_cb(self, msg: JointState):
+        """G001: joint_states at native rate → joints_raw.csv.
+        UR publishes 6 joints; pad with NaN if fewer/empty for any reason."""
+        if self._joints_raw_fh is None:
+            return
+        try:
+            n = 6
+            pos = list(msg.position) + [float("nan")] * max(0, n - len(msg.position))
+            vel = list(msg.velocity) + [float("nan")] * max(0, n - len(msg.velocity))
+            eff = list(msg.effort)   + [float("nan")] * max(0, n - len(msg.effort))
+            row = [str(msg.header.stamp.sec), str(msg.header.stamp.nanosec)]
+            row += [f"{v:.6f}" for v in pos[:n]]
+            row += [f"{v:.6f}" for v in vel[:n]]
+            row += [f"{v:.4f}" for v in eff[:n]]
+            self._joints_raw_fh.write(",".join(row) + "\n")
+        except Exception:
+            pass
+
+    def _wrench_raw_cb(self, msg: WrenchStamped):
+        """G003: wrench at native 500 Hz → wrench_raw.csv (unfiltered)."""
+        if self._wrench_raw_fh is None:
+            return
+        try:
+            w = msg.wrench
+            self._wrench_raw_fh.write(
+                f"{msg.header.stamp.sec},{msg.header.stamp.nanosec},"
+                f"{w.force.x:.4f},{w.force.y:.4f},{w.force.z:.4f},"
+                f"{w.torque.x:.4f},{w.torque.y:.4f},{w.torque.z:.4f},"
+                f"{msg.header.frame_id}\n"
+            )
+        except Exception:
+            pass
+
+    def _fm_event_cb(self, msg: TransitionEvent):
+        """G004: force_mode_controller lifecycle transitions → fm_events.csv."""
+        if self._fm_events_fh is None:
+            return
+        try:
+            wall = time.time()
+            self._fm_events_fh.write(
+                f"{wall:.4f},{msg.start_state.label},{msg.goal_state.label},"
+                f"{msg.transition.id},{msg.transition.label}\n"
+            )
+        except Exception:
+            pass
+
+    def _log_cmd_wrench_event(self, intent_baselink, gain_eff, damping_eff, sel_vec, source: str):
+        """G002: log every SetForceMode command (event-based, not periodic).
+        intent_baselink is the 6-tuple commanded wrench in base_link frame."""
+        if self._cmd_wrench_raw_fh is None:
+            return
+        try:
+            t_rel = (time.time() - self.start_t) if getattr(self, "start_t", None) is not None else float("nan")
+            ib = list(intent_baselink) + [0.0] * max(0, 6 - len(intent_baselink))
+            sv = list(sel_vec) + [True] * max(0, 6 - len(sel_vec))
+            self._cmd_wrench_raw_fh.write(
+                f"{t_rel:.4f},{ib[0]:.4f},{ib[1]:.4f},{ib[2]:.4f},"
+                f"{ib[3]:.4f},{ib[4]:.4f},{ib[5]:.4f},"
+                f"{int(sv[0])},{int(sv[1])},{int(sv[2])},{int(sv[3])},{int(sv[4])},{int(sv[5])},"
+                f"{gain_eff:.3f},{damping_eff:.3f},{source}\n"
+            )
+        except Exception:
+            pass
+
+    # ----- Schema v1.2 sidecar lifecycle ----------------------------------
+    def _open_raw_sidecars(self, csv_path: str):
+        """Open the 4 sidecar CSVs alongside the main CSV. Headers per file."""
+        base = csv_path[:-4] if csv_path.endswith(".csv") else csv_path
+        self._joints_raw_fh = open(f"{base}.joints_raw.csv", "w", buffering=1)
+        self._joints_raw_fh.write(
+            "stamp_sec,stamp_nsec,j0_pos,j1_pos,j2_pos,j3_pos,j4_pos,j5_pos,"
+            "j0_vel,j1_vel,j2_vel,j3_vel,j4_vel,j5_vel,"
+            "j0_eff,j1_eff,j2_eff,j3_eff,j4_eff,j5_eff\n"
+        )
+        self._wrench_raw_fh = open(f"{base}.wrench_raw.csv", "w", buffering=1)
+        self._wrench_raw_fh.write("stamp_sec,stamp_nsec,fx,fy,fz,tx,ty,tz,frame_id\n")
+        self._cmd_wrench_raw_fh = open(f"{base}.cmd_wrench_raw.csv", "w", buffering=1)
+        self._cmd_wrench_raw_fh.write(
+            "t_s,cmd_fx,cmd_fy,cmd_fz,cmd_tx,cmd_ty,cmd_tz,"
+            "sel_x,sel_y,sel_z,sel_rx,sel_ry,sel_rz,gain,damping,source\n"
+        )
+        self._fm_events_fh = open(f"{base}.fm_events.csv", "w", buffering=1)
+        self._fm_events_fh.write("wall_t_s,start_state,goal_state,transition_id,transition_label\n")
+
+    def _close_raw_sidecars(self):
+        for attr in ("_joints_raw_fh", "_wrench_raw_fh", "_cmd_wrench_raw_fh", "_fm_events_fh"):
+            fh = getattr(self, attr, None)
+            if fh is not None:
+                try: fh.close()
+                except Exception: pass
+                setattr(self, attr, None)
 
     # ------------------- topic-ready gate ---------------------------------
     def wait_for_topics(self, timeout=5.0) -> bool:
@@ -555,14 +711,40 @@ class CompliantInsertEpisode(Node):
         req.gain_scaling = gain_eff
         req.damping_factor = damping_eff
 
-        future = self.start_fm.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-        result = future.result()
-        if result is None or not result.success:
-            self.get_logger().error("start_force_mode call failed")
+        # Up to 3 retry attempts with backoff. The force_mode_controller's
+        # start_force_mode RPC can return success=False for ~0.5-1.5s after
+        # the controller becomes "active" (controller-manager reports it
+        # active, but the controller's internal state isn't ready to accept
+        # commands yet — verified empirically 2026-05-06 session 5). Retrying
+        # with backoff handles this transient.
+        result = None
+        last_err = None
+        for attempt in range(3):
+            future = self.start_fm.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            result = future.result()
+            if result is not None and getattr(result, 'success', False):
+                if attempt > 0 and not quiet:
+                    self.get_logger().info(f"start_force_mode succeeded on attempt {attempt+1}")
+                break
+            last_err = (
+                "service call timed out" if result is None else
+                f"service returned success=False (attempt {attempt+1}/3)"
+            )
+            if attempt < 2:
+                if not quiet:
+                    self.get_logger().warn(
+                        f"start_force_mode {last_err} — retrying in 1.0s"
+                    )
+                time.sleep(1.0)
+        if result is None or not getattr(result, 'success', False):
+            self.get_logger().error(f"start_force_mode call failed after 3 attempts: {last_err}")
             return False
         self.in_force_mode = True
         self.commanded_fz = intent_baselink[2]
+        # G002: track the full 6-axis intent for sidecar logging.
+        self.commanded_wrench_baselink = tuple(float(v) for v in intent_baselink)
+        self._log_cmd_wrench_event(intent_baselink, gain_eff, damping_eff, sel_vec, "start_force_mode")
         if not quiet:
             self.get_logger().info(
                 f"Force mode active: wrench={intent_baselink}, sel={sel_vec}, "
@@ -604,6 +786,8 @@ class CompliantInsertEpisode(Node):
             self.get_logger().warn("stop_force_mode never confirmed; proceeding")
         self.in_force_mode = False
         self.commanded_fz = 0.0
+        self.commanded_wrench_baselink = (0.0,) * 6
+        self._log_cmd_wrench_event((0.0,) * 6, 0.0, 0.0, (False,) * 6, "stop_force_mode")
 
     # ------------------- step-back gate -----------------------------------
     def _await_step_back(self, mode: str, auto_seconds: float) -> tuple[str, bool]:
@@ -858,7 +1042,7 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         return s.PHASE_ABORT
 
     # WRAP-07: verify the switch actually took effect, not just RPC success
-    if not _await_controller_active(FORCE_CTRL, timeout_s=5.0, logger=ep.get_logger()):
+    if not _await_controller_active(FORCE_CTRL, timeout_s=15.0, logger=ep.get_logger()):
         ep.meta.set_outcome(s.OUTCOME_ABORT, "force_mode_controller_did_not_activate")
         return s.PHASE_ABORT
 
@@ -887,11 +1071,20 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         ep.meta.set_outcome(s.OUTCOME_ABORT, "no_post_zero_wrench_sample")
         return s.PHASE_ABORT
     ep.meta.set_post_zero_bias(bias)
+    # Stash the post-zero bias on ep so downstream contact detection can subtract
+    # it before threshold check — without this, residual sensor bias (e.g., 2.67N
+    # from session 4 of 2026-05-06 collection) gets misread as contact at the
+    # very first APPROACH tick before any descent has happened.
+    ep.post_zero_bias_baselink = (
+        float(bias["Fx"]), float(bias["Fy"]), float(bias["Fz"]),
+        float(bias["Tx"]), float(bias["Ty"]), float(bias["Tz"]),
+    )
 
     max_axis_f = max(abs(bias["Fx"]), abs(bias["Fy"]), abs(bias["Fz"]))
     if max_axis_f > ep.args.bias_warn_n:
         ep.get_logger().warn(
-            f"Post-zero residual force {max_axis_f:.2f} N > {ep.args.bias_warn_n} N (warning, not abort)"
+            f"Post-zero residual force {max_axis_f:.2f} N > {ep.args.bias_warn_n} N "
+            f"— will subtract from fz before contact-detection threshold check."
         )
 
     # WRAP-04: +1 s post-zero drift sample
@@ -953,16 +1146,41 @@ def run_active(ep: CompliantInsertEpisode) -> str:
             cfg = load_config(cfg_path)
             hover_z = ep.target_xyz[2] if ep.target_xyz else None
 
-            # Phase 5 v1: CAD-derived universal target. If --base-world-pose was
-            # provided, compose with assembly_index + grasp_points to predict
-            # the exact TCP-at-seat z. Otherwise fall back to hover_z + per-
-            # shape descended_min_m (Phase 5 v0).
+            # Phase 5 v1: CAD-derived universal target. Computes the predicted
+            # TCP-at-seat xy/z from the CAD chain. Uses --base-world-pose if
+            # provided, else falls back to DEFAULT_BASE_POSITION + DEFAULT_BASE_ORIENTATION
+            # (so autonomous SEARCH always has a bootstrap target).
+            base_world_pose_for_cad = None
             if ep.args.base_world_pose is not None:
+                base_world_pose_for_cad = list(ep.args.base_world_pose)
+            else:
+                # Fallback: use DEFAULT_BASE_POSITION (same as primitives use).
+                try:
+                    from primitives.shared.config import (
+                        DEFAULT_BASE_POSITION,
+                        DEFAULT_BASE_ORIENTATION,
+                    )
+                    base_world_pose_for_cad = [
+                        float(DEFAULT_BASE_POSITION[0]),
+                        float(DEFAULT_BASE_POSITION[1]),
+                        float(DEFAULT_BASE_POSITION[2]),
+                        float(DEFAULT_BASE_ORIENTATION[0]),
+                        float(DEFAULT_BASE_ORIENTATION[1]),
+                        float(DEFAULT_BASE_ORIENTATION[2]),
+                        float(DEFAULT_BASE_ORIENTATION[3]),
+                    ]
+                    ep.get_logger().info(
+                        f"CAD prior using DEFAULT_BASE_POSITION fallback: "
+                        f"xyz={base_world_pose_for_cad[:3]}"
+                    )
+                except Exception as _e:
+                    ep.get_logger().warn(f"Could not load DEFAULT_BASE_POSITION: {_e}")
+            if base_world_pose_for_cad is not None:
                 try:
                     from compliant_insertion_studio.wrapper.cad_lookup import (
                         predict_tcp_at_seat,
                     )
-                    bp = ep.args.base_world_pose
+                    bp = base_world_pose_for_cad
                     # Phase 5 v2 (2026-05-04): cad_lookup now needs held_quat
                     # (object orientation in world) and EE orientation in world
                     # so it can apply fold-symmetry equivalents and project the
@@ -1024,6 +1242,23 @@ def run_active(ep: CompliantInsertEpisode) -> str:
             # detected as a relative z descent below surface_z, INSERT exits
             # on motion-stopped post-hole-entry.
             fsm_cfg = (cfg.get("fsm") or {}) if cfg else {}
+            # Inject --guided-mode into the FSM config so APPROACH→contact routes
+            # to GUIDED state instead of FIND_HOLE.
+            if getattr(ep.args, 'guided_mode', False):
+                fsm_cfg = dict(fsm_cfg)  # don't mutate the loaded YAML dict
+                fsm_cfg['guided_mode'] = True
+                # Stage 3a/3b: v4 autofire flag passed through to FSM. False (3a)
+                # = log only; True (3b) = v4 fire also triggers GUIDED→INSERT_DESCENT.
+                fsm_cfg['v4_autofire'] = bool(getattr(ep.args, 'v4_autofire', False))
+            if getattr(ep.args, 'autonomous_search', False):
+                fsm_cfg = dict(fsm_cfg)
+                fsm_cfg['autonomous_search'] = True
+                fsm_cfg['search_F_press_N'] = float(getattr(ep.args, 'search_F_press_N', 9.0))
+                fsm_cfg['search_max_duration_s'] = float(getattr(ep.args, 'search_max_duration_s', 15.0))
+                fsm_cfg['search_Fmax_N'] = float(getattr(ep.args, 'search_Fmax_N', 3.0))
+                fsm_cfg['search_v_s_m_s'] = float(getattr(ep.args, 'search_v_s_mm_s', 5.0)) / 1000.0
+                fsm_cfg['search_pitch_m'] = float(getattr(ep.args, 'search_pitch_mm', 2.0)) / 1000.0
+                fsm_cfg['search_R_max_m'] = float(getattr(ep.args, 'search_R_max_mm', 8.0)) / 1000.0
             # Pass hole_xy_prior as spiral origin override (cross-attempt learning).
             # If a previous run found the hole xy via z-drop detection, anchor
             # this spiral search there rather than peg's random contact xy.
@@ -1092,8 +1327,13 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 fsm = ContactSearchFSM(fsm_cfg,
                                        spiral_origin_override=spiral_origin_override,
                                        predicted_tcp_xy=predicted_tcp_xy,
+                                       predicted_tcp_z=predicted_tcp_z_at_seat,
                                        r_grasp_to_partcenter_world=r_grasp_to_partcenter_world,
                                        object_origin_in_EE=object_origin_in_EE)
+                # Bind FSM to episode object so signal handlers (SIGUSR1 hole-mark)
+                # can reach it via ep.fsm. Without this, the SIGUSR1 handler's
+                # getattr(ep, 'fsm', None) returns None and mark_hole() never fires.
+                ep.fsm = fsm
                 _orig_str = (f"override=({spiral_origin_override[0]:+.4f},"
                              f"{spiral_origin_override[1]:+.4f})"
                              if spiral_origin_override is not None else "= contact_xy")
@@ -1158,9 +1398,42 @@ def run_active(ep: CompliantInsertEpisode) -> str:
         # Signal-driven outcome
         if ep.outcome_signal == "success":
             ep.meta.set_outcome(s.OUTCOME_SUCCESS, "operator_sigterm")
+            # Persist GUIDED-mode hole_observed even on SIGTERM exit (data
+            # collection demos typically end via Ctrl+C — without this, the
+            # operator-marked hole xy is lost from meta despite being set).
+            _fsm = getattr(ep, 'fsm', None)
+            if _fsm is not None and getattr(_fsm, 'hole_observed_xy', None) is not None:
+                ep.meta.set_optional("hole_observed_operator", {
+                    "xy_m":   list(_fsm.hole_observed_xy),
+                    "z_m":    float(_fsm.hole_observed_z) if _fsm.hole_observed_z is not None else 0.0,
+                    "t_s":    float(_fsm.hole_observed_t) if _fsm.hole_observed_t is not None else 0.0,
+                    "source": (
+                        "fsm_guided_v4_autofire"
+                        if (getattr(_fsm, 'v4_predicate_fire', None) is not None
+                            and _fsm.v4_predicate_fire.get('autofired'))
+                        else "fsm_guided_sigusr1"
+                    ),
+                })
+            if _fsm is not None and getattr(_fsm, 'v4_predicate_fire', None) is not None:
+                ep.meta.set_optional("hole_observed_v4_predicate", _fsm.v4_predicate_fire)
             return s.PHASE_DONE
         if ep.outcome_signal == "abort":
             ep.meta.set_outcome(s.OUTCOME_ABORT, "operator_sigabrt")
+            _fsm = getattr(ep, 'fsm', None)
+            if _fsm is not None and getattr(_fsm, 'hole_observed_xy', None) is not None:
+                ep.meta.set_optional("hole_observed_operator", {
+                    "xy_m":   list(_fsm.hole_observed_xy),
+                    "z_m":    float(_fsm.hole_observed_z) if _fsm.hole_observed_z is not None else 0.0,
+                    "t_s":    float(_fsm.hole_observed_t) if _fsm.hole_observed_t is not None else 0.0,
+                    "source": (
+                        "fsm_guided_v4_autofire"
+                        if (getattr(_fsm, 'v4_predicate_fire', None) is not None
+                            and _fsm.v4_predicate_fire.get('autofired'))
+                        else "fsm_guided_sigusr1"
+                    ),
+                })
+            if _fsm is not None and getattr(_fsm, 'v4_predicate_fire', None) is not None:
+                ep.meta.set_optional("hole_observed_v4_predicate", _fsm.v4_predicate_fire)
             return s.PHASE_ABORT
 
         # Mid-episode re-zero (SIGUSR2)
@@ -1189,6 +1462,14 @@ def run_active(ep: CompliantInsertEpisode) -> str:
             _p = ep.tcp.pose.position
             _q = ep.tcp.pose.orientation
             (Fx_b, Fy_b, Fz_b), (Tx_b, Ty_b, Tz_b) = ep._wrench_in_base(ep.wrench)
+            # Subtract post-zero residual bias before passing to FSM. Without
+            # this, residual F/T zero contamination (e.g. 2.67N session-4 bias)
+            # crosses contact_threshold_N at the very first APPROACH tick →
+            # phantom contact at hover. Bias is set in PRE/ZERO phase.
+            _bias = getattr(ep, 'post_zero_bias_baselink', None)
+            if _bias is not None:
+                Fx_b -= _bias[0]; Fy_b -= _bias[1]; Fz_b -= _bias[2]
+                Tx_b -= _bias[3]; Ty_b -= _bias[4]; Tz_b -= _bias[5]
             fsm_action = fsm.update(
                 t_now_fsm, _p.x, _p.y, _p.z, Fz_b,
                 F_lat_baselink=(Fx_b, Fy_b),
@@ -1209,6 +1490,20 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 ep.get_logger().warn(
                     f"=== FSM → {fsm_action.new_state}: {fsm_action.transition_msg}"
                 )
+
+                # --abort-on-first-contact: stop right after APPROACH→FIND_HOLE
+                # transition fires, before any FIND_HOLE wrench is applied. Used
+                # to validate the contact-detection marker (regime-decoding analysis
+                # uses this exact moment as t=0). Routes through the exit_abort
+                # cleanup path so force mode stops + safe-height retract run.
+                if (getattr(ep.args, 'abort_on_first_contact', False)
+                        and fsm_action.new_state == fsm.FIND_HOLE):
+                    ep.get_logger().warn(
+                        f"=== ABORT-ON-FIRST-CONTACT (CLI flag): exiting at first "
+                        f"contact moment for marker validation. surface_z={fsm.surface_z:.4f}m"
+                    )
+                    fsm_action.kind = "exit_abort"
+                    fsm_action.abort_reason = "abort_on_first_contact"
 
             # Terminal lifecycles
             if fsm_action.kind == "exit_done":
@@ -1234,6 +1529,23 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                         "z_m":    float(fsm.hole_z) if fsm.hole_z is not None else 0.0,
                         "source": "fsm_find_hole",
                     })
+                # GUIDED-mode: persist operator-marked hole position too. This is the
+                # ground-truth hole_xy from the operator's hand at SIGUSR1 — the
+                # primary data product of GOLD data collection.
+                if getattr(fsm, 'hole_observed_xy', None) is not None:
+                    ep.meta.set_optional("hole_observed_operator", {
+                        "xy_m":  list(fsm.hole_observed_xy),
+                        "z_m":   float(fsm.hole_observed_z) if fsm.hole_observed_z is not None else 0.0,
+                        "t_s":   float(fsm.hole_observed_t) if fsm.hole_observed_t is not None else 0.0,
+                        "source": (
+                            "fsm_guided_v4_autofire"
+                            if (getattr(fsm, 'v4_predicate_fire', None) is not None
+                                and fsm.v4_predicate_fire.get('autofired'))
+                            else "fsm_guided_sigusr1"
+                        ),
+                    })
+                if getattr(fsm, 'v4_predicate_fire', None) is not None:
+                    ep.meta.set_optional("hole_observed_v4_predicate", fsm.v4_predicate_fire)
                 return s.PHASE_DONE
 
             if fsm_action.kind == "exit_abort":
@@ -1249,6 +1561,21 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     "hole_z_m":      fsm.hole_z,
                     "final_tcp_z_m": float(_p.z),
                 })
+                # Same as DONE: persist GUIDED-mode operator-marked hole if present
+                if getattr(fsm, 'hole_observed_xy', None) is not None:
+                    ep.meta.set_optional("hole_observed_operator", {
+                        "xy_m":  list(fsm.hole_observed_xy),
+                        "z_m":   float(fsm.hole_observed_z) if fsm.hole_observed_z is not None else 0.0,
+                        "t_s":   float(fsm.hole_observed_t) if fsm.hole_observed_t is not None else 0.0,
+                        "source": (
+                            "fsm_guided_v4_autofire"
+                            if (getattr(fsm, 'v4_predicate_fire', None) is not None
+                                and fsm.v4_predicate_fire.get('autofired'))
+                            else "fsm_guided_sigusr1"
+                        ),
+                    })
+                if getattr(fsm, 'v4_predicate_fire', None) is not None:
+                    ep.meta.set_optional("hole_observed_v4_predicate", fsm.v4_predicate_fire)
                 return s.PHASE_ABORT
 
             # Wrench update if needed (PD-spiral re-issues every tick during FIND_HOLE)
@@ -1575,6 +1902,11 @@ def main(argv=None):
     def _sigusr1(signum, frame):
         ep.event_marker_counter += 1
         ep.get_logger().info(f"SIGUSR1: event_marker -> {ep.event_marker_counter}")
+        # Guided-mode: SIGUSR1 also marks the hole when FSM is in GUIDED state.
+        # FSM.mark_hole() is a no-op outside GUIDED, so safe to always call.
+        fsm = getattr(ep, 'fsm', None)
+        if fsm is not None and hasattr(fsm, 'mark_hole'):
+            fsm.mark_hole()
 
     def _sigusr2(signum, frame):
         ep.get_logger().info("SIGUSR2: mid-episode re-zero requested")
@@ -1601,6 +1933,12 @@ def main(argv=None):
     ep.csv_path = f"{LOG_DIR}/insert_{args.object_name}_{ts}.csv"
     ep.meta_path = ep.csv_path[:-4] + ".meta.json"
     ep.csv_writer = CSVWriter(ep.csv_path)
+    # Schema bump v1.2 — open raw sidecar files (joints/wrench/cmd_wrench/fm_events).
+    try:
+        ep._open_raw_sidecars(ep.csv_path)
+        ep.get_logger().info(f"Schema v1.2 sidecars open: {ep.csv_path[:-4]}.{{joints,wrench,cmd_wrench,fm_events}}_raw.csv")
+    except Exception as e:
+        ep.get_logger().warn(f"Could not open v1.2 sidecars: {e} — continuing with main CSV only")
 
     # Identity into meta
     wrapper_version = args.wrapper_version or f"compliant_insert.py@{_git_sha_short()}"
@@ -1676,6 +2014,10 @@ def main(argv=None):
     # ---- Write artifacts -------------------------------------------------
     try:
         ep.csv_writer.close()
+    except Exception:
+        pass
+    try:
+        ep._close_raw_sidecars()
     except Exception:
         pass
     try:
