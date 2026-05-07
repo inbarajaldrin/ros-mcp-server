@@ -4,24 +4,40 @@
 
 **Read `compliant_insertion_studio/docs/HANDOFF_NEXT_AGENT.md` first.** It tells you where you are, what works, what's open, and which docs to read in what order.
 
-State as of 2026-05-06: **autonomous u_orange + u_brown insertion working** via `--autonomous-search` flag (Archimedean spiral + v4 Found Hole detector). u_brown also tested operator-out-of-loop pick→insert. inverted_u_yellow autonomous **still fails** (multi-prong physics — open).
+State as of **2026-05-07** (tag `real-world-verified-2026-05-07`, commit 75a418d): **all four FMB1 objects insert end-to-end via the replay script** — u_brown, u_orange, line_green, inverted_u_yellow seat correctly with zero manual intervention. Two insertion code paths in production (unification queued for later):
 
-Working command (object on table, camera up):
+| Object | Path | Why |
+|---|---|---|
+| u_brown, u_orange | `compliant_insert` wrapper (FSM autonomous SEARCH) | tight-fit pegs, XY-locked descent |
+| line_green, inverted_u_yellow | `prismatic_peg_insertion` (stash) via `translate_object` line_green/yellow branch | wide-grip parts; Rx/Ry compliance + geometric exit needed for jaws-on-rim seating |
+
+Routing happens in `primitives/translate_object.py` based on `object_name`. Per-object base offsets in `primitives/shared/config.py:PER_OBJECT_BASE_OFFSET_M` are applied to BOTH paths via `--final-base-pos`.
+
+Working command (full FMB1 assembly, all 4 objects on table, full stack up):
+```bash
+python3 -u ablations/replay_real_assembly.py \
+  --assembly-json ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json \
+  --only <object_name>      # one at a time, fail-stop
 ```
+Or single-object autonomous (older API, still works for u_brown/u_orange):
+```bash
 python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
   --object-name <name> --base-name base1 --grasp-id <N> \
   --autonomous-search --search-F-press-N 5.0 --search-Fmax-N 5.0 \
   --fz -9.0 --override-fz-cap --mode real
 ```
 
-Multi-iteration regrasp test harness:
-```
+Multi-iteration regrasp test harnesses:
+```bash
+# u_brown / u_orange (compliant_insert):
 bash compliant_insertion_studio/scripts/loop_autonomous_insert.sh 3 --object <name> --no-randomize --regrasp
+# line_green (prismatic via translate_object):
+bash compliant_insertion_studio/scripts/loop_line_green_prismatic.sh 3
 ```
 
 Doc routing (in order):
 1. `compliant_insertion_studio/docs/HANDOFF_NEXT_AGENT.md` — this handoff
-2. `compliant_insertion_studio/docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` — current working architecture
+2. `compliant_insertion_studio/docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` — current working architecture (compliant_insert path)
 3. `compliant_insertion_studio/docs/ITERATION_TRACE_2026-05-06.md` — full reasoning trace (avoid re-exploring rejected paths)
 4. `compliant_insertion_studio/.claude/skills/insertion-control-law-derivation/SKILL.md` — methodology rules (binding for FSM changes)
 5. `compliant_insertion_studio/analysis/CONTROL_LAW.md` + `SEARCH_CONTROL_LAW.md` — predicate + director specs
@@ -29,7 +45,7 @@ Doc routing (in order):
 Reference (consult on demand, not on every session):
 - `compliant_insertion_studio/docs/STACK.md` — full tech stack tables, version compat, alternatives considered
 - `compliant_insertion_studio/docs/RATIONALE.md` — detailed rationale + historical Phase 5 architecture (now superseded)
-- `compliant_insertion_studio/docs/SETUP.md` — cold-start runbook
+- `compliant_insertion_studio/docs/SETUP.md` — cold-start runbook (canonical bringup; see §1 for grasp_points_publisher requirement)
 
 ---
 
@@ -38,11 +54,27 @@ Reference (consult on demand, not on every session):
 ### Bringup (start each session)
 
 ```bash
-# Start the robot stack (UR driver + controllers + RViz, ~15s):
-bash compliant_insertion_studio/scripts/launch_robot.sh
+# 1. Start the robot stack (UR driver + controllers, ~15s; add --rviz to also launch RViz):
+bash compliant_insertion_studio/scripts/launch_robot.sh real
 
-# Start the camera (aruco_camera_localizer publishing /objects_poses_real):
+# 2. Start the camera (aruco_camera_localizer publishing /objects_poses_real):
 bash compliant_insertion_studio/scripts/launch_camera.sh --background
+
+# 3. Start the grasp-points publisher (publishes /grasp_points_real, required by
+#    move_to_grasp). DIES SILENTLY if the camera localizer restarts — recheck
+#    `ros2 topic list | grep grasp_points_real` before any pickup. (mode=default
+#    publishes both _real and _sim topics.)
+nohup python3 -u utils/grasp_points_publisher.py --mode default > /tmp/grasp_pub.log 2>&1 &
+```
+
+After all three are up, **STOP then PLAY on the pendant** to (re)attach external control. Verify with `ros2 topic hz /tcp_pose_broadcaster/pose` (~500 Hz) and `ros2 topic hz /grasp_points_real` (~5 Hz).
+
+### Shutdown
+
+```bash
+bash compliant_insertion_studio/scripts/close_robot.sh   # cleanly stops driver + RViz + grippers
+pkill -SIGINT -f aruco_camera_localizer
+pkill -SIGTERM -f grasp_points_publisher
 ```
 
 ### Autonomous insertion (production)

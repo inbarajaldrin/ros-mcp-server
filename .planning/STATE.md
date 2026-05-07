@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: planning
 stopped_at: Phase 4 COMPLETE (analyzer dashboard shipped — 5 segmentation methods + cross-episode tab). Phase 1 + 2 + 3 + 4 + 7 = 5 of 7 phases (71%). Phase 5 (Algorithm Derivation) is next; operator now at-robot.
-last_updated: "2026-05-04T19:00:00.000Z"
-last_activity: 2026-05-04 at-away dashboard session — built two-stage analyzer (preprocess.py + analyze_inserts.html) with 5 segmentation methods (M1 force, M2 kinematic, M3 energetic, M5 torque-motion, M7 object slip), per-shape baselines via iterative quiet-window pooling (10-25× larger sample base), Cross-Episode tab with feature scatter (18 axes) + contact-aligned compare. GPT adversarial review caught + fixed 6 issues including critical M3 frame mismatch (wrench tool0 × velocity base) and baseline pollution from "autonomous" traces self-triggering M1.
+last_updated: "2026-05-07T13:55:00.000Z"
+last_activity: 2026-05-07 at-robot real-world-verified milestone — full FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow) seats end-to-end via replay_real_assembly.py with zero manual intervention. Two insertion code paths in production: compliant_insert (autonomous SEARCH, u_brown/u_orange) + prismatic_peg_insertion (XY-compliant settling + Rx/Ry compliance + geometric exit, line_green/yellow). Per-object base offsets calibrated from observed seat TCP for all 4 parts. Tag: real-world-verified-2026-05-07 (commit 75a418d).
 progress:
   total_phases: 7
   completed_phases: 5
@@ -33,9 +33,13 @@ See: .planning/PROJECT.md (updated 2026-05-01)
 - **Phase 4 (Analyzer Dashboard)** — done 2026-05-04 (5 segmentation methods, cross-episode scatter+compare, see `.planning/phases/04-analyzer-dashboard/04-SUMMARY.md`).
 - **Phase 7 (Gripper URDF + RViz)** — done 2026-05-02.
 
-Most recent work: 2026-05-04 — analyzer dashboard delivered with 5 segmentation methods (M1 force, M2 kinematic, M3 energetic with proper base-frame transform, M5 torque-motion, M7 object slip), iterative quiet-window baseline (95% of samples pass through), Cross-Episode tab with 18-feature scatter + 2-episode contact-aligned compare. GPT adversarial review caught the critical M3 frame mismatch + baseline pollution.
+Most recent work: **2026-05-07 — real-world-verified FMB1 assembly milestone.** All four FMB1 parts seat end-to-end via `replay_real_assembly.py` with zero manual intervention. Two insertion code paths in production:
+- `compliant_insert` (autonomous SEARCH spiral + v4 detector) for u_brown / u_orange
+- `prismatic_peg_insertion` (under `_real_mode_stash/`, force-added to git) for line_green / inverted_u_yellow — XY-compliant settling, Rx/Ry compliance, Rz locked, geometric depth-based exit
 
-Next session goal: **Phase 5 — Algorithm Derivation + Per-Object Configs**. Operator is at-robot. Highest-leverage at-robot work for Phase 5: (a) review dashboard signatures to derive per-shape termination predicates, (b) write `configs/defaults.yaml` + per-shape YAMLs, (c) wire wrapper to read configs and auto-terminate, (d) test ≥5 consecutive autonomous successes per shape.
+Routing in `primitives/translate_object.py`. Per-object base offsets in `primitives/shared/config.py:PER_OBJECT_BASE_OFFSET_M` for all 4 objects, applied to BOTH paths via `--final-base-pos`. Tag: `real-world-verified-2026-05-07` (commit 75a418d). Multi-iteration regrasp-loop reproducibility validated (2/2 line_green via `loop_line_green_prismatic.sh`).
+
+Next session goal: **Phase 5 unification work** — fold the two insertion paths into a single wrapper with per-object compliance config (currently the prismatic path lives in `_real_mode_stash/`, awaiting a tracked home like `primitives/inserts/`). Also: harden the replay flow's reliability (camera-detection retry in `move_to_grasp`, auto-restart for `grasp_points_publisher` when it dies silently, retry-on-fail at the replay-script level).
 
 Progress: [██████████░░░░] 71% (5 of 7 phases formally complete)
 

@@ -2,8 +2,15 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: 2026-05-06.
-> State of the system: **fully autonomous u_orange + u_brown insertion working** (6+ runs incl. fresh-regrasp validation). u_brown also tested with operator-out-of-loop pick→insert. inverted_u_yellow autonomous **not yet working** — multi-prong physics requires further work (open).
+> Date of last update: **2026-05-07** (tag `real-world-verified-2026-05-07`, commit 75a418d).
+> State of the system: **all four FMB1 objects insert end-to-end via the replay script** —
+> u_brown, u_orange, line_green, inverted_u_yellow seat correctly with zero
+> manual recovery. Two insertion code paths in production:
+>
+> - `compliant_insert` wrapper (autonomous SEARCH spiral + v4 detector) — u_brown, u_orange
+> - `prismatic_peg_insertion` (stash) routed via `translate_object` line_green/yellow branch — line_green, inverted_u_yellow
+>
+> Routing key: `primitives/translate_object.py` `if args.object_name in ('line_green', 'inverted_u_yellow')`. **Unification of the two paths is queued for later work** — the split was retained because each path's compliance configuration suits a different geometry (XY-locked descent vs XY-compliant settling with Rx/Ry compliance).
 
 ---
 
@@ -31,10 +38,15 @@ The high-level deliverable is one CLI: `run_assembly_step.py --autonomous-search
 | File | What it is |
 |---|---|
 | `analysis/CONTROL_LAW.md` | v4 Found Hole detector spec — `\|fz\|` state-transition predicate, validated 10/10 |
-| `analysis/SEARCH_CONTROL_LAW.md` | SEARCH director (Archimedean spiral + constant-force + lag-pause + gradient-following) |
+| `analysis/SEARCH_CONTROL_LAW.md` | SEARCH director (Archimedean spiral + constant-force + lag-pause + gradient-following). **u_brown / u_orange path only** — line_green / yellow use prismatic. |
 | `analysis/AUTONOMOUS_RUN_LOG.md` | Per-iteration test journal — append-only |
 | `ablations/eval_resources/fmb1_assembly.json` | Source of truth for `gripper_width_mm` and `grasp_id` per object |
-| `primitives/shared/config.py:DEFAULT_BASE_POSITION` | Calibrated for FMB1 base1 fixture from u_brown centered-grasp demo |
+| `ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json` | Canonical FMB1 tool-sequence; `replay_real_assembly.py` consumes this |
+| `ablations/replay_real_assembly.py` | Real-mode counterpart to `replay_verify.py`. Drives the full assembly via `--assembly-json` + `--only`. |
+| `primitives/shared/config.py:DEFAULT_BASE_POSITION` | (+58.25, -472.10) mm — calibrated for FMB1 base1 fixture from u_brown insert (2026-05-07) |
+| `primitives/shared/config.py:PER_OBJECT_BASE_OFFSET_M` | Per-object delta (mm) on top of DEFAULT_BASE_POSITION; populated for ALL 4 objects from observed seat TCP. **Both insertion paths apply this offset** via `--final-base-pos` (wired in `translate_object.py`). |
+| `primitives/_real_mode_stash/prismatic_peg_insertion.py` | line_green / yellow insert primitive. Force-added 2026-05-07; gitignored elsewhere. Geometric exit: depth_err ∈ [-8, +1] mm AND `\|dz/dt\| ≤ 0.5 mm/s` over 1.5 s, sustained 1 s. |
+| `compliant_insertion_studio/scripts/loop_line_green_prismatic.sh` | Smoke-test loop for line_green (regrasp + rotate + translate_object insert) |
 
 ---
 
@@ -132,29 +144,40 @@ From `CLAUDE.md` (project conventions) and `SKILL.md` (methodology):
 
 ### Critical-path
 
-1. **Multi-prong parts (inverted_u_yellow).** `|fz|` saturates 7N during autonomous SEARCH (vs 3N during operator GUIDED). v4 collapse signal absent. Operator-mode Z-locked vs autonomous Z-compliant gives different signatures. Lower F_press helps but doesn't solve. **Suggested next moves**: relative `|fz|` drop detection (vs recent median), peg-z-descent dominance, or hybrid Z control (lock during search).
+1. **Unify the two insertion code paths.** `compliant_insert` (FSM autonomous SEARCH, used for u_brown/u_orange) and `prismatic_peg_insertion` (used for line_green/yellow) live separately and have evolved different compliance configurations. The line_green/yellow case needs Rx/Ry compliance + geometric depth-based exit; the u_brown/u_orange case needs XY-locked descent. Either fold both into one wrapper with per-object compliance config, or formalize the two-track split with a clean interface. Tracking note: `prismatic_peg_insertion.py` lives under `_real_mode_stash/` (force-added to git) — eventual home should be a tracked location like `primitives/inserts/`.
+
+2. **Single-shot reliability is not 100 %.** Today's full assembly required:
+   - Manual relaunch of `grasp_points_publisher` after it died silently.
+   - Retry on a `force_mode_controller_did_not_activate` (>15 s timeout) — `replay_real_assembly.py` has no built-in retry.
+   - Re-run `--only u_orange` after a one-shot camera-detection dropout in `move_to_grasp` (single-poll, no retry).
+   Suggested fixes: camera-detection retry loop in `move_to_grasp`; auto-restart `grasp_points_publisher` on death (or fold into replay startup); replay-script-level retry-on-fail.
 
 ### Nice-to-have
 
-2. **Two-stage insertion** (operator-flagged): when one part has to clear an alignment phase before the final slot. Spiral can't apply pressure on the underlying object (it'd move). Likely needs a separate FSM state with different constraints.
+3. **Two-stage insertion** (operator-flagged): when one part has to clear an alignment phase before the final slot. Spiral can't apply pressure on the underlying object (it'd move). FSM has experimental support but never engaged in a real run.
 
-3. **Sign convention root cause.** `verify_baselink_motion.py` validated single-axis convention; multi-axis SEARCH inverted in practice. The `-Fmax * unit(error)` sign-flip works empirically but the physics gap is unresolved.
+4. **Sign convention root cause.** `verify_baselink_motion.py` validated single-axis convention; multi-axis SEARCH inverted in practice. The `-Fmax * unit(error)` sign-flip works empirically but the physics gap is unresolved.
 
-4. **Per-object F_press tuning.** Currently 5N for all. Multi-prong wants less; single peg might want more for stronger rim contact signal.
-
-5. **`line_green` autonomous validation.** Has not been tested. `gripper_width=39.8` per assembly JSON. Single-peg geometry — should work like u_brown/u_orange. Validate.
+5. **Per-object F_press tuning.** Currently 5N for u_brown/u_orange and 1.5N for line_green/yellow (`PER_OBJECT_INSERT_FORCES_N`). Could be auto-tuned from observed rim-contact wrench amplitude.
 
 ---
 
 ## Reproducibility checklist
 
-To replicate the working autonomous insertion from raw data:
+To replicate the working full-assembly run (all 4 objects):
 
-1. Confirm part listed in `fmb1_assembly.json` with correct grasp_id + gripper_width_mm.
-2. Calibrate `DEFAULT_BASE_POSITION` from a SINGLE centered-grasp GUIDED demo per fixture (one-time per fixture).
-3. Wire the part into autonomous: `loop_autonomous_insert.sh 1 --object <name> --no-randomize --regrasp`.
-4. If success → run with N=3 for repeatability validation.
-5. If failure → forensic analysis on the run's CSV (see `ITERATION_TRACE_2026-05-06.md` §A.6 for example pattern). Then update parameters or detect signal source per `SKILL.md` rules.
+1. **Bringup** (in order): launch_robot.sh → launch_camera.sh → grasp_points_publisher.py (see `CLAUDE.md` Bringup section). STOP+PLAY on pendant.
+2. **Verify pre-flight**: `ros2 topic echo --once /objects_poses_real | grep child_frame_id` shows all 4 parts; `ros2 topic hz /grasp_points_real` ~5 Hz; `ros2 control list_controllers` shows scaled_joint_trajectory_controller active.
+3. **Sequential replay, fail-stop**:
+   ```bash
+   python3 -u ablations/replay_real_assembly.py --assembly-json <JSON> --only u_brown
+   python3 -u ablations/replay_real_assembly.py --assembly-json <JSON> --only u_orange --skip-startup
+   python3 -u ablations/replay_real_assembly.py --assembly-json <JSON> --only line_green --skip-startup
+   python3 -u ablations/replay_real_assembly.py --assembly-json <JSON> --only inverted_u_yellow --skip-startup
+   ```
+   On any non-zero exit: stop, inspect `ablations/logs/replay_*_<ts>.log` for the failure reason, address root cause, then continue. Do NOT advance to the next object on failure.
+4. **Calibration** (one-time per fixture): `DEFAULT_BASE_POSITION` from a single u_brown insert; per-object delta in `PER_OBJECT_BASE_OFFSET_M` from observed seat TCP vs predicted (see `primitives/shared/config.py` for the calibration arithmetic of each object).
+5. **Forensic analysis on failures**: `compliant_insertion_studio/logs/insert_<obj>_<ts>.csv` + `.meta.json`. Schema-v1 columns documented in `wrapper/schema_v1.py`. Both insertion paths now write the same schema, so the analyzer dashboard ingests both.
 
 ---
 

@@ -2,7 +2,11 @@
 
 > Companion to `COLLECTION_METHODOLOGY.md`. That document covered the GUIDED-mode operator-demo collection pipeline that produced the 60+ telemetry records used to derive the v4 Found Hole detector + the SEARCH director. This document picks up where that left off: **how to go from "we have demos" to "the robot inserts autonomously without operator hands."**
 >
-> Validated 2026-05-06 on UR5e + OnRobot RG2 + workspace camera, FMB1 assembly. u_orange + u_brown converted to fully autonomous insertion (multi-attempt, fresh-regrasp tested). inverted_u_yellow exposed open problems (§9).
+> Validated 2026-05-07 on UR5e + OnRobot RG2 + workspace camera, FMB1 assembly. **All four FMB1 parts insert end-to-end** via `replay_real_assembly.py` (tag `real-world-verified-2026-05-07`):
+> - u_brown / u_orange via the autonomous SEARCH path described in this document (`compliant_insert` wrapper).
+> - line_green / inverted_u_yellow via a **second insert path** — `prismatic_peg_insertion` (under `primitives/_real_mode_stash/`) routed through `translate_object.py`'s line_green/yellow branch. This path uses XY-compliant settling + Rx/Ry compliance + geometric depth-based exit (autonomous SEARCH spiral does not work for these wide-grip parts where the gripper jaws rest on the base rim — see §9).
+>
+> Unification of the two paths is queued as future work.
 >
 > Pair this doc with the `insertion-control-law-derivation` skill, especially §13–§19, before changing code.
 
