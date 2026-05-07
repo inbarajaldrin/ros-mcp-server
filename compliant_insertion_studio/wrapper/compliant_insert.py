@@ -1324,12 +1324,48 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     +r_grasp_to_partcenter_world[1],
                     -r_grasp_to_partcenter_world[2],
                 )
+                # CAD-derived contact candidates: {SEAT, BASE_RIM, OBJ:<name>...}
+                # Used by FSM at contact moment to classify and short-circuit
+                # the seat-on-touchdown case to DONE. Inert if any input missing.
+                contact_candidates = None
+                try:
+                    if (predicted_tcp_z_at_seat is not None
+                            and pred is not None and bp is not None):
+                        from compliant_insertion_studio.wrapper.cad_geometry import (
+                            build_contact_candidates, get_seated_so_far,
+                        )
+                        R_grasp = pred.get("fold_symmetry_used", {}).get(
+                            "R_eq_quat_xyzw")
+                        if R_grasp is not None:
+                            seated = get_seated_so_far(ep.args.base_name,
+                                                        ep.args.object_name)
+                            contact_candidates = build_contact_candidates(
+                                target_object=ep.args.object_name,
+                                target_grasp_id=int(ep.args.grasp_id),
+                                base_name=ep.args.base_name,
+                                base_world_z=float(bp[2]),
+                                R_grasp_quat_xyzw=R_grasp,
+                                predicted_tcp_z_at_seat=predicted_tcp_z_at_seat,
+                                seated_objects=seated,
+                            )
+                            ep.get_logger().info(
+                                "Contact candidates (CAD-derived): "
+                                + ", ".join(f"{k}={v*1000:.2f}mm"
+                                            for k, v in contact_candidates.items())
+                                + f" — seated_so_far={seated}"
+                            )
+                except Exception as e:
+                    ep.get_logger().warn(
+                        f"build_contact_candidates failed ({e}) — FSM falls "
+                        f"back to today's APPROACH→SEARCH/GUIDED dispatch")
+
                 fsm = ContactSearchFSM(fsm_cfg,
                                        spiral_origin_override=spiral_origin_override,
                                        predicted_tcp_xy=predicted_tcp_xy,
                                        predicted_tcp_z=predicted_tcp_z_at_seat,
                                        r_grasp_to_partcenter_world=r_grasp_to_partcenter_world,
-                                       object_origin_in_EE=object_origin_in_EE)
+                                       object_origin_in_EE=object_origin_in_EE,
+                                       contact_candidates=contact_candidates)
                 # Bind FSM to episode object so signal handlers (SIGUSR1 hole-mark)
                 # can reach it via ep.fsm. Without this, the SIGUSR1 handler's
                 # getattr(ep, 'fsm', None) returns None and mark_hole() never fires.
@@ -1416,6 +1452,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 })
             if _fsm is not None and getattr(_fsm, 'v4_predicate_fire', None) is not None:
                 ep.meta.set_optional("hole_observed_v4_predicate", _fsm.v4_predicate_fire)
+            if _fsm is not None and getattr(_fsm, 'contact_classification', None) is not None:
+                ep.meta.set_optional("contact_classification", _fsm.contact_classification)
             return s.PHASE_DONE
         if ep.outcome_signal == "abort":
             ep.meta.set_outcome(s.OUTCOME_ABORT, "operator_sigabrt")
@@ -1434,6 +1472,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 })
             if _fsm is not None and getattr(_fsm, 'v4_predicate_fire', None) is not None:
                 ep.meta.set_optional("hole_observed_v4_predicate", _fsm.v4_predicate_fire)
+            if _fsm is not None and getattr(_fsm, 'contact_classification', None) is not None:
+                ep.meta.set_optional("contact_classification", _fsm.contact_classification)
             return s.PHASE_ABORT
 
         # Mid-episode re-zero (SIGUSR2)
@@ -1546,6 +1586,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     })
                 if getattr(fsm, 'v4_predicate_fire', None) is not None:
                     ep.meta.set_optional("hole_observed_v4_predicate", fsm.v4_predicate_fire)
+                if getattr(fsm, 'contact_classification', None) is not None:
+                    ep.meta.set_optional("contact_classification", fsm.contact_classification)
                 return s.PHASE_DONE
 
             if fsm_action.kind == "exit_abort":
@@ -1576,6 +1618,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     })
                 if getattr(fsm, 'v4_predicate_fire', None) is not None:
                     ep.meta.set_optional("hole_observed_v4_predicate", fsm.v4_predicate_fire)
+                if getattr(fsm, 'contact_classification', None) is not None:
+                    ep.meta.set_optional("contact_classification", fsm.contact_classification)
                 return s.PHASE_ABORT
 
             # Wrench update if needed (PD-spiral re-issues every tick during FIND_HOLE)

@@ -424,7 +424,8 @@ class ContactSearchFSM:
                  predicted_tcp_xy: Optional[tuple[float, float]] = None,
                  predicted_tcp_z: Optional[float] = None,
                  r_grasp_to_partcenter_world: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                 object_origin_in_EE: Optional[tuple[float, float, float]] = None):
+                 object_origin_in_EE: Optional[tuple[float, float, float]] = None,
+                 contact_candidates: Optional[dict] = None):
         self.cfg = cfg or {}
         self.state = self.APPROACH
         # Optional spiral origin override (e.g. hole_xy_prior from successful
@@ -440,6 +441,15 @@ class ContactSearchFSM:
         # would re-latch surface_z and erase relative-descent metrics, but
         # absolute target-z stays valid throughout.
         self.predicted_tcp_z = predicted_tcp_z
+        # CAD-derived contact candidates: dict of {label: expected_tcp_z_m}
+        # populated by the wrapper from cad_geometry. Used at contact moment in
+        # _tick_approach to classify the contact (SEAT / BASE_RIM / OBJ:<name>).
+        # When SEAT classification fires (peg dropped straight to seat), FSM
+        # short-circuits to DONE instead of entering SEARCH/GUIDED. Other
+        # classifications are logged to self.contact_classification but don't
+        # change behavior — they're for downstream multi-stage control law work.
+        self.contact_candidates = contact_candidates
+        self.contact_classification: Optional[dict] = None
         # Vector from TCP to part_center (object origin) in WORLD frame.
         # Computed from CAD predicted_tcp_at_seat - T_world_object_seat.
         # Used for Fz→T lever-arm compensation: pure Fz at TCP creates
@@ -1592,6 +1602,54 @@ class ContactSearchFSM:
             self.surface_z = float(tcp_z)
             self.surface_t = float(t)
             warning = getattr(action, 'override_vs_predicted_warning', None)
+
+            # === CAD-derived contact classification (added 2026-05-06) ===
+            # If contact_candidates was provided by the wrapper, classify this
+            # contact's tcp_z against the CAD-derived expected surfaces:
+            #   SEAT     → peg dropped straight to seat → DONE short-circuit
+            #   BASE_RIM → peg on base outer rim → fall through to existing routing
+            #   OBJ:<n>  → peg on top of seated object <n> → log + fall through
+            #              (multi-stage control law TBD; current behavior unchanged)
+            # Validated to ±2mm against u_brown autonomous + inv_u_yellow GUIDED runs.
+            if self.contact_candidates:
+                residuals = {k: float(tcp_z) - float(v)
+                             for k, v in self.contact_candidates.items()}
+                best_label = min(residuals, key=lambda k: abs(residuals[k]))
+                best_residual_m = residuals[best_label]
+                # Tolerance: SEAT=5mm (allows for slot-bottom under-seating),
+                # other surfaces=5mm (CAD prediction is sub-2mm; tolerance
+                # absorbs measurement noise + force-mode startup transient).
+                tol_m = 0.005
+                in_tol = abs(best_residual_m) < tol_m
+                self.contact_classification = {
+                    "label": best_label if in_tol else "UNKNOWN",
+                    "best_match_label": best_label,
+                    "best_match_residual_mm": best_residual_m * 1000.0,
+                    "tcp_z_at_contact_m": float(tcp_z),
+                    "candidates_m": dict(self.contact_candidates),
+                    "in_tolerance": in_tol,
+                    "tolerance_m": tol_m,
+                    "t_s": float(t),
+                }
+                # SEAT short-circuit: peg dropped straight to seat (no rim
+                # contact event). Fixes the seat-on-touchdown mislabel where
+                # SEARCH/GUIDED would enter and then stall on a locked peg.
+                if in_tol and best_label == "SEAT":
+                    self.state = self.DONE
+                    action.kind = "exit_done"
+                    action.transitioned = True
+                    action.new_state = self.DONE
+                    action.transition_msg = (
+                        f"surface_z={self.surface_z:.4f}m at t={t:.2f}s "
+                        f"(fz_smoothed={fz_smoothed:.2f}N > {self.contact_threshold_N}); "
+                        f"tcp_z={tcp_z*1000:.2f}mm vs predicted_seat="
+                        f"{self.contact_candidates['SEAT']*1000:.2f}mm "
+                        f"Δ={best_residual_m*1000:+.2f}mm "
+                        f"→ SEAT_ON_TOUCHDOWN: peg dropped straight to seat, "
+                        f"no rim/spiral needed. → DONE"
+                    )
+                    action.state = self.DONE
+                    return action
 
             # Routing options on Contact:
             #   1. autonomous_search=True  → SEARCH (active F/T-driven director)
