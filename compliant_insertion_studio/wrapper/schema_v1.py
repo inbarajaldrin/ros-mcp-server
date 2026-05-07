@@ -119,6 +119,14 @@ META_OPTIONAL_KEYS: tuple[str, ...] = (
                                   # predicate fired (analysis/CONTROL_LAW.md). Logged
                                   # in stage 3a (parallel to SIGUSR1); also triggers
                                   # the GUIDED→INSERT_DESCENT transition in stage 3b.
+    # --- v1.6 (CAD-derived contact classifier, 2026-05-07) ---
+    "contact_classification", # {label, best_match_label, best_match_residual_mm,
+                              # tcp_z_at_contact_m, candidates_m, in_tolerance, t_s}
+                              # populated by ContactSearchFSM at first contact via
+                              # cad_geometry.build_contact_candidates(). label ∈
+                              # {SEAT, BASE_RIM, OBJ:<name>, UNKNOWN}. SEAT in-tol
+                              # short-circuits APPROACH→DONE; others fall through
+                              # to today's SEARCH/GUIDED/FIND_HOLE dispatch.
 )
 
 
