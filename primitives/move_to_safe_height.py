@@ -2,8 +2,12 @@ import sys
 import os
 import time
 
-# Add project root to path so primitives package can be imported when running directly
-_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path so primitives package can be imported when running directly.
+# File is at <repo>/primitives/move_to_safe_height.py, so dirname()×2 = <repo>.
+# Three dirnames was a typo that bumped us to the parent of the repo
+# (/home/aaugus11/Documents) where there's no `primitives/` package, so
+# script-path invocation broke with ModuleNotFoundError.
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 

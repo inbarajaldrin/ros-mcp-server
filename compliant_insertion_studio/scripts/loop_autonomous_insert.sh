@@ -137,12 +137,12 @@ for i in $(seq 1 "$N"); do
     --current-object-orientation $current_quat \
     --base-offset-xy $offset \
     --fz -9.0 --override-fz-cap \
-    --step-back auto --step-back-seconds 1.0 \
+    --step-back auto --step-back-seconds 0.0 \
     --autonomous-search \
-    --search-F-press-N 5.0 \
-    --search-Fmax-N 5.0 \
+    --search-F-press-N 9.0 \
+    --search-Fmax-N 8.0 \
     --search-v-s-mm-s 5.0 \
-    --search-max-duration-s 25.0 \
+    --search-max-duration-s 30.0 \
     2>&1 | tee "$log"
 
   iter_end=$(date +%s)

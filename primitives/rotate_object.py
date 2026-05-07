@@ -1197,27 +1197,27 @@ class ReorientForAssembly(Node):
         # === Calculate grasp rotation ===
         # R_grasp = R_EE^T × R_object (object orientation relative to EE frame)
         #
-        # 2026-05-04 PM bugfix: previously used `R_EE_current` (FK from current
-        # joints). That drifts across loop iterations because force-mode
-        # compliance + retract leaves the EE at a slightly different orientation
-        # than the prior rotate's commanded target. The drift compounds:
-        # iter N's R_grasp is recomputed from a stale R_object_current input
-        # combined with a drifted R_EE_current, the IK selects a slightly
-        # different cardinal, the new resulting_object_R is fed forward as next
-        # iter's R_object_current, and so on. After ~10 iterations the IK can
-        # snap to a non-canonical fold-equivalent (gimbal-lock case observed
-        # 2026-05-04: EE RPY [135,-90,0] instead of [180,0,180]).
+        # 2026-05-04 PM had a bugfix here that hardcoded R_EE = [0,-1,0,0]
+        # (face-down, wrist_3=0) on the assumption that the current EE is
+        # always at canonical face-down with zero roll. That's true when
+        # move_to_grasp picks a canonical wrist_3 = 0 (e.g. part lying with
+        # its long axis aligned to world X). It's NOT true when move_to_grasp
+        # picks a non-canonical wrist_3 to align the jaws with a tilted
+        # part on the table — in that case the hardcoded canonical mismatches
+        # the actual EE rotation by the wrist_3 offset, R_grasp is computed
+        # in the wrong frame, and the IK target lands at a non-canonical
+        # fold-equivalent (observed 2026-05-07: u_brown on-table at 24° tilt
+        # → move_to_grasp wrist_3 = 82° → rotate_object output had pitch=41.8°
+        # instead of 0°, replay halted with bizarre EE configuration).
         #
-        # Fix: use the CANONICAL face-down EE rotation as the reference for
-        # R_grasp computation. R_grasp is a geometric constant (where the
-        # gripper grabs the part) and must not depend on the noisy FK-derived
-        # current EE pose. The canonical face-down quaternion is [0,-1,0,0]
-        # which is the operator-verified TCP orientation at start of every
-        # ACTIVE phase (see CSV `tcp_qx,tcp_qy,tcp_qz,tcp_qw` columns).
-        # IK seed and trajectory generation continue to use the actual
-        # R_EE_current; only R_grasp computation is canonicalized.
-        R_EE_canonical_face_down = R.from_quat([0.0, -1.0, 0.0, 0.0]).as_matrix()
-        R_grasp = R_EE_canonical_face_down.T @ R_object_current
+        # 2026-05-07: revert to using R_EE_current (the actual FK-derived EE
+        # rotation). The May 4 fix was protecting against loop-iter compounding
+        # drift in the legacy loop_iterate workflow; that workflow is not in
+        # the current critical path (replay_real_assembly.py is single-shot
+        # per object). If we resume loop_iterate later we'll need a smarter
+        # fix that accommodates BOTH wrist_3 freedom AND drift rejection
+        # (e.g. snap drift only, preserve wrist_3 actual).
+        R_grasp = R_EE_current.T @ R_object_current
         
         # === Transform target to world frame ===
         # Use quaternion from JSON directly to avoid gimbal-lock-sensitive conversions.

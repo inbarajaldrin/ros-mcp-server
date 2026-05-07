@@ -291,7 +291,13 @@ def _wrapper(object_name: str, base_name: str, grasp_id: int,
             "--fz", str(fz),
             "--step-back", step_back,
             "--auto-step-back-seconds", str(step_back_seconds),
-            "--no-prompt-notes"]
+            "--no-prompt-notes",
+            # 2026-05-07: skip the PRE-phase F/T smoke test on every run.
+            # run_assembly_step is the orchestrated assembly entry point and
+            # is always called within an active session — exactly the
+            # "repeated rapid attempts" case the wrapper's --skip-smoke flag
+            # is documented for. Saves ~5-6s per insert.
+            "--skip-smoke"]
     if override_fz_cap:
         argv.append("--override-fz-cap")
     if abort_on_first_contact:
@@ -313,22 +319,31 @@ def _wrapper(object_name: str, base_name: str, grasp_id: int,
                  "--search-R-max-mm", str(search_R_max_mm)]
         # Generous timeout: full insert pipeline
         argv += ["--timeout", "120"]
-    if base_offset_xy is not None and (base_offset_xy[0] != 0.0 or base_offset_xy[1] != 0.0):
-        # Inject an xy offset into the base pose passed downstream. Hover lands at
-        # offset xy → peg's first-contact xy is offset from actual slot. Used for
-        # data collection: operator places part the same way every demo, the
-        # offset is precise + recorded in the wrapper meta JSON via --base-world-pose.
-        from primitives.shared.config import DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION
-        bx = float(DEFAULT_BASE_POSITION[0]) + float(base_offset_xy[0])
-        by = float(DEFAULT_BASE_POSITION[1]) + float(base_offset_xy[1])
-        bz = float(DEFAULT_BASE_POSITION[2])
+    # 2026-05-07: combine the per-object PER_OBJECT_BASE_OFFSET_M with any
+    # --base-offset-xy passed by the caller. Per-object offset is calibrated
+    # for objects whose CAD seat doesn't match the u_brown-derived
+    # DEFAULT_BASE_POSITION (e.g. inverted_u_yellow). Both offsets stack so
+    # data-collection runs (which use --base-offset-xy as a perturbation)
+    # still benefit from the per-object baseline calibration.
+    from primitives.shared.config import (
+        DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION, get_object_base_offset_m,
+    )
+    obj_off = get_object_base_offset_m(object_name)
+    cli_off_xy = base_offset_xy if base_offset_xy is not None else (0.0, 0.0)
+    total_dx = obj_off[0] + float(cli_off_xy[0])
+    total_dy = obj_off[1] + float(cli_off_xy[1])
+    total_dz = obj_off[2]   # CLI offset is xy-only by design
+    has_offset = (total_dx != 0.0 or total_dy != 0.0 or total_dz != 0.0)
+    if has_offset:
+        bx = float(DEFAULT_BASE_POSITION[0]) + total_dx
+        by = float(DEFAULT_BASE_POSITION[1]) + total_dy
+        bz = float(DEFAULT_BASE_POSITION[2]) + total_dz
         bq = [float(v) for v in DEFAULT_BASE_ORIENTATION]
         argv += ["--base-world-pose", f"{bx:.6f}", f"{by:.6f}", f"{bz:.6f}",
                  f"{bq[0]:.6f}", f"{bq[1]:.6f}", f"{bq[2]:.6f}", f"{bq[3]:.6f}"]
         argv += ["--final-base-pos", f"{bx:.6f}", f"{by:.6f}", f"{bz:.6f}"]
         argv += ["--final-base-orientation",
                  f"{bq[0]:.6f}", f"{bq[1]:.6f}", f"{bq[2]:.6f}", f"{bq[3]:.6f}"]
-        # Don't pass --use-default-base-position when explicit pose is given
     elif use_default_base_position:
         argv.append("--use-default-base-position")
     # Outer subprocess timeout: 300s default, but GUIDED mode lets operator drag
@@ -493,9 +508,27 @@ def main() -> int:
     # On any abort or on DONE it cleans up: stop force mode, switch back to
     # position controller, move_to_safe_height, move_home. So no separate
     # safe-height + home calls are needed after this returns.
+
+    # 2026-05-07: per-object force overrides. Some objects need much lower
+    # downforce throughout the pipeline (e.g. line_green where the gripper
+    # collides with the base). Apply on top of CLI args.
+    from primitives.shared.config import get_object_insert_forces
+    obj_forces = get_object_insert_forces(args.object_name)
+    fz_use            = obj_forces.get("fz_approach",    args.fz)
+    f_press_use       = obj_forces.get("search_F_press", args.search_F_press_N)
+    fmax_use          = obj_forces.get("search_Fmax",    args.search_Fmax_N)
+    if obj_forces:
+        # Use signed Fz consistent with caller convention (negative = down)
+        if fz_use > 0:
+            fz_use = -abs(fz_use)
+        print(_bold(
+            f"Per-object force overrides for {args.object_name}: "
+            f"fz={fz_use}N  search_F_press={f_press_use}N  search_Fmax={fmax_use}N"
+        ))
+
     wrapper_result = _wrapper(
         args.object_name, args.base_name, args.grasp_id,
-        insert_quat, args.fz, args.step_back, args.step_back_seconds,
+        insert_quat, fz_use, args.step_back, args.step_back_seconds,
         args.use_default_base_position,
         base_offset_xy=tuple(args.base_offset_xy) if args.base_offset_xy else None,
         override_fz_cap=args.override_fz_cap,
@@ -503,9 +536,9 @@ def main() -> int:
         guided_mode=args.guided_mode,
         v4_autofire=args.v4_autofire,
         autonomous_search=args.autonomous_search,
-        search_F_press_N=args.search_F_press_N,
+        search_F_press_N=f_press_use,
         search_max_duration_s=args.search_max_duration_s,
-        search_Fmax_N=args.search_Fmax_N,
+        search_Fmax_N=fmax_use,
         search_v_s_mm_s=args.search_v_s_mm_s,
         search_pitch_mm=args.search_pitch_mm,
         search_R_max_mm=args.search_R_max_mm,

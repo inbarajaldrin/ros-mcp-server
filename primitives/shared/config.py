@@ -10,12 +10,184 @@ SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (mete
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # Base object orientation [x, y, z, w] quaternion (identity = no rotation)
-# Calibrated 2026-05-06: empirical bias (+1.52, -3.78) mm derived from a
-# centered-grasp u_brown GUIDED demo. The (0.0, -0.4) starting value put CAD
-# predictions ~5mm off the physical fixture; this corrected value puts CAD
-# directly on actual slot positions and removes the need for FSM-side bias
-# correction in autonomous SEARCH.
-DEFAULT_BASE_POSITION = [0.00152, -0.40378, TABLE_HEIGHT + 0.0175]  # Default base object position [x, y, z] in robot base frame (meters)
+# 2026-05-07: operator marked base at (+55, -480) mm; refined by u_brown
+# autonomous insert at 09:57. Observed actual seat TCP=(+33.95, -519.60) mm
+# vs predicted (+30.70, -527.50) mm → camera/calibration delta = (+3.25,
+# +7.90) mm in XY. Applied to DEFAULT_BASE_POSITION below. Z left unchanged
+# (Δz=-2.23mm, but operator chose not to apply).
+DEFAULT_BASE_POSITION = [0.05825, -0.47210, TABLE_HEIGHT + 0.0175]  # Default base object position [x, y, z] in robot base frame (meters)
+
+# Per-object base-position offset (meters in robot base frame). Added on top
+# of DEFAULT_BASE_POSITION when inserting this specific object — i.e. when
+# CAD predicted_tcp_at_seat is computed, the base is treated as
+# (DEFAULT_BASE_POSITION + PER_OBJECT_BASE_OFFSET_M[object_name]).
+#
+# Why per-object: DEFAULT_BASE_POSITION was calibrated from a u_brown
+# centered-grasp GUIDED demo (2026-05-06). u_brown's slot is at y=-47.5mm
+# off-center in base1; small base-tilt or fixture rotation gets baked into
+# the calibration but shifts differently at other slot locations. For slots
+# centered on the base (line_green, inverted_u_yellow), the same calibration
+# bias points slightly off the actual hole center.
+#
+# Calibrated 2026-05-07. Three seat-z readings collected during tuning of
+# inverted_u_yellow on base1 with line_green seated underneath:
+#   without line_green (operator-seat):  TCP_z = +212.00 mm  Δz = -7.90  mm
+#   with line_green (operator-seat):     TCP_z = +207.68 mm  Δz = -12.22 mm
+#   with line_green (autonomous-seat):   TCP_z = +212.78 mm  Δz = -7.12  mm
+# The operator could press harder than autonomous Fz=-9N and bottom the
+# part out at +207.68mm; the autonomous chain can only reach +212.78mm
+# under the project's 9N cap. We anchor predicted_seat to the autonomous-
+# achievable depth (-7.12mm) so the global seat detector fires correctly
+# without needing to widen its tolerance — landing at 212.78 is exactly
+# at predicted_seat and falls inside the 5mm SEAT classifier band.
+# X and Y stay calibrated to the operator-with-line_green seat (the most
+# precise reading available for those axes).
+PER_OBJECT_BASE_OFFSET_M: dict = {
+    # 2026-05-07 v4: u_brown calibrated from full-assembly run actual seat
+    # TCP=(+82.35, -523.02, +199.07)mm vs predicted (+84.93, -519.50, +200.80)mm
+    #   → Δ=(-2.59, -3.52, -1.74)mm.
+    "u_brown":  (-0.00259, -0.00352, -0.00174),
+    # 2026-05-07 v4: u_orange calibrated from full-assembly run actual seat
+    # TCP=(+31.77, -427.29, +199.75)mm vs predicted (+33.96, -423.69, +200.80)mm
+    #   → Δ=(-2.19, -3.60, -1.06)mm.
+    "u_orange": (-0.00219, -0.00360, -0.00106),
+    # 2026-05-07 v3: yellow-specific calibration. Started with line_green's
+    # offset, observed actual seat TCP=(+60.48, -470.91, +212.98)mm vs
+    # predicted (+60.27, -470.19, +224.66)mm → Δ=(+0.21, -0.72, -11.68)mm.
+    # Yellow's prong geometry seats 11.7mm deeper than line_green's CAD
+    # predicts; XY nearly identical.
+    # Final offset = line_green offset (+1.13, +1.88, +4.76) + Δ
+    #              = (+1.34, +1.16, -6.92) mm
+    "inverted_u_yellow": (+0.00134, +0.00116, -0.00692),
+    # 2026-05-07: line_green calibrated from operator-manual-seat (with
+    # u_brown + u_orange already seated as flanking obstacles):
+    #   TCP_actual=(+3.31, -399.38, +191.73) mm
+    #   TCP_predicted (no offset)=(+2.71, -403.85, +190.49) mm
+    #   Δ = (+0.60, +4.46, +1.24) mm
+    # Note: line_green also has a known body-on-adjacent-part collision
+    # issue (gripper jaws holding line_green at center hit u_brown/u_orange
+    # tops during descent). This offset alone won't solve that — a true
+    # fix needs lateral-approach descent or different grasp_id. Captured
+    # here so the autonomous chain can at least classify SEAT correctly
+    # if/when descent does complete.
+    # 2026-05-07 v2: re-calibrated against operator-positioned line_green
+    # in slot. TCP_actual=(+60.57, -470.31, +195.25)mm vs
+    # TCP_predicted_no_offset=(+59.44, -472.19, +190.49)mm  →  Δ=(+1.13, +1.88, +4.76)mm.
+    # The previous +4.46mm Y offset was overshooting (compliance was drifting
+    # the bar away from the true slot in -Y); the actual slot is +1.88mm in Y.
+    "line_green": (+0.00113, +0.00188, +0.00476),
+}
+
+
+def get_object_base_offset_m(object_name: str) -> tuple[float, float, float]:
+    """Per-object base-position offset (meters). Returns (0,0,0) if no entry."""
+    return tuple(PER_OBJECT_BASE_OFFSET_M.get(object_name, (0.0, 0.0, 0.0)))
+
+
+# Per-object SEAT classifier tolerance (meters). Used by both the contact
+# classifier ("is this contact at SEAT?") and the global seat detector
+# ("is the peg now at the predicted seated position?").  Default 5mm is
+# loose enough that small CAD prediction noise + force-mode compliance
+# don't prevent SEAT detection on single-stage parts (u_brown/u_orange/
+# inverted_u_yellow). line_green needs tighter (2mm) because the
+# autonomous can plausibly stop 3mm above true seat without being
+# physically seated, and we need the global seat detector to NOT fire
+# prematurely so the multi-stage GUIDED re-entry can hand back to the
+# operator for a second nudge.
+PER_OBJECT_SEAT_TOL_M: dict = {
+    "line_green": 0.002,
+}
+
+
+def get_object_seat_tolerance_m(object_name: str, default: float = 0.005) -> float:
+    """Per-object SEAT classifier + global-seat-detector tolerance (m)."""
+    return float(PER_OBJECT_SEAT_TOL_M.get(object_name, default))
+
+
+# Per-object INSERT_DESCENT compliance mode. Default is XY-locked, Z-only
+# compliance (selection vector (F,F,T,F,F,F)) — appropriate for u_brown /
+# u_orange / inverted_u_yellow where the spiral SEARCH already aligned the
+# peg before INSERT_DESCENT begins.
+#
+# For line_green the slot is the same width as the bar (~26mm), so the
+# gripper jaws holding the bar at its center don't fit through the slot
+# alongside the bar. The descent has to find a yaw that minimises clearance
+# resistance against the slot walls — operator-suggested 2026-05-07: enable
+# yaw compliance during INSERT_DESCENT so the part naturally settles at the
+# correct yaw under torque feedback from the slot walls. Selection vector
+# (F,F,T,F,F,T) — Z compliant + Tz (yaw) compliant; XY+roll+pitch locked.
+PER_OBJECT_FREE_YAW_INSERT: dict = {
+    "line_green": True,
+}
+
+
+def is_free_yaw_insert(object_name: str) -> bool:
+    """Whether this object uses yaw-compliant INSERT_DESCENT."""
+    return bool(PER_OBJECT_FREE_YAW_INSERT.get(object_name, False))
+
+
+# Per-object force overrides for the insertion pipeline. Default is 9N
+# downforce throughout (calibrated to break stiction on u_brown/u_orange/
+# inverted_u_yellow rim friction). For line_green the gripper jaws holding
+# the bar at center collide with base1's outer surface — pushing 9N drives
+# the gripper hard into the base, which is both unsafe and prevents any
+# yaw-compliance from settling the part. Drop to 4N approach + 4N search
+# press + 3N insert descent so the part can yield to slot-wall feedback
+# without slamming.
+PER_OBJECT_INSERT_FORCES_N: dict = {
+    # 2026-05-07 v3: line_green sat fully blocked at -4N (Fz reaction = +4.15N
+    # mean, Z dropped 2mm in 30s while Y slid 7.7mm). Friction at gripper-base
+    # contact dominated. Cut forces in HALF again to 2.0N and lower; the
+    # gripper-base contact must be light enough that compliance can reposition.
+    "line_green": {
+        "fz_approach":    2.0,   # default 9.0
+        "search_F_press": 1.5,   # default 9.0  (commanded Fz during compliant_descent)
+        "search_Fmax":    1.5,   # default 8.0
+        "insert_fz":      1.5,   # default 8.0  (fsm_cfg insert_fz_N during INSERT_DESCENT)
+    },
+}
+
+
+def get_object_insert_forces(object_name: str) -> dict:
+    """Per-object force overrides; returns empty dict if not configured."""
+    return dict(PER_OBJECT_INSERT_FORCES_N.get(object_name, {}))
+
+
+# 2026-05-07: per-object SEARCH mode.
+#   "spiral"            (default): Archimedean PD spiral via SearchDirector.
+#                       Drives commanded Fx/Fy to sweep an outward spiral.
+#                       Works for u_brown / u_orange / inverted_u_yellow where
+#                       the slot is point-like and the gripper clears the base.
+#   "compliant_descent" (line_green): pure passive XYZ compliance under -Fz,
+#                       no commanded lateral force. Slot rim physically
+#                       guides the peg laterally as Z descends. If Z stalls,
+#                       escalate selection vector to free Rx/Ry/Rz so slot
+#                       walls can tilt + rotate the peg into alignment.
+#                       Borrowed from primitives/_real_mode_stash/legacy/
+#                       passive_compliance_move.py (Tier 0 → Tier 1 escalation).
+PER_OBJECT_SEARCH_MODE: dict = {
+    "line_green": "compliant_descent",
+}
+
+
+def get_object_search_mode(object_name: str) -> str:
+    """Per-object SEARCH-state mode. Default 'spiral'."""
+    return str(PER_OBJECT_SEARCH_MODE.get(object_name, "spiral"))
+
+
+# 2026-05-07: per-object yaw bias torque applied during free-yaw INSERT_DESCENT
+# and during compliant_descent tiers with rotational compliance enabled. Sign
+# determines rotation direction, magnitude is in Nm. Applied in base_link.
+# line_green: observed rotating wrong direction on impact under pure compliance,
+# operator requested sign reverse — start with negative bias.
+PER_OBJECT_YAW_BIAS_NM: dict = {
+    "line_green": +0.5,   # 2026-05-07: -0.5 was wrong direction → flipped
+}
+
+
+def get_object_yaw_bias_nm(object_name: str) -> float:
+    """Per-object active Tz bias (Nm) for free-yaw INSERT_DESCENT. 0 = pure compliance."""
+    return float(PER_OBJECT_YAW_BIAS_NM.get(object_name, 0.0))
 
 # UR5e motion limits — two independent constraints, compute_duration takes the max.
 # Cartesian limits govern translation speed (reference: safe_height ↔ table = 0.32m → 5.0s).

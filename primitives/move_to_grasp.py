@@ -472,11 +472,17 @@ class DirectObjectMove(Node):
         self.force_threshold = 50.0  # N for Fx,Fy,Tx,Ty,Tz
         # Threshold for contact-detection delta (N) on Fz from baseline.
         # 2026-05-05: bumped 10 → 25 because payload changed from default 3.5kg (uncalibrated)
-        # to correct 2.11kg, exposing a calibration mismatch that lets gravity shift during
-        # canonical-pose adjustment within step 2 cross 10N. 25N still catches real crashes
-        # (which spike >40N instantly) but tolerates gravity component swings under our
-        # actual payload + reasonable orientation shifts during fine positioning.
-        self.z_force_threshold = 25.0  # force change threshold for contact detection
+        #   to correct 2.11kg, exposing a calibration mismatch that lets gravity shift during
+        #   canonical-pose adjustment within step 2 cross 10N.
+        # 2026-05-07: bumped 25 → 40 because the new launch_robot.sh set_payload calibration
+        #   (mass=2.1109kg, cog=(-0.0032,0.0031,-0.0318)) PLUS the in-step gripper-open-to-
+        #   restore-visibility recovery (which shifts payload mass distribution mid-descent,
+        #   producing Fz transients up to ~30N) was tripping the 25N gate. Real crashes
+        #   still spike >40N instantly (single-tick), so 40N preserves crash protection
+        #   while tolerating the recovery transient. Override per-call via
+        #   PRIMITIVES_Z_FORCE_THRESHOLD env var if needed.
+        import os as _os
+        self.z_force_threshold = float(_os.environ.get("PRIMITIVES_Z_FORCE_THRESHOLD", "40.0"))
 
         # Gripper width monitoring and control
         self.current_gripper_width = None
@@ -1485,8 +1491,20 @@ class DirectObjectMove(Node):
             # Build trajectory with s-curve velocity profile
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
             joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
-            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-            self.get_logger().info(f"{step_label} duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+            # 2026-05-07: also include cartesian distance so this move is rate-
+            # limited the same as move_to_safe_height / translate_object. Without
+            # this, joint-only constraint allowed ~120 mm/s vs the ~80 mm/s used
+            # everywhere else.
+            cart_dist = float(np.linalg.norm(flange_target - current_flange_fk))
+            total_duration = compute_duration(
+                joint_distance=joint_dist, cartesian_distance=cart_dist,
+                cart_vel=0.15,  # 150 mm/s — 2× default (move_to_grasp moves are not insertion-precise)
+                profile='s_curve'
+            )
+            self.get_logger().info(
+                f"{step_label} duration: {total_duration:.2f}s "
+                f"(joint={joint_dist:.2f}rad, cart={cart_dist:.3f}m)"
+            )
 
             profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
@@ -1553,8 +1571,26 @@ class DirectObjectMove(Node):
 
         if joint_angles is not None:
             joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
-            movement_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-            self.get_logger().info(f"Step 1 duration: {movement_duration:.2f}s (joint={joint_dist:.2f}rad)")
+            # 2026-05-07: include cart distance for consistent rate-limiting
+            # with other primitives. ik_position is the target gripper center;
+            # current_ee_position is the current EE flange. Approximate cart
+            # distance as the straight-line gripper-center motion.
+            try:
+                cart_dist = float(np.linalg.norm(np.array(ik_position) - np.array(current_ee_position)))
+            except Exception:
+                cart_dist = None
+            movement_duration = compute_duration(
+                joint_distance=joint_dist,
+                cartesian_distance=cart_dist,
+                cart_vel=0.15,
+                profile='s_curve',
+            )
+            self.get_logger().info(
+                f"Step 1 duration: {movement_duration:.2f}s "
+                f"(joint={joint_dist:.2f}rad"
+                + (f", cart={cart_dist:.3f}m" if cart_dist is not None else "")
+                + ")"
+            )
             positions, velocities, t = single_point(joint_angles, movement_duration)[0]
             trajectory = {"traj1": [{"positions": positions, "velocities": velocities, "duration": t}]}
         else:
@@ -1663,6 +1699,10 @@ class DirectObjectMove(Node):
         if self.current_ee_pose is None or self.current_joint_angles is None:
             self.get_logger().warn("Cannot perform retreat: current EE pose or joint angles not available")
             self.trajectory_in_progress = False
+            # 2026-05-07: gripper was opened by _open_gripper_and_check before
+            # this retreat was scheduled — restore it before bailing out so the
+            # next step 2 doesn't descend on an open gripper.
+            self._restore_gripper_if_needed()
             return
 
         from primitives.shared.ik import compute_cartesian_waypoints_ik
@@ -1719,14 +1759,26 @@ class DirectObjectMove(Node):
             if waypoints is None:
                 self.get_logger().warn("Failed to compute retreat waypoints")
                 self.trajectory_in_progress = False
+                # 2026-05-07: same as the other early-exits — restore gripper
+                # before giving up on retreat.
+                self._restore_gripper_if_needed()
                 return
 
             # Build trajectory with s-curve velocity profile (same as step 2)
             all_joint_angles = [self.current_joint_angles.copy()] + list(waypoints)
 
             joint_dist = float(np.max(np.abs(np.array(waypoints[-1]) - np.array(self.current_joint_angles))))
-            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-            self.get_logger().info(f"Retreat duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+            # 2026-05-07: include cart distance for consistent rate-limiting.
+            cart_dist = float(np.linalg.norm(target_flange - fk_pos))
+            total_duration = compute_duration(
+                joint_distance=joint_dist, cartesian_distance=cart_dist,
+                cart_vel=0.15,  # 150 mm/s — 2× default (move_to_grasp moves are not insertion-precise)
+                profile='s_curve'
+            )
+            self.get_logger().info(
+                f"Retreat duration: {total_duration:.2f}s "
+                f"(joint={joint_dist:.2f}rad, cart={cart_dist:.3f}m)"
+            )
 
             profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
@@ -1752,13 +1804,24 @@ class DirectObjectMove(Node):
 
             self.trajectory_in_progress = True
             self.is_y_movement_trajectory = True
-            self.get_logger().info(f"Retreat trajectory sent: {n_total} waypoints over {total_duration:.1f}s")
+            # 2026-05-07: was f"...{n_total} waypoints..." — undefined name caused
+            # the whole try-block to raise NameError, retreat trajectory never
+            # got sent, and step 2 then descended with the gripper still open.
+            self.get_logger().info(
+                f"Retreat trajectory sent: {len(traj_points)} waypoints over {total_duration:.1f}s"
+            )
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
 
         except Exception as e:
             self.get_logger().warn(f"Retreat movement error: {e}")
             self.trajectory_in_progress = False
+            # 2026-05-07 fix: even when retreat fails, the gripper is still open
+            # from _open_gripper_and_check. If we don't restore it before falling
+            # back to step 2, step 2 will descend with an open gripper and either
+            # crash into the part or close on a wrong xy. Restore here so the
+            # next iteration of step 2 starts from a clean grasp-width state.
+            self._restore_gripper_if_needed()
 
     def execute_trajectory(self, trajectory):
         """Execute trajectory using ROS2 action"""

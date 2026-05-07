@@ -125,6 +125,23 @@ def _move_to_clear_area(target_xy: tuple[float, float] | None, mode: str) -> dic
     return _run("move_to_clear_area", argv, timeout_s=60)
 
 
+def _translate_place_down(object_name: str, base_name: str, mode: str) -> dict:
+    """Use translate_object --place-down to gently set the held part onto the
+    table at the clear-drop xy. Internally: verify_grasp + move_to_clear_area +
+    move_down (force-based contact). Replaces a raw open-gripper-from-safe-
+    height drop with a controlled placement, so the part comes to rest in a
+    consistent pose for the camera regrasp instead of bouncing."""
+    return _run(
+        f"translate_object place_down {object_name}",
+        ["python3", "-m", "primitives.translate_object",
+         "--mode", mode,
+         "--object-name", object_name,
+         "--base-name", base_name,
+         "--place-down"],
+        timeout_s=120,
+    )
+
+
 def _control_gripper(width_or_cmd: str, mode: str) -> dict:
     return _run(
         f"control_gripper {width_or_cmd}",
@@ -157,6 +174,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--object-name", required=True)
+    p.add_argument("--base-name", default="base1",
+                   help="Assembly base used by translate_object --place-down "
+                        "(2026-05-07: swapped raw clear-area drop for a controlled "
+                        "place_down). Defaults to base1 since that's the only FMB1 "
+                        "fixture; pass explicitly for FMB2/FMB3 layouts.")
     p.add_argument("--grasp-id", type=int, required=True)
     p.add_argument("--grasp-width", type=int, default=None,
                    help="Gripper width (mm) for the open command at release. "
@@ -190,18 +212,32 @@ def main():
                     "camera not publishing /objects_poses_real — launch camera first"
                 )
 
-        # Step 2: move to clear area
-        _move_to_clear_area(tuple(args.clear_xy) if args.clear_xy else None, args.mode)
+        # Step 1 (CRITICAL, added 2026-05-07): lift held part STRAIGHT UP first.
+        # If the part is currently INSERTED in base1 (caller just completed an
+        # insert), going straight to place_down would do horizontal motion
+        # that drags the inserted part through the slot, ripping the base
+        # apart. move_to_safe_height plans pure-Z lift to clear the slot
+        # before any lateral motion.
+        _move_to_safe_height(args.mode)
 
-        # Step 3: release (open to grasp_width). Part drops onto table.
+        # Step 2 (new 2026-05-07): place the held part down via translate_object
+        # --place-down instead of a raw drop from safe height. This does a
+        # controlled lower-onto-table with force-based contact, so the part
+        # comes to rest at a clean, predictable pose. Replaces the old
+        # move_to_clear_area + open-gripper combo which dropped the part from
+        # SAFE_HEIGHT and let it bounce/skid.
+        _translate_place_down(args.object_name, args.base_name, args.mode)
+
+        # Step 3: open gripper (part already touching table, so this is a clean
+        # release in place rather than a drop).
         _control_gripper(str(args.grasp_width), args.mode)
 
-        # Step 4: settle so the part comes to rest and camera publishes a fresh pose.
+        # Step 4: settle so the part stops moving and camera publishes fresh pose.
         print(_bold(f"\n>>> settle ({args.settle_s}s)"))
         time.sleep(float(args.settle_s))
         print(_green("    OK"))
 
-        # Step 5: move to safe height (clear of the dropped part).
+        # Step 5: move to safe height (clear of the placed part for camera-pick).
         _move_to_safe_height(args.mode)
 
         # Step 6: vision-driven move_to_grasp.

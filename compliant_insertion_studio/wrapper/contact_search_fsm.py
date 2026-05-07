@@ -46,6 +46,9 @@ class FSMAction:
     selection_vector: tuple[bool, bool, bool, bool, bool, bool] = (True, True, True, False, False, False)
     gain: float = 1.0
     damping: float = 0.7
+    # Optional per-tick speed-limit overrides (None = use args.lin_speed/ang_speed)
+    lin_speed: Optional[float] = None
+    ang_speed: Optional[float] = None
 
     # Diagnostic info
     state: str = ""
@@ -109,7 +112,14 @@ class SearchDirector:
                  stall_progress_ratio: float = 0.15,
                  stall_window_s: float = 1.0,
                  lag_pause_thresh_m: float = 0.002,
-                 near_miss_fz_thresh_N: float = 4.0):
+                 near_miss_fz_thresh_N: float = 4.0,
+                 # 2026-05-07: gradient-follower thresholds. Lowered in soft
+                 # second-stage SEARCH so the gradient mode kicks in on
+                 # smaller fz drops + slower peg motion — making the second
+                 # alignment respect the compliance instead of the spiral.
+                 gradient_d_fz_dt_thresh: float = -3.0,   # N/s (soft: -1.0)
+                 gradient_fz_thresh: float = 6.0,         # N    (soft: 5.0)
+                 gradient_v_thresh: float = 5e-4):       # m/s  (soft: 1e-4)
         self.r0 = float(r0_m)
         self.pitch = float(pitch_m)
         self.v_s = float(v_s_m_s)
@@ -123,6 +133,10 @@ class SearchDirector:
         self.stall_window_s = float(stall_window_s)
         self.lag_pause_thresh_m = float(lag_pause_thresh_m)
         self.near_miss_fz_thresh_N = float(near_miss_fz_thresh_N)
+        # Tunable gradient-follower thresholds (soft mode lowers these)
+        self.gradient_d_fz_dt_thresh = float(gradient_d_fz_dt_thresh)
+        self.gradient_fz_thresh      = float(gradient_fz_thresh)
+        self.gradient_v_thresh       = float(gradient_v_thresh)
 
         # Reset state
         self._center_xy: Optional[tuple[float, float]] = None
@@ -273,9 +287,9 @@ class SearchDirector:
         # spiral yank it back onto the rim. Active control kicks in as the
         # peg approaches the chamfer edge.
         v_mag = math.hypot(v_x, v_y)
-        gradient_active = (d_fz_dt < -3.0           # fz dropping > 3 N/s
-                           and abs_fz < 6.0          # already at/near chamfer threshold
-                           and v_mag > 5e-4)         # peg actually moving (>0.5mm/s)
+        gradient_active = (d_fz_dt < self.gradient_d_fz_dt_thresh  # fz dropping fast enough
+                           and abs_fz < self.gradient_fz_thresh    # already at/near chamfer threshold
+                           and v_mag > self.gradient_v_thresh)     # peg actually moving
 
         if gradient_active:
             # Continue in current peg-velocity direction at full Fmax.
@@ -476,6 +490,26 @@ class ContactSearchFSM:
 
         # GUIDED-mode state (operator-drag data collection):
         self.guided_mode: bool = bool(self.cfg.get("guided_mode", False))
+        # 2026-05-07: free-yaw INSERT_DESCENT mode. When True, INSERT_DESCENT
+        # uses selection vector (F,F,T,F,F,T) — Z compliant + Tz (yaw)
+        # compliant; XY+roll+pitch locked — so the part naturally settles
+        # at the correct yaw under slot-wall torque feedback. Used for
+        # line_green where the slot is the same width as the bar and the
+        # peg has to find the precise yaw to clear the gripper jaws.
+        self.free_yaw_insert: bool = bool(self.cfg.get("free_yaw_insert", False))
+        # 2026-05-07: SEARCH mode. "spiral" (default) uses SearchDirector PD
+        # spiral; "compliant_descent" uses passive XYZ compliance + Z-stall
+        # escalation to free Rx/Ry/Rz (borrowed from
+        # primitives/_real_mode_stash/legacy/passive_compliance_move.py).
+        self.search_mode: str = str(self.cfg.get("search_mode", "spiral"))
+        # Active Tz bias (Nm) applied during free-yaw / compliant_descent
+        # Rz-compliant axes. Sign drives rotation direction; 0 = pure compliance.
+        self.yaw_bias_nm: float = float(self.cfg.get("yaw_bias_nm", 0.0))
+        # Per-tier compliance state for compliant_descent
+        self._cdesc_tier: int = 0  # 0 = XYZ-only, 1 = full 6-DOF compliance, 2 = full + active nudge
+        self._cdesc_tier_t: Optional[float] = None
+        self._cdesc_z_at_tier_start: Optional[float] = None
+        self._cdesc_last_cmd_t: Optional[float] = None
         # Operator signals "above hole now" by setting this flag (the wrapper
         # sets it on receiving SIGUSR1). FSM checks each tick during GUIDED
         # state — when True, captures TCP and transitions to INSERT_DESCENT.
@@ -490,6 +524,12 @@ class ContactSearchFSM:
         self.guided_damping = float(self.cfg.get("guided_damping", 0.05))
         self._guided_entered: bool = False
         self._insert_descent_entered: bool = False
+        # Multi-stage re-contact (2026-05-07): once during INSERT_DESCENT we
+        # may detect a "second contact" (e.g. peg dropped through line_green
+        # hole and now touching base rim). One-shot transition to a softer
+        # SEARCH so the second alignment doesn't get bull-dozed.
+        self._soft_research_fired: bool = False
+        self._soft_research_first_t: Optional[float] = None
         self.insert_start_z: Optional[float] = None
 
         # v4 Found Hole predicate detector (analysis/CONTROL_LAW.md). Runs
@@ -527,6 +567,16 @@ class ContactSearchFSM:
             Fmax_N            = float(self.cfg.get("search_Fmax_N",      3.0)),
             F_press_N         = float(self.cfg.get("search_F_press_N",   9.0)),
             fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",   3.0)),
+            # 2026-05-07: relax stall detection. Original (0.15, 1.0s) fires
+            # at 15% progress in 1s — too aggressive when peg lands wedged
+            # at slot rim and needs a few seconds + lateral force to break
+            # free. Empirical: u_orange runs that stalled at ~13% progress
+            # in 1s would have succeeded given more time (one took 15.66s
+            # of search). New (0.02, 2.0s) only fires when peg is genuinely
+            # stuck (sub-2% over 2s) — search_max_duration_s (30s) is the
+            # outer bound.
+            stall_progress_ratio = float(self.cfg.get("search_stall_progress_ratio", 0.02)),
+            stall_window_s       = float(self.cfg.get("search_stall_window_s",       2.0)),
         )
         # Seeded by FSM at SEARCH entry (predicted_tcp_xy from CAD prior).
         # SearchDirector's bootstrap mode drives toward this xy until |F_lat|
@@ -1267,9 +1317,18 @@ class ContactSearchFSM:
                 absolute_at_target = dz_abs <= self.at_target_z_tol_m
 
             # Path (2): relative descent fallback
+            # 2026-05-07: gate this path on predicted_tcp_z being None so it
+            # only fires when CAD prediction is unavailable. Previously the
+            # OR'd condition fired DONE on z_drop > 20mm regardless of
+            # absolute Δ — so a tightened per-object SEAT tolerance got
+            # short-circuited (e.g. line_green: descent 38mm > 20mm relative
+            # threshold fired DONE even though Δ=3.71mm > 2mm tolerance).
+            # When CAD prediction IS available it is the authoritative
+            # signal; the relative path is single-contact-only and not
+            # robust to multi-stage inserts.
             relative_seated = False
             z_drop_global = float('inf')
-            if self.surface_z is not None:
+            if self.predicted_tcp_z is None and self.surface_z is not None:
                 z_drop_global = self.surface_z - tcp_z
                 relative_seated = z_drop_global >= self.engaged_z_drop_dominant_m
 
@@ -1403,6 +1462,191 @@ class ContactSearchFSM:
         action.state = self.GUIDED
         return action
 
+    def _tick_search_compliant(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
+        """SEARCH state: passive compliance descent (no spiral).
+
+        Borrowed from primitives/_real_mode_stash/legacy/passive_compliance_move.py.
+        Instead of commanding lateral force, just hold a constant -Fz under
+        XYZ compliance and let the slot rim physically guide the peg.
+
+        Tier escalation on Z stall (no progress in stall_window_s):
+          Tier 0 (entry): sel = (T,T,T,F,F,F)  — XYZ compliant, rotations locked
+          Tier 1 (after stall): sel = (T,T,T,T,T,T)  — full 6-DOF compliance
+          Tier 2 (after another stall): full compliance + active Tx/Ty→XY nudge
+                  (1 mm per 0.1 Nm) — borrowed from insert_compliance.py
+
+        Termination:
+          - v4 detector fires (rim-cross signature) → INSERT_DESCENT
+          - z reaches predicted seat tolerance → INSERT_DESCENT
+          - timeout (search_max_duration_s)
+        """
+        # Same v4 detector and timeout machinery as the spiral path. The
+        # difference is the wrench / sel vector we issue.
+        Fz_press = float(self.cfg.get("search_F_press_N", 4.0))  # default for compliant_descent
+        stall_window_s = float(self.cfg.get("search_stall_window_s", 2.0))
+        stall_progress_m = float(self.cfg.get("compliant_stall_progress_m", 0.0005))  # 0.5 mm
+        cmd_period = self._search_cmd_period_s
+
+        if not self._search_entered:
+            self._search_entered = True
+            self._search_start_t = t
+            self._cdesc_tier = 0
+            self._cdesc_tier_t = t
+            self._cdesc_z_at_tier_start = tcp_z
+            sel = (True, True, True, False, False, False)
+            wrench = (0.0, 0.0, -abs(Fz_press), 0.0, 0.0, 0.0)
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            # Borrowed from primitives/_real_mode_stash/perform_insert.py:849-857.
+            # damping=0.0 (free, no dissipation), gain=1.0 (full force tracking),
+            # angular_z fast (yaw can quickly settle), linear xy moderate.
+            action.gain = 1.0
+            action.damping = 0.3   # was 0.0 (too bouncy); 0.3 = compliant but stable
+            action.lin_speed = 0.05   # 50 mm/s
+            action.ang_speed = 0.50   # 28.6 deg/s — fast yaw settle
+            action.state = self.SEARCH
+            action.msg = (
+                f"SEARCH compliant_descent Tier 0 (XYZ-only, rotations locked): "
+                f"Fz=-{Fz_press:.1f}N  gain=1.0 damp=0.0 (FREE)  "
+                f"v4_arm={self.found_hole_detector.rim_high}N"
+            )
+            self._cdesc_last_cmd_t = t
+            return action
+
+        # Timeout
+        if t - self._search_start_t > self.search_max_duration_s:
+            action.kind = "exit_abort"
+            action.abort_reason = (
+                f"SEARCH compliant_descent timeout {self.search_max_duration_s}s "
+                f"in tier {self._cdesc_tier} — peg never crossed rim. "
+                f"Z progress over total search: "
+                f"{1000*(self._cdesc_z_at_tier_start - tcp_z):+.2f}mm"
+            )
+            return action
+
+        # v4 detector — same trigger as spiral path
+        v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
+        if v4_fired_now:
+            self.v4_predicate_fire = {
+                "t_s": float(t),
+                "xy_m": [float(tcp_x), float(tcp_y)],
+                "z_m": float(tcp_z),
+                "fz_smoothed_at_fire_N": float(fz_smoothed),
+                "abs_fz_smoothed_at_fire_N": float(abs(fz_smoothed)),
+                "thresholds": {
+                    "rim_high_N": self.found_hole_detector.rim_high,
+                    "rim_low_N":  self.found_hole_detector.rim_low,
+                    "off_sustain_s":   self.found_hole_detector.off_sustain_s,
+                    "recent_window_s": self.found_hole_detector.recent_window_s,
+                },
+                "autofired": True,
+                "from_state": self.SEARCH,
+            }
+            self.hole_observed_xy = (float(tcp_x), float(tcp_y))
+            self.hole_observed_z  = float(tcp_z)
+            self.hole_observed_t  = float(t)
+            self.state = self.INSERT_DESCENT
+            action.transitioned = True
+            action.new_state = self.INSERT_DESCENT
+            action.transition_msg = (
+                f"v4 predicate FIRED in SEARCH(compliant_descent) at t={t:.2f}s "
+                f"xy=({tcp_x:+.4f},{tcp_y:+.4f}) tier={self._cdesc_tier} "
+                f"|fz|={abs(fz_smoothed):.2f}N → INSERT_DESCENT"
+            )
+            action.state = self.INSERT_DESCENT
+            return action
+
+        # Tier escalation on Z stall: every stall_window_s, check if Z dropped
+        # enough. If not, escalate.
+        if (t - self._cdesc_tier_t) >= stall_window_s:
+            z_dropped = self._cdesc_z_at_tier_start - tcp_z  # positive = went down
+            if z_dropped < stall_progress_m:
+                # Stalled at this tier — escalate
+                if self._cdesc_tier == 0:
+                    self._cdesc_tier = 1
+                    self._cdesc_tier_t = t
+                    self._cdesc_z_at_tier_start = tcp_z
+                    sel = (True, True, True, True, True, True)
+                    wrench = (0.0, 0.0, -abs(Fz_press), 0.0, 0.0, self.yaw_bias_nm)
+                    action.new_wrench = True
+                    action.wrench_baselink = wrench
+                    action.selection_vector = sel
+                    action.gain = 1.0
+                    action.damping = 0.3
+                    action.lin_speed = 0.05
+                    action.ang_speed = 0.50
+                    action.msg = (
+                        f"SEARCH compliant_descent ESCALATE → Tier 1 "
+                        f"(full XYZ+Rx+Ry+Rz compliance, FREE) after "
+                        f"{stall_window_s:.1f}s stall (z_drop={1000*z_dropped:+.2f}mm)"
+                    )
+                    self._cdesc_last_cmd_t = t
+                    return action
+                elif self._cdesc_tier == 1:
+                    self._cdesc_tier = 2
+                    self._cdesc_tier_t = t
+                    self._cdesc_z_at_tier_start = tcp_z
+                    action.msg = (
+                        f"SEARCH compliant_descent ESCALATE → Tier 2 "
+                        f"(full compliance + active Tx/Ty nudge) after "
+                        f"{stall_window_s:.1f}s stall in tier 1"
+                    )
+                    # Wrench/sel unchanged here; nudge applied below
+                else:
+                    # Already at tier 2 and still stalled — let the timeout
+                    # safety abort fire on the next tick rather than aborting
+                    # here. Reset window so we keep nudging.
+                    self._cdesc_tier_t = t
+                    self._cdesc_z_at_tier_start = tcp_z
+            else:
+                # Made progress — reset window without escalating
+                self._cdesc_tier_t = t
+                self._cdesc_z_at_tier_start = tcp_z
+
+        # Re-issue wrench at fixed period (tier 0/1: pure -Fz; tier 2: with
+        # active Tx/Ty→XY nudge mapped from sensed wrist torque).
+        if (self._cdesc_last_cmd_t is None
+                or (t - self._cdesc_last_cmd_t) >= cmd_period):
+            sel = (True, True, True,
+                   self._cdesc_tier >= 1, self._cdesc_tier >= 1, self._cdesc_tier >= 1)
+            # Apply yaw bias only when Rz is in the compliant set (tier ≥ 1)
+            tz_cmd = self.yaw_bias_nm if self._cdesc_tier >= 1 else 0.0
+            if self._cdesc_tier < 2:
+                wrench = (0.0, 0.0, -abs(Fz_press), 0.0, 0.0, tz_cmd)
+            else:
+                # Tier 2: add lateral force nudge in the direction sensed
+                # torques say "lean against the wall". 1 N per 0.1 Nm of Tx/Ty,
+                # capped at 2 N. Sign: positive Tx (peg tipped about +X axis)
+                # → push -Y; positive Ty (peg tipped about +Y) → push +X.
+                Tx_b, Ty_b = self._last_T_lat_baselink
+                _clip = lambda v, lo, hi: max(lo, min(hi, v))
+                fx_nudge = float(_clip(+10.0 * Ty_b, -2.0, +2.0))
+                fy_nudge = float(_clip(-10.0 * Tx_b, -2.0, +2.0))
+                wrench = (fx_nudge, fy_nudge, -abs(Fz_press), 0.0, 0.0, tz_cmd)
+            action.new_wrench = True
+            action.wrench_baselink = wrench
+            action.selection_vector = sel
+            # UR force_mode: damping=1.0 = MAX energy dissipation = STIFF/molasses;
+            # damping=0.0 = no dissipation = freely follows contact. Legacy
+            # perform_insert.py uses damping=0.0 + gain=1.0 + ang_z=0.5rad/s.
+            action.gain = 1.0
+            action.damping = 0.0
+            action.lin_speed = 0.05
+            action.ang_speed = 0.50
+            self._cdesc_last_cmd_t = t
+            action.msg = (
+                f"SEARCH cdesc tier={self._cdesc_tier} "
+                f"t+{t-self._search_start_t:.1f}s "
+                f"z={1000*tcp_z:.1f}mm "
+                f"z_drop_tier={1000*(self._cdesc_z_at_tier_start - tcp_z):+.2f}mm "
+                f"|fz|={abs(fz_smoothed):.2f}N "
+                f"cmd=({wrench[0]:+.2f},{wrench[1]:+.2f},{wrench[2]:+.2f})N"
+            )
+
+        action.state = self.SEARCH
+        return action
+
     def _tick_search(self, t, tcp_x, tcp_y, tcp_z, fz_smoothed, action):
         """SEARCH state: autonomous F/T-driven director replaces operator drag.
 
@@ -1416,6 +1660,8 @@ class ContactSearchFSM:
         Same selection vector as APPROACH/INSERT_DESCENT: X,Y,Z compliant,
         rotation locked.
         """
+        if self.search_mode == "compliant_descent":
+            return self._tick_search_compliant(t, tcp_x, tcp_y, tcp_z, fz_smoothed, action)
         if not self._search_entered:
             self._search_entered = True
             self._search_start_t = t
@@ -1534,20 +1780,154 @@ class ContactSearchFSM:
         predicted + descent_post_contact > insert_min_descent_m) — declared
         via the global seat detector that runs every tick before state dispatch.
         Or: SAFETY_RETRACT if F_lat overload, or operator SIGINT for manual end.
+
+        2026-05-07: Multi-stage re-contact detection. After the v4-triggered
+        first SEARCH succeeds and INSERT_DESCENT begins descending, the peg
+        can hit a second surface (e.g. base rim after dropping through
+        line_green's hole) before reaching predicted_seat_z. When that
+        happens we re-enter SEARCH with a SOFTER parameter set
+        (reduced F_press + reduced Fmax + tighter spiral) so the second
+        alignment follows the least-resistance gradient instead of
+        bull-dozing the spiral. This is the "softer second search" mode.
         """
         if not self._insert_descent_entered:
             self._insert_descent_entered = True
-            wrench = (0.0, 0.0, -self.insert_fz_N, 0.0, 0.0, 0.0)
-            sel = (False, False, True, False, False, False)  # XY locked, Z compliant, rotation locked
+            # 2026-05-07: per-object free-yaw mode. Default sel locks XY +
+            # all rotations, only Z compliant. For objects whose slot
+            # geometry forces a precise yaw alignment to clear the gripper
+            # (line_green), enable Tz compliance so the part rotates freely
+            # under slot-wall torque feedback as it descends.
+            if self.free_yaw_insert:
+                sel = (False, False, True, False, False, True)
+                # Apply active yaw bias if configured per-object (signed)
+                wrench = (0.0, 0.0, -self.insert_fz_N, 0.0, 0.0, self.yaw_bias_nm)
+                msg_extra = (
+                    f" [free-yaw mode, gain=1.0 damp=0.3 Tz_bias={self.yaw_bias_nm:+.2f}Nm]"
+                )
+                # In free-yaw mode the slot walls push laterally to rotate
+                # the peg — match the same FREE compliance we use in cdesc.
+                gain_use = 1.0
+                damping_use = 0.3
+                action.lin_speed = 0.05
+                action.ang_speed = 0.50
+            else:
+                sel = (False, False, True, False, False, False)
+                wrench = (0.0, 0.0, -self.insert_fz_N, 0.0, 0.0, 0.0)
+                msg_extra = ""
+                gain_use = self.gain_insert
+                damping_use = self.damping_insert
             action.new_wrench = True
             action.wrench_baselink = wrench
             action.selection_vector = sel
-            action.gain = self.gain_insert
-            action.damping = self.damping_insert
+            action.gain = gain_use
+            action.damping = damping_use
             action.state = self.INSERT_DESCENT
             action.msg = (f"INSERT_DESCENT: descending Z at xy="
-                          f"({tcp_x:+.4f},{tcp_y:+.4f})")
+                          f"({tcp_x:+.4f},{tcp_y:+.4f}){msg_extra}")
             return action
+
+        # === multi-stage re-contact detection ===
+        # Trigger soft re-SEARCH if all of:
+        #   - peg has stopped descending (|dz/dt| < 0.5mm/s) over a window
+        #   - sustained contact (|fz| > 3N)
+        #   - we are NOT near predicted_seat_z (would be caught by global seat)
+        #   - this hasn't already been triggered (one-shot per insert)
+        if (not getattr(self, '_soft_research_fired', False)
+                and self.predicted_tcp_z is not None):
+            v_z = self._z_velocity(t, tcp_z, self.insert_motion_window_s)
+            speed_z = abs(v_z) if v_z is not None else float('inf')
+            motion_stopped = speed_z < self.insert_motion_thresh_m_s
+            fz_high = abs(fz_smoothed) > 3.0
+            far_from_seat = abs(tcp_z - self.predicted_tcp_z) > 0.005  # >5mm from seat
+            condition = motion_stopped and fz_high and far_from_seat
+            if condition:
+                if self._soft_research_first_t is None:
+                    self._soft_research_first_t = t
+                elif (t - self._soft_research_first_t) >= 1.0:
+                    # Sustained 1s — second-stage transition
+                    self._soft_research_fired = True
+                    self._soft_research_first_t = None
+
+                    # GUIDED-mode multi-stage (added 2026-05-07): if the wrapper
+                    # was invoked with --guided-mode, the operator drove the
+                    # first SIGUSR1 manually. When INSERT_DESCENT gets stuck at
+                    # a second contact (e.g. peg cleared first obstacle but is
+                    # now wedged at a deeper one), there's no autonomous
+                    # gradient-follower to bail us out — we hand back to the
+                    # operator for a second manual nudge + SIGUSR1.
+                    if self.guided_mode:
+                        # Reset GUIDED-state flags so re-entry re-arms the
+                        # gimbal-compliant wrench, and clear the previous
+                        # hole_marked flag so a new SIGUSR1 advances state.
+                        self._guided_entered = False
+                        self._guided_hole_marked = False
+                        self._insert_descent_entered = False
+                        self.state = self.GUIDED
+                        action.transitioned = True
+                        action.new_state = self.GUIDED
+                        action.transition_msg = (
+                            f"INSERT_DESCENT → GUIDED (multi-stage hand-off): "
+                            f"tcp_z={tcp_z*1000:.2f}mm, |fz|={abs(fz_smoothed):.2f}N, "
+                            f"|dz/dt|={speed_z*1000:.3f}mm/s, "
+                            f"|tcp_z-predicted_seat|={abs(tcp_z-self.predicted_tcp_z)*1000:.2f}mm "
+                            f"(>5mm). Operator: nudge peg + send second SIGUSR1."
+                        )
+                        action.state = self.GUIDED
+                        return action
+
+                    # Autonomous mode: switch to soft SEARCH
+                    # Reduced-force, gradient-following SearchDirector.
+                    # The spiral itself shouldn't overpower compliance:
+                    # - F_press, Fmax cut so the actuator can yield to gradient
+                    # - v_s slowed so the reference doesn't drag faster than
+                    #   the peg can settle
+                    # - r0, pitch, R_max tightened to keep the search local
+                    # - gradient thresholds dropped so any fz dip + slow drift
+                    #   is enough to switch from spiral to follow-the-gradient
+                    self.search_director.F_press = 4.0    # was 9.0
+                    self.search_director.Fmax    = 3.0    # was 8.0
+                    self.search_director.v_s     = 0.001  # 1mm/s (was 5)
+                    self.search_director.r0      = 0.0008  # 0.8mm
+                    self.search_director.pitch   = 0.001   # 1mm
+                    self.search_director.R_max   = 0.005   # 5mm
+                    # Loosen gradient-follower thresholds so it dominates
+                    self.search_director.gradient_d_fz_dt_thresh = -1.0
+                    self.search_director.gradient_fz_thresh      = 5.0
+                    self.search_director.gradient_v_thresh       = 1e-4
+                    # Reduce damping so peg can move with light forces
+                    self.search_director.Kd      = 10.0   # was 40
+                    # Reset SearchDirector internal state via set_center
+                    # (clears stall-tracker, theta, fz_buf, etc.) — center
+                    # at current TCP xy so the soft spiral grows from the
+                    # second-contact location, not the original.
+                    self.search_director.set_center((float(tcp_x), float(tcp_y)))
+                    # Allow more time for the soft search
+                    self._search_start_t = t
+                    self.state = self.SEARCH
+                    action.transitioned = True
+                    action.new_state = self.SEARCH
+                    action.transition_msg = (
+                        f"INSERT_DESCENT → SEARCH (soft re-search): tcp_z="
+                        f"{tcp_z*1000:.2f}mm, |fz|={abs(fz_smoothed):.2f}N, "
+                        f"|dz/dt|={speed_z*1000:.3f}mm/s, "
+                        f"|tcp_z-predicted_seat|={abs(tcp_z-self.predicted_tcp_z)*1000:.2f}mm "
+                        f"(>5mm) → soft params: F_press=4N Fmax=3N r0=0.8mm pitch=1mm R_max=5mm"
+                    )
+                    action.state = self.SEARCH
+                    # Reset insert_descent flag so re-entry from second SEARCH
+                    # starts fresh; also reset _search_entered so SEARCH's
+                    # first tick re-arms the wrench command with the new
+                    # (softer) parameters.
+                    self._insert_descent_entered = False
+                    self._search_entered = False
+                    # Also reset the FoundHole detector — we want v4 to fire
+                    # cleanly for the second-stage hole, not from the first
+                    # stage's residual state.
+                    if hasattr(self, 'found_hole_detector'):
+                        self.found_hole_detector.reset()
+                    return action
+            else:
+                self._soft_research_first_t = None
 
         action.state = self.INSERT_DESCENT
         return action

@@ -84,7 +84,11 @@ DEFAULT_RATE_HZ = 100.0          # TELE-04: subsample 500 Hz wrench every 5th
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_AUTO_STEP_BACK_S = 5.0
 DEFAULT_BIAS_WARN_N = 2.0
-DEFAULT_DRIFT_WINDOW_S = 1.0     # WRAP-04: +1 s post-zero drift sample
+DEFAULT_DRIFT_WINDOW_S = 0.0     # 2026-05-07: was 1.0s. The drift check just
+                                 # samples bias for meta-JSON reporting; it
+                                 # doesn't gate operation. Skipping the wait
+                                 # saves ~1s per insert. If we later need to
+                                 # diagnose F/T drift, restore to 1.0.
 
 # Controller names
 POS_CTRL = "scaled_joint_trajectory_controller"
@@ -218,6 +222,14 @@ def _parse_args(argv=None):
     p.add_argument("--skip-home-on-done", action="store_true",
                    help="skip the final move_home in cleanup (saves ~5s during tuning; "
                         "still does stop force mode + switch + safe_height)")
+    p.add_argument("--no-post-insert-move", action="store_true",
+                   help="On successful insert, leave EE AT the inserted seat pose. "
+                        "Skips BOTH move_to_safe_height and move_home (still stops "
+                        "force_mode + switches controllers). Caller is responsible "
+                        "for releasing the gripper and retracting. Use when the "
+                        "wrapper is invoked from a higher-level orchestrator that "
+                        "sequences the post-insert release/retract itself "
+                        "(e.g. translate_object --insertion-type compliant).")
     p.add_argument("--wrapper-version", default=None,
                    help="version tag for meta JSON (default: 'compliant_insert.py@<git-sha>')")
     return p.parse_args(argv)
@@ -382,6 +394,10 @@ class CompliantInsertEpisode(Node):
 
         self.start_fm = self.create_client(SetForceMode, "/force_mode_controller/start_force_mode")
         self.stop_fm = self.create_client(Trigger, "/force_mode_controller/stop_force_mode")
+        # 2026-05-07: native client for zero_ftsensor. Replaces a
+        # subprocess.run("ros2 service call ...") that paid ~1.5-2s of CLI
+        # Python-startup overhead every insert.
+        self.zero_ft_cli = self.create_client(Trigger, "/io_and_status_controller/zero_ftsensor")
 
         # TF for wrench frame transform — broadcaster publishes in tool0_controller
         # (post-driver-fix #1652), but SCHEMA.md commits to base_link for all logged
@@ -596,17 +612,26 @@ class CompliantInsertEpisode(Node):
         self.csv_writer.write(row)
         self.zero_event_pending = 0   # one-shot flag
 
-    # ------------------- zero F/T (CLI service call) ----------------------
+    # ------------------- zero F/T (native rclpy service client) -----------
     def _zero_ftsensor_call(self) -> bool:
-        result = subprocess.run(
-            ["ros2", "service", "call", "/io_and_status_controller/zero_ftsensor",
-             "std_srvs/srv/Trigger"],
-            capture_output=True, text=True, timeout=10,
-        )
-        ok = result.returncode == 0 and "success=True" in result.stdout
+        """2026-05-07: was subprocess.run('ros2 service call ...') which paid
+        ~1.5-2s for the ros2 CLI Python startup every insert. Native client
+        completes in ~50-200ms."""
+        if not self.zero_ft_cli.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error("zero_ftsensor service unavailable")
+            return False
+        future = self.zero_ft_cli.call_async(Trigger.Request())
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not future.done():
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if not future.done():
+            self.get_logger().error("zero_ftsensor call timed out (5s)")
+            return False
+        result = future.result()
+        ok = bool(getattr(result, "success", False))
         if not ok:
             self.get_logger().error(
-                f"zero_ftsensor failed rc={result.returncode} out={result.stdout.strip()}"
+                f"zero_ftsensor failed: {getattr(result, 'message', 'no response')}"
             )
         return ok
 
@@ -631,6 +656,8 @@ class CompliantInsertEpisode(Node):
                            override_wrench_baselink: tuple | None = None,
                            gain_override: float | None = None,
                            damping_override: float | None = None,
+                           lin_speed_override: float | None = None,
+                           ang_speed_override: float | None = None,
                            quiet: bool = False) -> bool:
         """Call SetForceMode. Default wrench = (0, 0, -fz, 0, 0, 0) in base_link
         (operator's intent: push down). When `override_wrench_baselink` is
@@ -699,12 +726,14 @@ class CompliantInsertEpisode(Node):
 
         req.type = SetForceMode.Request.NO_TRANSFORM   # = 2
 
-        req.speed_limits.linear.x = float(self.args.lin_speed)
-        req.speed_limits.linear.y = float(self.args.lin_speed)
-        req.speed_limits.linear.z = float(self.args.lin_speed)
-        req.speed_limits.angular.x = float(self.args.ang_speed)
-        req.speed_limits.angular.y = float(self.args.ang_speed)
-        req.speed_limits.angular.z = float(self.args.ang_speed)
+        lin_eff = float(lin_speed_override) if lin_speed_override is not None else float(self.args.lin_speed)
+        ang_eff = float(ang_speed_override) if ang_speed_override is not None else float(self.args.ang_speed)
+        req.speed_limits.linear.x = lin_eff
+        req.speed_limits.linear.y = lin_eff
+        req.speed_limits.linear.z = lin_eff
+        req.speed_limits.angular.x = ang_eff
+        req.speed_limits.angular.y = ang_eff
+        req.speed_limits.angular.z = ang_eff
 
         gain_eff    = float(gain_override)    if gain_override    is not None else float(self.args.gain)
         damping_eff = float(damping_override) if damping_override is not None else float(self.args.damping)
@@ -717,9 +746,13 @@ class CompliantInsertEpisode(Node):
         # active, but the controller's internal state isn't ready to accept
         # commands yet — verified empirically 2026-05-06 session 5). Retrying
         # with backoff handles this transient.
+        # 2026-05-07: bumped 3 → 6 attempts and 1.0s → 0.8s backoff. The
+        # transient sometimes lasts longer than 3s (especially after a prior
+        # force_mode session), and 6 × 0.8s = ~5s budget covers it.
         result = None
         last_err = None
-        for attempt in range(3):
+        N_ATTEMPTS = 6
+        for attempt in range(N_ATTEMPTS):
             future = self.start_fm.call_async(req)
             rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
             result = future.result()
@@ -729,16 +762,16 @@ class CompliantInsertEpisode(Node):
                 break
             last_err = (
                 "service call timed out" if result is None else
-                f"service returned success=False (attempt {attempt+1}/3)"
+                f"service returned success=False (attempt {attempt+1}/{N_ATTEMPTS})"
             )
-            if attempt < 2:
+            if attempt < N_ATTEMPTS - 1:
                 if not quiet:
                     self.get_logger().warn(
-                        f"start_force_mode {last_err} — retrying in 1.0s"
+                        f"start_force_mode {last_err} — retrying in 0.8s"
                     )
-                time.sleep(1.0)
+                time.sleep(0.8)
         if result is None or not getattr(result, 'success', False):
-            self.get_logger().error(f"start_force_mode call failed after 3 attempts: {last_err}")
+            self.get_logger().error(f"start_force_mode call failed after {N_ATTEMPTS} attempts: {last_err}")
             return False
         self.in_force_mode = True
         self.commanded_fz = intent_baselink[2]
@@ -1046,8 +1079,15 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         ep.meta.set_outcome(s.OUTCOME_ABORT, "force_mode_controller_did_not_activate")
         return s.PHASE_ABORT
 
-    # 1.0 s settle after controller switch (force spikes contaminate zero otherwise)
-    t_settle_end = time.time() + 1.0
+    # 2026-05-07: bumped 0.3s → 2.5s. Root cause of "start_force_mode_failed"
+    # transient: _await_controller_active returns the moment controller-manager
+    # reports "active", but the controller's internal state takes 0.5-1.5s
+    # (sometimes longer after a previous force_mode session) to actually
+    # accept service RPCs. Per CLAUDE.md: "controller-manager reports it
+    # 'active', but the controller's internal state isn't ready to accept
+    # commands yet". 2.5s covers the warmup; the start_force_mode retry loop
+    # (now 6 attempts) is the safety net for outliers.
+    t_settle_end = time.time() + 2.5
     while time.time() < t_settle_end:
         rclpy.spin_once(ep, timeout_sec=0.05)
         ep._log_sample()
@@ -1065,8 +1105,9 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         ep.meta.set_outcome(s.OUTCOME_ABORT, "zero_ftsensor_failed")
         return s.PHASE_ABORT
 
-    # 0.5 s settle, sample bias
-    bias = ep._sample_bias(settle_s=0.5)
+    # 2026-05-07: was 0.5s. The post-zero F/T values stabilize within ~50ms;
+    # 0.2s gives ample margin. Saves ~0.3s per insert.
+    bias = ep._sample_bias(settle_s=0.2)
     if bias is None:
         ep.meta.set_outcome(s.OUTCOME_ABORT, "no_post_zero_wrench_sample")
         return s.PHASE_ABORT
@@ -1242,6 +1283,75 @@ def run_active(ep: CompliantInsertEpisode) -> str:
             # detected as a relative z descent below surface_z, INSERT exits
             # on motion-stopped post-hole-entry.
             fsm_cfg = (cfg.get("fsm") or {}) if cfg else {}
+            # 2026-05-07: per-object SEAT tolerance override. Tighter for
+            # objects (line_green) where the autonomous can plausibly stop a
+            # few mm above the true seat, so we want the global seat detector
+            # to NOT fire prematurely.
+            try:
+                from primitives.shared.config import (
+                    get_object_seat_tolerance_m, is_free_yaw_insert,
+                )
+                seat_tol = get_object_seat_tolerance_m(ep.args.object_name)
+                if seat_tol != 0.005:  # only override if non-default
+                    fsm_cfg = dict(fsm_cfg)
+                    fsm_cfg['at_target_z_tol_m'] = seat_tol
+                    ep.get_logger().info(
+                        f"Per-object SEAT tolerance for {ep.args.object_name}: "
+                        f"{seat_tol*1000:.1f}mm (default 5.0mm)"
+                    )
+                if is_free_yaw_insert(ep.args.object_name):
+                    fsm_cfg = dict(fsm_cfg)
+                    fsm_cfg['free_yaw_insert'] = True
+                    # Free-yaw INSERT_DESCENT EXPECTS slot walls to push laterally
+                    # to rotate the peg into alignment, so the default 30N/100ms
+                    # F_lat safety abort fires on the very physics we want.
+                    fsm_cfg['abort_F_lat_N']        = 60.0
+                    fsm_cfg['abort_F_lat_window_s'] = 0.30
+                    ep.get_logger().info(
+                        f"Per-object free-yaw INSERT_DESCENT enabled for "
+                        f"{ep.args.object_name}: peg can rotate about world Z "
+                        f"under slot-wall torque feedback "
+                        f"(abort_F_lat 30→60N, window 100→300ms)"
+                    )
+                # Per-object insert_fz_N override (forces during INSERT_DESCENT)
+                from primitives.shared.config import (
+                    get_object_insert_forces, get_object_search_mode,
+                )
+                obj_forces = get_object_insert_forces(ep.args.object_name)
+                if 'insert_fz' in obj_forces:
+                    fsm_cfg = dict(fsm_cfg)
+                    fsm_cfg['insert_fz_N'] = float(obj_forces['insert_fz'])
+                    ep.get_logger().info(
+                        f"Per-object INSERT_DESCENT Fz for {ep.args.object_name}: "
+                        f"{fsm_cfg['insert_fz_N']}N (default 8.0N)"
+                    )
+                # Per-object yaw bias (active Tz commanded during free-yaw)
+                from primitives.shared.config import get_object_yaw_bias_nm
+                yaw_bias = get_object_yaw_bias_nm(ep.args.object_name)
+                if yaw_bias != 0.0:
+                    fsm_cfg = dict(fsm_cfg)
+                    fsm_cfg['yaw_bias_nm'] = float(yaw_bias)
+                    ep.get_logger().info(
+                        f"Per-object yaw bias for {ep.args.object_name}: "
+                        f"Tz={yaw_bias:+.2f}Nm (active rotation bias under free-yaw)"
+                    )
+                # Per-object SEARCH mode (spiral vs compliant_descent)
+                search_mode = get_object_search_mode(ep.args.object_name)
+                if search_mode != 'spiral':
+                    fsm_cfg = dict(fsm_cfg)
+                    fsm_cfg['search_mode'] = search_mode
+                    # In compliant_descent, sensed F_lat is the very signal
+                    # we want the controller to RESPOND to (slot rim pushing
+                    # peg into channel). Loosen abort thresholds further.
+                    fsm_cfg['abort_F_lat_N']        = 80.0
+                    fsm_cfg['abort_F_lat_window_s'] = 0.50
+                    ep.get_logger().info(
+                        f"Per-object SEARCH mode for {ep.args.object_name}: "
+                        f"{search_mode} (no spiral; passive XYZ compliance + escalation; "
+                        f"abort_F_lat 30→80N, window 100→500ms)"
+                    )
+            except Exception:
+                pass
             # Inject --guided-mode into the FSM config so APPROACH→contact routes
             # to GUIDED state instead of FIND_HOLE.
             if getattr(ep.args, 'guided_mode', False):
@@ -1629,6 +1739,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     override_wrench_baselink=fsm_action.wrench_baselink,
                     gain_override=fsm_action.gain,
                     damping_override=fsm_action.damping,
+                    lin_speed_override=fsm_action.lin_speed,
+                    ang_speed_override=fsm_action.ang_speed,
                     quiet=True,
                 )
 
@@ -1880,10 +1992,17 @@ def run_done(ep: CompliantInsertEpisode) -> None:
     # Gated on controller_ok — useless otherwise, trajectory would be silently rejected.
     # Use python -m module mode (NOT script-path) so the primitive's
     # `from primitives.shared.config import ...` import resolves.
-    if controller_ok and not getattr(ep.args, "skip_home_on_done", False):
-        # safe_height runs even with --skip-home-on-done; the flag only skips home
-        pass
-    if controller_ok:
+    # Also gated on --no-post-insert-move: when the caller sequences the
+    # post-insert release+retract itself (e.g. translate_object --insertion-type
+    # compliant), running safe_height here would yank the still-gripped peg
+    # straight back out of the slot before the caller's release fires.
+    no_post_move = getattr(ep.args, "no_post_insert_move", False)
+    if no_post_move:
+        ep.get_logger().info(
+            "Subprocess: move_to_safe_height SKIPPED (--no-post-insert-move). "
+            "EE left at seat pose; caller is responsible for release + retract."
+        )
+    elif controller_ok:
         try:
             ep.get_logger().info("Subprocess: move_to_safe_height")
             res = subprocess.run(
@@ -1900,7 +2019,9 @@ def run_done(ep: CompliantInsertEpisode) -> None:
 
     # 4. move_home (optional — skipped during tuning to save ~5s).
     # Gated on controller_ok like safe_height; same module-mode fix.
-    if getattr(ep.args, "skip_home_on_done", False):
+    if no_post_move:
+        ep.get_logger().info("Subprocess: move_home SKIPPED (--no-post-insert-move)")
+    elif getattr(ep.args, "skip_home_on_done", False):
         ep.get_logger().info("Subprocess: move_home SKIPPED (--skip-home-on-done)")
     elif controller_ok:
         try:

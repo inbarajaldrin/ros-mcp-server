@@ -49,11 +49,28 @@ def _subprocess_fast_path():
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--mode', type=str, default='sim')
     pre.add_argument('--place-down', action='store_true', dest='place_down')
+    pre.add_argument('--insert', action='store_true')
+    pre.add_argument('--insertion-type', type=str, default='compliant')
     pre.add_argument('--object-name', type=str, default=None)
+    pre.add_argument('--base-name', type=str, default=None)
+    pre.add_argument('--grasp-id', type=int, default=None)
     pre.add_argument('--current-object-orientation', type=float, nargs=4, default=None)
+    pre.add_argument('--use-default-base-position', action='store_true',
+                     dest='use_default_base_position')
+    pre.add_argument('--final-base-pos', type=float, nargs=3, default=None)
+    pre.add_argument('--final-base-orientation', type=float, nargs=4, default=None)
     args, _ = pre.parse_known_args()
 
-    is_fast = args.place_down
+    # Real-mode insert with the compliant_insert wrapper is a thin proxy:
+    # delegate to the autonomous-search FSM in compliant_insertion_studio,
+    # skipping the IK-heavy hover step (the wrapper has its own _run_hover).
+    # The actual insert algorithm lives in compliant_insertion_studio/wrapper/
+    # so that future improvements there land here automatically without
+    # touching translate_object's main path. Sim-mode insert is unchanged.
+    is_compliant_insert = (
+        args.insert and args.mode == 'real' and args.insertion_type == 'compliant'
+    )
+    is_fast = args.place_down or is_compliant_insert
     if not is_fast:
         return  # Fall through to heavy imports and full main()
 
@@ -155,6 +172,210 @@ def _subprocess_fast_path():
         log.info("Lowering object onto table")
         ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
         _finish(ok, out, "place_down")
+
+    if is_compliant_insert:
+        # Validate inputs that the wrapper requires up front (so we fail fast
+        # with a clean error JSON before subprocess spin-up).
+        missing = []
+        if not args.object_name:
+            missing.append('--object-name')
+        if not args.base_name:
+            missing.append('--base-name')
+        if args.grasp_id is None:
+            missing.append('--grasp-id')
+        if args.current_object_orientation is None:
+            missing.append('--current-object-orientation')
+        if not (args.use_default_base_position
+                or (args.final_base_pos is not None and args.final_base_orientation is not None)):
+            missing.append('--use-default-base-position OR --final-base-pos+--final-base-orientation')
+        if missing:
+            _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
+                     "error": f"compliant insert requires: {', '.join(missing)}"})
+            sys.exit(1)
+
+        # 2026-05-07: apply PER_OBJECT_BASE_OFFSET_M for ALL objects routed
+        # through this thin shell. Both branches below (line_green/yellow via
+        # prismatic, others via compliant_insert) used to load bare
+        # DEFAULT_BASE_POSITION, missing the per-object calibration. Apply
+        # once here; both branches then pass --final-base-pos through.
+        if args.use_default_base_position and args.final_base_pos is None:
+            from primitives.shared.config import (
+                DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION,
+                get_object_base_offset_m,
+            )
+            offs = get_object_base_offset_m(args.object_name)
+            if offs != (0.0, 0.0, 0.0):
+                base_pos_eff = [
+                    float(DEFAULT_BASE_POSITION[0]) + float(offs[0]),
+                    float(DEFAULT_BASE_POSITION[1]) + float(offs[1]),
+                    float(DEFAULT_BASE_POSITION[2]) + float(offs[2]),
+                ]
+                args.final_base_pos = base_pos_eff
+                args.final_base_orientation = list(DEFAULT_BASE_ORIENTATION)
+                args.use_default_base_position = False
+                print(
+                    f"[translate_object] applying PER_OBJECT_BASE_OFFSET_M for "
+                    f"{args.object_name}: offset={tuple(round(1000*o,3) for o in offs)} mm "
+                    f"→ final-base-pos={tuple(round(1000*v,3) for v in base_pos_eff)} mm",
+                    flush=True,
+                )
+
+        # 2026-05-07: line_green and inverted_u_yellow route to the stash
+        # prismatic_peg_insertion primitive (validated working for line_green —
+        # XYZ + Rx/Ry compliance with geometric settling exit). The autonomous
+        # SEARCH spiral can't break the gripper-jaws-on-base-rim standoff for
+        # these wide-grasp parts; prismatic's tiered approach handles it.
+        # u_brown / u_orange keep the validated compliant_insert path.
+        if args.object_name in ('line_green', 'inverted_u_yellow'):
+            # Per-object base offset already applied above (one branch handles
+            # all objects). Continue with hover + prismatic dispatch.
+
+            # Step 1: position the part above the slot via _run_hover
+            hover_argv = [
+                sys.executable, '-u', '-m',
+                'compliant_insertion_studio.wrapper._run_hover',
+                '--object-name', args.object_name,
+                '--base-name', args.base_name,
+                '--grasp-id', str(args.grasp_id),
+                '--current-object-orientation',
+                *[f"{v:.6f}" for v in args.current_object_orientation],
+            ]
+            if args.use_default_base_position:
+                hover_argv.append('--use-default-base-position')
+            if args.final_base_pos is not None:
+                hover_argv += ['--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos]]
+            if args.final_base_orientation is not None:
+                hover_argv += ['--final-base-orientation',
+                               *[f"{v:.6f}" for v in args.final_base_orientation]]
+            print(f"[line_green route] hover: {' '.join(hover_argv)}", flush=True)
+            r = subprocess.run(hover_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if r.returncode != 0:
+                _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
+                         "object_name": args.object_name,
+                         "error": f"hover subprocess returned {r.returncode}"})
+                sys.exit(1)
+            # Step 2: run prismatic_peg_insertion (stash primitive)
+            prism_argv = [
+                sys.executable, '-u', '-m',
+                'primitives._real_mode_stash.prismatic_peg_insertion',
+                '--object-name', args.object_name,
+                '--base-name', args.base_name,
+                '--grasp-id', str(args.grasp_id),
+                '--current-object-orientation',
+                *[f"{v:.6f}" for v in args.current_object_orientation],
+                '--force', '2.0',
+                '--timeout', '60',
+            ]
+            if args.use_default_base_position:
+                prism_argv.append('--use-default-base-position')
+            if args.final_base_pos is not None:
+                prism_argv += ['--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos]]
+            if args.final_base_orientation is not None:
+                prism_argv += ['--final-base-orientation',
+                               *[f"{v:.6f}" for v in args.final_base_orientation]]
+            print(f"[line_green route] prismatic: {' '.join(prism_argv)}", flush=True)
+            r = subprocess.run(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            success = (r.returncode == 0)
+            _output({
+                "result": "success" if success else "failure",
+                "mode": args.mode,
+                "movement_type": "insert",
+                "object_name": args.object_name,
+                "base_name": args.base_name,
+                "router": "line_green→prismatic_peg_insertion",
+            })
+            sys.exit(0 if success else 1)
+
+        # Build wrapper argv. Hardcoded autonomous-search params match the
+        # working production config validated against u_brown / u_orange runs
+        # (see compliant_insertion_studio/scripts/loop_autonomous_insert.sh).
+        wrapper_argv = [
+            '-u', '-m', 'compliant_insertion_studio.wrapper.compliant_insert',
+            '--object-name', args.object_name,
+            '--base-name', args.base_name,
+            '--grasp-id', str(args.grasp_id),
+            '--current-object-orientation',
+            *[f"{v:.6f}" for v in args.current_object_orientation],
+            '--fz', '-9.0',
+            '--step-back', 'auto',
+            # 2026-05-07: dropped to 0.0s. Operator is always pre-cleared
+            # before invoking the orchestrated assembly via this thin shell;
+            # the step-back gate is a redundant wait. Auto-mode with zero
+            # seconds short-circuits the gate's while-loop.
+            '--auto-step-back-seconds', '0.0',
+            '--no-prompt-notes',
+            '--override-fz-cap',
+            # 2026-05-07: skip the PRE F/T smoke test (~5-6s) — saves time on
+            # back-to-back inserts within one session. The wrapper itself
+            # documents this as the right use case ("repeated rapid attempts").
+            '--skip-smoke',
+            '--autonomous-search',
+            # 2026-05-07: bumped F_press 5→9, Fmax 5→8 after observing u_brown
+            # SEARCH stalls when peg lands 1-2mm BELOW the rim (partially engaged
+            # in slot edge). 5N press wasn't enough to drive the peg through the
+            # chamfer, and 5N lateral wasn't enough to overcome partial-engagement
+            # friction. With 9N press + 8N lateral, the same insert seated within
+            # 1.7s of SEARCH. Real crashes are still well-bounded by --override-fz-cap.
+            '--search-F-press-N', '9.0',
+            '--search-Fmax-N', '8.0',
+            '--search-v-s-mm-s', '5.0',
+            '--search-pitch-mm', '2.0',
+            '--search-R-max-mm', '8.0',
+            '--search-max-duration-s', '60.0',
+            '--timeout', '180',
+            # Leave the EE at the seated pose: caller (run_assembly_step /
+            # replay_real_assembly / etc.) is responsible for the post-insert
+            # release + retract. Without this the wrapper's internal
+            # safe_height move pulls the still-gripped peg straight out of
+            # the slot before the caller's gripper-open fires.
+            '--no-post-insert-move',
+        ]
+        if args.use_default_base_position:
+            wrapper_argv.append('--use-default-base-position')
+        if args.final_base_pos is not None:
+            wrapper_argv += ['--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos]]
+        if args.final_base_orientation is not None:
+            wrapper_argv += ['--final-base-orientation',
+                             *[f"{v:.6f}" for v in args.final_base_orientation]]
+        # Echo a base-world-pose to the wrapper so its CAD prediction matches
+        # whatever offset/override the caller injected via --final-base-pos.
+        if args.final_base_pos is not None and args.final_base_orientation is not None:
+            wrapper_argv += ['--base-world-pose',
+                             *[f"{v:.6f}" for v in args.final_base_pos],
+                             *[f"{v:.6f}" for v in args.final_base_orientation]]
+
+        log.info(f"Compliant insert: delegating to compliant_insertion_studio.wrapper.compliant_insert")
+        cmd = [sys.executable] + wrapper_argv
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=_make_env(),
+        )
+        lines = []
+        t = threading.Thread(target=_stream, args=(proc.stdout, lines), daemon=True)
+        t.start()
+        try:
+            rc = proc.wait(timeout=300)
+            t.join(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            t.join(timeout=1.0)
+            _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
+                     "error": "compliant_insert wrapper timed out (300s)"})
+            sys.exit(1)
+        out_text = '\n'.join(lines)
+        rj = _extract_json(out_text)
+        if rj is None:
+            rj = {"result": "success" if rc == 0 else "failure",
+                  "mode": args.mode, "movement_type": "insert"}
+            if rc != 0:
+                rj["error"] = "compliant_insert wrapper exited non-zero with no JSON output"
+        else:
+            rj.setdefault("mode", args.mode)
+            rj["movement_type"] = "insert"
+            rj.setdefault("object_name", args.object_name)
+            rj.setdefault("base_name", args.base_name)
+        _output(rj)
+        sys.exit(0 if rc == 0 and rj.get("result") == "success" else 1)
 
 
 if __name__ == '__main__':
@@ -1154,7 +1375,12 @@ def main():
     parser.add_argument('--use-default-base-position', action='store_true', dest='use_default_base_position')
     parser.add_argument('--grasp-id', type=int, default=None)
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'))
-    parser.add_argument('--insertion-type', type=str, default='prismatic', choices=['prismatic', 'legacy'])
+    parser.add_argument('--insertion-type', type=str, default='compliant',
+                        choices=['compliant', 'prismatic', 'legacy'],
+                        help="Real-mode insert backend. 'compliant' (default) routes to "
+                             "the compliant_insertion_studio autonomous-search wrapper "
+                             "via the fast path. 'prismatic'/'legacy' fall through to "
+                             "the original real-mode hover+subprocess path.")
 
     args = parser.parse_args()
 
