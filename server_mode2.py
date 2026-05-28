@@ -477,6 +477,14 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
     
     # Set PYTHONPATH to include project root for imports
     env = os.environ.copy()
+    # Mode-aware config: surface the primitive's --mode to the subprocess as
+    # ROS_MCP_MODE so config.py picks the sim/real GRIPPER_CENTER_TOOL_OFFSET and
+    # gates real-only base calibration at import. (Primitives bind config
+    # constants at import, so this must be in the env before the process starts.)
+    import re as _re
+    _mode_match = _re.search(r"--mode\s+(\w+)", command_args or "")
+    if _mode_match:
+        env['ROS_MCP_MODE'] = _mode_match.group(1).strip().lower()
     if 'PYTHONPATH' in env:
         env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
     else:
