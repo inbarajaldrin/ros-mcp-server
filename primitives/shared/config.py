@@ -24,7 +24,7 @@ GRIPPER_CENTER_TOOL_OFFSET = (
     GRIPPER_CENTER_TOOL_OFFSET_SIM if RUNTIME_MODE == "sim"
     else GRIPPER_CENTER_TOOL_OFFSET_REAL
 )  # 3D offset from EE flange to gripper center in tool frame (meters)
-SAFE_HEIGHT_ABOVE_TABLE = 0.45      # Safe/hover height above table surface (meters)
+SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (meters)
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
 DEFAULT_BASE_ORIENTATION = [0.0, 0.0, 0.0, 1.0]  # Base object orientation [x, y, z, w] quaternion (identity = no rotation)
