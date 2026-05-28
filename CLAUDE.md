@@ -250,3 +250,23 @@ python3 primitives/move_to_safe_height.py ...    # WRONG (ModuleNotFoundError, o
 ---
 
 `docs/RATIONALE.md` has the long-form WHY for these rules + the legacy Phase 5 architecture (Mode A/B, iterative-loop workflow, etc.) which has been superseded by the autonomous SEARCH director.
+
+## 2026-05-28 — mode-aware sim/real config (parity)
+
+`primitives/shared/config.py` reads `RUNTIME_MODE` from env `ROS_MCP_MODE` at import.
+`server_mode2.py::_run_primitive` injects `ROS_MCP_MODE` from the tool's `--mode`, so each
+primitive subprocess gets the right values (primitives bind config constants at import time,
+so the env must be set before the process starts).
+
+Mode-aware values (sim | real):
+- `ROBOT_BASE_Z`: 0.0 | 0.08 → drives TABLE_HEIGHT / SAFE_HEIGHT / DEFAULT_BASE_POSITION.
+  Sim robot+floor at z=0 (Isaac convention); real robot on an 8 cm mount. Without this, sim
+  `place_down` drove to world −0.08 → INTO the ground plane → gripper orientation wrecked →
+  assembly failures. (6e120af)
+- `GRIPPER_CENTER_TOOL_OFFSET`: 0.23 | 0.2286 (flange → gripper-center, tool Z). (6e120af)
+- `get_object_base_offset_m`: returns (0,0,0) in sim — real-arm calibration corrections don't
+  apply to the CAD-exact twin. (6e120af)
+- `SAFE_HEIGHT_ABOVE_TABLE = 0.50` m (hover height above table). (d8f9118)
+
+The real path is unchanged when `ROS_MCP_MODE` is unset/`real` — the `real-world-verified-2026-05-07`
+tag behavior is intact. Verified 2026-05-28: ground-truth FMB1 replay seats 4/4 in sim.
