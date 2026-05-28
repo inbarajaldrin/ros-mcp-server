@@ -1,11 +1,29 @@
 import numpy as np
+import os as _os
 
-ROBOT_BASE_Z = 0.08         # Robot base origin Z in world/table frame (meters)
+# Runtime mode, read once at import. Set by ros-mcp-server's _run_primitive from
+# the tool's --mode arg (env var ROS_MCP_MODE), since primitives bind config
+# constants at import time. Defaults to 'real' so the tagged real path is
+# unaffected when the env var is absent.
+RUNTIME_MODE = _os.environ.get("ROS_MCP_MODE", "real").strip().lower()
+
+ROBOT_BASE_Z = (0.0 if RUNTIME_MODE == "sim" else 0.08)  # world frame. Sim: robot+floor at z=0 (Isaac convention); Real: 8cm mount. Mode-aware so TABLE_HEIGHT/DEFAULT_BASE_POSITION/place_down map to the SAME world Z in both modes (sim place_down was driving into the ground plane at world -0.08).
 TABLE_HEIGHT_WORLD = 0.0    # Table surface Z in world frame (meters)
 TABLE_HEIGHT = TABLE_HEIGHT_WORLD - ROBOT_BASE_Z  # Table surface Z in robot base frame (meters)
 TABLE_COLLISION_MARGIN_SIDEWAYS = 0.08  # Safety margin for sideways/horizontal EE orientations
 TABLE_COLLISION_MARGIN_FACEDOWN = 0.08  # Safety margin for face_down EE orientation 
-GRIPPER_CENTER_TOOL_OFFSET = np.array([0.0, 0.0, 0.2286])  # 3D offset from EE flange to gripper center in tool frame (meters)
+# Mode-aware EE-flange -> gripper-center offset (tool frame, meters). The sim
+# (Isaac ur5e-dt) twin and the real RG2+coupling differ in flange->grasp-frame
+# distance, so the value must track the mode. Real=0.2286 (real-world-verified
+# 2026-05-07), Sim=0.23 (historical sim value, lost when commit 2b42e33 collapsed
+# the SIM/REAL toggle to a single hardcoded real value — this restores it as a
+# proper mode switch instead of a manual comment toggle).
+GRIPPER_CENTER_TOOL_OFFSET_REAL = np.array([0.0, 0.0, 0.2286])  # real RG2 + coupling
+GRIPPER_CENTER_TOOL_OFFSET_SIM  = np.array([0.0, 0.0, 0.23])    # Isaac ur5e-dt twin
+GRIPPER_CENTER_TOOL_OFFSET = (
+    GRIPPER_CENTER_TOOL_OFFSET_SIM if RUNTIME_MODE == "sim"
+    else GRIPPER_CENTER_TOOL_OFFSET_REAL
+)  # 3D offset from EE flange to gripper center in tool frame (meters)
 SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (meters)
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
@@ -80,7 +98,16 @@ PER_OBJECT_BASE_OFFSET_M: dict = {
 
 
 def get_object_base_offset_m(object_name: str) -> tuple[float, float, float]:
-    """Per-object base-position offset (meters). Returns (0,0,0) if no entry."""
+    """Per-object base-position offset (meters), REAL mode only.
+
+    These are real-arm calibration corrections (compliance drift, camera delta)
+    measured against observed seat TCPs. The sim twin is CAD-exact and reads the
+    base pose from /objects_poses_sim, so applying these in sim would inject
+    real-world error. Returns (0,0,0) in sim mode or if no entry. (The compliant
+    insert path that consumes this is already real-gated; this guard makes the
+    sim/real split explicit at the source.)"""
+    if RUNTIME_MODE == "sim":
+        return (0.0, 0.0, 0.0)
     return tuple(PER_OBJECT_BASE_OFFSET_M.get(object_name, (0.0, 0.0, 0.0)))
 
 
