@@ -27,7 +27,8 @@ Arguments:
     use_fake_hardware   (default: true)   true=fake, false=real hardware.
     fake_sensor_commands(default: true)   Only used in fake mode.
     robot_ip            (default: 192.0.2.1) Robot IP — set when use_fake_hardware:=false.
-    tf_rpy              (default: "0 0 π") Roll/Pitch/Yaw for tool0 -> rg2_base_link static TF.
+    tf_rpy              (default: "0 0 π/2") Roll/Pitch/Yaw for tool0 -> rg2_base_link static TF
+                        (π/2 matches the articulated RG2 to isaac-sim-mcp; old rigid model used π).
     tf_xyz              (default: "0 0 0") Translation for tool0 -> rg2_base_link static TF.
 """
 from pathlib import Path
@@ -171,14 +172,21 @@ def generate_launch_description():
         condition=UnlessCondition(LaunchConfiguration("rg2_only")),
     )
 
-    # Static TF tool0 -> rg2_base_link. Default yaw = π, derived empirically from
-    # a live read of the isaac-sim-mcp ur5e-dt quickstart attach scene, anchored
-    # on the /World/RG2_Gripper asset root. Translation ≈ (0,0,0): the RG2 base
-    # mounts at the UR mechanical flange = tool0. Tunable via tf_rpy / tf_xyz.
+    # Static TF tool0 -> rg2_base_link. Default yaw = π/2 for the ARTICULATED URDF.
+    # Derivation (ROS frames only): the old rigid rg2.urdf baked rpy=(0,0,-π/2) into
+    # every mesh origin and mounted at yaw=π, giving a net mesh orientation of
+    # π + (-π/2) = +π/2 vs tool0 (the orientation validated for the rigid model).
+    # The articulated URDF (from onrobot_ros2) has identity mesh origins, so the
+    # static TF must itself carry the +π/2 to reproduce that same world orientation
+    # and match the isaac-sim-mcp twin. Translation ≈ (0,0,0): the RG2 base mounts
+    # at the UR mechanical flange = tool0. Tunable via tf_rpy / tf_xyz
+    # (pass tf_rpy:="0 0 3.14159" for the old rigid-model yaw).
     rpy_arg = DeclareLaunchArgument(
         "tf_rpy",
-        default_value="0 0 3.141592653589793",
-        description="Roll Pitch Yaw in radians (xyz) for tool0 -> rg2_base_link.",
+        default_value="0 0 1.5707963267948966",
+        description="Roll Pitch Yaw in radians (xyz) for tool0 -> rg2_base_link. "
+                    "Default π/2 matches the articulated RG2 to the isaac-sim-mcp "
+                    "twin (the old rigid model used π).",
     )
     xyz_arg = DeclareLaunchArgument(
         "tf_xyz",
