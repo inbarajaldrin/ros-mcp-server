@@ -33,7 +33,12 @@ Arguments:
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -47,15 +52,24 @@ RG2_URDF_PATH = REPO / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2_arti
 RVIZ_CONFIG = REPO / "compliant_insertion_studio" / "rviz" / "ur5e_with_rg2.rviz"
 
 
-def _load_rg2_description(_context):
+def _load_rg2_description(context):
     """Bring up the articulated RG2 in the /rg2 namespace:
 
       * robot_state_publisher — publishes TF for every gripper link from
         /rg2/joint_states.
       * joint_state_publisher — evaluates the URDF `mimic` joints and publishes
-        /rg2/joint_states. Fed by /rg2/gripper_command (source_list), so a single
-        `finger_joint` angle drives all six joints and both fingers move
-        symmetrically. Send open/close with scripts/rg2_gripper_command.py.
+        /rg2/joint_states. Fed by /rg2/gripper_command (source_list, JointState
+        carrying finger_joint), so one angle drives all six joints and both
+        fingers move symmetrically. This is the articulated core.
+
+    Two ways to drive the core:
+      * DEFAULT (gripper_bridge:=true) — rg2_command_bridge.py translates the
+        established /gripper_command (std_msgs/String "open"/"close"/width*10)
+        into finger_joint on /rg2/gripper_command and echoes /gripper_width_sim.
+        This is the same interface isaac-sim-mcp and primitives/control_gripper.py
+        speak, so `control_gripper.py open|close` drives the RViz gripper too.
+      * LOW-LEVEL (gripper_bridge:=false) — no bridge; publish finger_joint
+        directly with scripts/rg2_gripper_command.py.
 
     package:// mesh paths are rewritten to file:// absolute paths so RViz can
     resolve them without a ROS2 package install.
@@ -65,7 +79,7 @@ def _load_rg2_description(_context):
         "package://compliant_insertion_studio/",
         f"file://{REPO}/compliant_insertion_studio/",
     )
-    return [
+    actions = [
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
@@ -87,6 +101,18 @@ def _load_rg2_description(_context):
             }],
         ),
     ]
+    # Default: bridge the established /gripper_command (String) interface onto the
+    # articulated core. Run as a plain python process since the repo is not a
+    # ROS2 package. Toggle off with gripper_bridge:=false for the low-level path.
+    if context.launch_configurations.get("gripper_bridge", "true").lower() != "false":
+        actions.append(
+            ExecuteProcess(
+                cmd=["python3", str(REPO / "compliant_insertion_studio" / "scripts" / "rg2_command_bridge.py")],
+                name="rg2_command_bridge",
+                output="screen",
+            )
+        )
+    return actions
 
 
 def generate_launch_description():
@@ -114,6 +140,13 @@ def generate_launch_description():
         "robot_ip",
         default_value="192.0.2.1",
         description="Robot IP — set when use_fake_hardware:=false.",
+    )
+    gripper_bridge_arg = DeclareLaunchArgument(
+        "gripper_bridge",
+        default_value="true",
+        description="true (default): bridge /gripper_command (String width) -> RG2 "
+                    "articulation, like isaac-sim-mcp/control_gripper.py. "
+                    "false: low-level finger_joint path (rg2_gripper_command.py).",
     )
 
     # UR5e bringup — real or fake. Includes ur_control.launch.py directly
@@ -207,6 +240,7 @@ def generate_launch_description():
             use_fake_hardware_arg,
             fake_sensor_commands_arg,
             robot_ip_arg,
+            gripper_bridge_arg,
             rpy_arg,
             xyz_arg,
             ur_launch,
