@@ -5,12 +5,17 @@ for the OnRobot RG2 + a static TF tool0 -> rg2_base_link, then optionally bring
 up RViz with the dual-RobotModel config.
 
 This is Phase 7's standalone-URDF-plus-static-TF integration (07-CONTEXT.md
-D-4..D-6). The RG2 URDF is at `compliant_insertion_studio/urdf/rg2/rg2.urdf`
+D-4..D-6). The RG2 URDF is at `compliant_insertion_studio/urdf/rg2/rg2_articulated.urdf`
 and uses `package://compliant_insertion_studio/...` mesh paths; rewritten to
 absolute `file://` paths at launch time because the repo is not a ROS2 package.
 
+The RG2 is fully articulated (master finger_joint + 5 mimic joints). A
+joint_state_publisher evaluates the mimics and publishes /rg2/joint_states; it is
+fed by /rg2/gripper_command, so commanding finger_joint alone opens/closes both
+fingers symmetrically. Drive it with scripts/rg2_gripper_command.py open|close.
+
 Usage:
-    # Fake hardware (Phase 7 default — visualization-only)
+    # Fake hardware (visualization-only)
     ros2 launch .../ur5e_with_rg2.launch.py
 
     # Real robot
@@ -36,13 +41,24 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 REPO = Path("/home/aaugus11/Documents/ros-mcp-server")
-RG2_URDF_PATH = REPO / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2.urdf"
+# Articulated RG2 (master finger_joint + 5 mimic joints). The old single-rigid-body
+# rg2.urdf (visualization-only) is kept alongside for any collision-geometry consumers.
+RG2_URDF_PATH = REPO / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2_articulated.urdf"
 RVIZ_CONFIG = REPO / "compliant_insertion_studio" / "rviz" / "ur5e_with_rg2.rviz"
 
 
 def _load_rg2_description(_context):
-    """Read the RG2 URDF and rewrite package:// mesh paths to file:// absolute
-    paths so RViz can resolve them without requiring a ROS2 package install.
+    """Bring up the articulated RG2 in the /rg2 namespace:
+
+      * robot_state_publisher — publishes TF for every gripper link from
+        /rg2/joint_states.
+      * joint_state_publisher — evaluates the URDF `mimic` joints and publishes
+        /rg2/joint_states. Fed by /rg2/gripper_command (source_list), so a single
+        `finger_joint` angle drives all six joints and both fingers move
+        symmetrically. Send open/close with scripts/rg2_gripper_command.py.
+
+    package:// mesh paths are rewritten to file:// absolute paths so RViz can
+    resolve them without a ROS2 package install.
     """
     text = RG2_URDF_PATH.read_text()
     text = text.replace(
@@ -57,6 +73,18 @@ def _load_rg2_description(_context):
             name="rg2_state_publisher",
             output="screen",
             parameters=[{"robot_description": text}],
+        ),
+        Node(
+            package="joint_state_publisher",
+            executable="joint_state_publisher",
+            namespace="rg2",
+            name="rg2_joint_state_publisher",
+            output="screen",
+            parameters=[{
+                "robot_description": text,
+                "source_list": ["gripper_command"],
+                "rate": 30.0,
+            }],
         ),
     ]
 
@@ -110,20 +138,10 @@ def generate_launch_description():
         condition=UnlessCondition(LaunchConfiguration("rg2_only")),
     )
 
-    # Static TF tool0 -> rg2_base_link.
-    # The per-mesh <visual><origin rpy> blocks in the RG2 URDF already encode
-    # each link's USD-authored -90°/+90°-about-Z orientations. So the v1
-    # hypothesis here is identity — RG2 base mounts at the UR mechanical
-    # flange (= tool0) with no extra rotation. Iteration handled via the
-    # static_tf_rpy launch argument (see below).
-    # Default rpy_z = π = 3.1415926 — derived empirically from a live read
-    # of the isaac-sim-mcp ur5e-dt quickstart attach scene, anchored on the
-    # /World/RG2_Gripper asset root (NOT the leaf onrobot_rg2_base_link prim:
-    # the leaf's own -90° about Z is already encoded in each per-mesh
-    # <visual><origin rpy> block of rg2.urdf).
-    # See _references/articles/rg2_attach_transform.md.
-    # Translation is ≈ (0, 0, 0) — the RG2 base mounts at the UR mechanical
-    # flange = tool0.
+    # Static TF tool0 -> rg2_base_link. Default yaw = π, derived empirically from
+    # a live read of the isaac-sim-mcp ur5e-dt quickstart attach scene, anchored
+    # on the /World/RG2_Gripper asset root. Translation ≈ (0,0,0): the RG2 base
+    # mounts at the UR mechanical flange = tool0. Tunable via tf_rpy / tf_xyz.
     rpy_arg = DeclareLaunchArgument(
         "tf_rpy",
         default_value="0 0 3.141592653589793",

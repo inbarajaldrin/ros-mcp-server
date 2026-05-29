@@ -1,0 +1,226 @@
+<?xml version="1.0" ?>
+<!--
+  OnRobot RG2 — fully articulated description (4-bar linkage).
+
+  Reference: https://github.com/takuya-ki/onrobot_ros2
+             (ros2_ws/humble/src/onrobot_rg2_description/urdf/onrobot_rg2.urdf.xacro)
+
+  Adapted for ros-mcp-server / compliant_insertion_studio:
+    - Dropped the upstream `world` link + `joint0`; this gripper is anchored to
+      the UR5e `tool0` via the static TF published in ur5e_with_rg2.launch.py
+      (tool0 -> rg2_base_link).
+    - Renamed the upstream base link `onrobot_rg2_base_link` -> `rg2_base_link`
+      so the existing static TF child frame still resolves.
+    - Mesh paths use package://compliant_insertion_studio/... (rewritten to
+      file:// at launch time by _load_rg2_description, since the repo is not a
+      ROS2 package).
+
+  Articulation: one actuated master joint `finger_joint` + 5 `mimic` joints.
+  Driving `finger_joint` opens/closes both fingers symmetrically — matching the
+  isaac-sim-mcp ur5e-dt RG2.usd, which uses the identical link/joint names.
+  finger_joint range: lower=-0.558505 (OPEN) .. upper=0.785398 (CLOSED) rad.
+-->
+<robot name="rg2">
+
+  <link name="rg2_base_link">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.7" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/base_link.stl" />
+      </geometry>
+      <material name="rg2_grey"><color rgba="0.8 0.8 0.8 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/base_link.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="left_outer_knuckle">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/outer_knuckle.stl" />
+      </geometry>
+      <material name="rg2_grey"><color rgba="0.8 0.8 0.8 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/outer_knuckle.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="left_inner_knuckle">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/inner_knuckle.stl" />
+      </geometry>
+      <material name="rg2_grey"><color rgba="0.8 0.8 0.8 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/inner_knuckle.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="left_inner_finger">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/inner_finger.stl" />
+      </geometry>
+      <material name="rg2_black"><color rgba="0.1 0.1 0.1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/inner_finger.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="right_outer_knuckle">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/outer_knuckle.stl" />
+      </geometry>
+      <material name="rg2_grey"><color rgba="0.8 0.8 0.8 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/outer_knuckle.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="right_inner_knuckle">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/inner_knuckle.stl" />
+      </geometry>
+      <material name="rg2_grey"><color rgba="0.8 0.8 0.8 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/inner_knuckle.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="right_inner_finger">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+      <mass value="0.05" />
+      <inertia ixx="1.0E-03" ixy="1.0E-06" ixz="1.0E-06" iyy="1.0E-03" iyz="1.0E-06" izz="1.0E-03" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/visual/inner_finger.stl" />
+      </geometry>
+      <material name="rg2_black"><color rgba="0.1 0.1 0.1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/rg2/meshes_articulated/collision/inner_finger.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Actuated master joint -->
+  <joint name="finger_joint" type="revolute">
+    <origin xyz="0 -0.017178 0.125797" rpy="0 0 0" />
+    <parent link="rg2_base_link" />
+    <child link="left_outer_knuckle" />
+    <axis xyz="-1 0 0" />
+    <limit lower="-0.558505" upper="0.785398" velocity="100.0" effort="1000" />
+  </joint>
+
+  <joint name="left_inner_knuckle_joint" type="revolute">
+    <origin xyz="0 -0.007678 0.1422970" rpy="0 0 0" />
+    <parent link="rg2_base_link" />
+    <child link="left_inner_knuckle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.785398" upper="0.785398" velocity="100.0" effort="1000" />
+    <mimic joint="finger_joint" multiplier="-1" offset="0" />
+  </joint>
+
+  <joint name="left_inner_finger_joint" type="revolute">
+    <origin xyz="0 -0.039592 0.038177" rpy="0 0 0" />
+    <parent link="left_outer_knuckle" />
+    <child link="left_inner_finger" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.872665" upper="0.872665" velocity="100.0" effort="1000" />
+    <mimic joint="finger_joint" multiplier="1" offset="0" />
+  </joint>
+
+  <joint name="right_outer_knuckle_joint" type="revolute">
+    <origin xyz="0 0.017178 0.125797" rpy="0 0 3.14159265359" />
+    <parent link="rg2_base_link" />
+    <child link="right_outer_knuckle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.785398" upper="0.785398" velocity="100.0" effort="1000" />
+    <mimic joint="finger_joint" multiplier="-1" offset="0" />
+  </joint>
+
+  <joint name="right_inner_knuckle_joint" type="revolute">
+    <origin xyz="0 0.007678 0.1422970" rpy="0 0 -3.14159265359" />
+    <parent link="rg2_base_link" />
+    <child link="right_inner_knuckle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.785398" upper="0.785398" velocity="100.0" effort="1000" />
+    <mimic joint="finger_joint" multiplier="-1" offset="0" />
+  </joint>
+
+  <joint name="right_inner_finger_joint" type="revolute">
+    <origin xyz="0 -0.039592 0.038177" rpy="0 0 0" />
+    <parent link="right_outer_knuckle" />
+    <child link="right_inner_finger" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.872665" upper="0.872665" velocity="100.0" effort="1000" />
+    <mimic joint="finger_joint" multiplier="1" offset="0" />
+  </joint>
+
+</robot>
