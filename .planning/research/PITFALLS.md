@@ -467,7 +467,7 @@ Episode wrapper phase (CSV schema) + Dashboard phase (segmented stats).
 Operator already noted AprilTag is occluded during ACTIVE. But: the part can shift during compliance, the gripper can rotate, and the tag may briefly become visible again. If any code in the pipeline uses the most-recent vision pose without checking timestamp/staleness, it can overwrite the force-mode-driven trajectory with a vision correction based on a noisy reappearance.
 
 **Why it happens:**
-The MCP server (`server_p3.py`) auto-injects orientation/grasp_id between primitive calls. If this auto-injection runs during a force-mode lifecycle, it can do the wrong thing.
+The MCP server (`server.py`) auto-injects orientation/grasp_id between primitive calls. If this auto-injection runs during a force-mode lifecycle, it can do the wrong thing.
 
 **How to avoid:**
 - During ACTIVE phase, the wrapper sets a flag (or context) telling the MCP server: "do not override pose; force mode is in control."

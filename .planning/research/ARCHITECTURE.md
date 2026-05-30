@@ -14,7 +14,7 @@
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  CALLER LAYER (orchestration — already exists, do not modify shape)      │
 │                                                                          │
-│   server_p3.py:translate_object("insert", base_name=..., grasp_id=...)   │
+│   server.py:translate_object("insert", base_name=..., grasp_id=...)   │
 │                              │                                           │
 │                              ▼                                           │
 │   primitives/translate_object.py main() --insert --mode real             │
@@ -133,7 +133,7 @@ ros-mcp-server/
 ├── logs/                                # exists; add .gitignore entry for insert_*
 │   ├── insert_<obj>_<ts>.csv
 │   └── insert_<obj>_<ts>.meta.json
-└── server_p3.py                         # unchanged (translate_object tool stays)
+└── server.py                         # unchanged (translate_object tool stays)
 ```
 
 ### Structure Rationale
@@ -293,7 +293,7 @@ git commit primitives/insert_configs/u_brown.yaml
 ### Runtime Flow (autonomous, post-tuning)
 
 ```
-LLM agent → server_p3.py:translate_object("insert", base_name="fmb1", grasp_id=0)
+LLM agent → server.py:translate_object("insert", base_name="fmb1", grasp_id=0)
        │
        ▼
 [server_p3] auto-injects current_object_orientation from session state
@@ -436,7 +436,7 @@ This is the dependency DAG. Phases must respect it.
 | `primitives/translate_object.py` | `:1093–1107` | Arg passthrough already covers `object_name`, `base_name`, `grasp_id`, `final_base_pos`, `final_base_orientation`, `use_default_base_position`, `current_object_orientation`. **No change needed.** |
 | `primitives/translate_object.py` | `:1157` | Optional: drop `--insertion-type {prismatic,legacy}` once dispatcher is the only path; keep for one milestone as escape hatch |
 | `.gitignore` | append | `logs/insert_*.csv`<br>`logs/insert_*.meta.json` |
-| `server_p3.py` | none | **No change.** The MCP tool `translate_object("insert", ...)` already abstracts the implementation; swapping the script behind it is invisible to the agent. |
+| `server.py` | none | **No change.** The MCP tool `translate_object("insert", ...)` already abstracts the implementation; swapping the script behind it is invisible to the agent. |
 
 ### Operator-Facing Failure Surface
 

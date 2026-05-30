@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Test harness for real-mode occlusion-tolerant verify_assembly --check-all + the
-ported assembly-order gate (server_p3.py + queries/verify_assembly.py).
+ported assembly-order gate (server.py + queries/verify_assembly.py).
 
 No hardware / no ROS runtime needed: exercises the real functions with a temp state
 store and simulated /objects_poses_real drop-outs. Covers the GPT must-fix list +
@@ -25,7 +25,7 @@ def _load(name, path):
     spec.loader.exec_module(m)
     return m
 
-sp3 = _load("sp3_under_test", os.path.join(REPO, "server_p3.py"))
+sp3 = _load("sp3_under_test", os.path.join(REPO, "server.py"))
 va = _load("va_under_test", os.path.join(REPO, "queries", "verify_assembly.py"))
 
 STATE = sp3._state_path()

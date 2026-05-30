@@ -254,7 +254,7 @@ python3 primitives/move_to_safe_height.py ...    # WRONG (ModuleNotFoundError, o
 ## 2026-05-28 — mode-aware sim/real config (parity)
 
 `primitives/shared/config.py` reads `RUNTIME_MODE` from env `ROS_MCP_MODE` at import.
-`server_mode2.py::_run_primitive` injects `ROS_MCP_MODE` from the tool's `--mode`, so each
+`server_remap.py::_run_primitive` injects `ROS_MCP_MODE` from the tool's `--mode`, so each
 primitive subprocess gets the right values (primitives bind config constants at import time,
 so the env must be set before the process starts).
 

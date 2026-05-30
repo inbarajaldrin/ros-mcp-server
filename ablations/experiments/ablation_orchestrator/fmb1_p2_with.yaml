@@ -6,7 +6,7 @@ models:
   - provider: anthropic
     model: claude-sonnet-4-6
 settings:
-  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_remap.json
   maxIterations: 200
 systemPrompt: "@insert-prompt:Prompts__system_context"
 hooks:

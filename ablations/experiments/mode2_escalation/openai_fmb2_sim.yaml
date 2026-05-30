@@ -11,7 +11,7 @@ models:
   - provider: openai
     model: o3
 settings:
-  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config.json
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_remap.json
   maxIterations: 200
   clearContextBetweenPhases: true
 systemPrompt: "@insert-prompt:Prompts__system_context"

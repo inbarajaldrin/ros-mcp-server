@@ -156,7 +156,7 @@ The integration step — done **last**, otherwise broken dispatcher silently bre
 - [ ] `[N→R]` **DISP-02**: Lazy config loading by name (a YAML parse error in one object's config does not break inserts of other objects)
 - [ ] `[N→R]` **DISP-03**: Unknown-object behavior: drops into `MANUAL_GUIDED` fallback (full 6-DOF compliance, no auto-terminate, operator-terminated only). Output JSON includes `hint` field with exact `--collect` command for the LLM to surface to operator.
 - [ ] `[N→R]` **DISP-04**: `primitives/translate_object.py:1085` `script_path` updated to point at `compliant_insertion_studio/dispatcher/compliant_insert_episode.py`. Existing arg passthrough at lines 1093–1107 already covers everything needed.
-- [ ] `[N→R]` **DISP-05**: `server_p3.py` MCP tool surface unchanged (translate_object signature is preserved)
+- [ ] `[N→R]` **DISP-05**: `server.py` MCP tool surface unchanged (translate_object signature is preserved)
 - [ ] `[N→R]` **DISP-06**: Existing `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation YAMLs complete the insert leg autonomously once configs are in place
 - [ ] `[N→R]` **DISP-07**: `compliant_insertion_studio/README.md` documents standalone use: how to install into a *different* robotics project (copy folder, edit one path in host's translate_object equivalent, configure assembly_target source)
 

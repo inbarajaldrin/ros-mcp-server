@@ -16,7 +16,7 @@ models:
   - provider: google
     model: gemini-2.5-flash
 settings:
-  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_ablation_quat.json
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_quat.json
   maxIterations: 200
   clearContextBetweenPhases: true
 systemPrompt: "@insert-prompt:Prompts__system_context"

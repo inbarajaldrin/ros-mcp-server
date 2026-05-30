@@ -52,7 +52,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
 
 #### Integration
 - [ ] `translate_object.py:1085` real-mode insert path points at the new dispatcher (not at the broken `prismatic_peg_insertion.py`)
-- [ ] Existing `--insert` flow in real mode works end-to-end via MCP server (`server_p3.py`) and via direct primitive CLI
+- [ ] Existing `--insert` flow in real mode works end-to-end via MCP server (`server.py`) and via direct primitive CLI
 - [ ] Existing `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation runs complete the insert leg without manual intervention once configs are in place
 - [ ] Behavior on unknown object: drops into manual-guidance fallback mode (force-compliant, no autonomous termination), operator runs ~5 demos, system populates a starter config — explicit calibration ramp, no silent default-config gambling
 
@@ -79,7 +79,7 @@ A data-collection wrapper, analyzer dashboard, and **parametric peg-in-hole poli
   - `rotate_object.py:622` — removed `if self.mode != 'sim': return False` early-out so geometric posture filters (compact-config, EE-facing-robot, self-collision, etc.) run in real mode too. This was forcing real-mode IK into "wrist-low" configurations that subsequent primitives couldn't handle.
   - `core/move_to_clear_area.py:_verify_grasp` — skips pose-lookup in real mode (AprilTag is occluded once grasped); `translate_object.py:142` pre-verify uses `--width-only` to match.
 - A first-cut `primitives/compliant_insert.py` (~250 LOC) is in place: switches to `force_mode_controller`, zeros F/T, starts force mode with full 6-DOF compliance + Fz=-3 N, logs basic CSV, supports SIGTERM/USR1/USR2 signals. Validated empirically: with proper F/T zero (post-zero bias < 0.5 N) the robot descends in the correct direction and yields freely to operator pushes. **This script is a placeholder for the wrapper to be built; not the final architecture.**
-- The `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation YAMLs and `mcp_config_real.json` are wired to use `server_p3.py` (state-threaded, auto-injects orientation/grasp_id between primitive calls) — so the agent doesn't need to write quaternions; the server tracks them. Real-mode insert is the only blocking primitive for those YAMLs to complete.
+- The `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation YAMLs and `mcp_config.json` are wired to use `server.py` (state-threaded, auto-injects orientation/grasp_id between primitive calls) — so the agent doesn't need to write quaternions; the server tracks them. Real-mode insert is the only blocking primitive for those YAMLs to complete.
 
 **Hardware/services available** (all confirmed live in the current ROS graph):
 - `/objects_poses_real` (vision-tracked AprilTag poses, drops parts when occluded)

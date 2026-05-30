@@ -94,7 +94,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Phase 5
 **Requirements**: DISP-01, DISP-02, DISP-03, DISP-04, DISP-05, DISP-06, DISP-07, VAL-01, VAL-02, VAL-03, VAL-04, VAL-05
 **Success Criteria** (what must be TRUE):
-  1. The single-line edit at `primitives/translate_object.py:1085` points at `compliant_insertion_studio/dispatcher/compliant_insert_episode.py`, the existing `--insert` real-mode flow works end-to-end via `server_p3.py` MCP tool surface (translate_object signature unchanged), and the existing `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation YAMLs complete the insert leg autonomously
+  1. The single-line edit at `primitives/translate_object.py:1085` points at `compliant_insertion_studio/dispatcher/compliant_insert_episode.py`, the existing `--insert` real-mode flow works end-to-end via `server.py` MCP tool surface (translate_object signature unchanged), and the existing `recording_dryrun_real_u_brown.yaml` and `recording_dryrun_real.yaml` ablation YAMLs complete the insert leg autonomously
   2. Each FMB1 object passes >= 5 consecutive autonomous insert successes with no manual interventions and no parameter tweaks between attempts (logged to `logs/validation_*`)
   3. At least one part from a second assembly is successfully inserted using only its YAML config — no algorithm changes — and passes >= 3 consecutive autonomous successes
   4. Calling the dispatcher with an unknown object name drops into MANUAL_GUIDED fallback (full 6-DOF compliance, operator-terminated only) and the JSON output includes a `hint` field with the exact `--collect` command for the LLM to surface to the operator
