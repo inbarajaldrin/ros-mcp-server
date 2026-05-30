@@ -455,6 +455,44 @@ class VerifyAssembly(Node):
         return unassembled
 
 
+def _classify_component(comp_name, present_names, certified_set, mode, verify_fn):
+    """Classify one component for check_all as 'assembled' or 'unassembled'.
+
+    Occlusion rescue (real only): a component ABSENT from perception that was
+    CERTIFIED assembled this run is occluded by a later part, not unassembled
+    (DOMAIN INVARIANT). A component PRESENT but pose-wrong is NOT rescued — it
+    goes through verify_fn and fails normally, preserving disturbance detection.
+    verify_fn(comp_name) -> (is_assembled: bool, error_data); exceptions -> unassembled.
+    Returns (classification: str, rescued: bool)."""
+    if mode == 'real' and comp_name not in present_names and comp_name in certified_set:
+        return 'assembled', True
+    try:
+        is_assembled, _ = verify_fn(comp_name)
+        return ('assembled' if is_assembled else 'unassembled'), False
+    except Exception:
+        return 'unassembled', False
+
+
+def _load_certified_set(state_path, expected_run_id):
+    """Set of object_names certified assembled THIS run, read from the server's
+    primitive_state.json at an ABSOLUTE path. Fail-closed (empty set, so NO rescue)
+    on: missing path/run_id, unreadable/torn JSON, or a store whose run_id does not
+    match expected_run_id (i.e. a store left from a different run / no clear ran).
+    No lock needed — the server writes via atomic os.replace, so open() always sees
+    a complete file."""
+    if not state_path or not expected_run_id:
+        return set()
+    try:
+        with open(state_path, 'r') as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(state, dict) or state.get('run_id') != expected_run_id:
+        return set()
+    return {name for name, st in state.get('objects', {}).items()
+            if isinstance(st, dict) and st.get('assembled') is True}
+
+
 def main(args=None):
     parser = argparse.ArgumentParser(description='Verify Assembly - Check if object is in correct position')
     parser.add_argument('--object-name', type=str, help='Name of the object to verify (optional if --check-all is used)')
@@ -462,14 +500,25 @@ def main(args=None):
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
     parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are assembled')
+    parser.add_argument('--primitive-state-path', type=str, default=None,
+                       help='Absolute path to primitive_state.json (real check_all occlusion rescue). '
+                            'Passed by the server so this subprocess reads the SAME file regardless of cwd.')
+    parser.add_argument('--run-id', type=str, default=None,
+                       help='Current run id. Occlusion rescue trusts the state store ONLY if its '
+                            'run_id matches this (fail-closed on mismatch / stale store).')
     parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
 
     # Validate arguments
-    if args.mode == 'real' and args.check_all:
-        parser.error("--check-all is not supported in real mode. Verify one object at a time.")
+    # Real-mode --check-all is now SUPPORTED and occlusion-tolerant: a part absent
+    # from /objects_poses_real that was certified assembled THIS run (in the state
+    # store) is counted assembled (DOMAIN INVARIANT: a certified part cannot move
+    # until assembly completes, so absent == occluded). See _load_certified_set.
     if not args.check_all and not args.object_name:
         parser.error("Either --object-name or --check-all must be specified")
+
+    certified_set = _load_certified_set(getattr(args, 'primitive_state_path', None),
+                                        getattr(args, 'run_id', None)) if args.mode == 'real' else set()
 
     rclpy.init()
     node = VerifyAssembly(base_name=args.base_name, mode=args.mode)
@@ -503,6 +552,16 @@ def main(args=None):
         elapsed = time.time() - start_time
         node.get_logger().info(f"Received pose data for {len(node.current_poses)} objects (waited {elapsed:.1f}s)")
 
+        # Settle window (real check_all): after the first poses arrive, spin a
+        # bounded extra window so a partial first frame does not make a visible
+        # object momentarily look absent (which would defer it to the occlusion
+        # rescue). Noise reduction only — not a safety control.
+        if args.mode == 'real' and args.check_all:
+            settle_deadline = time.time() + 2.0
+            while time.time() < settle_deadline:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                time.sleep(0.05)
+
         if args.check_all:
             # Check all objects in the assembly, sorted by assembly_order
             components = node.assembly_config.get('components', [])
@@ -520,15 +579,17 @@ def main(args=None):
                 if comp_order is not None:
                     entry["assembly_order"] = comp_order
 
-                # Verify this component
-                try:
-                    is_assembled, _ = node.verify_assembly_pose(comp_name, args.base_name)
-                    if is_assembled:
-                        assembled_objects.append(entry)
-                    else:
-                        unassembled_objects.append(entry)
-                except Exception as e:
-                    node.get_logger().debug(f"Could not verify {comp_name}: {e}")
+                # Classify (with occlusion rescue) — see _classify_component.
+                klass, rescued = _classify_component(
+                    comp_name, node.current_poses, certified_set, args.mode,
+                    lambda n: node.verify_assembly_pose(n, args.base_name))
+                if rescued:
+                    node.get_logger().info(
+                        f"{comp_name}: absent from /objects_poses_real but certified "
+                        f"assembled this run -> occluded, counted assembled")
+                if klass == 'assembled':
+                    assembled_objects.append(entry)
+                else:
                     unassembled_objects.append(entry)
 
             # Success if all objects are assembled
@@ -601,10 +662,10 @@ def main(args=None):
                 "base_name": args.base_name,
                 "all_assembled": success,
             }
-            # Only include object lists in sim mode
-            if args.mode == 'sim':
-                result["assembled_objects"] = assembled_objects
-                result["unassembled_objects"] = unassembled_objects
+            # Include object lists in BOTH modes — real check_all is now
+            # occlusion-tolerant (absent-but-certified parts already counted assembled).
+            result["assembled_objects"] = assembled_objects
+            result["unassembled_objects"] = unassembled_objects
         else:
             result = {
                 "result": "success" if success else "failure",

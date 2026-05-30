@@ -70,40 +70,196 @@ else:
 # Per-object state that captures orientation and grasp_id from primitive outputs
 # and auto-injects them into subsequent calls. Persists to disk.
 
+#
+# It ALSO holds the per-run "assembled" certification set consumed by (a)
+# occlusion-tolerant real-mode verify_assembly --check-all and (b) the assembly
+# -order gate. DOMAIN INVARIANT (author-owned, see .planning/track-b-realmode-
+# checkall-design.md): once an object is verified assembled it cannot move until
+# the whole assembly completes -> "absent from /objects_poses_real" can ONLY mean
+# occluded, never disturbed; so an absent-but-certified object is still assembled.
+# The store is run_id-scoped: clear_primitive_state() stamps a fresh run_id and
+# empties objects, and every cross-process reader (the verify_assembly.py CLI)
+# refuses to trust the store unless its run_id matches the one the server passes.
+# All load/mutate/save go through an flock so concurrent tool calls never tear it.
+import fcntl
+import uuid as _uuid
+
+# In-process record of the run_id stamped by the most recent clear. The check_all
+# CLI is handed this so it can reject a store left over from a different run.
+_CURRENT_RUN_ID = None
+
 def _state_path() -> str:
     if BASE_OUTPUT_DIR:
         return os.path.join(BASE_OUTPUT_DIR, "primitive_state.json")
     return "primitive_state.json"
 
-def _load_state() -> dict:
+def _lock_path() -> str:
+    return _state_path() + ".lock"
+
+class _state_lock:
+    """Exclusive cross-process lock around the state file (flock-based)."""
+    def __enter__(self):
+        self._f = open(_lock_path(), "w")
+        fcntl.flock(self._f, fcntl.LOCK_EX)
+        return self
+    def __exit__(self, *exc):
+        fcntl.flock(self._f, fcntl.LOCK_UN)
+        self._f.close()
+        return False
+
+def _load_state_unlocked() -> dict:
     p = _state_path()
     if os.path.exists(p):
-        with open(p, "r") as f:
-            return json.load(f)
+        try:
+            with open(p, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Fail closed: an unreadable/torn store yields no objects (no rescue).
+            return {"objects": {}}
     return {"objects": {}}
 
-def _save_state(state: dict) -> None:
+def _save_state_unlocked(state: dict) -> None:
     p = _state_path()
-    tmp = p + ".tmp"
+    tmp = f"{p}.tmp.{os.getpid()}.{_uuid.uuid4().hex[:8]}"
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
     os.replace(tmp, p)
+
+def _load_state() -> dict:
+    with _state_lock():
+        return _load_state_unlocked()
+
+def _save_state(state: dict) -> None:
+    with _state_lock():
+        _save_state_unlocked(state)
 
 def _get_object_state(object_name: str) -> Optional[dict]:
     state = _load_state()
     return state.get("objects", {}).get(object_name)
 
-def _set_object_state(object_name: str, orientation: Optional[list] = None, grasp_id: Optional[int] = None) -> None:
+def _set_object_state(object_name: str, orientation: Optional[list] = None,
+                      grasp_id: Optional[int] = None, assembled: Optional[bool] = None) -> None:
+    with _state_lock():
+        state = _load_state_unlocked()
+        if "objects" not in state:
+            state["objects"] = {}
+        if object_name not in state["objects"]:
+            state["objects"][object_name] = {}
+        if orientation is not None:
+            state["objects"][object_name]["orientation"] = orientation
+        if grasp_id is not None:
+            state["objects"][object_name]["grasp_id"] = grasp_id
+        if assembled is not None:
+            state["objects"][object_name]["assembled"] = assembled
+        _save_state_unlocked(state)
+
+# ── Assembly-order precondition gate (real mode) ──────────────────────────────
+# Ported from server_mode2.py (commit 3963663). Blocks move_to_grasp /
+# translate_object(insert) / rotate_object on an object whose assembly-order
+# predecessors are not yet seated, BEFORE motion. REAL-mode only here (server_p3
+# sim path is left exactly as it was). Seated oracle = the run_id-scoped
+# 'assembled' certification set in the primitive state store (NOT a
+# verify_assembly --check-all subprocess — real check_all is occlusion-tolerant
+# but the in-process set is cheaper and already authoritative). It is a
+# CERTIFIED-seated oracle: a predecessor physically seated but not yet
+# verify_assembly'd reads as not-certified and the gate asks for certification
+# (fail-closed). Toggle MCP_ORDER_GATE=0 (read at CALL time) for the ungated arm.
+import functools
+import glob
+
+def _order_gate_on() -> bool:
+    return os.getenv("MCP_ORDER_GATE", "1") != "0"
+
+@functools.lru_cache(maxsize=1)
+def _load_order_maps_raw():
+    """Load assembly order maps ONCE from ablations/eval_resources/fmb*_assembly.json.
+    Returns (by_base, by_obj, dups, n_files, errors). Caches only the file load (no
+    gate-policy decision), so a gate-off first call cannot poison a later gate-on
+    fail-closed validation (done in _order_maps)."""
+    by_base, by_obj, dups, errors = {}, {}, set(), []
+    pattern = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "ablations", "eval_resources", "fmb*_assembly.json")
+    files = sorted(glob.glob(pattern))
+    for path in files:
+        try:
+            j = json.loads(open(path).read())
+            base = j["base_name"]
+            names = [s["object_name"] for s in sorted(j["assembly_order"],
+                                                      key=lambda s: s["position"])]
+        except Exception as e:
+            errors.append(f"{os.path.basename(path)}: {e}")
+            continue
+        by_base[base] = names
+        for n in names:
+            if n in by_obj and by_obj[n] != base:
+                dups.add(n)
+            by_obj[n] = base
+    return by_base, by_obj, sorted(dups), len(files), errors
+
+def _order_maps():
+    """Return (by_base, by_obj). Validates FAIL-CLOSED every call when the gate is on
+    (outside the lru_cache so a prior gate-off call cannot skip it)."""
+    by_base, by_obj, dups, n_files, errors = _load_order_maps_raw()
+    if _order_gate_on():
+        if not by_base:
+            raise RuntimeError("MCP_ORDER_GATE on but no assembly order maps loaded "
+                               "from eval_resources/fmb*_assembly.json")
+        if errors:
+            raise RuntimeError(f"MCP_ORDER_GATE on but {len(errors)} of {n_files} "
+                               f"assembly file(s) failed to load: {errors}")
+        if dups:
+            raise RuntimeError(f"MCP_ORDER_GATE on but object names are ambiguous "
+                               f"across assemblies (base inference unsafe): {dups}")
+    return by_base, by_obj
+
+_ORDER_UNKNOWN_WARNED = set()  # one-time warn per unknown object (gate-on liveness audit)
+
+def _run_certified_seated_set():
+    """Set of object_names CERTIFIED assembled THIS run, or None if the store is
+    untrustworthy (no clear stamped a run_id, or run_id != this run's) -> caller
+    fails closed. Trust requires a run_id stamped by clear_primitive_state this run."""
     state = _load_state()
-    if "objects" not in state:
-        state["objects"] = {}
-    if object_name not in state["objects"]:
-        state["objects"][object_name] = {}
-    if orientation is not None:
-        state["objects"][object_name]["orientation"] = orientation
-    if grasp_id is not None:
-        state["objects"][object_name]["grasp_id"] = grasp_id
-    _save_state(state)
+    rid = state.get("run_id")
+    if not rid or (_CURRENT_RUN_ID is not None and rid != _CURRENT_RUN_ID):
+        return None
+    return {name for name, st in state.get("objects", {}).items()
+            if isinstance(st, dict) and st.get("assembled") is True}
+
+def _assert_assembly_order(object_name, mode, base_name=None):
+    """Precondition gate. Return {result:failure,error} to BLOCK, or None to proceed.
+    No-op when the gate is off or mode != real. base_name is inferred from
+    object_name when not supplied (names disjoint across base1/2/3)."""
+    if not _order_gate_on() or mode != "real":
+        return None
+    by_base, by_obj = _order_maps()
+    base = base_name or by_obj.get(object_name)
+    order = by_base.get(base)
+    if not order or object_name not in order:
+        if object_name not in _ORDER_UNKNOWN_WARNED:
+            _ORDER_UNKNOWN_WARNED.add(object_name)
+            logger.warning(f"[order-gate] object '{object_name}' (base={base}) not in any "
+                           f"assembly order map -- NOT gated. Known bases: {list(by_base.keys())}")
+        return None
+    k = order.index(object_name)
+    if k == 0:
+        return None  # first object, nothing precedes
+    seated = _run_certified_seated_set()
+    if seated is None:
+        # Store has no run certification -> cannot confirm predecessors. FAIL CLOSED.
+        return {"result": "failure",
+                "error": (f"Assembly order gate unavailable: the primitive state store has "
+                          f"no run certification (call clear_primitive_state at phase start). "
+                          f"Cannot confirm predecessors of '{object_name}' are seated; blocked.")}
+    if object_name in seated:
+        return None  # already certified seated -> regrasp/removal, not an assembly pick
+    missing = [o for o in order[:k] if o not in seated]
+    if missing:
+        return {"result": "failure",
+                "error": (f"Assembly order: '{object_name}' is order {k + 1} but predecessor(s) "
+                          f"{missing} are not CERTIFIED seated yet — call verify_assembly("
+                          f"'{missing[0]}') first (seat it if it is not). Required order for "
+                          f"{base}: {order}.")}
+    return None
 
 # Use Cyclone DDS for faster discovery (3-7x faster than FastDDS UDP-only).
 # Shared memory disabled to prevent /dev/shm exhaustion from zombie processes.
@@ -820,25 +976,38 @@ def verify_assembly(
     base_name: str,
     mode: Mode,
     object_name: Annotated[Optional[str], Field(description="Optional if check_all is True")] = None,
-    check_all: Annotated[bool, Field(description="Check all objects instead of a specific one (sim mode only)")] = False,
+    check_all: Annotated[bool, Field(description="Check all objects instead of a specific one")] = False,
 ) -> SingleAssemblyVerification | CheckAllAssemblyVerification:
     """Verify if object(s) are assembled into the base.
 
     Returns:
         Single object: result ("success"/"failure"), object_name, base_name, assembly_order, position_error_m {x,y,z}, orientation_error_deg {roll,pitch,yaw}, within_tolerance (bool), unassembled_objects (list), error
-        check_all=True: result, base_name, all_assembled (bool), assembled_objects (list), unassembled_objects (list), error"""
-    if check_all and mode == "real":
-        return {"result": "failure", "error": "check_all is not supported in real mode. Verify one object at a time."}
+        check_all=True: result, base_name, all_assembled (bool), assembled_objects (list), unassembled_objects (list), error
+
+    Real-mode check_all is occlusion-tolerant: a part absent from /objects_poses_real
+    that was certified assembled earlier THIS run still counts assembled (DOMAIN
+    INVARIANT: a certified part cannot move until assembly completes, so absent ==
+    occluded, never disturbed). The certification lives in the run_id-scoped state
+    store; the CLI rescues only when the store's run_id matches this run."""
     if check_all:
-        result = _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
+        extra = ""
+        if mode == "real":
+            # Hand the CLI the absolute state path + this run's id so its rescue
+            # reads the SAME file the server writes (cwd-independent) and ignores a
+            # store left over from a different run (fail-closed on mismatch).
+            extra = f" --primitive-state-path \"{_state_path()}\" --run-id \"{_CURRENT_RUN_ID or ''}\""
+        result = _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all{extra}", timeout=30, error_prefix="Verify assembly")
     elif object_name:
         result = _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify assembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
 
-    # In real mode, don't return assembled_objects (only unassembled matters)
-    if mode == "real" and isinstance(result, dict):
-        result.pop("assembled_objects", None)
+    # Real-mode single-object success -> certify the object assembled for this run.
+    # By the domain invariant it stays assembled, so a later check_all can rescue it
+    # once a subsequent part occludes it from perception.
+    if (mode == "real" and not check_all and object_name
+            and isinstance(result, dict) and result.get("result") == "success"):
+        _set_object_state(object_name, assembled=True)
 
     return result
 
@@ -1069,6 +1238,16 @@ Returns:
     current_object_position: {x, y, z} after movement
     current_object_orientation: {quat: {x, y, z, w}} after movement
     error: failure reason (only on failure)"""
+    # Order gate (real-only): block the pick if assembly-order predecessors are not
+    # CERTIFIED seated yet, before any motion.
+    gate_err = _assert_assembly_order(object_name, mode)
+    if gate_err:
+        return gate_err
+    # Picking an object means it is being handled, not seated -> clear its
+    # certification. No-op on a first grasp; under the domain invariant a certified
+    # object is never re-picked, but this keeps the set honest if one ever is.
+    if mode == "real":
+        _set_object_state(object_name, assembled=False)
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     raw = _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
     result = _parse_result(MoveToGraspResult, raw)
@@ -1146,6 +1325,13 @@ Returns:
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
 
+    # Order gate (real-only): an insert is an assembly action -> enforce predecessor
+    # order before motion. place_down is not an assembly seat, so it is not gated.
+    if action == "insert":
+        gate_err = _assert_assembly_order(object_name, mode, base_name)
+        if gate_err:
+            return gate_err
+
     cmd = f"--mode {mode} --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
@@ -1194,6 +1380,12 @@ Returns:
     obj_state = _get_object_state(object_name)
     if obj_state and "orientation" in obj_state:
         current_object_orientation = obj_state["orientation"]
+
+    # Order gate (real-only): rotate-for-assembly is part of seating this object ->
+    # enforce predecessor order before motion.
+    gate_err = _assert_assembly_order(object_name, mode, base_name)
+    if gate_err:
+        return gate_err
 
     # Verify grasp as a separate subprocess before rotate_object to avoid
     # nested DDS participant churn that causes discovery race conditions.
@@ -1254,12 +1446,19 @@ Returns:
     return _parse_result(MoveToSafeHeightResult, raw)
 
 @mcp.tool()
-def clear_primitive_state() -> dict:
-    """Clear the primitive state store. Call at phase start."""
-    p = _state_path()
-    if os.path.exists(p):
-        os.remove(p)
-    return {"result": "success"}
+def clear_primitive_state(run_id: Optional[str] = None) -> dict:
+    """Reset the primitive state store at run/phase start. Atomically writes
+    {run_id, objects:{}} so no stale 'assembled' certification from a prior run
+    survives. Pass the ablation run-dir name as run_id to tie the store to this
+    run (defaults to a fresh id). MUST be called in every real-mode phase onStart
+    — occlusion-tolerant check_all and the order gate trust the store only when a
+    clear has stamped a run_id this run."""
+    global _CURRENT_RUN_ID
+    rid = run_id or _uuid.uuid4().hex
+    with _state_lock():
+        _save_state_unlocked({"run_id": rid, "objects": {}})
+    _CURRENT_RUN_ID = rid
+    return {"result": "success", "run_id": rid}
 
 ## ############################################################################################## ##
 ##
