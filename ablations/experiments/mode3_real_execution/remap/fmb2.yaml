@@ -1,0 +1,49 @@
+name: remap_phase3_gt_fmb2
+description: "Remap Phase-3-only (assembly execution), seeded with GROUND-TRUTH phase-2 output. Agent is framed mode='real'; server_remap (mcp_config_remap.json) redirects execution to sim. LIVE agent run (LLM). fmb2. Bisects mode2_anthropic_fmb2_sim to its 3rd phase, swapping results_resource -> ground_truth_resource so phase 1/2 need not run."
+created: 2026-05-30T00:00:00.000Z
+runs: 1
+models:
+  - provider: anthropic
+    model: claude-haiku-4-5
+settings:
+  mcpConfigPath: /home/aaugus11/Documents/mcp-client-example/mcp_config_remap.json
+  maxIterations: 200
+  clearContextBetweenPhases: true
+systemPrompt: "@insert-prompt:Prompts__system_context"
+phases:
+  - name: Assembly execution
+    tools:
+      deny:
+        - mcp-tools-orchestrator__execute_composed_code
+        - isaac-sim__save_scene_state
+        - isaac-sim__restore_scene_state
+    onStart:
+      # --- sim scene staging (same as mode2 phase 3): scatter the parts for assembly ---
+      - "@tool-exec:isaac-sim__new_stage()"
+      - "@wait:0.5"
+      - "@tool-exec:isaac-sim__quick_start()"
+      - "@tool-exec:ros-mcp-server__move_home(mode='sim')"
+      - "@tool-exec:ros-mcp-server__control_gripper(command='open', mode='sim')"
+      - "@tool-exec:isaac-sim__add_objects(assembly='fmb2')"
+      - "@tool-exec:isaac-sim__setup_pose_publisher()"
+      - "@wait:1"
+      - "@tool-exec:isaac-sim__randomize_object_poses()"
+      # --- entry-point context: GROUND-TRUTH stands in for the agent's phase 1/2 output ---
+      - "@insert-resource:Resources__assembly_objects(assembly_id='fmb_assembly_2')"
+      - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_2', task_type='disassembly')"
+      - "@insert-resource:Resources__ground_truth_resource(assembly_id='fmb_assembly_2', task_type='assembly')"
+    commands:
+      - "@insert-prompt:Prompts__phase_3_perform_assembly(mode='real')"
+      - "@insert-attachment:fmb_assembly2_manual.png"
+    hooks:
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: success
+        run: "@complete-phase"
+      - after: ros-mcp-server__signal_phase_complete
+        whenOutput:
+          phase: 3
+          status: failure
+          requires_response: false
+        run: "@abort"
