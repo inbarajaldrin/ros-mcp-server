@@ -16,6 +16,8 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 #camera
 import time
 import os
+import glob
+import functools
 from datetime import datetime, timedelta
 import io
 import numpy as np
@@ -52,6 +54,150 @@ def _remap_mode(mode: str) -> str:
     if mode == "real":
         return "sim"
     return mode
+
+# ── Assembly-order precondition gate ─────────────────────────────────────────
+# Rejects arm-committing actions on an object whose assembly-order predecessors
+# are not yet seated, BEFORE any motion. The interlocking FMB geometry makes
+# order a hard precondition (a later part blocks access to an earlier slot), so
+# an out-of-order pick/insert wastes the whole run thrashing. The order is NOT
+# something the agent discovers — it is injected via the assembly://{id}/objects
+# resource — so enforcing it removes no measured signal; it only stops waste.
+#
+# Toggle: MCP_ORDER_GATE=0 disables (read at CALL time, so a relaunched server
+# with the env unset/0 truly runs the ungated ablation arm).
+# Scope: sim only — verify_assembly --check-all is unsupported in real mode
+# (queries/verify_assembly.py rejects it), so the seated-set oracle is sim-only.
+# The real-mode path no-ops here and is handled separately.
+def _order_gate_on() -> bool:
+    return os.getenv("MCP_ORDER_GATE", "1") != "0"
+
+@functools.lru_cache(maxsize=1)
+def _load_order_maps_raw():
+    """Load order maps from disk ONCE (gate-independent -> safe to cache).
+
+    Returns (by_base, by_obj, dups, n_files, errors):
+      by_base = {base_name: [object_name in assembly order]}
+      by_obj  = {object_name: base_name}   (base inference from object_name)
+      dups    = sorted object names appearing under >1 base
+      n_files = count of fmb*_assembly.json matched by glob
+      errors  = list of "filename: reason" for files that failed to parse
+
+    Source of truth: ros-mcp-server/ablations/eval_resources/fmb*_assembly.json
+    (same files primitives/shared/config.py reads for gripper widths). This caches
+    only the file load; it makes NO gate-policy decision, so a gate-off first call
+    cannot poison a later gate-on call's fail-closed validation (done in _order_maps)."""
+    by_base = {}
+    by_obj = {}
+    dups = set()
+    errors = []
+    pattern = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "ablations", "eval_resources", "fmb*_assembly.json")
+    files = sorted(glob.glob(pattern))
+    for path in files:
+        try:
+            j = json.loads(open(path).read())
+            base = j["base_name"]
+            names = [s["object_name"] for s in sorted(j["assembly_order"],
+                                                       key=lambda s: s["position"])]
+        except Exception as e:
+            errors.append(f"{os.path.basename(path)}: {e}")
+            continue
+        by_base[base] = names
+        for n in names:
+            if n in by_obj and by_obj[n] != base:
+                dups.add(n)
+            by_obj[n] = base
+    return by_base, by_obj, sorted(dups), len(files), errors
+
+def _order_maps():
+    """Return (by_base, by_obj). Validates FAIL-CLOSED every call when the gate is
+    on (validation is intentionally OUTSIDE the lru_cache so a prior gate-off call
+    cannot skip it). A RuntimeError here is turned by FastMCP into a clean ToolError
+    the agent sees; the server stays up. Fails closed when, with the gate on:
+      - no maps loaded at all, OR
+      - any matched fmb*_assembly.json failed to parse (partial load -> a base could
+        be silently ungated), OR
+      - an object name is ambiguous across assemblies (base inference unsafe)."""
+    by_base, by_obj, dups, n_files, errors = _load_order_maps_raw()
+    if _order_gate_on():
+        if not by_base:
+            raise RuntimeError("MCP_ORDER_GATE on but no assembly order maps loaded "
+                               "from eval_resources/fmb*_assembly.json")
+        if errors:
+            raise RuntimeError(f"MCP_ORDER_GATE on but {len(errors)} of {n_files} "
+                               f"assembly file(s) failed to load (a base could be "
+                               f"silently ungated): {errors}")
+        if dups:
+            raise RuntimeError(f"MCP_ORDER_GATE on but object names are ambiguous "
+                               f"across assemblies (base inference unsafe): {dups}")
+    return by_base, by_obj
+
+_ORDER_UNKNOWN_WARNED = set()  # one-time warn per unknown object (gate-on liveness audit)
+
+def _seated_name(e):
+    """Object name from a verify_assembly assembled_objects element, tolerating
+    {'name':...}, {'object_name':...}, or a bare string. None if no name key."""
+    if isinstance(e, dict):
+        return e.get("name") or e.get("object_name")
+    return e
+
+def _assert_assembly_order(object_name, mode, base_name=None):
+    """Precondition gate. Return a {result:failure,error} dict to BLOCK the action,
+    or None to proceed. No-op when the gate is off or in real mode (real mode
+    verify_assembly --check-all is unsupported, so the seated-set oracle is sim-only).
+
+    base_name is inferred from object_name when not supplied (object names are
+    disjoint across base1/2/3; ambiguity fails closed in _order_maps).
+
+    Decision order:
+      - gate off / real mode            -> None (proceed)
+      - object/base unknown to the maps -> None (proceed) + one-time WARN (audit)
+      - target is order 1               -> None (nothing precedes)
+      - oracle unavailable              -> BLOCK with a distinct 'gate unavailable'
+                                           error (fail CLOSED: never let an
+                                           unverifiable action be recorded as gated)
+      - target already seated           -> None (removal/regrasp, not an assembly pick;
+                                           makes the gate correct in disassembly +
+                                           dirty-scene recovery without a phase flag)
+      - a predecessor not seated        -> BLOCK with an order-violation error
+      - all predecessors seated         -> None (proceed)"""
+    if not _order_gate_on() or _remap_mode(mode) != "sim":
+        return None
+    by_base, by_obj = _order_maps()
+    base = base_name or by_obj.get(object_name)
+    order = by_base.get(base)
+    if not order or object_name not in order:
+        # Unknown object/base -> proceed (liveness), but surface once so a gate-on
+        # run that silently let actions through is auditable in the logs.
+        if object_name not in _ORDER_UNKNOWN_WARNED:
+            _ORDER_UNKNOWN_WARNED.add(object_name)
+            logger.warning(f"[order-gate] object '{object_name}' (base={base}) not in any "
+                           f"assembly order map -- NOT gated. Known bases: {list(by_base.keys())}")
+        return None
+    k = order.index(object_name)
+    if k == 0:
+        return None  # first object, nothing precedes
+    res = _verify_all_assembled(base, "sim")
+    if not isinstance(res, dict) or not isinstance(res.get("assembled_objects"), list):
+        # Oracle unavailable (timeout/wedge/malformed) -> FAIL CLOSED. Blocking
+        # visibly is correct for data integrity: an action we cannot verify must
+        # not be silently recorded as having passed a live gate. Distinct error
+        # so it is never confused with a real order violation.
+        return {"result": "failure",
+                "error": (f"Assembly order gate unavailable: verify_assembly returned no "
+                          f"assembled_objects for base '{base}' (got: {str(res)[:200]}). "
+                          f"Cannot confirm predecessors of '{object_name}' are seated; "
+                          f"action blocked. Retry once the scene/oracle is responsive.")}
+    seated = {n for n in (_seated_name(e) for e in res["assembled_objects"]) if n}
+    if object_name in seated:
+        return None  # already seated -> removal/regrasp, not an assembly pick
+    missing = [o for o in order[:k] if o not in seated]
+    if missing:
+        return {"result": "failure",
+                "error": (f"Assembly order violation: '{object_name}' is order {k + 1} "
+                          f"but predecessor(s) {missing} are not seated yet. Seat "
+                          f"'{missing[0]}' next. Required order for {base}: {order}.")}
+    return None
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -1001,6 +1147,9 @@ Returns:
     current_object_orientation: {quat: {x, y, z, w}} after movement
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_assembly_order(object_name, mode)  # base inferred from object_name
+    if gate_err:
+        return gate_err
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     raw = _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
     return _parse_result(MoveToGraspResult, raw)
@@ -1056,6 +1205,11 @@ Returns:
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
 
+    if action == "insert":
+        gate_err = _assert_assembly_order(object_name, mode, base_name)
+        if gate_err:
+            return gate_err
+
     cmd = f"--mode sim --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
@@ -1094,6 +1248,9 @@ Returns:
     final_object_orientation: {quat: {x, y, z, w}} after rotation
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_assembly_order(object_name, mode, base_name)
+    if gate_err:
+        return gate_err
     # Verify grasp as a separate subprocess before rotate_object to avoid
     # nested DDS participant churn that causes discovery race conditions.
     script_dir = os.path.dirname(os.path.abspath(__file__))
