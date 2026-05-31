@@ -6,6 +6,20 @@ from pathlib import Path
 import json
 import base64
 from utils.websocket_manager import WebSocketManager
+# Observe-only telemetry (Track B baseline). Guarded so an import problem can
+# never break the server. No-op unless MCP_CLIENT_OUTPUT_DIR is set (i.e. in a run).
+try:
+    from primitives.shared import instrument as _instr
+except Exception:  # pragma: no cover - defensive
+    class _InstrStub:
+        @staticmethod
+        def timed_primitive(fn):
+            return fn
+
+        @staticmethod
+        def child_env():
+            return {}
+    _instr = _InstrStub()
 import subprocess
 import sys
 import logging
@@ -604,6 +618,7 @@ import sys
     except Exception as e:
         return {"output": f"Error: Failed to execute Python code: {str(e)}"}
 
+@_instr.timed_primitive
 def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
     """Helper function to run primitive scripts and return raw output.
     
@@ -635,7 +650,11 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
         env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
     else:
         env['PYTHONPATH'] = script_dir
-    
+
+    # Observe-only: push INSTRUMENT_CALL_ID + INSTRUMENT_SIDECAR into the subprocess
+    # so primitive/IK telemetry is tagged with this call. No-op when disabled.
+    env.update(_instr.child_env())
+
     # Use sys.executable to ensure we use the same Python interpreter as the MCP server
     # This preserves conda/virtualenv environment and ROS2 DDS configuration
     import sys
@@ -836,6 +855,34 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
         return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
     except Exception as e:
         return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+
+
+def _snapshot_robot_state(command_args):
+    """Observe-only: read joints + gripper + EE pose for the before/after snapshot.
+
+    Registered as instrument's snapshot hook so the timing decorator can bracket
+    every tool call with robot state WITHOUT touching the primitives. Returns the
+    parsed dict or None (fail-loud — instrument records "MISSING" on None).
+    Reads the mode from the primitive's --mode arg; defaults to sim.
+    """
+    try:
+        m = re.search(r"--mode\s+(\w+)", command_args or "")
+        mode = (m.group(1).strip().lower() if m else "sim")
+        if mode not in ("sim", "real"):
+            mode = "sim"
+        raw = _run_query("get_robot_state.py", f"--mode {mode}", timeout=6, error_prefix="Robot state")
+        if isinstance(raw, dict) and "joints_rad" in raw:
+            return raw
+        return None
+    except Exception:
+        return None
+
+
+# Wire the snapshot hook into the observe-only instrument (no-op if disabled).
+try:
+    _instr.register_snapshot_hook(_snapshot_robot_state)
+except Exception:
+    pass
 
 
 ## ############################################################################################## ##

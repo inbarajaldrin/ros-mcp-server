@@ -10,6 +10,26 @@ Reference: Biagiotti & Melchiorri, "Trajectory Planning for Automatic Machines
 and Robots", Springer 2008, Ch. 3 — sinusoidal jerk variant and min-jerk.
 """
 
+# TODO(offline-path-optimization — EXECUTION phase only):
+#   During EXECUTION (replay / Phase 3) the FULL primitive sequence is known ahead of time,
+#   so the per-primitive "decelerate to zero velocity, then re-accelerate from rest"
+#   transitions between moves can be merged into continuous, blended motion.
+#   Measured 2026-05-31 on a replayed fmb2 assembly: only ~44% of primitive wall-clock is
+#   actual arm motion; ~56% is the in-between (subprocess spawn + subscription-ready + IK
+#   solve + gripper settle + the stop/restart between every move). The arm motion itself is
+#   already near its safe limits — the remaining win is removing the in-between, in execution.
+#
+#   DO NOT merge during DISCOVERY: the discrete stop-between-steps is a REQUIRED feature there
+#   (the agent observes -> thinks -> decides the next primitive between steps). Execution only.
+#
+#   Approach: take the known sequence's waypoints; keep HARD zero-velocity stops ONLY at the
+#   contact-sensitive points (gripper close on grasp, insert/place_down contact, release), and
+#   blend the free-space transitions (retract -> traverse -> pre-grasp / pre-insert) into one
+#   (or few) continuous FollowJointTrajectory goals with nonzero internal-waypoint velocities.
+#   The UR scaled_joint_trajectory_controller only interpolates the points it is given, so the
+#   merge must be computed host/server-side (this module generates the profiles to feed it).
+#   Prereq: build the deferred intra-primitive timestamps (trajectory send -> action result)
+#   to measure the exact mergeable in-between before/after. See Track-B session log 2026-05-31.
 import numpy as np
 
 

@@ -219,12 +219,35 @@ def get_object_yaw_bias_nm(object_name: str) -> float:
 # UR5e motion limits — two independent constraints, compute_duration takes the max.
 # Cartesian limits govern translation speed (reference: safe_height ↔ table = 0.32m → 5.0s).
 # Joint limits govern rotation speed independently (2 rad rotation → 5.0s).
-JOINT_VEL_LIMIT = 0.80      # rad/s  (hardware max: pi rad/s)
-JOINT_ACCEL_LIMIT = 0.80    # rad/s²
-CART_VEL_LIMIT = 0.0798     # m/s    (hardware max: 1.0 m/s)
-CART_ACCEL_LIMIT = 0.0798   # m/s²
+# --- TIMING OPTIMIZATION SWEEP (2026-05-30) — baseline-safe values for rollback:
+#       JOINT_VEL=0.80 JOINT_ACCEL=0.80 CART_VEL=0.0798 CART_ACCEL=0.0798 MIN_DURATION=2.5
+#     Stage 1 = 2x VELOCITY only (accel UNCHANGED → unchanged accel/decel ramps,
+#     near-zero added slip risk; helps the long velocity-limited transport moves ~20%).
+# NOTE: timing sweep 2026-05-30 found PROVEN-SAFE faster config = vel 2x + accel 1.5x
+#   (JOINT_VEL 1.60 / JOINT_ACCEL 1.20 / CART_VEL 0.1596 / CART_ACCEL 0.1197) → fmb2 4/4, ~6% faster.
+#   2x accel (JOINT 1.60 / CART 0.1596) FAILS (u_green place_down). Reverted to baseline pending approval.
+# Global limits = proven-safe vel 2x / accel 1.5x (validated fmb2 4/4 incl. place_down).
+# move_to_grasp overrides these with FAST_FREE_MOVE (empty-gripper, faster).
+JOINT_VEL_LIMIT = 1.60      # rad/s  (hardware max: pi rad/s)  [vel 2x]
+JOINT_ACCEL_LIMIT = 1.20    # rad/s²                           [accel 1.5x]
+CART_VEL_LIMIT = 0.1596     # m/s    (hardware max: 1.0 m/s)   [vel 2x]
+CART_ACCEL_LIMIT = 0.1197   # m/s²                             [accel 1.5x]
 MIN_DURATION = 2.5          # seconds — floor to avoid jerky micro-moves
 MAX_DURATION = 10.0         # seconds — cap for very long moves
+
+# Per-move speed profile (2026-05-30). compute_duration() accepts per-call
+# limit overrides, so a move that carries NO grasped part into contact can run
+# far faster than the conservative global defaults WITHOUT touching the
+# contact-sensitive moves (place_down/insert). Pass via **FAST_FREE_MOVE.
+# Use ONLY for empty-gripper / free-space moves (move_to_grasp approach+retreat,
+# free retracts) — never for place_down/insert (proven to fail at 2x global accel).
+FAST_FREE_MOVE = dict(
+    cart_vel=0.30,     # m/s   (was 0.15 in move_to_grasp; hw max 1.0)
+    cart_accel=0.30,   # m/s²  (was default 0.0798 — this was the binding limit)
+    joint_vel=2.40,    # rad/s (was default 0.80; hw max ~3.14)
+    joint_accel=2.40,  # rad/s²(was default 0.80)
+    min_duration=1.0,  # lower floor for short empty-gripper approaches
+)
 
 HOME_POSE = [0.065, -0.385, 0.481, 0, 180, 0]  # EE tool frame
 PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame

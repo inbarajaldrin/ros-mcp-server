@@ -15,6 +15,22 @@ from scipy.spatial.transform import Rotation as Rot
 
 from primitives.shared.config import DH_PARAMS as dh_params
 
+# Observe-only telemetry (Track B baseline). Guarded so an instrument import
+# problem can never break IK. No-op unless INSTRUMENT_SIDECAR is set in the env.
+try:
+    from primitives.shared import instrument as _instr
+except Exception:  # pragma: no cover - defensive
+    class _InstrStub:
+        @staticmethod
+        def now():
+            import time as _t
+            return _t.monotonic()
+
+        @staticmethod
+        def record(*a, **k):
+            pass
+    _instr = _InstrStub()
+
 
 # ---------------------------------------------------------------------------
 # Low-level kinematics
@@ -137,6 +153,10 @@ class IKSolver:
         self._solver_options = self.config.solver_options if self.config.solver_options is not None else _DEFAULT_SOLVER_OPTIONS
         self._dh_params = self.config.dh_params or dh_params
         self._use_cached_objective = self._objective_fn is ik_objective_quaternion
+        # Observe-only IK telemetry counters (reset per solve/solve_collect).
+        self._ik_single = 0   # number of _solve_single (scipy.minimize) invocations
+        self._ik_nfev = 0     # cumulative scipy objective evaluations
+        self._ik_nit = 0      # cumulative scipy iterations
 
     def _solve_single(
         self,
@@ -167,6 +187,14 @@ class IKSolver:
             method='L-BFGS-B', bounds=self._joint_bounds,
             options=self._solver_options,
         )
+
+        # Observe-only: accumulate IK math cost (never affects control flow).
+        try:
+            self._ik_single += 1
+            self._ik_nfev += int(getattr(result, "nfev", 0) or 0)
+            self._ik_nit += int(getattr(result, "nit", 0) or 0)
+        except Exception:
+            pass
 
         # Use result.fun directly instead of re-evaluating the objective
         cost = float(result.fun)
@@ -209,6 +237,62 @@ class IKSolver:
 
         return False
 
+    def _emit_ik(self, method, t0, n_seeds, perturbations, outcome, won,
+                 target_pose=None, seeds=None, n_results=None, override_best=None):
+        """Emit one observe-only IK telemetry record (incl. current->target). Never raises.
+
+        override_best=(joint_angles, cost) supplies the solution for solve_collect,
+        which collects results without populating self._best_result.
+        """
+        try:
+            if override_best is not None:
+                _ob_joints, _ob_cost = override_best
+                bc = float(_ob_cost)
+                result_joints = [float(x) for x in _ob_joints]
+                found = True
+            else:
+                found = self._best_result is not None
+                bc = self._best_result.cost if found else None
+                # current->target: IK input (seed/current + target pose) and output (solution joints)
+                result_joints = (
+                    [float(x) for x in self._best_result.joint_angles] if found else None
+                )
+            tgt_pos = tgt_quat = seed_used = None
+            if target_pose is not None:
+                try:
+                    tgt_pos = [float(x) for x in target_pose[:3, 3]]
+                    tgt_quat = [float(x) for x in Rot.from_matrix(target_pose[:3, :3]).as_quat()]
+                except Exception:
+                    pass
+            if seeds is not None and won is not None and 0 <= won < len(seeds):
+                try:
+                    seed_used = [float(x) for x in seeds[won]]
+                except Exception:
+                    pass
+            _instr.record(
+                "ik",
+                method=method,
+                wall_s=round(_instr.now() - t0, 5),
+                n_seeds=int(n_seeds),
+                perturbations=int(perturbations),
+                n_solve_single=int(self._ik_single),
+                nfev=int(self._ik_nfev),
+                nit=int(self._ik_nit),
+                best_cost=(float(bc) if bc is not None else None),
+                found=found,
+                outcome=outcome,
+                winning_seed=int(won),
+                n_results=(int(n_results) if n_results is not None else None),
+                target_pos=tgt_pos,
+                target_quat=tgt_quat,
+                seed_used=seed_used,
+                result_joints=result_joints,
+                cost_threshold=float(self.config.cost_threshold),
+                acceptable_cost=float(self.config.acceptable_cost),
+            )
+        except Exception:
+            pass
+
     def solve(
         self,
         seeds: List[np.ndarray],
@@ -231,21 +315,33 @@ class IKSolver:
             Best joint angles if found, None otherwise.
         """
         self._best_result = None
+        self._ik_single = self._ik_nfev = self._ik_nit = 0
+        _t0 = _instr.now()
+        _outcome = "failed"
+        _won = -1
 
-        for seed in seeds:
-            for p in range(perturbations):
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[0, 3] += p * dx
+        try:
+            for _si, seed in enumerate(seeds):
+                for p in range(perturbations):
+                    perturbed_pose = target_pose.copy()
+                    perturbed_pose[0, 3] += p * dx
 
-                ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
-                if ik_result is not None:
-                    terminated = self._update_best(ik_result)
-                    if terminated:
-                        return self._best_result.joint_angles
+                    ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
+                    if ik_result is not None:
+                        terminated = self._update_best(ik_result)
+                        if self._best_result is ik_result:
+                            _won = _si
+                        if terminated:
+                            _outcome = "early_term"
+                            return self._best_result.joint_angles
 
-        if self._best_result is not None:
-            return self._best_result.joint_angles
-        return None
+            if self._best_result is not None:
+                _outcome = "acceptable"
+                return self._best_result.joint_angles
+            return None
+        finally:
+            self._emit_ik("solve", _t0, len(seeds), perturbations, _outcome, _won,
+                          target_pose=target_pose, seeds=seeds)
 
     def solve_collect(
         self,
@@ -279,26 +375,37 @@ class IKSolver:
             List of (joint_angles, cost) tuples for all valid solutions.
         """
         self._best_result = None
+        self._ik_single = self._ik_nfev = self._ik_nit = 0
+        _t0 = _instr.now()
         results = []
         consecutive_failures = 0
 
-        for seed in seeds:
-            for p in range(perturbation_start, perturbations):
-                perturbed_pose = target_pose.copy()
-                perturbed_pose[0, 3] += p * dx
+        try:
+            for seed in seeds:
+                for p in range(perturbation_start, perturbations):
+                    perturbed_pose = target_pose.copy()
+                    perturbed_pose[0, 3] += p * dx
 
-                ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
-                if ik_result is not None and not ik_result.has_collision and ik_result.cost < self.config.acceptable_cost:
-                    results.append((ik_result.joint_angles, ik_result.cost))
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if (max_consecutive_collisions > 0
-                            and consecutive_failures >= max_consecutive_collisions
-                            and len(results) == 0):
-                        return results
+                    ik_result = self._solve_single(seed, perturbed_pose, collision_checker)
+                    if ik_result is not None and not ik_result.has_collision and ik_result.cost < self.config.acceptable_cost:
+                        results.append((ik_result.joint_angles, ik_result.cost))
+                        consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
+                        if (max_consecutive_collisions > 0
+                                and consecutive_failures >= max_consecutive_collisions
+                                and len(results) == 0):
+                            return results
 
-        return results
+            return results
+        finally:
+            _ob = min(results, key=lambda r: r[1]) if results else None
+            self._emit_ik(
+                "solve_collect", _t0, len(seeds), perturbations,
+                ("acceptable" if results else "failed"), -1,
+                target_pose=target_pose, seeds=seeds, n_results=len(results),
+                override_best=_ob,
+            )
 
 
 # ---------------------------------------------------------------------------

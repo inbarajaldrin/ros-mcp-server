@@ -46,7 +46,7 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
-from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, FAST_FREE_MOVE
 from queries.get_scene_info import load_grasp_validity_data
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
@@ -1498,8 +1498,7 @@ class DirectObjectMove(Node):
             cart_dist = float(np.linalg.norm(flange_target - current_flange_fk))
             total_duration = compute_duration(
                 joint_distance=joint_dist, cartesian_distance=cart_dist,
-                cart_vel=0.15,  # 150 mm/s — 2× default (move_to_grasp moves are not insertion-precise)
-                profile='s_curve'
+                profile='s_curve', **FAST_FREE_MOVE,  # empty-gripper move: fast vel+accel, no part held → no slip risk
             )
             self.get_logger().info(
                 f"{step_label} duration: {total_duration:.2f}s "
@@ -1582,8 +1581,7 @@ class DirectObjectMove(Node):
             movement_duration = compute_duration(
                 joint_distance=joint_dist,
                 cartesian_distance=cart_dist,
-                cart_vel=0.15,
-                profile='s_curve',
+                profile='s_curve', **FAST_FREE_MOVE,  # empty-gripper move: fast vel+accel, no part held → no slip risk
             )
             self.get_logger().info(
                 f"Step 1 duration: {movement_duration:.2f}s "
@@ -1772,8 +1770,7 @@ class DirectObjectMove(Node):
             cart_dist = float(np.linalg.norm(target_flange - fk_pos))
             total_duration = compute_duration(
                 joint_distance=joint_dist, cartesian_distance=cart_dist,
-                cart_vel=0.15,  # 150 mm/s — 2× default (move_to_grasp moves are not insertion-precise)
-                profile='s_curve'
+                profile='s_curve', **FAST_FREE_MOVE,  # empty-gripper move: fast vel+accel, no part held → no slip risk
             )
             self.get_logger().info(
                 f"Retreat duration: {total_duration:.2f}s "
