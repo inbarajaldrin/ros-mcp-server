@@ -148,6 +148,45 @@ def _order_maps():
 
 _ORDER_UNKNOWN_WARNED = set()  # one-time warn per unknown object (gate-on liveness audit)
 
+# --- phase-aware order gate: task phase state (added 2026-05-31) ---
+# None until the host sets it via set_task_phase() at each phase onStart. The server is ONE
+# persistent process across all 3 phases, so the host must set it per phase; it does not auto-reset.
+# FAIL-CLOSED: gated known-object sim actions are BLOCKED while the phase is unset (a forgotten
+# set_task_phase must never silently ungate). gate-off bypasses the phase requirement entirely.
+_TASK_PHASE = None
+_VALID_PHASES = ("assembly", "disassembly")
+
+
+def _get_task_phase():
+    return _TASK_PHASE
+
+
+def _still_assembled_set(res, order):
+    """Objects still on the base, from a verify_disassembly(check_all) result. Returns a set, or
+    None when the result is not trustworthy (-> caller fails closed). GPT-hardened:
+      - require a dict with a usable list; distinguish missing key from a present (possibly empty) list
+      - validate the reported universe is a SUBSET of the known order (an unknown/aliased name means
+        naming drift between the verifier and the *_assembly JSON -> untrustworthy -> None)
+    Preference: explicit 'still_assembled_objects'; else full order minus 'disassembled_objects'."""
+    if not isinstance(res, dict):
+        return None
+    order_set = set(order)
+    s = res.get("still_assembled_objects")
+    if isinstance(s, list):
+        names = {_seated_name(e) for e in s if _seated_name(e)}
+        if not names.issubset(order_set):
+            return None  # verifier returned a name we don't know -> naming drift, fail closed
+        return names
+    d = res.get("disassembled_objects")
+    if isinstance(d, list):
+        removed = {_seated_name(e) for e in d if _seated_name(e)}
+        if not removed.issubset(order_set):
+            return None  # unknown removed name -> drift, fail closed
+        return order_set - removed
+    return None  # neither key present as a list -> oracle malformed -> fail closed
+
+
+
 def _seated_name(e):
     """Object name from a verify_assembly assembled_objects element, tolerating
     {'name':...}, {'object_name':...}, or a bare string. None if no name key."""
@@ -156,62 +195,90 @@ def _seated_name(e):
     return e
 
 def _assert_assembly_order(object_name, mode, base_name=None):
-    """Precondition gate. Return a {result:failure,error} dict to BLOCK the action,
-    or None to proceed. No-op when the gate is off or in real mode (real mode
-    verify_assembly --check-all is unsupported, so the seated-set oracle is sim-only).
+    """Phase-aware precondition gate. Return {result:failure,error} to BLOCK the action, or None to
+    proceed. No-op when the gate is off or in real mode (the verify oracles are sim-only).
 
-    base_name is inferred from object_name when not supplied (object names are
-    disjoint across base1/2/3; ambiguity fails closed in _order_maps).
+    Phase is set by the host via set_task_phase() at each phase onStart (the server is one persistent
+    process across all 3 phases). FAIL-CLOSED: when the gate is on and the target is a KNOWN gated
+    object but no phase has been set, BLOCK -- a forgotten phase must not silently ungate. gate-off
+    bypasses the phase requirement entirely (handled by the first return below). Unknown objects
+    proceed (liveness), surfaced once for audit.
 
-    Decision order:
-      - gate off / real mode            -> None (proceed)
-      - object/base unknown to the maps -> None (proceed) + one-time WARN (audit)
-      - target is order 1               -> None (nothing precedes)
-      - oracle unavailable              -> BLOCK with a distinct 'gate unavailable'
-                                           error (fail CLOSED: never let an
-                                           unverifiable action be recorded as gated)
-      - target already seated           -> None (removal/regrasp, not an assembly pick;
-                                           makes the gate correct in disassembly +
-                                           dirty-scene recovery without a phase flag)
-      - a predecessor not seated        -> BLOCK with an order-violation error
-      - all predecessors seated         -> None (proceed)"""
+    base_name is inferred from object_name when not supplied (names are disjoint across base1/2/3).
+
+    assembly phase    -- block insert/grasp of an object whose assembly-order predecessors are not
+                         seated yet (oracle = verify_assembly check_all). [behavior preserved]
+    disassembly phase -- block removal of any object that is not the next-to-remove, where removal
+                         order is the reverse of assembly order (protocol order, NOT a physical-
+                         obstruction claim) and "still on the base" comes from
+                         verify_disassembly(check_all).still_assembled_objects. Fail-closed when the
+                         still-assembled set is not trustworthy.
+    """
     if not _order_gate_on() or _remap_mode(mode) != "sim":
-        return None
+        return None  # gate-off / real mode bypasses EVERYTHING incl. the phase requirement
     by_base, by_obj = _order_maps()
     base = base_name or by_obj.get(object_name)
     order = by_base.get(base)
     if not order or object_name not in order:
-        # Unknown object/base -> proceed (liveness), but surface once so a gate-on
-        # run that silently let actions through is auditable in the logs.
+        # Unknown object/base -> proceed (liveness), but surface once so a gate-on run that silently
+        # let actions through is auditable in the logs.
         if object_name not in _ORDER_UNKNOWN_WARNED:
             _ORDER_UNKNOWN_WARNED.add(object_name)
             logger.warning(f"[order-gate] object '{object_name}' (base={base}) not in any "
                            f"assembly order map -- NOT gated. Known bases: {list(by_base.keys())}")
         return None
-    k = order.index(object_name)
-    if k == 0:
-        return None  # first object, nothing precedes
-    res = _verify_all_assembled(base, "sim")
-    if not isinstance(res, dict) or not isinstance(res.get("assembled_objects"), list):
-        # Oracle unavailable (timeout/wedge/malformed) -> FAIL CLOSED. Blocking
-        # visibly is correct for data integrity: an action we cannot verify must
-        # not be silently recorded as having passed a live gate. Distinct error
-        # so it is never confused with a real order violation.
+    phase = _get_task_phase()
+    if phase is None:
+        # FAIL-CLOSED: known gated object but the host never set the phase (gate is on).
         return {"result": "failure",
-                "error": (f"Assembly order gate unavailable: verify_assembly returned no "
-                          f"assembled_objects for base '{base}' (got: {str(res)[:200]}). "
-                          f"Cannot confirm predecessors of '{object_name}' are seated; "
-                          f"action blocked. Retry once the scene/oracle is responsive.")}
-    seated = {n for n in (_seated_name(e) for e in res["assembled_objects"]) if n}
-    if object_name in seated:
-        return None  # already seated -> removal/regrasp, not an assembly pick
-    missing = [o for o in order[:k] if o not in seated]
-    if missing:
+                "error": (f"Order gate: task phase not set. The host must call "
+                          f"set_task_phase(phase='assembly'|'disassembly') in the phase onStart "
+                          f"before gated actions on '{object_name}'. Action blocked (fail-closed).")}
+    if phase == "assembly":
+        k = order.index(object_name)
+        if k == 0:
+            return None  # first object, nothing precedes
+        res = _verify_all_assembled(base, "sim")
+        if not isinstance(res, dict) or not isinstance(res.get("assembled_objects"), list):
+            return {"result": "failure",
+                    "error": (f"Assembly order gate unavailable: verify_assembly returned no "
+                              f"assembled_objects for base '{base}' (got: {str(res)[:200]}). "
+                              f"Cannot confirm predecessors of '{object_name}' are seated; "
+                              f"action blocked. Retry once the scene/oracle is responsive.")}
+        seated = {n for n in (_seated_name(e) for e in res["assembled_objects"]) if n}
+        if object_name in seated:
+            return None  # already seated -> removal/regrasp, not an assembly pick
+        missing = [o for o in order[:k] if o not in seated]
+        if missing:
+            return {"result": "failure",
+                    "error": (f"Assembly order violation: '{object_name}' is order {k + 1} "
+                              f"but predecessor(s) {missing} are not seated yet. Seat "
+                              f"'{missing[0]}' next. Required order for {base}: {order}.")}
+        return None
+    if phase == "disassembly":
+        removal = list(reversed(order))  # protocol removal order = reverse of assembly order
+        res = _verify_all_disassembled(base, "sim")
+        still = _still_assembled_set(res, order)
+        if still is None:
+            # oracle malformed / naming drift / neither list present -> fail closed (GPT #1,#2)
+            return {"result": "failure",
+                    "error": (f"Disassembly order gate unavailable: verify_disassembly returned no "
+                              f"trustworthy still_assembled set for base '{base}' (got: "
+                              f"{str(res)[:200]}). Action on '{object_name}' blocked (fail-closed).")}
+        if object_name not in still:
+            return None  # not currently on the base -> already removed / scatter; nothing to gate
+        next_rm = next((o for o in removal if o in still), None)
+        if object_name == next_rm:
+            return None
         return {"result": "failure",
-                "error": (f"Assembly order violation: '{object_name}' is order {k + 1} "
-                          f"but predecessor(s) {missing} are not seated yet. Seat "
-                          f"'{missing[0]}' next. Required order for {base}: {order}.")}
-    return None
+                "error": (f"Disassembly order violation: '{object_name}' cannot be removed yet; "
+                          f"remove '{next_rm}' next. Required removal (protocol) order for "
+                          f"{base}: {removal}.")}
+    # unknown phase value -> fail closed
+    return {"result": "failure",
+            "error": (f"Order gate: unknown task phase '{phase}'. Expected 'assembly' or "
+                      f"'disassembly'.")}
+
 
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
@@ -1554,6 +1621,70 @@ async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_scr
             "message": f"Elicitation failed: {error_msg}",
             "error": str(e)
         }
+
+@mcp.tool()
+def set_task_phase(phase: str) -> Dict[str, Any]:
+    """Host-only: set the current task phase for the phase-aware order gate ('assembly' or
+    'disassembly'). Injected by each phase onStart via
+    @tool-exec:ros-mcp-server__set_task_phase(phase=...). NOT part of the agent tool surface
+    (tool-states marks it false; the host @tool-exec path bypasses tool-states)."""
+    global _TASK_PHASE
+    p = (phase or "").strip().lower()
+    if p not in _VALID_PHASES:
+        return {"result": "failure", "error": f"invalid phase '{phase}'; expected one of {list(_VALID_PHASES)}"}
+    _TASK_PHASE = p
+    logger.info(f"[order-gate] set_task_phase -> '{p}' (pid={os.getpid()}, gate_on={_order_gate_on()})")
+    return {"result": "success", "phase": p}
+
+
+def _assert_order_config_consistent():
+    """Startup config check (GPT-hardened). For EVERY known assembly base, require a matching
+    fmb*_disassembly.json that equals reverse(assembly), and vice-versa. When the gate is ON, any
+    missing/inconsistent file fails CLOSED (raise) so a base can never run unguarded in disassembly
+    or under drifted order. When the gate is OFF, only warn (never crash an ungated assembly run).
+    Returns the list of problems."""
+    import glob as _glob, json as _json
+    by_base, _ = _order_maps()  # assembly side (already fail-closed-validated when gate on)
+    eval_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ablations", "eval_resources")
+    dis_by_base = {}
+    problems = []
+    for path in sorted(_glob.glob(os.path.join(eval_dir, "fmb*_disassembly.json"))):
+        try:
+            data = _json.load(open(path))
+            dis_by_base[data["base_name"]] = [o["object_name"]
+                                              for o in sorted(data["disassembly_order"],
+                                                              key=lambda o: o["position"])]
+        except Exception as e:
+            problems.append(f"{os.path.basename(path)}: load error {e}")
+    for base, asm in by_base.items():
+        dis = dis_by_base.get(base)
+        if dis is None:
+            problems.append(f"{base}: assembly map present but NO disassembly file")
+        elif dis != list(reversed(asm)):
+            problems.append(f"{base}: disassembly {dis} != reverse(assembly) {list(reversed(asm))}")
+    for base in dis_by_base:
+        if base not in by_base:
+            problems.append(f"{base}: disassembly file present but NO assembly map")
+    if problems and _order_gate_on():
+        raise RuntimeError("[order-gate] config consistency check FAILED (fail-closed): "
+                           + " ; ".join(problems))
+    if problems:
+        logger.warning("[order-gate] config issues (gate off, not enforced): " + " ; ".join(problems))
+    return problems
+
+
+# Startup observability + fail-closed config check (runs at import; the server hosts the gate).
+try:
+    _bb, _ = _order_maps()
+    logger.info(f"[order-gate] file={os.path.abspath(__file__)} "
+                f"MCP_ORDER_GATE={'on' if _order_gate_on() else 'off'} "
+                f"bases={list(_bb.keys())} task_phase={_TASK_PHASE}")
+    _assert_order_config_consistent()
+    logger.info("[order-gate] assembly/disassembly config consistency OK")
+except Exception as _e:
+    logger.error(f"[order-gate] startup config check error: {_e}")
+    raise
+
 
 if __name__ == "__main__":
     # Start services BEFORE MCP server runs (outside async context)
