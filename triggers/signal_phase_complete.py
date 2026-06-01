@@ -208,7 +208,7 @@ def _handle_phase_2(
 
     # Gate 0: check for unresolved orchestrator replay rejections
     from triggers.signal_verify_results import (
-        get_unresolved_rejections, has_exhausted_object
+        get_unresolved_rejections, has_exhausted_object, mark_reprompted
     )
 
     exhausted = has_exhausted_object()
@@ -225,7 +225,33 @@ def _handle_phase_2(
 
     unresolved = get_unresolved_rejections()
     if unresolved:
+        # First-failure @switch (author decision 2026-06-01, option (a)): the assembly is
+        # physically complete (sim_passed) but a logged sequence is STILL wrong after the
+        # model was already re-prompted to fix it. That is the defining "completed-but-logged-
+        # wrong, can't self-correct" case → switch to the next model KEEPING CONTEXT (it sees
+        # the assembled scene + the rejected sequence and only needs to re-log), rather than
+        # re-prompting the same model forever or escalating (which redoes the phase fresh).
+        # Decoupled from the 3-strike `attempts` counter (see track-b-switch-gate-scope.md).
+        # Toggle: MCP_SWITCH_ON_UNFIXABLE_LOG=0 reverts to re-prompt-only (3-strike path).
+        switch_on_unfixable = os.getenv("MCP_SWITCH_ON_UNFIXABLE_LOG", "1") != "0"
+        already_reprompted = [n for n, s in unresolved.items() if s.get("reprompted")]
+        if switch_on_unfixable and sim_passed and already_reprompted:
+            return {
+                "status": "failure",
+                "requires_response": False,
+                "action": "switch",
+                "message": (
+                    f"Assembly is physically complete but the logged tool_sequence for "
+                    f"{already_reprompted} is still incorrect after a re-prompt. This model "
+                    f"cannot self-correct its log; switching to the next model to fix the "
+                    f"logs (keeping context, assembly retained)."
+                ),
+            }
+        # First time we see these unresolved: give the SAME model one chance to fix, and mark
+        # it so a repeat lands in the @switch path above.
         objects = list(unresolved.keys())
+        for name in objects:
+            mark_reprompted(name)
         details = "; ".join(
             f"'{name}' (attempt {s['attempts']}, failed at: {s.get('last_failed_step', '?')})"
             for name, s in unresolved.items()
