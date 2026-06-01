@@ -1566,7 +1566,8 @@ async def signal_operator(
     if mode == "sim":
         return {
             "result": "success",
-            "action": "proceed",
+            "action": "abort",
+            "feedback": "auto-abort: no operator in sim/ablation mode",
             "reason": reason,
         }
 
