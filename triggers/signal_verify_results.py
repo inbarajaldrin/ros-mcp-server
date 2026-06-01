@@ -72,6 +72,19 @@ def clear_rejection(object_name: str):
         _save_rejection(data)
 
 
+def mark_reprompted(object_name: str):
+    """Mark that the agent has already been re-prompted to fix this object's log.
+    Used by the first-failure @switch path: an object still unresolved AFTER a
+    re-prompt means this model cannot self-correct its own log → switch model
+    (keep context) rather than re-prompt the same model indefinitely. Survives
+    record_rejection (which preserves the existing record) so the flag persists
+    across the fix-and-resignal cycle even if `attempts` does not climb."""
+    data = _load_rejection()
+    rec = data["failed_objects"].setdefault(object_name, {"attempts": 0, "resolved": False})
+    rec["reprompted"] = True
+    _save_rejection(data)
+
+
 def get_unresolved_rejections() -> Dict:
     """Return unresolved rejections {object_name: {attempts, last_failed_step}}."""
     data = _load_rejection()

@@ -1511,6 +1511,11 @@ async def signal_operator(
         action: operator decision ("proceed" or "abort")
         reason: the reason tag provided
         feedback: optional operator feedback text"""
+    # Remap real->sim BEFORE the sim auto-abort guard. On this (Remap) server the
+    # agent operates in mode='real' (the phase-3 prompt is mode='real') and the
+    # server remaps execution to sim; the guard must key on the EFFECTIVE mode, or
+    # a headless ablation run blocks forever on the operator elicitation below.
+    mode = _remap_mode(mode)
     if mode == "sim":
         return {
             "result": "success",
