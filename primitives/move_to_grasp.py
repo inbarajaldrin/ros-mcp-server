@@ -1120,7 +1120,12 @@ class DirectObjectMove(Node):
                 # Create face-down quaternion with grasp point yaw (QUATERNION-BASED, no gimbal lock)
                 target_quaternion = _face_down_quaternion(grasp_point_yaw)
 
-                # --- v2 grasp-candidate override (env-gated, no fallback) ---
+                # --- v2 grasp-candidate feed-in (env-gated, no fallback) ---
+                # Feeds the candidate THROUGH the canonical/symmetry match:
+                # canonical_quat (already computed above) is the symmetry-snapped
+                # object orientation. Compose candidate on top of it so fold-symmetry
+                # is respected. For direction_id=1 (q_cand=(0,1,0,0)), this reproduces
+                # the baseline target exactly (diag=0.00 for all objects incl. hex pegs).
                 import os as _os
                 if _os.environ.get('MOVE_TO_GRASP_USE_CANDIDATE') == '1':
                     try:
@@ -1134,23 +1139,20 @@ class DirectObjectMove(Node):
                         _c = next((c for c in _cands if c.get('direction_id') == 1), _cands[0])
                         _qc = _c['approach_quaternion']
                         _q_cand = _R.from_quat([_qc['x'], _qc['y'], _qc['z'], _qc['w']])
-                        _q_obj = _R.from_quat(grasp_point_quat)
-                        # q_world = q_obj * q_cand IS face_down(yaw) on flat objects (proven).
-                        # q_world has form (x,y,~0,~0) where x=-sin(yaw/2), y=cos(yaw/2).
-                        # Extract yaw via atan2(-x,y) (robust, no gimbal singularity),
-                        # then rebuild as face_down so downstream 2*atan2(qz,qw) works.
-                        _q_world = _q_obj * _q_cand
-                        _qw = _q_world.as_quat()
-                        _cand_yaw = _math.degrees(2.0 * _math.atan2(-_qw[0], _qw[1]))
+                        # Feed-in: use canonical_quat (post symmetry-match), NOT raw grasp_point_quat
+                        _q_canonical = _R.from_quat(canonical_quat)
+                        _q_grasp = _q_canonical * _q_cand
+                        _qg = _q_grasp.as_quat()
+                        _cand_yaw = _math.degrees(2.0 * _math.atan2(-_qg[0], _qg[1]))
                         _cand_target = _face_down_quaternion(_cand_yaw)
-                        # Diagnostic: log divergence from canonical-matched target
+                        # Diagnostic: divergence from baseline (should be ~0.00 for dir_id=1)
                         _d = (_R.from_quat(_cand_target).inv() * _R.from_quat(target_quaternion)).magnitude() * 57.2958
                         target_quaternion = _cand_target
-                        self.get_logger().info(f"[CANDIDATE-WIRE] using candidate-derived target yaw={_cand_yaw:.1f} (diag: {_d:.2f} deg from canonical)")
+                        self.get_logger().info(f"[CANDIDATE-WIRE] feed-in yaw={_cand_yaw:.1f} (diag: {_d:.2f} deg from baseline)")
                     except Exception as _e:
                         self.get_logger().info(f"[CANDIDATE-WIRE] ERROR (no fallback): {_e}")
                         raise
-                # --- end candidate override ---
+                # --- end candidate feed-in ---
 
                 step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
                 self.get_logger().info(step_msg)
