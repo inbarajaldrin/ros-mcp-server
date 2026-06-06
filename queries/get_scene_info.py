@@ -280,10 +280,10 @@ def main(args=None):
     # Determine topic names
     if args.mode == 'sim':
         objects_topic = "/objects_poses_sim"
-        grasp_points_topic = "/grasp_points_sim"
+        grasp_points_topic = "/grasp_candidates_sim"
     else:
         objects_topic = "/objects_poses_real"
-        grasp_points_topic = "/grasp_points_real"
+        grasp_points_topic = "/grasp_candidates_real"
 
     # --- Read live data from ROS ---
     reader = None

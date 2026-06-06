@@ -5,8 +5,8 @@ Reads object poses from topic and publishes grasp points to topic.
 Uses grasp points data from JSON files and transforms them using object poses.
 
 Supports three modes:
-- sim: Uses /objects_poses_sim and /grasp_points_sim topics
-- real: Uses /objects_poses_real and /grasp_points_real topics
+- sim: Uses /objects_poses_sim and /grasp_candidates_sim topics
+- real: Uses /objects_poses_real and /grasp_candidates_real topics
 - default/auto: Publishes to both sim and real topics
 
 Usage:
@@ -45,7 +45,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from utils.data_path_finder import get_aruco_data_dir
+from utils.data_path_finder import get_aruco_data_dir, get_symmetry_dir
+from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 
 
 class GraspPointsPublisher(Node):
@@ -72,6 +73,12 @@ class GraspPointsPublisher(Node):
         self.grasp_data: Dict[str, dict] = {}
         self.object_name_map: Dict[str, str] = {}
         self.load_grasp_data()
+
+        # Candidate data + symmetry dir for grasp orientation derivation
+        aruco_data_dir = get_aruco_data_dir() if data_dir is None else Path(data_dir).parent
+        self.candidates_dir = aruco_data_dir / "grasp_candidates"
+        self.symmetry_dir = str(get_symmetry_dir())
+        self.candidate_cache: Dict[str, Optional[dict]] = {}  # object_name -> candidate or None
         
         # Store latest object poses - separate for sim and real in default mode
         self.object_poses: Dict[str, dict] = {}
@@ -96,8 +103,8 @@ class GraspPointsPublisher(Node):
             # Default mode: subscribe to both sim and real, publish to both
             self.objects_poses_topic_sim = "/objects_poses_sim"
             self.objects_poses_topic_real = "/objects_poses_real"
-            self.grasp_points_topic_sim = "/grasp_points_sim"
-            self.grasp_points_topic_real = "/grasp_points_real"
+            self.grasp_points_topic_sim = "/grasp_candidates_sim"
+            self.grasp_points_topic_real = "/grasp_candidates_real"
             
             # Create subscriptions for both sim and real
             self.pose_sub_sim = self.create_subscription(
@@ -140,9 +147,9 @@ class GraspPointsPublisher(Node):
             
             if grasp_points_topic is None:
                 if self.mode == 'sim':
-                    self.grasp_points_topic = "/grasp_points_sim"
+                    self.grasp_points_topic = "/grasp_candidates_sim"
                 else:
-                    self.grasp_points_topic = "/grasp_points_real"
+                    self.grasp_points_topic = "/grasp_candidates_real"
             else:
                 self.grasp_points_topic = grasp_points_topic
             
@@ -243,15 +250,40 @@ class GraspPointsPublisher(Node):
                 'header': transform.header
             }
 
-    def transform_grasp_point(self, grasp_point_local, object_pose):
+    def _get_candidate(self, object_name):
+        """Load and cache the v2 grasp candidate for an object (direction_id=1)."""
+        if object_name not in self.candidate_cache:
+            cf = self.candidates_dir / f"{object_name}_grasp_candidates.json"
+            if cf.exists():
+                try:
+                    cands = json.load(open(cf))['grasp_candidates']
+                    c = next((c for c in cands if c.get('direction_id') == 1), cands[0])
+                    qc = c['approach_quaternion']
+                    self.candidate_cache[object_name] = np.array([qc['x'], qc['y'], qc['z'], qc['w']])
+                except Exception:
+                    self.candidate_cache[object_name] = None
+            else:
+                self.candidate_cache[object_name] = None
+        return self.candidate_cache[object_name]
+
+    def _canonical_match(self, obj_quat, object_name):
+        """Canonical-match an object quaternion (fold-symmetry resolution)."""
+        fold_data = load_symmetry_data(object_name, self.symmetry_dir)
+        if fold_data is None:
+            return obj_quat
+        canonical, _, dist = find_closest_canonical_quaternion(obj_quat, fold_data, threshold=1.0)
+        return canonical if canonical is not None else obj_quat
+
+    def transform_grasp_point(self, grasp_point_local, object_pose, object_name):
         """
         Transform grasp point from CAD center frame to base frame using object pose.
-        Grasp point inherits the orientation of the object.
+        Publishes the candidate-derived, symmetry-resolved, face-down gripper orientation.
 
         Args:
             grasp_point_local: Dict with position (x, y, z) relative to CAD center
             object_pose: Dict with translation and quaternion of object in base frame
-        
+            object_name: Object name (for candidate + symmetry lookup)
+
         Returns:
             Transformed position and orientation in base frame
         """
@@ -261,11 +293,11 @@ class GraspPointsPublisher(Node):
             grasp_point_local['position']['y'],
             grasp_point_local['position']['z']
         ])
-        
+
         # Object pose in base frame
         obj_translation = object_pose['translation']
         obj_quaternion = object_pose['quaternion']
-        
+
         # Create rotation matrix from quaternion
         r_object_world = R.from_quat(obj_quaternion)
         rot_matrix = r_object_world.as_matrix()
@@ -273,15 +305,20 @@ class GraspPointsPublisher(Node):
         # Transform position to world frame
         pos_base = obj_translation + rot_matrix @ pos_local
 
-        # Grasp point inherits object's orientation directly - no conversion needed
-        # 
-        # Note: The move_to_grasp code ensures the gripper is always pointing down
-        # (face-down, pitch=180°), so we can use the object's orientation as-is.
-        # The approach vector [0,0,1] defined in the JSON file only affects position
-        # transformation, not orientation. If grasp point orientation differs from
-        # object orientation in the future, the code will need to be updated to handle
-        # that transformation.
-        quat_base = obj_quaternion
+        # Derive the face-down gripper orientation:
+        # 1. Canonical-match the object orientation (fold-symmetry resolution)
+        # 2. Compose with the candidate approach quaternion
+        # 3. Extract yaw and rebuild as face_down for downstream compatibility
+        q_cand = self._get_candidate(object_name)
+        if q_cand is not None:
+            canonical = self._canonical_match(obj_quaternion, object_name)
+            q_grasp = R.from_quat(canonical) * R.from_quat(q_cand)
+            qg = q_grasp.as_quat()
+            yaw = math.degrees(2.0 * math.atan2(-qg[0], qg[1]))
+            quat_base = R.from_euler('xyz', [0, 180, yaw], degrees=True).as_quat()
+        else:
+            # No candidate data — fall back to object orientation (legacy behavior)
+            quat_base = obj_quaternion
 
         return pos_base, quat_base
 
@@ -309,7 +346,7 @@ class GraspPointsPublisher(Node):
             # Axis-based gripper state filtering is handled by get_scene_info.py.
             for gp_local in grasp_points_local:
                 try:
-                    pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose)
+                    pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose, object_name_topic)
                     
                     marker = Marker()
                     marker.header.stamp = now.to_msg()

@@ -3,7 +3,7 @@
 Get Current Grasp Points Pose
 
 Reads grasp point positions from the grasp points topic by:
-1. Subscribing to /grasp_points_sim (sim mode) or /grasp_points_real (real mode)
+1. Subscribing to /grasp_candidates_sim (sim mode) or /grasp_candidates_real (real mode)
 2. Reading MarkerArray messages
 3. Extracting object names, grasp IDs, and x,y,z positions from markers
 4. Returning a dictionary mapping object names to lists of grasp point poses
@@ -121,7 +121,7 @@ class GraspPointsPoseReader(Node):
 def main(args=None):
     parser = argparse.ArgumentParser(description='Get Current Grasp Points Pose')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
-                       help='Mode: sim (reads from /grasp_points_sim) or real (reads from /grasp_points_real)')
+                       help='Mode: sim (reads from /grasp_candidates_sim) or real (reads from /grasp_candidates_real)')
     parser.add_argument('--pretty', action='store_true',
                        help='Pretty print output for terminal readability')
 
@@ -129,9 +129,9 @@ def main(args=None):
 
     # Determine topic name based on mode
     if args.mode == 'sim':
-        topic_name = "/grasp_points_sim"
+        topic_name = "/grasp_candidates_sim"
     else:  # real mode
-        topic_name = "/grasp_points_real"
+        topic_name = "/grasp_candidates_real"
 
     # Read grasp point poses from ROS topic
     try:

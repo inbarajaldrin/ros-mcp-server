@@ -3,7 +3,7 @@
 Direct Object Movement - Native ROS2 Node
 Read object poses from TFMessage and perform single direct movement to specific object by name
 Includes calibration offset correction for accurate positioning
-Supports grasp point selection from /grasp_points_sim or /grasp_points_real topics
+Supports grasp point selection from /grasp_candidates_sim or /grasp_candidates_real topics
 """
 
 import sys
@@ -335,7 +335,7 @@ def output_result(result):
 
 
 class DirectObjectMove(Node):
-    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
+    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_candidates", grasp_id=None, offset=None, mode=None):
         super().__init__('direct_object_move')
 
         # Mode must be explicitly specified - no default
@@ -360,11 +360,11 @@ class DirectObjectMove(Node):
             self.topic_name = topic_name
         
         # Set default grasp points topic based on mode if using default value
-        if grasp_points_topic == "/grasp_points":  # Default value - override based on mode
+        if grasp_points_topic == "/grasp_candidates":  # Default value - override based on mode
             if self.mode == 'sim':
-                self.grasp_points_topic = "/grasp_points_sim"
+                self.grasp_points_topic = "/grasp_candidates_sim"
             else:
-                self.grasp_points_topic = "/grasp_points_real"  # Real mode uses /grasp_points_real
+                self.grasp_points_topic = "/grasp_candidates_real"  # Real mode uses /grasp_candidates_real
         else:
             self.grasp_points_topic = grasp_points_topic  # Use explicitly provided topic
         
@@ -1101,58 +1101,19 @@ class DirectObjectMove(Node):
                 return
             
             if grasp_point_has_orientation:
-                # Extract grasp point orientation and apply fold symmetry matching
+                # The grasp_points topic now publishes the face-down gripper target
+                # orientation directly (candidate-derived, symmetry-resolved in the
+                # publisher). Consume it as the target quaternion.
                 grasp_point_quat = np.array([
                     self.selected_grasp_point.pose.orientation.x,
                     self.selected_grasp_point.pose.orientation.y,
                     self.selected_grasp_point.pose.orientation.z,
                     self.selected_grasp_point.pose.orientation.w
                 ])
-                
-                # Try to find canonical match with increasing thresholds
-                canonical_quat, canonical_match, match_distance = self._try_canonical_match_with_threshold(
-                    grasp_point_quat, self.object_name
-                )
-                
-                # Extract yaw from returned quaternion (canonical match or fallback)
-                grasp_point_yaw = _extract_yaw(canonical_quat)
-                
-                # Create face-down quaternion with grasp point yaw (QUATERNION-BASED, no gimbal lock)
-                target_quaternion = _face_down_quaternion(grasp_point_yaw)
 
-                # --- v2 grasp-candidate feed-in (env-gated, no fallback) ---
-                # Feeds the candidate THROUGH the canonical/symmetry match:
-                # canonical_quat (already computed above) is the symmetry-snapped
-                # object orientation. Compose candidate on top of it so fold-symmetry
-                # is respected. For direction_id=1 (q_cand=(0,1,0,0)), this reproduces
-                # the baseline target exactly (diag=0.00 for all objects incl. hex pegs).
-                import os as _os
-                if _os.environ.get('MOVE_TO_GRASP_USE_CANDIDATE') == '1':
-                    try:
-                        import json as _json
-                        import math as _math
-                        from scipy.spatial.transform import Rotation as _R
-                        from utils.data_path_finder import find_aruco_data_dir
-                        _data_dir = find_aruco_data_dir()
-                        _cf = _data_dir / "grasp_candidates" / f"{self.object_name}_grasp_candidates.json"
-                        _cands = _json.load(open(_cf))['grasp_candidates']
-                        _c = next((c for c in _cands if c.get('direction_id') == 1), _cands[0])
-                        _qc = _c['approach_quaternion']
-                        _q_cand = _R.from_quat([_qc['x'], _qc['y'], _qc['z'], _qc['w']])
-                        # Feed-in: use canonical_quat (post symmetry-match), NOT raw grasp_point_quat
-                        _q_canonical = _R.from_quat(canonical_quat)
-                        _q_grasp = _q_canonical * _q_cand
-                        _qg = _q_grasp.as_quat()
-                        _cand_yaw = _math.degrees(2.0 * _math.atan2(-_qg[0], _qg[1]))
-                        _cand_target = _face_down_quaternion(_cand_yaw)
-                        # Diagnostic: divergence from baseline (should be ~0.00 for dir_id=1)
-                        _d = (_R.from_quat(_cand_target).inv() * _R.from_quat(target_quaternion)).magnitude() * 57.2958
-                        target_quaternion = _cand_target
-                        self.get_logger().info(f"[CANDIDATE-WIRE] feed-in yaw={_cand_yaw:.1f} (diag: {_d:.2f} deg from baseline)")
-                    except Exception as _e:
-                        self.get_logger().info(f"[CANDIDATE-WIRE] ERROR (no fallback): {_e}")
-                        raise
-                # --- end candidate feed-in ---
+                # The topic orientation IS the face-down target; extract yaw for IK
+                grasp_point_yaw = _extract_yaw(grasp_point_quat)
+                target_quaternion = _face_down_quaternion(grasp_point_yaw)
 
                 step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
                 self.get_logger().info(step_msg)
@@ -2231,8 +2192,8 @@ def main(args=None):
                        help='Optional target position [x, y, z] in meters')
     parser.add_argument('--target-xyzw', type=float, nargs=4, default=None,
                        help='Optional target orientation [x, y, z, w] quaternion')
-    parser.add_argument('--grasp-points-topic', type=str, default="/grasp_points",
-                       help='Topic name for grasp points subscription')
+    parser.add_argument('--grasp-points-topic', type=str, default="/grasp_candidates",
+                       help='Topic name for grasp candidates subscription')
     parser.add_argument('--grasp-id', type=int, required=True,
                        help='Specific grasp point ID to use (required - will use grasp point instead of object center)')
     parser.add_argument('--offset', type=float, default=None,
