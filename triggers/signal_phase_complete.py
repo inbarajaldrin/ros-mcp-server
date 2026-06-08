@@ -233,7 +233,9 @@ def _handle_phase_2(
         # re-prompting the same model forever or escalating (which redoes the phase fresh).
         # Decoupled from the 3-strike `attempts` counter (see track-b-switch-gate-scope.md).
         # Toggle: MCP_SWITCH_ON_UNFIXABLE_LOG=0 reverts to re-prompt-only (3-strike path).
-        switch_on_unfixable = os.getenv("MCP_SWITCH_ON_UNFIXABLE_LOG", "1") != "0"
+        # Default OFF (2026-06-01): superseded by the def-level gate onFail -> @switch (direct switch,
+        # no same-model re-prompt). Toggle on only to restore the old reprompt-then-switch path.
+        switch_on_unfixable = os.getenv("MCP_SWITCH_ON_UNFIXABLE_LOG", "0") != "0"
         already_reprompted = [n for n, s in unresolved.items() if s.get("reprompted")]
         if switch_on_unfixable and sim_passed and already_reprompted:
             return {

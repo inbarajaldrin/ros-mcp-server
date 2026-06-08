@@ -148,12 +148,21 @@ def handle_verify_results(
         failed_object = data.get("failed_object", "unknown")
         failed_step = data.get("failed_step", "unknown")
         completed = data.get("completed_objects", [])
+        remaining = data.get("remaining_objects", [])
         completed_steps = data.get("completed_steps_for_object", [])
         total_steps = data.get("total_steps_for_object", [])
 
         # Record rejection and get attempt count
         attempts = record_rejection(failed_object, failed_step)
         max_attempts = MAX_REPLAY_ATTEMPTS_PER_OBJECT
+
+        # Per-object ladder status: replay runs objects in order and stops at the
+        # first failure, so report the whole ladder (passed / failed / not reached)
+        # rather than spotlighting only the failed object.
+        ladder_parts = [f"{o}: PASSED" for o in completed]
+        ladder_parts.append(f"{failed_object}: FAILED at step {len(completed_steps)+1}")
+        ladder_parts.extend(f"{o}: NOT REACHED" for o in remaining)
+        ladder = " · ".join(ladder_parts)
 
         # Build step-by-step replay report for the failed object
         step_report = ""
@@ -180,10 +189,11 @@ def handle_verify_results(
                 f"Only log steps that actually moved the robot -- do not include "
                 f"tool calls that failed during your execution. "
                 f"Review your conversation history for the actual steps you "
-                f"performed on '{failed_object}' and call write_assembly_results "
-                f"with the complete sequence. Do NOT re-assemble. "
-                f"(Attempt {attempts}/{max_attempts}. "
-                f"Completed objects: {completed}.)"
+                f"performed on every object not marked PASSED above and call "
+                f"write_assembly_results with the complete sequence for each. "
+                f"Do NOT re-assemble. "
+                f"(Attempt {attempts}/{max_attempts}.)"
+                f"\n\nReplay status (all objects, in order): {ladder}"
                 f"{step_report}"
             ),
             "verification": verification,

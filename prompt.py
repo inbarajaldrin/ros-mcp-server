@@ -120,7 +120,7 @@ Run verify assembly once you've run all tools required to assemble one object in
 
 **SUCCESS** — verify assembly returns success:
 1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
-2. Log the minimal successful tool sequence for that object — only the steps needed to reproduce the assembly from a fresh scene. Include recovery steps that were part of the final successful path (e.g. place_down + regrasp). Do not include failed tool calls, abandoned attempts, or diagnostic queries (get_scene_info, verify_clearance, verify_assembly). Use the grasp_id and matching gripper_width_mm that worked.
+2. The sequence you log is replayed back-to-back with the other objects' sequences from a fresh scene by an automated verifier. Log the complete sequence of robot-moving steps you actually executed for this object — every step the tools required, in order. Do not trim "cleanup" steps; an incomplete sequence will not replay. Still exclude failed attempts and diagnostic queries.
 3. Move on to the next object.
 
 **FAILURE** — verify assembly returns failure:
