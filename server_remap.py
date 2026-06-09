@@ -20,10 +20,14 @@ except Exception:  # pragma: no cover - defensive
         def child_env():
             return {}
     _instr = _InstrStub()
+# Pure order/checkpoint predicates — the ROS-free single source of truth the gate
+# wrappers delegate their decision to (presentation/remedy stays in the wrappers).
+from primitives.shared.predicates import is_order_correct, is_checkpoint_saved
 import subprocess
 import sys
 import logging
 import re
+import shlex
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -84,6 +88,13 @@ def _remap_mode(mode: str) -> str:
 # The real-mode path no-ops here and is handled separately.
 def _order_gate_on() -> bool:
     return os.getenv("MCP_ORDER_GATE", "1") != "0"
+
+
+def _checkpoint_gate_on() -> bool:
+    # NEW gate, opt-in (default OFF) so existing studies are unaffected. Enable per
+    # study via the MCP server config env (mcp_config_*.json -> ros-mcp-server.env),
+    # or os.environ in unit tests. There is no study-level YAML env field.
+    return os.getenv("MCP_CHECKPOINT_GATE", "0") == "1"
 
 @functools.lru_cache(maxsize=1)
 def _load_order_maps_raw():
@@ -216,6 +227,8 @@ def _assert_assembly_order(object_name, mode, base_name=None):
     """
     if not _order_gate_on() or _remap_mode(mode) != "sim":
         return None  # gate-off / real mode bypasses EVERYTHING incl. the phase requirement
+    if _is_host_call():
+        return None  # host @tool-exec/onStart/hook call — not agent discovery, not order-gated
     by_base, by_obj = _order_maps()
     base = base_name or by_obj.get(object_name)
     order = by_base.get(base)
@@ -235,9 +248,8 @@ def _assert_assembly_order(object_name, mode, base_name=None):
                           f"set_task_phase(phase='assembly'|'disassembly') in the phase onStart "
                           f"before gated actions on '{object_name}'. Action blocked (fail-closed).")}
     if phase == "assembly":
-        k = order.index(object_name)
-        if k == 0:
-            return None  # first object, nothing precedes
+        if object_name == order[0]:
+            return None  # first object, nothing precedes (skip the oracle call)
         res = _verify_all_assembled(base, "sim")
         if not isinstance(res, dict) or not isinstance(res.get("assembled_objects"), list):
             return {"result": "failure",
@@ -248,13 +260,17 @@ def _assert_assembly_order(object_name, mode, base_name=None):
         seated = {n for n in (_seated_name(e) for e in res["assembled_objects"]) if n}
         if object_name in seated:
             return None  # already seated -> removal/regrasp, not an assembly pick
+        # DECISION delegated to the predicate (single source of truth); k/missing are
+        # recomputed below ONLY to compose the richer agent-facing remedy message.
+        ok, _reason = is_order_correct(object_name, order, seated, remedy_verb="Seat")
+        if ok:
+            return None
+        k = order.index(object_name)
         missing = [o for o in order[:k] if o not in seated]
-        if missing:
-            return {"result": "failure",
-                    "error": (f"Assembly order violation: '{object_name}' is order {k + 1} "
-                              f"but predecessor(s) {missing} are not seated yet. Seat "
-                              f"'{missing[0]}' next. Required order for {base}: {order}.")}
-        return None
+        return {"result": "failure",
+                "error": (f"Assembly order violation: '{object_name}' is order {k + 1} "
+                          f"but predecessor(s) {missing} are not seated yet. Seat "
+                          f"'{missing[0]}' next. Required order for {base}: {order}.")}
     if phase == "disassembly":
         removal = list(reversed(order))  # protocol removal order = reverse of assembly order
         res = _verify_all_disassembled(base, "sim")
@@ -267,9 +283,13 @@ def _assert_assembly_order(object_name, mode, base_name=None):
                               f"{str(res)[:200]}). Action on '{object_name}' blocked (fail-closed).")}
         if object_name not in still:
             return None  # not currently on the base -> already removed / scatter; nothing to gate
-        next_rm = next((o for o in removal if o in still), None)
-        if object_name == next_rm:
+        # DECISION via the predicate over the REVERSED (removal) order; "done" == removed.
+        # ("object is next-to-remove" <=> "all removal-order predecessors already removed".)
+        removed = [o for o in order if o not in still]
+        ok, _reason = is_order_correct(object_name, removal, removed, remedy_verb="Remove")
+        if ok:
             return None
+        next_rm = next((o for o in removal if o in still), None)
         return {"result": "failure",
                 "error": (f"Disassembly order violation: '{object_name}' cannot be removed yet; "
                           f"remove '{next_rm}' next. Required removal (protocol) order for "
@@ -278,6 +298,72 @@ def _assert_assembly_order(object_name, mode, base_name=None):
     return {"result": "failure",
             "error": (f"Order gate: unknown task phase '{phase}'. Expected 'assembly' or "
                       f"'disassembly'.")}
+
+
+# ── PRE-GATE REGISTRY — TODO: LIFT OUT (annotation-driven) ───────────────────────────
+# Both _assert_assembly_order and _assert_init_saved are applied INLINE at the top of
+# each motion tool today (the proven pattern). They should LATER be lifted out of the
+# tool bodies into an annotation-driven pre-gate registry keyed on the tool's _meta
+# category — category:"motion" => init pre-gate (all motion tools); the order pre-gate
+# on the object-pick subset — so a new motion tool is gated by its tag, not by
+# remembering to add the inline call. Until then: keep the inline calls in sync.
+# ────────────────────────────────────────────────────────────────────────────────────
+
+def _list_scene_checkpoints() -> set:
+    """Basenames (sans .json) of saved scene-state checkpoints for this run.
+
+    The checkpoints isaac-sim writes to {MCP_CLIENT_OUTPUT_DIR}/resources/scene_states/
+    are the cross-server evidence this gate reads — ros-mcp-server never sees the
+    isaac-sim save_scene_state call, only the file it leaves on the shared filesystem.
+    Per-phase freshness is intentionally NOT handled here yet (deferred): this is plain
+    existence.
+    """
+    if not BASE_OUTPUT_DIR:
+        return set()
+    d = os.path.join(BASE_OUTPUT_DIR, "resources", "scene_states")
+    try:
+        return {os.path.splitext(f)[0] for f in os.listdir(d) if f.endswith(".json")}
+    except OSError:
+        return set()
+
+
+def _is_host_call() -> bool:
+    """True when the current MCP request was marked by the client as a host @tool-exec /
+    onStart / hook call (params._meta.toolExec=true; stamped in tool-executor.ts). Such calls
+    are scene SETUP, not agent discovery, so the checkpoint/order pre-gates EXEMPT them — a host
+    move_home in onStart must not be blocked by "save 'init' first", and the windower already
+    drops pre-'init' host motions. Fail-safe: any lookup error => treat as an agent call (stay
+    gated), so a broken read never silently opens the gate."""
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        meta = getattr(request_ctx.get(), "meta", None)
+        if meta is None:
+            return False
+        if isinstance(meta, dict):
+            return bool(meta.get("toolExec"))
+        val = getattr(meta, "toolExec", None)
+        if val is None:
+            val = (getattr(meta, "model_extra", None) or {}).get("toolExec")
+        return bool(val)
+    except Exception:
+        return False
+
+
+def _assert_init_saved(mode):
+    """Init checkpoint PRE-GATE — block any motion until the phase baseline 'init'
+    scene state has been saved by the agent. Mirrors _assert_assembly_order's wrapper
+    shape: env-gated (MCP_CHECKPOINT_GATE, default OFF) + sim-only, returns
+    {result:failure,error} to BLOCK or None to proceed. The DECISION is delegated to
+    predicates.is_checkpoint_saved (empty object_name => the 'init' baseline check).
+    Host @tool-exec/onStart/hook calls are exempt (_is_host_call)."""
+    if not _checkpoint_gate_on() or _remap_mode(mode) != "sim":
+        return None
+    if _is_host_call():
+        return None  # host setup motion (onStart/hook) — not agent discovery, not gated
+    ok, reason = is_checkpoint_saved("", None, _list_scene_checkpoints())
+    if ok:
+        return None
+    return {"result": "failure", "error": f"Init checkpoint gate: {reason}"}
 
 
 # Configuration using environment variables with defaults (similar to newer version)
@@ -958,7 +1044,7 @@ except Exception:
 ##
 ## ############################################################################################## ##
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def get_scene_info(
     object_name: str,
     base_name: str,
@@ -982,7 +1068,7 @@ class GraspVerificationResult(BaseModel):
     mode: Mode
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_grasp(
     object_name: str,
     mode: Mode,
@@ -1039,7 +1125,7 @@ class CheckAllAssemblyVerification(BaseModel):
     unassembled_objects: Optional[List[ObjectOrderEntry]] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_assembly(
     base_name: str,
     mode: Mode,
@@ -1085,7 +1171,7 @@ class CheckAllDisassemblyVerification(BaseModel):
     still_assembled_objects: Optional[List[str]] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_disassembly(
     base_name: str,
     mode: Mode,
@@ -1113,7 +1199,7 @@ class ClearanceResult(BaseModel):
     missing_objects: Optional[List[str]] = Field(default=None, description="Sim: never missing. Real: operator is prompted to fix.")
     objects_with_clearance_issues: Optional[List[str]] = Field(default=None, description="Sim: agent must call restore scene. Real: operator is prompted to fix.")
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 async def verify_clearance(
     base_name: str,
     ctx: Context[ServerSession, None],
@@ -1165,7 +1251,7 @@ class MoveHomeResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_home(mode: Mode) -> MoveHomeResult:
     """Move robot to home position.
 
@@ -1173,6 +1259,9 @@ Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     raw = _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
     return _parse_result(MoveHomeResult, raw)
 
@@ -1180,7 +1269,7 @@ class GripperResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def control_gripper(
     command: Annotated[GripperCommand, Field(description="-")],
     mode: Mode,
@@ -1199,6 +1288,9 @@ Returns:
         "Gripper already holding an object."
         "Gripper blocked: pressing against object its holding, cannot reach target width." — open gripper to release the object"""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     raw = _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
     return _parse_result(GripperResult, raw)
 
@@ -1206,7 +1298,7 @@ class ScanWorkspaceResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def scan_workspace(
     object_name: Annotated[str, Field(description="-")],
     mode: Mode = "real",
@@ -1218,6 +1310,9 @@ Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     raw = _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
     return _parse_result(ScanWorkspaceResult, raw)
 
@@ -1241,7 +1336,7 @@ class MoveToGraspResult(BaseModel):
     current_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_to_grasp(
     object_name: Annotated[str, Field(description="-")],
     grasp_id: Annotated[int, Field(description="-")],
@@ -1261,6 +1356,9 @@ Returns:
     current_object_orientation: {quat: {x, y, z, w}} after movement
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     gate_err = _assert_assembly_order(object_name, mode)  # base inferred from object_name
     if gate_err:
         return gate_err
@@ -1272,7 +1370,7 @@ class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def translate_object(
     action: Annotated[TranslateAction, Field(description="-")],
     object_name: Annotated[str, Field(description="-")],
@@ -1315,6 +1413,9 @@ Returns:
         "Object orientation error is {X} degrees (tolerance: {Y} degrees)."
             — Object needs rotation before insert."""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     if action == "insert" and not base_name:
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
@@ -1344,7 +1445,7 @@ class RotateObjectResult(BaseModel):
     final_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def rotate_object(
     object_name: Annotated[str, Field(description="-")],
     base_name: Annotated[str, Field(description="-")],
@@ -1362,6 +1463,9 @@ Returns:
     final_object_orientation: {quat: {x, y, z, w}} after rotation
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
+    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     gate_err = _assert_assembly_order(object_name, mode, base_name)
     if gate_err:
         return gate_err
@@ -1395,7 +1499,7 @@ class MoveToSafeHeightResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_to_safe_height(
     mode: Mode,
 ) -> MoveToSafeHeightResult:
@@ -1404,6 +1508,9 @@ def move_to_safe_height(
 Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
+    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
     raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", "", timeout=45, error_prefix="Move to safe height")
     return _parse_result(MoveToSafeHeightResult, raw)
 
@@ -1424,7 +1531,7 @@ def _verify_all_assembled(base_name: str, mode: str) -> Dict[str, Any]:
     """Run verify_assembly with check_all for gating phase completion."""
     return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
 
-@mcp.tool()
+@mcp.tool(meta={"category": "signal"})
 async def signal_phase_complete(
     phase: Annotated[PhaseNumber, Field(description="Phase number")],
     status: PhaseStatus,
@@ -1451,10 +1558,110 @@ async def signal_phase_complete(
         base_name=base_name,
         verify_disassembly_fn=_verify_all_disassembled,
         verify_assembly_fn=_verify_all_assembled,
+        robot_state_fn=_robot_state,
     )
 
 
-@mcp.tool()
+# --- commit_object: per-object gated commit (stitcher boundary) -----------------------
+# Injected callbacks for the per-object commit handler. Each is sim+real and returns the
+# {"result": ...} / get_robot_state dict that primitives.shared.predicates consume.
+
+def _verify_assembled_obj(base_name: str, mode: str, object_name: Optional[str] = None) -> Dict[str, Any]:
+    """Dual verify_assembly: per-object when object_name is given, else check_all."""
+    if object_name:
+        # _run_query runs via shell=True; shlex.quote dynamic tokens to block injection.
+        cmd = f"--object-name {shlex.quote(object_name)} --base-name {shlex.quote(base_name)} --mode {mode}"
+        return _run_with_retry(_run_query, "verify_assembly.py", cmd, timeout=30, error_prefix="Verify assembly")
+    return _verify_all_assembled(base_name, mode)
+
+
+def _verify_disassembled_obj(base_name: str, mode: str, object_name: Optional[str] = None) -> Dict[str, Any]:
+    """Dual verify_disassembly: per-object when object_name is given, else check_all."""
+    if object_name:
+        cmd = f"--object-name {shlex.quote(object_name)} --base-name {shlex.quote(base_name)} --mode {mode}"
+        return _run_with_retry(_run_query, "verify_disassembly.py", cmd, timeout=30, error_prefix="Verify disassembly")
+    return _verify_all_disassembled(base_name, mode)
+
+
+def _verify_grasp_held(object_name: str, mode: str, base_name: str, grasp_id: int) -> Dict[str, Any]:
+    """Release/grasp check for commit.
+
+    SIM uses the grasp-aware dispatch: the caller supplies the grasp_id it used during
+    move_to_grasp, and --base-name scopes which assembly's grasp dataset
+    (eval_resources/fmb*_grasp_points.json) verify_grasp reads the approach width from. The
+    width is checked against THAT grasp's approach width — so an idle gripper sitting at it is
+    correctly read as NOT holding (the naive --width-only path could not tell that apart from a
+    real grip, and grasp_id is required because each grasp has its own approach width).
+
+    REAL keeps --width-only: the full real path (verify_grasp_real) additionally needs the
+    object's current orientation, which is not available to the commit tool."""
+    if mode == "sim":
+        cmd = (f"--object-name {shlex.quote(object_name)} "
+               f"--base-name {shlex.quote(base_name)} "
+               f"--mode sim --grasp-id {int(grasp_id)}")
+    else:
+        cmd = f"--object-name {shlex.quote(object_name)} --mode real --width-only"
+    return _run_with_retry(_run_query, "verify_grasp.py", cmd, timeout=15, error_prefix="Verify grasp")
+
+
+def _robot_state(mode: str) -> Dict[str, Any]:
+    """get_robot_state dict (joints_rad / ee_pos / ee_quat) for the pose predicates."""
+    return _run_query("get_robot_state.py", f"--mode {mode}", timeout=6, error_prefix="Robot state")
+
+
+@mcp.tool(meta={"category": "commit"})
+def commit_object(
+    object_name: Annotated[str, Field(description="The object whose assembly/disassembly is being committed", min_length=1)],
+    phase: Annotated[PhaseNumber, Field(description="1=disassembly, 2/3=assembly")],
+    mode: Mode,
+    grasp_id: Annotated[int, Field(description="The grasp point ID used to grasp this object (the same id passed to move_to_grasp). Required: the release check verifies the gripper width against THIS grasp's approach width, and each grasp_id has a different width.")],
+    base_name: Annotated[str, Field(description="Assembly base name the object belongs to")] = "",
+) -> Dict[str, Any]:
+    """Commit one object as complete.
+Call after verify_assembly (phase 2/3) / verify_disassembly (phase 1) passes for the object.
+
+Prerequisites:
+- The object is released and the robotic arm is at safe height.
+- You have saved this object's scene-state checkpoint (only required in sim, skip in real world).
+
+Returns:
+    result: "success" or "failure" (the gates decide, not the agent)
+    requires_response: False when committed; True when a gate failed (act on message)
+    message: "'X' committed." or the combined remedies for the failed gates
+    commit: True on success (the stitcher commit boundary; _meta category "commit")"""
+    mode = _remap_mode(mode)
+    # G4 checkpoint gate inputs — opt-in (MCP_CHECKPOINT_GATE) + sim only (mode is already
+    # remapped). Resolve the phase-appropriate order (reversed for disassembly, exactly like
+    # _assert_assembly_order:260) so the phase-agnostic predicate gets the right k-index.
+    # Leaving these None disables G4 in handle_object_commit (commit stays G1/G2/G3 only).
+    ck_ordered = None
+    ck_fn = None
+    if _checkpoint_gate_on() and mode == "sim":
+        try:
+            by_base, by_obj = _order_maps()
+            base = base_name or by_obj.get(object_name)
+            order = by_base.get(base)
+            if order:
+                ck_ordered = list(reversed(order)) if phase == 1 else list(order)
+                ck_fn = _list_scene_checkpoints
+        except Exception:
+            ck_ordered, ck_fn = None, None  # order map unavailable -> G4 off (liveness)
+    from triggers.commit_object import handle_object_commit
+    return handle_object_commit(
+        object_name=object_name,
+        phase=phase,
+        mode=mode,
+        base_name=base_name,
+        verify_assembly_fn=_verify_assembled_obj,
+        verify_disassembly_fn=_verify_disassembled_obj,
+        verify_grasp_fn=lambda obj, m: _verify_grasp_held(obj, m, base_name, grasp_id),
+        robot_state_fn=_robot_state,
+        ordered_objects=ck_ordered,
+        checkpoints_fn=ck_fn,
+    )
+
+
+@mcp.tool(meta={"category": "signal"})
 def signal_verify_results(
     phase: Annotated[Literal[1, 2], Field(description="1=disassembly, 2=assembly")],
     base_name: Annotated[str, Field(description="Assembly base object name")],
@@ -1497,7 +1704,7 @@ class SignalOperatorResult(BaseModel):
     reason: str
     feedback: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "signal"})
 async def signal_operator(
     message: Annotated[str, Field(description="Description of what the robot has done and what the operator needs to do before the robot can continue.")],
     ctx: Context[ServerSession, None],

@@ -400,10 +400,12 @@ def _write_results(mode: str, assembly_id: str, base_name: str,
 
 
 def _clear_results(mode: str, assembly_id: str) -> dict:
-    """Shared clear logic."""
+    """Shared clear logic. Idempotent: clearing an absent log is success (the log is
+    already clear). The client stitcher's clear-first step relies on this — a fresh
+    assembly (no file yet) must not be reported as a failure."""
     path = _results_file(mode, assembly_id)
     if not path.exists():
-        return _err("Log not found")
+        return _ok()
     try:
         path.unlink()
         return _ok()
@@ -448,7 +450,7 @@ class DisassemblyResults(BaseModel):
     disassembly_order: List[DisassemblyEntry] = Field(default_factory=list, description="Ordered list of disassembly results")
 
 
-@mcp.tool()
+@mcp.tool(meta={"category": "record"})
 def write_assembly_results(
     assembly_id: AssemblyId,
     base_name: str,
@@ -468,7 +470,7 @@ def write_assembly_results(
 
 
 
-@mcp.tool()
+@mcp.tool(meta={"category": "record"})
 def write_disassembly_results(
     assembly_id: AssemblyId,
     base_name: str,

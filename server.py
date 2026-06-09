@@ -864,7 +864,7 @@ def _run_query(script_name: str, command_args: str = "", timeout: int = 10, erro
 ##
 ## ############################################################################################## ##
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def get_scene_info(
     object_name: str,
     base_name: str,
@@ -887,7 +887,7 @@ class GraspVerificationResult(BaseModel):
     mode: Mode
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_grasp(
     object_name: str,
     mode: Mode,
@@ -971,7 +971,7 @@ class CheckAllAssemblyVerification(BaseModel):
     unassembled_objects: Optional[List[ObjectOrderEntry]] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_assembly(
     base_name: str,
     mode: Mode,
@@ -1035,7 +1035,7 @@ class CheckAllDisassemblyVerification(BaseModel):
     still_assembled_objects: Optional[List[str]] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 def verify_disassembly(
     base_name: str,
     mode: Mode,
@@ -1062,7 +1062,7 @@ class ClearanceResult(BaseModel):
     missing_objects: Optional[List[str]] = Field(default=None, description="Sim: never missing. Real: operator is prompted to fix.")
     objects_with_clearance_issues: Optional[List[str]] = Field(default=None, description="Sim: agent must call restore scene. Real: operator is prompted to fix.")
 
-@mcp.tool()
+@mcp.tool(meta={"category": "hint"})
 async def verify_clearance(
     base_name: str,
     ctx: Context[ServerSession, None],
@@ -1146,7 +1146,7 @@ class MoveHomeResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_home(mode: Mode) -> MoveHomeResult:
     """Move robot to home position.
 
@@ -1160,7 +1160,7 @@ class GripperResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def control_gripper(
     command: Annotated[GripperCommand, Field(description="-")],
     mode: Mode,
@@ -1185,7 +1185,7 @@ class ScanWorkspaceResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def scan_workspace(
     object_name: Annotated[str, Field(description="-")],
     mode: Annotated[Literal["real"], Field(description="real mode only")] = "real",
@@ -1219,7 +1219,7 @@ class MoveToGraspResult(BaseModel):
     current_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_to_grasp(
     object_name: Annotated[str, Field(description="-")],
     grasp_id: Annotated[int, Field(description="-")],
@@ -1268,7 +1268,7 @@ class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def translate_object(
     action: Annotated[TranslateAction, Field(description="-")],
     object_name: Annotated[str, Field(description="-")],
@@ -1358,7 +1358,7 @@ class RotateObjectResult(BaseModel):
     final_object_orientation: Optional[Orientation] = None
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def rotate_object(
     object_name: Annotated[str, Field(description="-")],
     base_name: Annotated[str, Field(description="-")],
@@ -1433,7 +1433,7 @@ class MoveToSafeHeightResult(BaseModel):
     result: Literal["success", "failure"]
     error: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "motion"})
 def move_to_safe_height(
     mode: Mode,
 ) -> MoveToSafeHeightResult:
@@ -1477,7 +1477,7 @@ def _verify_all_assembled(base_name: str, mode: str) -> Dict[str, Any]:
     """Run verify_assembly with check_all for gating phase completion."""
     return _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
 
-@mcp.tool()
+@mcp.tool(meta={"category": "signal"})
 async def signal_phase_complete(
     phase: Annotated[PhaseNumber, Field(description="Phase number")],
     status: PhaseStatus,
@@ -1506,7 +1506,7 @@ async def signal_phase_complete(
     )
 
 
-@mcp.tool()
+@mcp.tool(meta={"category": "signal"})
 def signal_verify_results(
     phase: Annotated[Literal[1, 2], Field(description="1=disassembly, 2=assembly")],
     base_name: Annotated[str, Field(description="Assembly base object name")],
@@ -1549,7 +1549,7 @@ class SignalOperatorResult(BaseModel):
     reason: str
     feedback: Optional[str] = None
 
-@mcp.tool()
+@mcp.tool(meta={"category": "signal"})
 async def signal_operator(
     message: Annotated[str, Field(description="Description of what the robot has done and what the operator needs to do before the robot can continue.")],
     ctx: Context[ServerSession, None],

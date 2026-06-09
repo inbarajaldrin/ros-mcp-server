@@ -19,9 +19,7 @@ Common parameters used across all tools:
 - mode: "sim" = simulation environment, "real" = physical robot.
 - object_name: name of the object being manipulated.
 - base_name: name of the fixed assembly base.
-- grasp_id: grasp point ID from the assembly resource.
-
-Always know whether the gripper is open or closed and whether the arm is holding an object before calling a tool."""
+- grasp_id: grasp point ID from the assembly resource."""
 
 
 @mcp.prompt()
@@ -103,7 +101,9 @@ def phase_2_assembly_sequence_discovery(
 
 Read the disassembly results to identify the grasp ids successfully used to disassemble each object from a fully assembled state. Use the same grasp ids to assemble them back when their current orientation matches their target orientation.
 
-Save scene state at the start before beginning assembly.
+Save scene state at the start before beginning assembly as "init.json".
+
+Then move the robot home and open the gripper before assembling the first object.
 
 **Task**
 
@@ -119,9 +119,9 @@ If you exhaust all strategies for an object, signal failure — do not skip to t
 Run verify assembly once you've run all tools required to assemble one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
-1. Save scene state with a descriptive name (e.g. save_scene_state with json_file_path="after_u_brown.json").
-2. The sequence you log is replayed back-to-back with the other objects' sequences from a fresh scene by an automated verifier. Log the complete sequence of robot-moving steps you actually executed for this object — every step the tools required, in order. Do not trim "cleanup" steps; an incomplete sequence will not replay. Still exclude failed attempts and diagnostic queries.
-3. Move on to the next object.
+1. Move to safe height.
+2. Save scene state with "{{object_name}}.json".
+3. Commit the object with commit_object, then move on to the next object.
 
 **FAILURE** — verify assembly returns failure:
 1. Figure out if there are any steps you can continue to take to complete the assembly.

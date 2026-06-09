@@ -21,6 +21,7 @@ import argparse
 import time
 import sys
 import os
+import glob
 import json
 
 # Add project root to path so primitives package can be imported when running directly
@@ -51,6 +52,32 @@ EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Default radius tolerance (in meters)
 DEFAULT_RADIUS = 0.06  # 6cm default radius
+
+
+def load_assembly_grasp_width(object_name, grasp_id, base_name, logger=None):
+    """Approach gripper_width_mm for (object_name, grasp_id), scoped to the assembly that
+    --base-name selects, from eval_resources/fmb*_grasp_points.json.
+
+    base_name picks the assembly grasp dataset (matched on its "base_name" field); grasp_id
+    picks the specific grasp's width within that object's valid_grasps. This is what makes the
+    width check unambiguous — each grasp_id has its own approach width, so the caller must say
+    which grasp it used. Returns float width, or None if not found."""
+    pattern = os.path.join(_project_root, "ablations", "eval_resources", "fmb*_grasp_points.json")
+    for path in sorted(glob.glob(pattern)):
+        try:
+            with open(path) as f:
+                j = json.load(f)
+        except Exception:
+            continue
+        if j.get("base_name") != base_name:
+            continue
+        for obj in j.get("objects", []):
+            if obj.get("object_name") == object_name:
+                for g in obj.get("valid_grasps", []):
+                    if g.get("grasp_id") == grasp_id:
+                        return g.get("gripper_width_mm")
+        return None  # base matched but object/grasp not present
+    return None
 
 
 # ============================================================================
@@ -147,7 +174,7 @@ def check_gripper_width_valid(gripper_width_mm, valid_modes):
 
 
 class VerifyGrasp(Node):
-    def __init__(self, object_name, mode='sim', radius=DEFAULT_RADIUS, grasp_id=0, object_orientation=None):
+    def __init__(self, object_name, mode='sim', radius=DEFAULT_RADIUS, grasp_id=0, object_orientation=None, base_name=None):
         super().__init__('verify_grasp')
 
         self.object_name = object_name
@@ -155,6 +182,7 @@ class VerifyGrasp(Node):
         self.radius = radius
         self.grasp_id = grasp_id
         self.object_orientation = object_orientation
+        self.base_name = base_name
 
         # TCP to gripper center offset distance (from TCP to gripper center along gripper Z-axis)
         self.tcp_to_gripper_center_offset = GRIPPER_CENTER_TOOL_OFFSET
@@ -500,14 +528,27 @@ class VerifyGrasp(Node):
                 # it hasn't closed on anything (pre-grasp or re-opened).
                 approach_widths = []
                 if self.grasp_id is not None:
-                    # Known grasp_id: check its specific approach width
-                    _, grasp_validity = load_grasp_point_and_validity(
-                        self.object_name, self.grasp_id, logger=self.get_logger()
-                    )
-                    if grasp_validity:
-                        aw = grasp_validity.get('x_axis_gripper_width_mm')
+                    # Known grasp_id: check its specific approach width. When --base-name is
+                    # given, scope the width to that assembly's grasp dataset
+                    # (eval_resources/fmb*_grasp_points.json); otherwise fall back to the
+                    # annotator's per-object grasp_validity.
+                    aw = None
+                    if self.base_name:
+                        aw = load_assembly_grasp_width(
+                            self.object_name, self.grasp_id, self.base_name, logger=self.get_logger()
+                        )
                         if aw is not None:
-                            approach_widths = [aw]
+                            self.get_logger().info(
+                                f"Approach width for grasp {self.grasp_id} from assembly "
+                                f"'{self.base_name}': {aw:.1f}mm")
+                    if aw is None:
+                        _, grasp_validity = load_grasp_point_and_validity(
+                            self.object_name, self.grasp_id, logger=self.get_logger()
+                        )
+                        if grasp_validity:
+                            aw = grasp_validity.get('x_axis_gripper_width_mm')
+                    if aw is not None:
+                        approach_widths = [aw]
                 else:
                     # No grasp_id: check all grasp points' approach widths
                     try:
@@ -575,6 +616,9 @@ def main(args=None):
     parser.add_argument('--radius', type=float, default=DEFAULT_RADIUS,
                        help=f'Radius tolerance in meters (sim mode)')
     parser.add_argument('--grasp-id', type=int, default=None, help='Grasp point ID (required for real mode)')
+    parser.add_argument('--base-name', type=str, default=None,
+                       help='Assembly base name. When --grasp-id is omitted, verify_grasp resolves '
+                            'the object grasp_id from eval_resources/fmb*_assembly.json using this base.')
     parser.add_argument('--current-object-orientation', type=float, nargs=4,
                        help='Object orientation quaternion [x, y, z, w] (real mode)')
     parser.add_argument('--width-only', action='store_true',
@@ -612,7 +656,8 @@ def main(args=None):
             mode=parsed_args.mode,
             radius=parsed_args.radius,
             grasp_id=parsed_args.grasp_id,
-            object_orientation=object_quat
+            object_orientation=object_quat,
+            base_name=parsed_args.base_name
         )
 
         # Wait for required data

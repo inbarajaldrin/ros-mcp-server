@@ -36,6 +36,8 @@ from typing import Literal, Dict, Any, Optional, Callable
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
+from primitives.shared import predicates as P
+
 
 def _get_logs_dir() -> Path:
     """Return the logs directory path, respecting MCP_CLIENT_OUTPUT_DIR."""
@@ -46,9 +48,48 @@ def _get_logs_dir() -> Path:
 
 
 def _has_assembly_results() -> bool:
-    """Check if Assembly_*_results.json files exist in logs dir."""
+    """Check if Assembly_*_results.json files exist in logs dir.
+
+    DORMANT (CLEANUP item 2): the results-file gate helper. Only the dormant _handle_phase_*
+    handlers call it; the active slim path does not. The stitcher produces the data now.
+    Delete with the dormant handlers once the slim path + stitcher are proven.
+    """
     logs_dir = _get_logs_dir()
     return logs_dir.exists() and len(list(logs_dir.glob("Assembly_*_results.json"))) > 0
+
+
+def _remaining_objects(res) -> list:
+    """Objects still not in their target state, for the failure message."""
+    if not isinstance(res, dict):
+        return []
+    return res.get("unassembled_objects") or res.get("still_assembled_objects") or []
+
+
+def _phase_complete(verify_fn, base_name, mode, robot_state_fn):
+    """Authoritative phase completion: check_all verify + arm home. Returns (complete, reason).
+
+    is_home implies the gripper is released (move_home refuses while holding), so the two
+    checks cover the whole "phase done + neutral" condition. Fail-closed throughout.
+    """
+    if not (base_name and verify_fn):
+        return False, "verification unavailable"
+    try:
+        res = verify_fn(base_name, mode)  # check_all
+    except Exception as e:
+        return False, f"verification unavailable ({type(e).__name__})"
+    if not (isinstance(res, dict) and res.get("result") == "success"):
+        rem = _remaining_objects(res)
+        return False, ("not all objects verified" + (f" (remaining: {rem})" if rem else ""))
+    if robot_state_fn is None:
+        return False, "robot state unavailable"
+    try:
+        state = robot_state_fn(mode)
+    except Exception as e:
+        return False, f"robot state unavailable ({type(e).__name__})"
+    home_ok, _ = P.is_home(state)
+    if not home_ok:
+        return False, "arm not home"
+    return True, "complete"
 
 
 async def handle_phase_signal(
@@ -57,40 +98,68 @@ async def handle_phase_signal(
     comment: str,
     ctx: Context[ServerSession, None],
     mode: Literal["sim", "real"],
-    elicit_user_fn=None,
+    elicit_user_fn=None,                          # DORMANT: phase-3-real elicitation dropped
     base_name: Optional[str] = None,
     verify_disassembly_fn: Optional[Callable] = None,
     verify_assembly_fn: Optional[Callable] = None,
+    robot_state_fn: Optional[Callable] = None,    # () -> get_robot_state dict, for is_home
 ) -> Dict[str, Any]:
-    """Handle phase completion signal.
+    """Authoritatively decide phase completion (uniform sim+real).
 
-    Args:
-        phase: Which phase completed (1, 2, or 3).
-        status: Whether the phase succeeded or failed.
-        comment: Optional comment (should explain failure).
-        ctx: MCP Context (needed for phase 3 elicitation).
-        elicit_user_fn: Reference to the elicit_user tool function from server.py.
-        mode: sim or real.
-        base_name: Assembly base name for verification gating.
-        verify_disassembly_fn: Callback(base_name, mode) -> verify result dict.
-        verify_assembly_fn: Callback(base_name, mode) -> verify result dict.
+    Gates on check_all verify (verify_disassembly for phase 1, verify_assembly for 2/3) +
+    is_home. The agent's `status` drives the client's hook-based escalate/switch (the YAML
+    @escalate/@switch hooks match on this result JSON); the system's verdict can OVERRIDE it.
 
-    Returns:
-        Structured result dict consumed by the MCP client.
+    Result schema (uniform, `message` ALWAYS present): {phase, status, requires_response, message}.
+      - status=failure + genuinely incomplete -> stays failure -> YAML hook escalates. comment=why.
+      - status=failure + actually complete     -> OVERRIDE to success (hallucination safeguard).
+      - status=success + incomplete            -> failure, requires_response (keep working).
+      - status=success + complete              -> success.
+
+    DORMANT (code preserved, off the active path): _handle_phase_{1,2,3} below (the old
+    @switch/replay Gate 0 + results-file gate + phase-3-real elicitation), re-enableable.
     """
-    if phase == 1:
-        result = _handle_phase_1(status, comment, mode, base_name, verify_disassembly_fn)
-    elif phase == 2:
-        result = _handle_phase_2(status, comment, mode, base_name, verify_assembly_fn)
-    elif phase == 3:
-        result = await _handle_phase_3(status, comment, ctx, elicit_user_fn, mode, base_name, verify_assembly_fn)
+    verify_fn = verify_disassembly_fn if phase == 1 else verify_assembly_fn
+    complete, reason = _phase_complete(verify_fn, base_name, mode, robot_state_fn)
+    label = "Disassembly" if phase == 1 else "Assembly"
 
-    # Stamp every return with phase/status so the MCP client can route it
-    # Allow handlers to override status (e.g. gate check failing)
-    effective_status = result.pop("status", status)
-    envelope = {"phase": phase, "status": effective_status}
-    return {**envelope, **result}
+    if status != "success":
+        if complete:
+            # OVERRIDE: agent reported failure but the phase is authoritatively complete.
+            # Don't escalate; carry the agent comment; (stitcher trigger = Step 5).
+            return {"phase": phase, "status": "success", "requires_response": False,
+                    "message": (f"{label} verified complete despite agent signaling failure "
+                                f"(agent comment: {comment or 'none'}). Overriding to success."),
+                    "override": True}
+        # Genuine failure -> status stays failure -> the YAML hook escalates. comment = why.
+        return {"phase": phase, "status": "failure", "requires_response": False,
+                "message": f"{label} incomplete ({reason}). Agent comment: {comment or 'none'}."}
 
+    # Agent reported success -> must be authoritatively complete.
+    if not complete:
+        return {"phase": phase, "status": "failure", "requires_response": True,
+                "message": f"{label} not complete: {reason}. Keep working, then signal again."}
+    return {"phase": phase, "status": "success", "requires_response": False,
+            "message": f"Phase {phase} ({label}) complete."}
+
+
+# ====================================================================================
+# DORMANT — the old per-phase handlers, NO LONGER CALLED by handle_phase_signal (the slim
+# _phase_complete path replaced them). Preserved for reference / re-enable / the
+# ablations/test_switch_gate_probe.py probe.
+#
+# ░░ CLEANUP CHECKLIST ░░  Once the slim path + the stitcher are PROVEN in a live mode2
+# run, delete in this order (each line is independently removable):
+#   [ ] 1. _handle_phase_1 / _handle_phase_2 / _handle_phase_3 (the three functions below)
+#   [ ] 2. _has_assembly_results() above            — dormant results-file gate helper
+#   [ ] 3. triggers/signal_verify_results.py        — the @switch/replay log-repair machinery
+#          (+ any orchestrator replay wiring); confirm nothing live imports it first
+#   [ ] 4. elicitations/verify_assembly.py          — phase-3-real human elicitation, ONLY if
+#          signal_operator fully covers the human-in-the-loop need
+#   [ ] 5. handle_phase_signal params elicit_user_fn + ctx (if unused) + the server tool's
+#          _handle_elicitation wiring for signal_phase_complete
+# Do NOT delete before that live run passes — this is the rollback path.
+# ====================================================================================
 
 def _handle_phase_1(
     status: Literal["success", "failure"],
@@ -206,6 +275,9 @@ def _handle_phase_2(
                 }
         return {"requires_response": False}
 
+    # ░░ CLEANUP item 3 ░░ Gate 0 — the @switch/replay log-repair. Obsolete with the stitcher
+    # (no written log to repair). Dormant: this whole block + signal_verify_results.py go once
+    # the slim path + stitcher are proven.
     # Gate 0: check for unresolved orchestrator replay rejections
     from triggers.signal_verify_results import (
         get_unresolved_rejections, has_exhausted_object, mark_reprompted
@@ -322,6 +394,10 @@ async def _handle_phase_3(
                 }
         return {"requires_response": False}
 
+    # ░░ CLEANUP item 4 ░░ phase-3-real human elicitation. Dropped from the active path —
+    # real now gates on automated check_all (+ occlusion certification); signal_operator is
+    # the explicit human-in-the-loop. This block + elicitations/verify_assembly.py go once
+    # signal_operator is confirmed to cover the need.
     # Real mode: human verification elicitation
     if elicit_user_fn is None:
         return {}
