@@ -167,9 +167,35 @@ _ORDER_UNKNOWN_WARNED = set()  # one-time warn per unknown object (gate-on liven
 _TASK_PHASE = None
 _VALID_PHASES = ("assembly", "disassembly")
 
+# --- POST-gate predicate: phase-completion handshake state (added 2026-06-10) ---
+# Sibling to _TASK_PHASE. Tracks whether the agent has issued a TERMINAL signal_phase_complete
+# for the current phase ("terminal" = the server returned requires_response=False, i.e. either an
+# accepted success/override OR a genuine-failure escalate — in both cases no further agent action
+# is expected). It is FALSE while a signal is still pending or the last signal asked the agent to
+# keep working (requires_response=True).
+#
+# A gate = predicate (state) + trigger (interception point). The PRE-gates (order/checkpoint) are
+# fully server-side because their trigger is an *incoming tool call* the server can refuse. The
+# POST-gate's trigger is "the agent stopped" — which is NOT a tool call, so the server can never
+# observe it. So the server owns only the PREDICATE here; the MCP client owns the stop-trigger +
+# the forcing remedy (mirrors how server_remap separates order/checkpoint predicates from wrapper
+# remedies). set_task_phase clears this so each phase starts with the handshake pending.
+_PHASE_SIGNALED = False
+
 
 def _get_task_phase():
     return _TASK_PHASE
+
+
+def phase_resolved() -> bool:
+    """Pure predicate: has the current phase received a terminal completion signal?
+
+    True once signal_phase_complete has returned requires_response=False for the active phase
+    (success, override-to-success, or genuine-failure escalate). Reset to False by set_task_phase.
+    The client polls/keys on this (or on the live tool-result stream) to decide whether the
+    agent's stop is premature.
+    """
+    return _PHASE_SIGNALED
 
 
 def _still_assembled_set(res, order):
@@ -1548,7 +1574,7 @@ async def signal_phase_complete(
         requires_response: False when no further action needed from the LLM
         error: failure reason (only on gate check failure)"""
     mode = _remap_mode(mode)
-    return await handle_phase_signal(
+    result = await handle_phase_signal(
         phase=phase,
         status=status,
         comment=comment,
@@ -1560,6 +1586,16 @@ async def signal_phase_complete(
         verify_assembly_fn=_verify_all_assembled,
         robot_state_fn=_robot_state,
     )
+    # POST-gate predicate: mark the handshake resolved ONLY on a terminal result. The server uses
+    # requires_response=False to mean "no further agent action expected" (accepted success,
+    # override-to-success, or genuine-failure escalate). A requires_response=True result ("keep
+    # working, signal again") leaves the phase UNsignaled so a premature stop is still caught.
+    if isinstance(result, dict) and result.get("requires_response") is False:
+        global _PHASE_SIGNALED
+        _PHASE_SIGNALED = True
+        logger.info(f"[phase-gate] phase {phase} signal resolved "
+                    f"(status={result.get('status')}, override={result.get('override', False)})")
+    return result
 
 
 # --- commit_object: per-object gated commit (stitcher boundary) -----------------------
@@ -1841,11 +1877,26 @@ def set_task_phase(phase: str) -> Dict[str, Any]:
     'disassembly'). Injected by each phase onStart via
     @tool-exec:ros-mcp-server__set_task_phase(phase=...). NOT part of the agent tool surface
     (tool-states marks it false; the host @tool-exec path bypasses tool-states)."""
-    global _TASK_PHASE
+    global _TASK_PHASE, _PHASE_SIGNALED
     p = (phase or "").strip().lower()
     if p not in _VALID_PHASES:
         return {"result": "failure", "error": f"invalid phase '{phase}'; expected one of {list(_VALID_PHASES)}"}
+
+    # POST-gate bonus (multi-phase only): a transition to a DIFFERENT phase while the prior phase
+    # never got a terminal signal means the prior phase ended unsignaled. Fail-closed when the
+    # order gate is on (gated study runs), warn-only otherwise (ungated dev). NOTE: this canNOT
+    # catch the TERMINAL phase (no set_task_phase follows the last phase) — that run-end stop is
+    # the client trigger's job. Idempotent re-set of the SAME phase is allowed (host re-inject).
+    if _TASK_PHASE is not None and _TASK_PHASE != p and not _PHASE_SIGNALED:
+        msg = (f"phase transition '{_TASK_PHASE}' -> '{p}' but prior phase was never signaled "
+               f"complete (no terminal signal_phase_complete)")
+        if _order_gate_on():
+            logger.error(f"[phase-gate] REFUSED: {msg}")
+            return {"result": "failure", "error": msg}
+        logger.warning(f"[phase-gate] {msg} (gate off, not enforced)")
+
     _TASK_PHASE = p
+    _PHASE_SIGNALED = False  # new phase -> completion handshake pending again
     logger.info(f"[order-gate] set_task_phase -> '{p}' (pid={os.getpid()}, gate_on={_order_gate_on()})")
     return {"result": "success", "phase": p}
 
