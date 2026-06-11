@@ -168,6 +168,16 @@ _ORDER_UNKNOWN_WARNED = set()  # one-time warn per unknown object (gate-on liven
 _TASK_PHASE = None
 _VALID_PHASES = ("assembly", "disassembly")
 
+# Active phase NUMBER (1/2/3), host-injected alongside _TASK_PHASE via set_task_phase's optional
+# phase_number. Drives the phase-number gate on commit_object / signal_phase_complete: agents have
+# been observed DRIFTING the phase argument per object ("u_green was phase 2, so the next object is
+# phase 3" — qwen3:30b, 2026-06-11), which resolves signals no client hook is listening for. The
+# phase name alone cannot catch 2-vs-3 drift (both are 'assembly'), hence the explicit number.
+# None => number unknown (host didn't inject it) => the gate falls back to name-level consistency
+# (1<->disassembly, 2/3<->assembly) only.
+_TASK_PHASE_NUMBER = None
+_PHASE_NUMBERS_FOR = {"disassembly": (1,), "assembly": (2, 3)}
+
 # --- POST-gate predicate: phase-completion handshake state (added 2026-06-10) ---
 # Sibling to _TASK_PHASE. Tracks whether the agent has issued a TERMINAL signal_phase_complete
 # for the current phase ("terminal" = the server returned requires_response=False, i.e. either an
@@ -488,6 +498,37 @@ def _assert_holding_state(mode, holding, object_name, base_name, grasp_id):
         return {"result": "failure",
                 "error": (f"Holding gate: declared holding='without_object' but '{object_name}' is still "
                           f"in the gripper. Release it before retracting.")}
+    return None
+
+
+def _assert_phase_number(phase):
+    """Phase-number PRE-GATE for commit_object / signal_phase_complete — refuse a phase argument
+    that contradicts the ACTIVE task phase. Agents drift the number per object ("u_green was
+    phase 2, so inverted_u_brown is phase 3"), which commits/resolves under a phase no client
+    hook is listening for (qwen3:30b, 2026-06-11). The phase number identifies the TASK PHASE
+    (1=disassembly, 2=assembly discovery, 3=assembly execution), never the object index.
+
+    Strictness ladder, by what the host injected via set_task_phase:
+      number known  -> phase must EQUAL it;
+      name only     -> phase must be CONSISTENT with it (1<->disassembly, 2/3<->assembly);
+      nothing set   -> no-op (standalone/dev usage stays ungated).
+    Host @tool-exec calls exempt, as with the other pre-gates."""
+    if _is_host_call() or _TASK_PHASE is None:
+        return None
+    if _TASK_PHASE_NUMBER is not None:
+        if phase != _TASK_PHASE_NUMBER:
+            return {"result": "failure",
+                    "error": (f"Phase gate: active task phase is {_TASK_PHASE_NUMBER} ({_TASK_PHASE}). "
+                              f"Phase numbers identify the TASK PHASE, not the object index — every "
+                              f"object in this phase uses phase={_TASK_PHASE_NUMBER}. Retry with "
+                              f"phase={_TASK_PHASE_NUMBER}.")}
+        return None
+    allowed = _PHASE_NUMBERS_FOR.get(_TASK_PHASE, ())
+    if phase not in allowed:
+        return {"result": "failure",
+                "error": (f"Phase gate: active task phase is '{_TASK_PHASE}' (phase "
+                          f"{' or '.join(map(str, allowed))}). Phase numbers identify the TASK PHASE, "
+                          f"not the object index. Retry with the active phase number.")}
     return None
 
 
@@ -1688,6 +1729,14 @@ async def signal_phase_complete(
         requires_response: False when no further action needed from the LLM
         error: failure reason (only on gate check failure)"""
     mode = _remap_mode(mode)
+    # Phase-number pre-gate: a drifted phase must be refused BEFORE handle_phase_signal, or it
+    # resolves a signal no client hook matches. requires_response=True keeps the handshake
+    # pending (the POST-gate below must not see this as terminal).
+    gate_err = _assert_phase_number(phase)
+    if gate_err:
+        logger.warning(f"[phase-gate] REFUSED signal: {gate_err['error']}")
+        return {"phase": phase, "status": "failure", "requires_response": True,
+                "error": gate_err["error"]}
     result = await handle_phase_signal(
         phase=phase,
         status=status,
@@ -1781,6 +1830,13 @@ Returns:
     message: "'X' committed." or the combined remedies for the failed gates
     commit: True on success (the stitcher commit boundary; _meta category "commit")"""
     mode = _remap_mode(mode)
+    # Phase-number pre-gate: refuse a drifted phase (e.g. "next object => next phase") before
+    # the commit gates run — a commit recorded under the wrong phase number poisons the ledger.
+    gate_err = _assert_phase_number(phase)
+    if gate_err:
+        logger.warning(f"[phase-gate] REFUSED commit: {gate_err['error']}")
+        return {"result": "failure", "requires_response": True,
+                "message": gate_err["error"], "failed_gates": ["phase"]}
     # G4 checkpoint gate inputs — opt-in (MCP_CHECKPOINT_GATE) + sim only (mode is already
     # remapped). Resolve the phase-appropriate order (reversed for disassembly, exactly like
     # _assert_assembly_order:260) so the phase-agnostic predicate gets the right k-index.
@@ -1992,15 +2048,23 @@ async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_scr
         }
 
 @mcp.tool()
-def set_task_phase(phase: str) -> Dict[str, Any]:
+def set_task_phase(phase: str, phase_number: Optional[int] = None) -> Dict[str, Any]:
     """Host-only: set the current task phase for the phase-aware order gate ('assembly' or
     'disassembly'). Injected by each phase onStart via
     @tool-exec:ros-mcp-server__set_task_phase(phase=...). NOT part of the agent tool surface
-    (tool-states marks it false; the host @tool-exec path bypasses tool-states)."""
-    global _TASK_PHASE, _PHASE_SIGNALED
+    (tool-states marks it false; the host @tool-exec path bypasses tool-states).
+
+    phase_number (optional, backward-compatible): the phase NUMBER (1/2/3) for the phase-number
+    gate on commit_object / signal_phase_complete. Without it the gate only enforces name-level
+    consistency (1<->disassembly, 2/3<->assembly) and cannot catch 2-vs-3 drift."""
+    global _TASK_PHASE, _TASK_PHASE_NUMBER, _PHASE_SIGNALED
     p = (phase or "").strip().lower()
     if p not in _VALID_PHASES:
         return {"result": "failure", "error": f"invalid phase '{phase}'; expected one of {list(_VALID_PHASES)}"}
+    if phase_number is not None and phase_number not in _PHASE_NUMBERS_FOR[p]:
+        return {"result": "failure",
+                "error": (f"phase_number {phase_number} inconsistent with phase '{p}' "
+                          f"(expected {list(_PHASE_NUMBERS_FOR[p])})")}
 
     # POST-gate bonus (multi-phase only): a transition to a DIFFERENT phase while the prior phase
     # never got a terminal signal means the prior phase ended unsignaled. Fail-closed when the
@@ -2016,9 +2080,10 @@ def set_task_phase(phase: str) -> Dict[str, Any]:
         logger.warning(f"[phase-gate] {msg} (gate off, not enforced)")
 
     _TASK_PHASE = p
+    _TASK_PHASE_NUMBER = phase_number  # None when the host injects name only (number gate degrades)
     _PHASE_SIGNALED = False  # new phase -> completion handshake pending again
     _clear_commit_floor()    # new phase -> fresh monotonic floor
-    logger.info(f"[order-gate] set_task_phase -> '{p}' (pid={os.getpid()}, gate_on={_order_gate_on()})")
+    logger.info(f"[order-gate] set_task_phase -> '{p}' (number={phase_number}, pid={os.getpid()}, gate_on={_order_gate_on()})")
     return {"result": "success", "phase": p}
 
 
