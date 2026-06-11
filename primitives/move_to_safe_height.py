@@ -32,8 +32,19 @@ from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinemat
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 
 class MoveToSafeHeight(Node):
-    def __init__(self, height=None):
+    def __init__(self, height=None, mode='real', holding=None,
+                 object_name='', base_name='', grasp_id=None):
         super().__init__('move_to_safe_height')
+        # Payload-edge metadata, plumbed from the move_to_safe_height tool. The holding
+        # PRE-GATE that verifies these is enforced server-side (server_remap._assert_holding_state)
+        # BEFORE this primitive runs; they are accepted here for end-to-end provenance and reserved
+        # for future use (e.g. base_name -> collision-aware lift around the inserted base). The lift
+        # motion itself is unchanged and payload-agnostic today.
+        self.mode = mode
+        self.holding = holding
+        self.object_name = object_name
+        self.base_name = base_name
+        self.grasp_id = grasp_id
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
@@ -389,9 +400,28 @@ def output_result(result):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    import argparse
+    parser = argparse.ArgumentParser(description='Move robot to safe height')
+    parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'])
+    parser.add_argument('--holding', type=str, default=None, choices=['with_object', 'without_object'],
+                        help="Declared payload state of this lift edge. Gate-checked server-side; "
+                             "accepted here for end-to-end plumbing.")
+    parser.add_argument('--object-name', dest='object_name', type=str, default='',
+                        help="Object in/just-released-from the gripper (declarative).")
+    parser.add_argument('--base-name', dest='base_name', type=str, default='',
+                        help="Assembly base name (declarative; reserved for future collision-aware "
+                             "lift planning around the inserted base).")
+    parser.add_argument('--grasp-id', dest='grasp_id', type=int, default=None,
+                        help="Grasp id used to grasp this object (declarative).")
+    # parse_known_args: stay tolerant of any extra flags a caller appends; direct/replay
+    # callers that pass no args keep working (every flag has a default).
+    parsed, _ = parser.parse_known_args(args if args is not None else sys.argv[1:])
 
-    node = MoveToSafeHeight()
+    rclpy.init()
+
+    node = MoveToSafeHeight(mode=parsed.mode, holding=parsed.holding,
+                            object_name=parsed.object_name, base_name=parsed.base_name,
+                            grasp_id=parsed.grasp_id)
 
     try:
         if node.error_message:

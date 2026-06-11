@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - defensive
     _instr = _InstrStub()
 # Pure order/checkpoint predicates — the ROS-free single source of truth the gate
 # wrappers delegate their decision to (presentation/remedy stays in the wrappers).
-from primitives.shared.predicates import is_order_correct, is_checkpoint_saved
+from primitives.shared.predicates import is_order_correct, is_checkpoint_saved, is_object_grasped
 import subprocess
 import sys
 import logging
@@ -59,6 +59,7 @@ logger = logging.getLogger("RosMCPServer")
 
 # Type aliases for consistent parameter types
 Mode = Literal["sim", "real"]
+Holding = Literal["with_object", "without_object"]  # declared payload state (move_to_safe_height gate)
 GripperCommand = str  # "open", "close", or numeric mm value (e.g. "35")
 TranslateAction = Literal["insert", "place_down"]
 PhaseNumber = Literal[1, 2, 3]
@@ -446,6 +447,48 @@ def _assert_init_saved(mode):
     if ok:
         return None
     return {"result": "failure", "error": f"Init checkpoint gate: {reason}"}
+
+
+def _assert_holding_state(mode, holding, object_name, base_name, grasp_id):
+    """move_to_safe_height PAYLOAD PRE-GATE (the L2 machine payload dim made enforceable).
+
+    The tool DECLARES whether this lift carries a part (holding='with_object') or is an empty
+    retract ('without_object'); this gate evaluates the live grasp predicate — the SAME
+    verify_grasp path commit's G2 'released' gate uses, just read for the opposite expected
+    verdict — and REFUSES if the world disagrees with the declaration. A 'with_object' lift
+    after a silently-failed grasp, or a 'without_object' retract with the part still in the jaws,
+    is caught HERE instead of surfacing as a mid-air drop / dragged part downstream.
+
+    Always on (sim+real): holding is observable in both modes. sim is grasp-aware (gripper width
+    vs THIS grasp's approach width, so grasp_id+base_name are required to read it soundly); real
+    is width-only. Fail-closed: anything that is not an explicit {result: success|failure} verify
+    verdict => refuse (an unreadable sensor never opens the gate). Host @tool-exec/onStart setup
+    calls are exempt (_is_host_call), mirroring the other pre-gates. Reuses _verify_grasp_held
+    (defined later in this module) + predicates.is_object_grasped — no new predicate."""
+    if _is_host_call():
+        return None
+    if not object_name or not object_name.strip():
+        return {"result": "failure",
+                "error": "Holding gate: object_name is required to verify the gripper's payload state."}
+    if mode == "sim" and (grasp_id is None or int(grasp_id) < 0):
+        return {"result": "failure",
+                "error": ("Holding gate: grasp_id is required in sim (the width check compares the "
+                          "gripper against THIS grasp's approach width).")}
+    gres = _verify_grasp_held(object_name, mode, base_name, grasp_id)
+    if not (isinstance(gres, dict) and gres.get("result") in ("success", "failure")):
+        return {"result": "failure",
+                "error": f"Holding gate: grasp check unavailable for '{object_name}'. Retry."}
+    holding_actual, _ = is_object_grasped(gres)
+    want_holding = (holding == "with_object")
+    if want_holding and not holding_actual:
+        return {"result": "failure",
+                "error": (f"Holding gate: declared holding='with_object' but the gripper is not holding "
+                          f"'{object_name}'. The grasp likely failed — re-grasp before lifting.")}
+    if (not want_holding) and holding_actual:
+        return {"result": "failure",
+                "error": (f"Holding gate: declared holding='without_object' but '{object_name}' is still "
+                          f"in the gripper. Release it before retracting.")}
+    return None
 
 
 # Configuration using environment variables with defaults (similar to newer version)
@@ -1584,16 +1627,31 @@ class MoveToSafeHeightResult(BaseModel):
 @mcp.tool(meta={"category": "motion"})
 def move_to_safe_height(
     mode: Mode,
+    holding: Annotated[Holding, Field(description="'with_object' when lifting a grasped part; 'without_object' when retracting after release")],
+    object_name: Annotated[str, Field(description="The object holding refers to", min_length=1)],
+    base_name: Annotated[str, Field(description="Assembly base name", min_length=1)],
+    grasp_id: Annotated[int, Field(description="Same id passed to move_to_grasp")],
 ) -> MoveToSafeHeightResult:
     """Lift robotic arm to safe height (z=0.3m).
+
+Declare holding plus the object it refers to (object_name, grasp_id, base_name);
+the declared state is verified against the gripper before moving.
 
 Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
+    mode = _remap_mode(mode)
     gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
     if gate_err:
         return gate_err
-    raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", "", timeout=45, error_prefix="Move to safe height")
+    hold_err = _assert_holding_state(mode, holding, object_name, base_name, grasp_id)  # payload pre-gate
+    if hold_err:
+        return hold_err
+    args = (f"--mode {mode} --holding {holding} "
+            f"--object-name {shlex.quote(object_name)} "
+            f"--base-name {shlex.quote(base_name)} "
+            f"--grasp-id {int(grasp_id)}")
+    raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", args, timeout=45, error_prefix="Move to safe height")
     return _parse_result(MoveToSafeHeightResult, raw)
 
 ## ############################################################################################## ##
