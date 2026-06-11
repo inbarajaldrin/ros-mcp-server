@@ -43,6 +43,7 @@ sys.path.insert(0, ROOT)
 
 from triggers.commit_object import handle_object_commit
 from triggers.signal_phase_complete import handle_phase_signal
+from primitives.shared.predicates import is_object_grasped, is_at_safe_height, is_home
 
 
 def _run_query(script: str, args: str, *, domain: str, mode: str, timeout: int = 60) -> dict:
@@ -117,6 +118,35 @@ def run_commit(args):
     return res
 
 
+def run_home(args):
+    """MIRRORS server_remap._assert_home_preconditions (the move_home pre-gate):
+    empty (verify_grasp --width-only, explicit-verdict fail-closed) AND (at safe height OR
+    already home). Same query flags, same predicate calls, same refusal logic — drift here
+    means the probe needs updating, which is the point."""
+    _va, _vd, _vg, rs = make_callbacks(args.domain, args.mode, args.base, args.grasp_id)
+    gres = _run_query("verify_grasp.py", f"--object-name any --mode {args.mode} --width-only",
+                      domain=args.domain, mode=args.mode, timeout=15)
+    if not (isinstance(gres, dict) and gres.get("result") in ("success", "failure")):
+        return {"result": "failure", "error": "Move-home gate: grasp check unavailable. Retry.",
+                "leg": "empty(unavailable)"}
+    holding, why = is_object_grasped(gres)
+    if holding:
+        return {"result": "failure", "leg": "empty", "verdict": why,
+                "error": "Move-home gate: the gripper is not empty (holding a part or at a "
+                         "partial width)."}
+    state = rs(args.mode)
+    if not isinstance(state, dict):
+        return {"result": "failure", "leg": "state", "error": "Move-home gate: robot state unavailable."}
+    at_safe, safe_why = is_at_safe_height(state)
+    if not at_safe:
+        home_ok, home_why = is_home(state)
+        if not home_ok:
+            return {"result": "failure", "leg": "safe_height", "verdict": f"{safe_why} / {home_why}",
+                    "error": "Move-home gate: arm is not at safe height."}
+        return {"result": "success", "leg": "home", "verdict": home_why, "empty_verdict": why}
+    return {"result": "success", "leg": "safe_height", "verdict": safe_why, "empty_verdict": why}
+
+
 def run_signal(args):
     va, vd, _vg, rs = make_callbacks(args.domain, args.mode, args.base, args.grasp_id)
     res = asyncio.run(handle_phase_signal(
@@ -128,7 +158,7 @@ def run_signal(args):
 
 def main():
     p = argparse.ArgumentParser(description="No-LLM live-ROS probe for commit / signal_phase gates.")
-    p.add_argument("--tool", required=True, choices=["commit", "signal"])
+    p.add_argument("--tool", required=True, choices=["commit", "signal", "home"])
     p.add_argument("--mode", required=True, choices=["sim", "real"])
     p.add_argument("--phase", type=int, default=2, choices=[1, 2, 3], help="1=disassembly, 2/3=assembly")
     p.add_argument("--base", default="", help="assembly base name (e.g. base2)")
@@ -142,7 +172,7 @@ def main():
     if args.tool == "commit" and not args.object:
         p.error("--object is required for --tool commit")
 
-    res = run_commit(args) if args.tool == "commit" else run_signal(args)
+    res = {"commit": run_commit, "signal": run_signal, "home": run_home}[args.tool](args)
     print(json.dumps(res, indent=2))
     # Exit nonzero when a gate failed, so the probe is usable in scripts/CI.
     ok = res.get("result") == "success" or res.get("status") == "success"

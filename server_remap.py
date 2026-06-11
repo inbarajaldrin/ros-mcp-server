@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - defensive
     _instr = _InstrStub()
 # Pure order/checkpoint predicates — the ROS-free single source of truth the gate
 # wrappers delegate their decision to (presentation/remedy stays in the wrappers).
-from primitives.shared.predicates import is_order_correct, is_checkpoint_saved, is_object_grasped
+from primitives.shared.predicates import is_order_correct, is_checkpoint_saved, is_object_grasped, is_at_safe_height, is_home
 import subprocess
 import sys
 import logging
@@ -498,6 +498,58 @@ def _assert_holding_state(mode, holding, object_name, base_name, grasp_id):
         return {"result": "failure",
                 "error": (f"Holding gate: declared holding='without_object' but '{object_name}' is still "
                           f"in the gripper. Release it before retracting.")}
+    return None
+
+
+def _assert_home_preconditions(mode):
+    """move_home PRE-GATE — 'home only from safe height, with an empty gripper'.
+
+    Two predicate reuses, no new logic:
+      empty    verify_grasp --width-only (the SAME source commit-G2's release check uses
+               in real) read through predicates.is_object_grasped. Width-only is
+               object-agnostic — move_home has no object params and the invariant is
+               'holding NOTHING' — and runs sim AND real. Replaces the bespoke sim-only
+               check_holding_object_sim that lived inside primitives/move_home.py.
+      safe ht  predicates.is_at_safe_height (commit-G3's check) on live robot state —
+               move_home plans a straight-line trajectory that ignores inserted bases,
+               so a home call from a low pose drags the gripper through the workspace
+               even when empty. Safe height first, always.
+
+    Together they enforce the choreography place/release -> open -> safe height -> home,
+    and make 'is_home => released' hold in real (the linchpin under
+    signal_phase_complete's 2-check design). Fail-closed like G2 (the empty check's pass
+    condition is the predicate being False, so an explicit verdict is required first);
+    host @tool-exec/onStart setup calls exempt."""
+    if _is_host_call():
+        return None
+    gres = _run_with_retry(_run_query, "verify_grasp.py",
+                           f"--object-name any --mode {mode} --width-only",
+                           timeout=15, error_prefix="Verify grasp")
+    if not (isinstance(gres, dict) and gres.get("result") in ("success", "failure")):
+        return {"result": "failure",
+                "error": "Move-home gate: grasp check unavailable. Retry."}
+    holding, _ = is_object_grasped(gres)
+    if holding:
+        return {"result": "failure",
+                "error": ("Move-home gate: the gripper is not empty (holding a part or at a "
+                          "partial width). Do not open the gripper mid-air while holding — "
+                          "place the part down first, then open the gripper fully and move to "
+                          "safe height before retrying.")}
+    try:
+        state = _robot_state(mode)
+    except Exception:
+        state = None
+    if not isinstance(state, dict):
+        return {"result": "failure",
+                "error": "Move-home gate: robot state unavailable. Retry."}
+    # At safe height OR already at home (re-homing must pass: HOME sits 19mm below
+    # SAFE_HEIGHT — within tolerance only by 1mm, too knife-edge to rely on).
+    at_safe, _ = is_at_safe_height(state)
+    if not at_safe:
+        home_ok, _ = is_home(state)
+        if not home_ok:
+            return {"result": "failure",
+                    "error": "Move-home gate: arm is not at safe height. Move to safe height before moving home."}
     return None
 
 
@@ -1426,6 +1478,9 @@ Returns:
     error: failure reason (only on failure)"""
     mode = _remap_mode(mode)
     gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+    if gate_err:
+        return gate_err
+    gate_err = _assert_home_preconditions(mode)  # pre-gate: empty gripper + at safe height
     if gate_err:
         return gate_err
     raw = _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")

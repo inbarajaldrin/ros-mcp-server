@@ -37,6 +37,11 @@ from std_msgs.msg import Float32, Float64
 GRIPPER_HALF_OPEN_WIDTH_MM = 35.0
 GRIPPER_MAX_WIDTH_MM = 100.0
 GRIPPER_WIDTH_MATCH_TOLERANCE_MM = 2.0  # If width is within this of approach width, gripper hasn't closed
+# Closed-on-nothing floor for the width-only verdict. MEASURED (sim, 2026-06-11, live
+# /gripper_width_sim): a 'close' on empty air settles at 2.45mm — NOT 0 — so a <=0 band
+# reads a closed-empty gripper as "holding". 5.0 sits above that settle and far below the
+# thinnest grasped part (narrowest approach width in the datasets is 24.4mm).
+GRIPPER_CLOSED_EMPTY_MAX_MM = 5.0
 
 
 def output_result(result):
@@ -460,13 +465,17 @@ class VerifyGrasp(Node):
 
         self.get_logger().info(f"Gripper width: {self.gripper_width:.2f}mm")
 
-        if self.gripper_width <= 0:
+        # Band edges are MEASURED (sim, 2026-06-11): full-open publishes 99.99999mm — an
+        # exact >= GRIPPER_MAX_WIDTH_MM band misses it by 6e-6mm and deadlocked the
+        # move_home gate (P1 run); closed-on-nothing publishes 2.45mm, so <= 0 never
+        # fires either. Open band mirrors the grasp-aware path's tolerance treatment.
+        if self.gripper_width <= GRIPPER_CLOSED_EMPTY_MAX_MM:
             result['result'] = 'failure'
             result['error'] = f"Gripper fully closed (width: {self.gripper_width:.2f}mm) - nothing grasped"
             self.get_logger().error(result['error'])
             return False, result
 
-        if self.gripper_width >= GRIPPER_MAX_WIDTH_MM:
+        if self.gripper_width >= GRIPPER_MAX_WIDTH_MM - GRIPPER_WIDTH_MATCH_TOLERANCE_MM:
             result['result'] = 'failure'
             result['error'] = f"Gripper fully open (width: {self.gripper_width:.2f}mm) - no grip"
             self.get_logger().error(result['error'])

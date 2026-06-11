@@ -52,7 +52,7 @@ You will be provided the fully assembled assembly in the environment.
 
 Save scene state at the start as "init.json" before touching anything — this is the assembled baseline.
 
-Then move the robot home and open the gripper before disassembling the first object.
+Then open the gripper and move the robot home before disassembling the first object.
 
 **Task**
 
@@ -106,7 +106,7 @@ Read the disassembly results to identify the grasp ids successfully used to disa
 
 Save scene state at the start before beginning assembly as "init.json".
 
-Then move the robot home and open the gripper before assembling the first object.
+Then open the gripper and move the robot home before assembling the first object.
 
 **Task**
 
@@ -158,7 +158,7 @@ def phase_3_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(descr
 
 {setup_instruction}Read the assembly recipe to identify the tool call sequence for each object.
 {init_save}
-Then move the robot home and open the gripper before assembling the first object.
+Then open the gripper and move the robot home before assembling the first object.
 
 **Task**
 
