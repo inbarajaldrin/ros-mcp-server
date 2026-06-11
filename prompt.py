@@ -50,31 +50,34 @@ def phase_1_disassembly_sequence_discovery(
 
 You will be provided the fully assembled assembly in the environment.
 
-Save scene state at the start before beginning disassembly.
+Save scene state at the start as "init.json" before touching anything — this is the assembled baseline.
+
+Then move the robot home and open the gripper before disassembling the first object.
 
 **Task**
 
 Your goal is to disassemble the objects into the clear region of the workspace,
 thereby figuring out which grasp ids let you perform the disassembly.
-Disassemble in reverse assembly order. The information you collect in this run
-will be used later to perform assembly.
+Disassemble in reverse assembly order. The grasp ids you commit in this run are
+reused for assembly later.
 
 **Execution**
 
 Perform disassembly one object at a time.{grasp_hint_text}{orchestrator_instruction}
+If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**
 
 Run verify disassembly once you've run all tools required to move one object away from the fixed base.
 
 **SUCCESS** — verify disassembly returns success:
-1. Save scene state.
-2. Log the grasp id used to disassemble that object.
-3. Move on to the next object.
+1. Move to safe height.
+2. Save scene state as "{{object_name}}.json".
+3. Commit the object with commit_object — the grasp id you pass is the record of what worked. Then move on to the next object.
 
 **FAILURE** — verify disassembly returns failure:
-1. Restore scene state.
-2. Try disassembling the object using a different grasp id. Not all grasp points are accessible from every object orientation.
+1. Figure out if there are any steps you can continue to take to complete the disassembly.
+2. If not, restore scene state and try a different grasp id. Not all grasp points are accessible from every object orientation.
 
 **Post Execution**
 Signal you are done with the disassembly of all objects.
@@ -137,36 +140,45 @@ def phase_3_perform_assembly(mode: Annotated[Literal["sim", "real"], Field(descr
     Phase 3: Performing Assembly in simulation or real world.
     """
     if mode == "real":
-        setup_instruction = "Run verify_clearance to ask a human operator to set up and verify the real workspace before starting assembly.\n"
+        setup_instruction = ("Signal the operator (signal_operator) to set up and verify the workspace, "
+                             "and wait for confirmation before starting.\n")
+        init_save = ""
+        success_block = """1. Move to safe height.
+2. Commit the object with commit_object, then move on to the next object."""
     else:
         setup_instruction = ""
+        init_save = '\nSave scene state at the start as "init.json".\n'
+        success_block = """1. Move to safe height.
+2. Save scene state as "{object_name}.json".
+3. Commit the object with commit_object, then move on to the next object."""
 
     return f"""Phase 3: Performing Assembly ({mode} mode).
 
 **Initialization:**
 
-{setup_instruction}Read the assembly sequence log to identify the tool call sequences for each object.
+{setup_instruction}Read the assembly recipe to identify the tool call sequence for each object.
+{init_save}
+Then move the robot home and open the gripper before assembling the first object.
 
 **Task**
 
-Perform assembly of the objects onto the fixed base using the assembly sequence log.
+Perform assembly of the objects onto the fixed base following the recipe.
 
 **Execution**
 
-Follow the sequence of objects and tool calls with arguments to perform assembly one by one. Do not skip any object.
+Follow the recipe's object order and tool calls with their arguments, one object at a time. Do not skip any object.
 If you exhaust all strategies for an object, signal failure — do not skip to the next object.
 
 **Verification**
 
-Run verify assembly once you've run all tools required to move one object into the fixed base.
+Run verify assembly once you've run all tools required to assemble one object into the fixed base.
 
 **SUCCESS** — verify assembly returns success:
-1. Move on to the next object.
+{success_block}
 
 **FAILURE** — verify assembly returns failure or any of the steps failed:
-1. Grasp the object and place it in clear space to regrasp.
-2. Start the cycle over for that object.
-3. If the object is still not assembled in two tries, signal a human for assistance.
+1. Grasp the object, place it down in clear space, and start that object's cycle over (regrasp and retry).
+2. If the object is still not assembled after two tries, signal the operator for assistance.
 
 **Post Execution**
 Signal you are done with the final assembly of all objects.
