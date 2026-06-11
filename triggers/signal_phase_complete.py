@@ -103,6 +103,7 @@ async def handle_phase_signal(
     verify_disassembly_fn: Optional[Callable] = None,
     verify_assembly_fn: Optional[Callable] = None,
     robot_state_fn: Optional[Callable] = None,    # () -> get_robot_state dict, for is_home
+    has_committed_progress_fn: Optional[Callable] = None,  # () -> bool: >=1 commit this phase
 ) -> Dict[str, Any]:
     """Authoritatively decide phase completion (uniform sim+real).
 
@@ -131,9 +132,17 @@ async def handle_phase_signal(
                     "message": (f"{label} verified complete despite agent signaling failure "
                                 f"(agent comment: {comment or 'none'}). Overriding to success."),
                     "override": True}
-        # Genuine failure -> status stays failure -> the YAML hook escalates. comment = why.
-        return {"phase": phase, "status": "failure", "requires_response": False,
-                "message": f"{label} incomplete ({reason}). Agent comment: {comment or 'none'}."}
+        # Genuine failure -> status stays failure. Route the cascade by whether there is
+        # committed work this phase: if >=1 object is committed (the floor file exists), emit
+        # action="switch" so the client preserves the ledger+scene+context and a stronger tier
+        # CONTINUES from the committed state (design B). With nothing committed, omit action ->
+        # the YAML @escalate hook does a clean restart (nothing to preserve). The floor file is
+        # the cascade-vs-restart discriminator.
+        result = {"phase": phase, "status": "failure", "requires_response": False,
+                  "message": f"{label} incomplete ({reason}). Agent comment: {comment or 'none'}."}
+        if has_committed_progress_fn is not None and has_committed_progress_fn():
+            result["action"] = "switch"
+        return result
 
     # Agent reported success -> must be authoritatively complete.
     if not complete:

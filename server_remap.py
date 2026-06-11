@@ -353,6 +353,62 @@ def _list_scene_checkpoints() -> set:
         return set()
 
 
+def _commit_floor_path():
+    """MONOTONIC FLOOR file (L1 transaction invariant: rollback must never cross the
+    last commit). ros-mcp-server WRITES it on every successful commit_object; the
+    isaac-sim server's restore_scene_state gate READS it and refuses restores to
+    checkpoints older than the floor (sim-runner owns that half). Shared-fs contract,
+    same pattern as _list_scene_checkpoints. Motivated by the 2026-06-11 qwen3 run:
+    3/4 objects committed, then restore->init.json discarded all committed work twice."""
+    return os.path.join(BASE_OUTPUT_DIR, "resources", "commit_floor.json") if BASE_OUTPUT_DIR else None
+
+
+def _write_commit_floor(object_name: str, phase) -> None:
+    """Best-effort: a floor-write failure must never fail a commit (the floor is
+    advisory infrastructure; the commit verdict belongs to the commit gates). The
+    file's own mtime doubles as a PROGRESS HEARTBEAT (last-commit timestamp) for
+    client-side stall detection."""
+    path = _commit_floor_path()
+    if not path:
+        return
+    try:
+        ck = f"{object_name}.json"
+        ck_path = os.path.join(BASE_OUTPUT_DIR, "resources", "scene_states", ck)
+        mtime = os.path.getmtime(ck_path) if os.path.exists(ck_path) else None
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # ATOMIC write (tmp + rename): the isaac restore gate fails CLOSED on a
+        # partial/unreadable floor file, so a mid-write read must be impossible.
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump({"phase": phase, "object_name": object_name,
+                       "checkpoint": ck, "mtime": mtime, "ts": time.time()}, f)
+        os.rename(tmp_path, path)
+        logger.info(f"[floor-gate] commit floor -> '{ck}' (phase={phase})")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[floor-gate] could not write commit floor: {e}")
+
+
+def _has_commit_floor() -> bool:
+    """True iff >=1 object has been committed this phase (the floor file exists). Drives the
+    cascade routing in signal_phase_complete: committed work present => action="switch"
+    (preserve + continue) instead of @escalate (clean restart)."""
+    path = _commit_floor_path()
+    return bool(path and os.path.exists(path))
+
+
+def _clear_commit_floor() -> None:
+    """New phase => fresh floor (cleared alongside the phase's scene_states)."""
+    path = _commit_floor_path()
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info("[floor-gate] commit floor cleared")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[floor-gate] could not clear commit floor: {e}")
+
+
 def _is_host_call() -> bool:
     """True when the current MCP request was marked by the client as a host @tool-exec /
     onStart / hook call (params._meta.toolExec=true; stamped in tool-executor.ts). Such calls
@@ -1585,6 +1641,7 @@ async def signal_phase_complete(
         verify_disassembly_fn=_verify_all_disassembled,
         verify_assembly_fn=_verify_all_assembled,
         robot_state_fn=_robot_state,
+        has_committed_progress_fn=_has_commit_floor,  # floor exists => cascade via @switch
     )
     # POST-gate predicate: mark the handshake resolved ONLY on a terminal result. The server uses
     # requires_response=False to mean "no further agent action expected" (accepted success,
@@ -1683,7 +1740,7 @@ Returns:
         except Exception:
             ck_ordered, ck_fn = None, None  # order map unavailable -> G4 off (liveness)
     from triggers.commit_object import handle_object_commit
-    return handle_object_commit(
+    res = handle_object_commit(
         object_name=object_name,
         phase=phase,
         mode=mode,
@@ -1695,6 +1752,11 @@ Returns:
         ordered_objects=ck_ordered,
         checkpoints_fn=ck_fn,
     )
+    # MONOTONIC FLOOR: a successful commit advances the floor the isaac restore gate
+    # enforces (rollback must never cross the last commit).
+    if isinstance(res, dict) and res.get("result") == "success":
+        _write_commit_floor(object_name, phase)
+    return res
 
 
 @mcp.tool(meta={"category": "signal"})
@@ -1897,6 +1959,7 @@ def set_task_phase(phase: str) -> Dict[str, Any]:
 
     _TASK_PHASE = p
     _PHASE_SIGNALED = False  # new phase -> completion handshake pending again
+    _clear_commit_floor()    # new phase -> fresh monotonic floor
     logger.info(f"[order-gate] set_task_phase -> '{p}' (pid={os.getpid()}, gate_on={_order_gate_on()})")
     return {"result": "success", "phase": p}
 
