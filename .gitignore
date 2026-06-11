@@ -220,3 +220,6 @@ primitives/_real_mode_stash/
 # Per-user Claude harness state (top-level only — project-local skills under
 # compliant_insertion_studio/.claude/ ARE tracked)
 /.claude/
+.local/
+.codex
+.understand-anything/
