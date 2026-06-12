@@ -178,6 +178,23 @@ _VALID_PHASES = ("assembly", "disassembly")
 _TASK_PHASE_NUMBER = None
 _PHASE_NUMBERS_FOR = {"disassembly": (1,), "assembly": (2, 3)}
 
+# DECLARED task mode (host-injected via set_task_phase mode=, like _TASK_PHASE_NUMBER).
+# Drives gate APPLICABILITY for the checkpoint-family gates (init pre-gate, commit G4):
+# those gates exist only where save/restore exists, i.e. declared-sim phases. P3 declares
+# 'real' — no scene checkpoints — so they must be OFF even though the remap executes sim
+# (predicate SOURCES keep following the EXECUTED mode; only applicability follows the
+# declaration). Host-injected rather than per-call: agent-supplied mode args drift (qwen
+# phase-drift lesson; recipes even record mode='sim'), and gate semantics must not be
+# agent-flippable. None => not injected => fall back to executed-mode keying (back-compat).
+_TASK_MODE = None
+_VALID_TASK_MODES = ("sim", "real")
+
+
+def _checkpoint_family_applies(executed_mode: str) -> bool:
+    """Shared applicability for the init pre-gate + commit G4: declared mode when the host
+    injected one, executed (remapped) mode otherwise. executed_mode must already be remapped."""
+    return (_TASK_MODE or executed_mode) == "sim"
+
 # --- POST-gate predicate: phase-completion handshake state (added 2026-06-10) ---
 # Sibling to _TASK_PHASE. Tracks whether the agent has issued a TERMINAL signal_phase_complete
 # for the current phase ("terminal" = the server returned requires_response=False, i.e. either an
@@ -449,8 +466,8 @@ def _assert_init_saved(mode):
     {result:failure,error} to BLOCK or None to proceed. The DECISION is delegated to
     predicates.is_checkpoint_saved (empty object_name => the 'init' baseline check).
     Host @tool-exec/onStart/hook calls are exempt (_is_host_call)."""
-    if not _checkpoint_gate_on() or _remap_mode(mode) != "sim":
-        return None
+    if not _checkpoint_gate_on() or not _checkpoint_family_applies(_remap_mode(mode)):
+        return None  # gate off, or declared-real phase (no checkpoints exist to demand)
     if _is_host_call():
         return None  # host setup motion (onStart/hook) — not agent discovery, not gated
     ok, reason = is_checkpoint_saved("", None, _list_scene_checkpoints())
@@ -1898,7 +1915,7 @@ Returns:
     # Leaving these None disables G4 in handle_object_commit (commit stays G1/G2/G3 only).
     ck_ordered = None
     ck_fn = None
-    if _checkpoint_gate_on() and mode == "sim":
+    if _checkpoint_gate_on() and _checkpoint_family_applies(mode):  # mode already remapped
         try:
             by_base, by_obj = _order_maps()
             base = base_name or by_obj.get(object_name)
@@ -2103,7 +2120,8 @@ async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_scr
         }
 
 @mcp.tool()
-def set_task_phase(phase: str, phase_number: Optional[int] = None) -> Dict[str, Any]:
+def set_task_phase(phase: str, phase_number: Optional[int] = None,
+                   mode: Optional[str] = None) -> Dict[str, Any]:
     """Host-only: set the current task phase for the phase-aware order gate ('assembly' or
     'disassembly'). Injected by each phase onStart via
     @tool-exec:ros-mcp-server__set_task_phase(phase=...). NOT part of the agent tool surface
@@ -2111,8 +2129,13 @@ def set_task_phase(phase: str, phase_number: Optional[int] = None) -> Dict[str, 
 
     phase_number (optional, backward-compatible): the phase NUMBER (1/2/3) for the phase-number
     gate on commit_object / signal_phase_complete. Without it the gate only enforces name-level
-    consistency (1<->disassembly, 2/3<->assembly) and cannot catch 2-vs-3 drift."""
-    global _TASK_PHASE, _TASK_PHASE_NUMBER, _PHASE_SIGNALED
+    consistency (1<->disassembly, 2/3<->assembly) and cannot catch 2-vs-3 drift.
+
+    mode (optional, backward-compatible): the DECLARED task mode ('sim'/'real') for gate
+    applicability — declared-real turns the checkpoint-family gates (init pre-gate, commit G4)
+    OFF (no checkpoints exist in real choreography), while predicate sources keep following
+    the executed (remapped) mode. Without it gates key on executed mode as before."""
+    global _TASK_PHASE, _TASK_PHASE_NUMBER, _TASK_MODE, _PHASE_SIGNALED
     p = (phase or "").strip().lower()
     if p not in _VALID_PHASES:
         return {"result": "failure", "error": f"invalid phase '{phase}'; expected one of {list(_VALID_PHASES)}"}
@@ -2120,6 +2143,10 @@ def set_task_phase(phase: str, phase_number: Optional[int] = None) -> Dict[str, 
         return {"result": "failure",
                 "error": (f"phase_number {phase_number} inconsistent with phase '{p}' "
                           f"(expected {list(_PHASE_NUMBERS_FOR[p])})")}
+    m = (mode or "").strip().lower() or None
+    if m is not None and m not in _VALID_TASK_MODES:
+        return {"result": "failure",
+                "error": f"invalid mode '{mode}'; expected one of {list(_VALID_TASK_MODES)}"}
 
     # POST-gate bonus (multi-phase only): a transition to a DIFFERENT phase while the prior phase
     # never got a terminal signal means the prior phase ended unsignaled. Fail-closed when the
@@ -2136,9 +2163,10 @@ def set_task_phase(phase: str, phase_number: Optional[int] = None) -> Dict[str, 
 
     _TASK_PHASE = p
     _TASK_PHASE_NUMBER = phase_number  # None when the host injects name only (number gate degrades)
+    _TASK_MODE = m           # None when not injected (gates fall back to executed-mode keying)
     _PHASE_SIGNALED = False  # new phase -> completion handshake pending again
     _clear_commit_floor()    # new phase -> fresh monotonic floor
-    logger.info(f"[order-gate] set_task_phase -> '{p}' (number={phase_number}, pid={os.getpid()}, gate_on={_order_gate_on()})")
+    logger.info(f"[order-gate] set_task_phase -> '{p}' (number={phase_number}, mode={m}, pid={os.getpid()}, gate_on={_order_gate_on()})")
     return {"result": "success", "phase": p}
 
 
