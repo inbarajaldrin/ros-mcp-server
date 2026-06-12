@@ -1,7 +1,24 @@
+"""server_core.py — the consolidated ros-mcp-server surface.
+
+Each tool is defined ONCE here. All sim/real divergence is isolated in the four
+ModeConfig seams (route_mode / apply_pre_gates / resolve_pose / real_extras); the
+robot logic and the entire harness (gates, commit_object, set_task_phase, floor,
+predicates, signals) are mode-agnostic — identical across sim and real.
+
+Built per the CONSOLIDATION_PLAN.md spec — the consolidation merged two prior
+entrypoints (a remap/harness server + a real-direct server):
+  - the full harness (the canonical truth) lives here, unchanged.
+  - the real-world STATE-STORE + real-direct routing folded in as the REAL
+    route-mode's resolve_pose seam (§4).
+
+The thin entry (server.py) builds a ModeConfig from env at import and registers the
+surface. server_quat.py is left UNTOUCHED (separate file + config).
+"""
 from mcp.server.fastmcp import FastMCP, Image, Context
 from mcp.server.session import ServerSession
 from pydantic import BaseModel, Field
-from typing import Annotated, List, Any, Optional, Union, Literal, Dict
+from typing import Annotated, List, Any, Optional, Union, Literal, Dict, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import base64
@@ -52,6 +69,10 @@ from scipy.spatial.transform import Rotation as R
 import traceback
 import re
 
+# State store deps (real route-mode resolve_pose seam — folded from server.py §4)
+import fcntl
+import uuid as _uuid
+
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -65,6 +86,13 @@ TranslateAction = Literal["insert", "place_down"]
 PhaseNumber = Literal[1, 2, 3]
 PhaseStatus = Literal["success", "failure"]
 
+
+## ############################################################################################## ##
+##
+##   MODE SEAM 1 — route-mode  (sim: real->sim redirect | real: identity)
+##
+## ############################################################################################## ##
+
 # ── Mode 2 real→sim redirect ────────────────────────────────────────────────
 # All phases run in sim. Phase 3 YAML says mode='real' but execution is sim.
 # Tool signatures use sim-mode parameters (no current_object_orientation).
@@ -73,6 +101,18 @@ def _remap_mode(mode: str) -> str:
     if mode == "real":
         return "sim"
     return mode
+
+
+def _identity_mode(mode: str) -> str:
+    """Real route-mode: the agent's mode flows straight to the primitives."""
+    return mode
+
+
+## ############################################################################################## ##
+##
+##   ORDER / PHASE / CHECKPOINT GATE STATE + PREDICATES (the canonical harness)
+##
+## ############################################################################################## ##
 
 # ── Assembly-order precondition gate ─────────────────────────────────────────
 # Rejects arm-committing actions on an object whose assembly-order predecessors
@@ -206,7 +246,7 @@ def _checkpoint_family_applies(executed_mode: str) -> bool:
 # fully server-side because their trigger is an *incoming tool call* the server can refuse. The
 # POST-gate's trigger is "the agent stopped" — which is NOT a tool call, so the server can never
 # observe it. So the server owns only the PREDICATE here; the MCP client owns the stop-trigger +
-# the forcing remedy (mirrors how server_remap separates order/checkpoint predicates from wrapper
+# the forcing remedy (mirrors how the server separates order/checkpoint predicates from wrapper
 # remedies). set_task_phase clears this so each phase starts with the handshake pending.
 _PHASE_SIGNALED = False
 
@@ -258,6 +298,66 @@ def _seated_name(e):
     if isinstance(e, dict):
         return e.get("name") or e.get("object_name")
     return e
+
+
+# ── Real-mode state-store assembly-order oracle (folded from server.py §4) ──────
+# In sim the order gate's seated oracle is verify_assembly --check-all (the
+# _assert_assembly_order path below). In real the camera is occluded by the gripper
+# ("held-object pose chains, not reads"), so the server maintains a CERTIFIED store
+# chained across tool calls and the order gate reads _run_certified_seated_set().
+def _run_certified_seated_set():
+    """Set of object_names CERTIFIED assembled THIS run, or None if the store is
+    untrustworthy (no clear stamped a run_id, or run_id != this run's) -> caller
+    fails closed. Trust requires a run_id stamped by clear_primitive_state this run."""
+    state = _load_state()
+    rid = state.get("run_id")
+    if not rid or (_CURRENT_RUN_ID is not None and rid != _CURRENT_RUN_ID):
+        return None
+    return {name for name, st in state.get("objects", {}).items()
+            if isinstance(st, dict) and st.get("assembled") is True}
+
+
+def _assert_assembly_order_real(object_name, mode, base_name=None):
+    """REAL route-mode assembly-order gate (folded from server.py).
+
+    Precondition gate. Return {result:failure,error} to BLOCK, or None to proceed.
+    No-op when the gate is off or mode != real. base_name is inferred from
+    object_name when not supplied (names disjoint across base1/2/3). Seated oracle =
+    the run_id-scoped 'assembled' certification set in the state store (a CERTIFIED-
+    seated oracle: a predecessor physically seated but not yet verify_assembly'd reads
+    as not-certified and the gate asks for certification — fail-closed)."""
+    if not _order_gate_on() or mode != "real":
+        return None
+    by_base, by_obj = _order_maps()
+    base = base_name or by_obj.get(object_name)
+    order = by_base.get(base)
+    if not order or object_name not in order:
+        if object_name not in _ORDER_UNKNOWN_WARNED:
+            _ORDER_UNKNOWN_WARNED.add(object_name)
+            logger.warning(f"[order-gate] object '{object_name}' (base={base}) not in any "
+                           f"assembly order map -- NOT gated. Known bases: {list(by_base.keys())}")
+        return None
+    k = order.index(object_name)
+    if k == 0:
+        return None  # first object, nothing precedes
+    seated = _run_certified_seated_set()
+    if seated is None:
+        # Store has no run certification -> cannot confirm predecessors. FAIL CLOSED.
+        return {"result": "failure",
+                "error": (f"Assembly order gate unavailable: the primitive state store has "
+                          f"no run certification (call clear_primitive_state at phase start). "
+                          f"Cannot confirm predecessors of '{object_name}' are seated; blocked.")}
+    if object_name in seated:
+        return None  # already certified seated -> regrasp/removal, not an assembly pick
+    missing = [o for o in order[:k] if o not in seated]
+    if missing:
+        return {"result": "failure",
+                "error": (f"Assembly order: '{object_name}' is order {k + 1} but predecessor(s) "
+                          f"{missing} are not CERTIFIED seated yet — call verify_assembly("
+                          f"'{missing[0]}') first (seat it if it is not). Required order for "
+                          f"{base}: {order}.")}
+    return None
+
 
 def _assert_assembly_order(object_name, mode, base_name=None):
     """Phase-aware precondition gate. Return {result:failure,error} to BLOCK the action, or None to
@@ -425,10 +525,11 @@ def _has_commit_floor() -> bool:
 
 
 def _clear_commit_floor() -> None:
-    """New phase => fresh floor + fresh scene_states. The server is the single authority for
-    phase-boundary resource state: the 181616 run proved stale resources from a PRIOR run can
-    materialize in the shared dir AFTER this clear (host restore ordering) — every branch logs
-    so a silent no-op can never hide in forensics again."""
+    """Clear ONLY the commit-floor file. Called both at phase ENTRY (set_task_phase, alongside
+    _clear_scene_states) and at terminal phase SUCCESS (signal_phase_complete) — where the floor's
+    within-phase rollback guard is retired but the checkpoints must SURVIVE (the post-phase replay
+    validator restores 'init', and captureRunOutputs archives them). Logs every branch so a silent
+    no-op can't hide in forensics."""
     path = _commit_floor_path()
     if not path:
         logger.warning("[floor-gate] clear skipped: BASE_OUTPUT_DIR unset (no shared resources dir)")
@@ -441,9 +542,17 @@ def _clear_commit_floor() -> None:
             logger.info("[floor-gate] no floor to clear")
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"[floor-gate] could not clear commit floor: {e}")
-    # scene_states: stale checkpoints from a prior phase/run are never restorable (the floor
-    # gate scopes restores within the phase) but they CAN wrongly block bracket saves via the
-    # write-once gate (181616 seq=31) — clear them with the floor.
+
+
+def _clear_scene_states() -> None:
+    """Sweep the phase's scene_states checkpoints. PHASE-ENTRY ONLY (set_task_phase): stale
+    checkpoints from a prior phase/run are never restorable (the floor gate scopes restores
+    within the phase) but they CAN wrongly block bracket saves via the isaac write-once gate
+    (181616 seq=31). MUST NOT run at phase success — the checkpoints have to outlive the phase
+    for the replay validator (restore 'init') and for run-dir archival."""
+    if not BASE_OUTPUT_DIR:
+        logger.warning("[floor-gate] scene_states clear skipped: BASE_OUTPUT_DIR unset")
+        return
     d = os.path.join(BASE_OUTPUT_DIR, "resources", "scene_states")
     try:
         n = 0
@@ -621,6 +730,100 @@ def _assert_phase_number(phase):
     return None
 
 
+## ############################################################################################## ##
+##
+##   REAL-MODE STATE STORE (folded from server.py §4 — the resolve_pose seam backing fns)
+##
+## ############################################################################################## ##
+
+# Per-object state that captures orientation and grasp_id from primitive outputs and
+# auto-injects them into subsequent calls. Persists to disk. It ALSO holds the per-run
+# "assembled" certification set consumed by (a) occlusion-tolerant real-mode
+# verify_assembly --check-all and (b) the real assembly-order gate. DOMAIN INVARIANT
+# (author-owned): once an object is verified assembled it cannot move until the whole
+# assembly completes -> "absent from /objects_poses_real" can ONLY mean occluded, never
+# disturbed; so an absent-but-certified object is still assembled. The store is
+# run_id-scoped: clear_primitive_state() stamps a fresh run_id and empties objects, and
+# every cross-process reader (the verify_assembly.py CLI) refuses to trust the store
+# unless its run_id matches the one the server passes. All load/mutate/save go through an
+# flock so concurrent tool calls never tear it.
+
+# In-process record of the run_id stamped by the most recent clear. The check_all
+# CLI is handed this so it can reject a store left over from a different run.
+_CURRENT_RUN_ID = None
+
+def _state_path() -> str:
+    if BASE_OUTPUT_DIR:
+        return os.path.join(BASE_OUTPUT_DIR, "primitive_state.json")
+    return "primitive_state.json"
+
+def _lock_path() -> str:
+    return _state_path() + ".lock"
+
+class _state_lock:
+    """Exclusive cross-process lock around the state file (flock-based)."""
+    def __enter__(self):
+        self._f = open(_lock_path(), "w")
+        fcntl.flock(self._f, fcntl.LOCK_EX)
+        return self
+    def __exit__(self, *exc):
+        fcntl.flock(self._f, fcntl.LOCK_UN)
+        self._f.close()
+        return False
+
+def _load_state_unlocked() -> dict:
+    p = _state_path()
+    if os.path.exists(p):
+        try:
+            with open(p, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Fail closed: an unreadable/torn store yields no objects (no rescue).
+            return {"objects": {}}
+    return {"objects": {}}
+
+def _save_state_unlocked(state: dict) -> None:
+    p = _state_path()
+    tmp = f"{p}.tmp.{os.getpid()}.{_uuid.uuid4().hex[:8]}"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, p)
+
+def _load_state() -> dict:
+    with _state_lock():
+        return _load_state_unlocked()
+
+def _save_state(state: dict) -> None:
+    with _state_lock():
+        _save_state_unlocked(state)
+
+def _get_object_state(object_name: str) -> Optional[dict]:
+    state = _load_state()
+    return state.get("objects", {}).get(object_name)
+
+def _set_object_state(object_name: str, orientation: Optional[list] = None,
+                      grasp_id: Optional[int] = None, assembled: Optional[bool] = None) -> None:
+    with _state_lock():
+        state = _load_state_unlocked()
+        if "objects" not in state:
+            state["objects"] = {}
+        if object_name not in state["objects"]:
+            state["objects"][object_name] = {}
+        if orientation is not None:
+            state["objects"][object_name]["orientation"] = orientation
+        if grasp_id is not None:
+            state["objects"][object_name]["grasp_id"] = grasp_id
+        if assembled is not None:
+            state["objects"][object_name]["assembled"] = assembled
+        _save_state_unlocked(state)
+
+
+## ############################################################################################## ##
+##
+##   CONFIGURATION + SERVICE MANAGEMENT (14 byte-identical backend fns; remap is canonical)
+##
+## ############################################################################################## ##
+
 # Configuration using environment variables with defaults (similar to newer version)
 # ROS Bridge connection settings
 LOCAL_IP = os.getenv("ROSBRIDGE_LOCAL_IP", "127.0.0.1")  # Default: localhost
@@ -637,7 +840,6 @@ _grasp_publisher_process = None
 # Output directories - use MCP_CLIENT_OUTPUT_DIR if set, otherwise use relative paths
 # Directories are created lazily when needed by tools
 BASE_OUTPUT_DIR = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
-import sys
 if BASE_OUTPUT_DIR:
     PYTHON_EXECUTIONS_DIR = os.path.join(BASE_OUTPUT_DIR, "python_executions")
 else:
@@ -811,6 +1013,341 @@ def _parse_result(model_cls, raw: dict):
 mcp = FastMCP("ros-mcp-server")
 
 
+@_instr.timed_primitive
+def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
+    """Helper function to run primitive scripts and return raw output.
+
+    Args:
+        script_name: Name of the primitive script (e.g., "move_home.py", "control_gripper.py")
+        command_args: Optional command-line arguments to pass to the script
+        timeout: Timeout for the subprocess (default: 60 seconds)
+        error_prefix: Prefix for error messages (default: "Primitive")
+
+    Returns:
+        Dictionary with output from the primitive script (stdout + stderr)
+    """
+    import subprocess
+    import os
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Set PYTHONPATH to include project root for imports
+    env = os.environ.copy()
+    # Mode-aware config: surface the primitive's --mode to the subprocess as
+    # ROS_MCP_MODE so config.py picks the sim/real GRIPPER_CENTER_TOOL_OFFSET and
+    # gates real-only base calibration at import. (Primitives bind config
+    # constants at import, so this must be in the env before the process starts.)
+    import re as _re
+    _mode_match = _re.search(r"--mode\s+(\w+)", command_args or "")
+    if _mode_match:
+        env['ROS_MCP_MODE'] = _mode_match.group(1).strip().lower()
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = script_dir
+
+    # Observe-only: push INSTRUMENT_CALL_ID + INSTRUMENT_SIDECAR into the subprocess
+    # so primitive/IK telemetry is tagged with this call. No-op when disabled.
+    env.update(_instr.child_env())
+
+    # Use sys.executable to ensure we use the same Python interpreter as the MCP server
+    # This preserves conda/virtualenv environment and ROS2 DDS configuration
+    import sys
+    python_executable = sys.executable
+
+    cmd_parts = [
+        f"cd {script_dir}/primitives",
+        f"timeout {timeout} {python_executable} -u {script_name} {command_args}".strip()
+    ]
+
+    cmd = "\n".join(cmd_parts)
+
+    try:
+        # Use Popen with threading to capture output in real-time
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Combine stderr into stdout
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True,
+            env=env
+        )
+
+        # Read output in a separate thread to avoid blocking
+        output_lines = []
+        output_lock = threading.Lock()
+        read_complete = threading.Event()
+
+        def read_output():
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        with output_lock:
+                            output_lines.append(line)
+                    if process.poll() is not None:
+                        break
+                # Read any remaining output
+                remaining = process.stdout.read()
+                if remaining:
+                    with output_lock:
+                        output_lines.append(remaining)
+            except Exception:
+                pass
+            finally:
+                read_complete.set()
+
+        # Start reading thread
+        read_thread = threading.Thread(target=read_output, daemon=True)
+        read_thread.start()
+
+        # Wait for process to complete or timeout
+        start_time = time.time()
+        while process.poll() is None:
+            if time.time() - start_time > timeout + 10:
+                # Process timed out, kill it
+                process.kill()
+                try:
+                    process.wait()
+                except:
+                    pass
+                break
+            time.sleep(0.1)
+
+        # Ensure process is terminated
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait()
+            except:
+                pass
+
+        # Wait a bit for output thread to finish reading
+        read_complete.wait(timeout=1)
+
+        # Get return code
+        returncode = process.returncode
+
+        # Combine all output and strip ANSI color codes from ROS2 logging
+        with output_lock:
+            output = _ANSI_RE.sub("", "".join(output_lines))
+
+        # Check if output contains JSON markers (parse even on timeout)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result = json.loads(json_str)
+                # UNIFORM FAILURE CONTEXT: some primitives emit a bare result:failure with no
+                # error text — weak models flail on contextless failures and the P3 replay
+                # envelope surfaces `error` verbatim. The primitive's own log lines (combined
+                # stdout+stderr, ANSI-stripped) are right here before the marker — reattach
+                # their tail instead of discarding them. Gates already return prose; this
+                # closes the gap for the execution path. No-op when error/message present.
+                if (isinstance(result, dict) and result.get("result") == "failure"
+                        and not (result.get("error") or result.get("message"))):
+                    pre = output[:output.rfind(start_marker)]
+                    tail = [l.strip() for l in pre.strip().splitlines() if l.strip()][-6:]
+                    result["error"] = ((f"{error_prefix} failed without detail. Last output: "
+                                        + " | ".join(tail))[:500] if tail
+                                       else f"{error_prefix} failed (primitive returned no detail).")
+                return result
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to old format handling
+                pass
+
+        # If process was killed by timeout command (exit code 124), add timeout message
+        if returncode == 124:
+            if output:
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
+            else:
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
+
+        # If process was killed by us (returncode -9 or None), it timed out
+        if returncode is None or returncode == -9:
+            if output:
+                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
+            else:
+                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
+
+        # Old format (backward compatible)
+        return {"output": output if output else "", "returncode": returncode}
+
+    except subprocess.TimeoutExpired as e:
+        # Fallback: try to get any output from the exception
+        output = ""
+        if hasattr(e, 'stdout') and e.stdout:
+            output += e.stdout
+        if hasattr(e, 'stderr') and e.stderr:
+            output += e.stderr
+        if output:
+            return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": None}
+        else:
+            return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": None}
+    except Exception as e:
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}", "returncode": None}
+
+def _run_query(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Query") -> Dict[str, Any]:
+    """Helper function to run query scripts and return raw output.
+
+    Args:
+        script_name: Name of the query script (e.g., "get_scene_info.py", "get_current_grasp_points_pose.py")
+        command_args: Optional command-line arguments to pass to the script
+        timeout: Timeout for the subprocess (default: 10 seconds)
+        error_prefix: Prefix for error messages (default: "Query")
+
+    Returns:
+        Dictionary with output from the query script (stdout + stderr)
+    """
+    import subprocess
+    import os
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    cmd_parts = [
+        f"cd {script_dir}/queries",
+        f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
+    ]
+
+    cmd = "\n".join(cmd_parts)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            executable='/bin/bash',
+            capture_output=True,
+            text=True,
+            timeout=timeout + 5  # Add buffer for subprocess timeout
+        )
+
+        # Return combined stdout and stderr, strip ANSI color codes from ROS2 logging
+        output = result.stdout if result.stdout else ""
+        if result.stderr:
+            output += result.stderr
+        output = _ANSI_RE.sub("", output)
+
+        # Check if output contains JSON markers (parse JSON if present)
+        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
+            # Extract JSON portion - use rfind to get the LAST occurrence
+            # This handles cases where subprocess output also contains markers with ROS logger prefixes
+            start_marker = "__RESULT_JSON__"
+            end_marker = "__END_RESULT_JSON__"
+            start_idx = output.rfind(start_marker) + len(start_marker)
+            end_idx = output.rfind(end_marker)
+            json_str = output[start_idx:end_idx].strip()
+
+            try:
+                # Parse and return the JSON directly (no extra fields)
+                import json
+                result_json = json.loads(json_str)
+                return result_json
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall through to returning raw output
+                pass
+
+        # Fallback: return raw output if no JSON markers or parsing failed
+        return {"output": output}
+
+    except subprocess.TimeoutExpired:
+        return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
+    except Exception as e:
+        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
+
+
+def _snapshot_robot_state(command_args):
+    """Observe-only: read joints + gripper + EE pose for the before/after snapshot.
+
+    Registered as instrument's snapshot hook so the timing decorator can bracket
+    every tool call with robot state WITHOUT touching the primitives. Returns the
+    parsed dict or None (fail-loud — instrument records "MISSING" on None).
+    Reads the mode from the primitive's --mode arg; defaults to sim.
+    """
+    try:
+        m = re.search(r"--mode\s+(\w+)", command_args or "")
+        mode = (m.group(1).strip().lower() if m else "sim")
+        if mode not in ("sim", "real"):
+            mode = "sim"
+        raw = _run_query("get_robot_state.py", f"--mode {mode}", timeout=6, error_prefix="Robot state")
+        if isinstance(raw, dict) and "joints_rad" in raw:
+            return raw
+        return None
+    except Exception:
+        return None
+
+
+# Wire the snapshot hook into the observe-only instrument (no-op if disabled).
+try:
+    _instr.register_snapshot_hook(_snapshot_robot_state)
+except Exception:
+    pass
+
+
+## ############################################################################################## ##
+##
+##   MODECONFIG — the four seams that hold ALL sim/real divergence
+##
+## ############################################################################################## ##
+
+@dataclass
+class ModeConfig:
+    """The four seams where sim and real diverge. Robot logic / harness never differ.
+
+    route_mode       seam 1: real->sim redirect (sim/canonical) | identity (real-direct)
+    apply_pre_gates  seam 2: full harness (sim) vs order-only (real) — applied per-tool by name
+    resolve_pose     seam 3: state-store inject (real) | omit/ground-truth (sim) | agent-supplied (quat)
+    real_extras      seam 4: --use-default-base-position when real, else nothing
+    quat             only when the §7 signature shim lands; else server_quat owns quat
+    """
+    route_mode: Callable[[str], str]
+    pose_store: bool          # True => real state-store resolve_pose seam active
+    real_default_base: bool   # True => seam 4 appends --use-default-base-position on real
+    full_harness: bool        # True => sim init/order/hold/home/phase pre-gates; False => real order-only
+    quat: bool = False
+
+    # ── seam 3: pose resolution ────────────────────────────────────────────
+    def resolve_pose(self, object_name: str):
+        """Return (grasp_id, orientation) injected from the real state-store, or
+        (None, None) for the sim route-mode (the sim primitive reads ground-truth)."""
+        if not self.pose_store:
+            return None, None
+        st = _get_object_state(object_name)
+        if not st:
+            return None, None
+        return st.get("grasp_id"), st.get("orientation")
+
+    # ── seam 4: real-extras ────────────────────────────────────────────────
+    def real_extras_for(self, mode: str) -> str:
+        """seam 4: the --use-default-base-position flag, real route-mode only."""
+        return " --use-default-base-position" if (self.real_default_base and mode == "real") else ""
+
+
+# Built by the thin entry (server.py) from env. Default here = the canonical
+# sim/remap config so importing server_core standalone behaves like the canonical sim server.
+cfg = ModeConfig(
+    route_mode=_remap_mode,
+    pose_store=False,
+    real_default_base=False,
+    full_harness=True,
+)
+
+
+def configure(mode_config: "ModeConfig") -> None:
+    """Install the active ModeConfig (called by the thin entry at import)."""
+    global cfg
+    cfg = mode_config
+
+
 ## ############################################################################################## ##
 ##
 ##                      ROS TOPIC TOOLS
@@ -819,15 +1356,8 @@ mcp = FastMCP("ros-mcp-server")
 
 # TODO: Add MCP tool annotations (readOnlyHint, destructiveHint, etc.) to all tools.
 # replay_verify.py can then filter out read-only tools during replay instead of
-# hardcoding a skip-list. Query tools like get_scene_info, verify_clearance,
-# verify_assembly, verify_grasp should be marked readOnlyHint=True.
-#
-# Example:
-#   @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
-#   def get_scene_info(...):
-#
-# Then in replay_verify.py:
-#   if tool_annotations.get("readOnlyHint"): continue  # skip queries during replay
+# hardcoding a skip-list. Query tools like get_scene_info, verify_assembly,
+# verify_grasp should be marked readOnlyHint=True.
 
 @mcp.tool()
 def get_topics():
@@ -853,12 +1383,12 @@ def _np_to_mcp_image(arr_rgb):
     """Convert numpy array to MCP Image format."""
     # Convert numpy array to PIL Image
     pil_image = PILImage.fromarray(arr_rgb)
-    
+
     # Convert to bytes
     img_byte_arr = io.BytesIO()
     pil_image.save(img_byte_arr, format='JPEG')
     img_byte_arr = img_byte_arr.getvalue()
-    
+
     # Return MCP Image
     return Image(data=img_byte_arr, format="jpeg")
 
@@ -880,11 +1410,11 @@ def read_topic(
         "topic": topic_name,
         "status": "attempting"
     }
-    
+
     try:
         # Run command - ROS2 environment should already be sourced
         cmd = f"timeout {timeout} ros2 topic echo {topic_name} --once"
-        
+
         process_result = subprocess.run(
             cmd,
             shell=True,
@@ -893,7 +1423,7 @@ def read_topic(
             text=True,
             timeout=timeout + 2  # Add buffer for subprocess timeout
         )
-        
+
         if process_result.returncode == 0:
             result["status"] = "success"
             result["message_data"] = process_result.stdout.strip()
@@ -911,17 +1441,17 @@ def read_topic(
             if process_result.stderr:
                 result["stderr"] = process_result.stderr.strip()
             return result
-            
+
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
         result["error"] = f"Command timed out after {timeout} seconds"
         return result
-        
+
     except FileNotFoundError:
         result["status"] = "error"
         result["error"] = "ros2 command not found. Make sure ROS2 is properly installed and sourced."
         return result
-        
+
     except Exception as e:
         import traceback
         result["status"] = "error"
@@ -1026,285 +1556,6 @@ import sys
     except Exception as e:
         return {"output": f"Error: Failed to execute Python code: {str(e)}"}
 
-@_instr.timed_primitive
-def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, error_prefix: str = "Primitive") -> Dict[str, Any]:
-    """Helper function to run primitive scripts and return raw output.
-    
-    Args:
-        script_name: Name of the primitive script (e.g., "move_home.py", "control_gripper.py")
-        command_args: Optional command-line arguments to pass to the script
-        timeout: Timeout for the subprocess (default: 60 seconds)
-        error_prefix: Prefix for error messages (default: "Primitive")
-    
-    Returns:
-        Dictionary with output from the primitive script (stdout + stderr)
-    """
-    import subprocess
-    import os
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Set PYTHONPATH to include project root for imports
-    env = os.environ.copy()
-    # Mode-aware config: surface the primitive's --mode to the subprocess as
-    # ROS_MCP_MODE so config.py picks the sim/real GRIPPER_CENTER_TOOL_OFFSET and
-    # gates real-only base calibration at import. (Primitives bind config
-    # constants at import, so this must be in the env before the process starts.)
-    import re as _re
-    _mode_match = _re.search(r"--mode\s+(\w+)", command_args or "")
-    if _mode_match:
-        env['ROS_MCP_MODE'] = _mode_match.group(1).strip().lower()
-    if 'PYTHONPATH' in env:
-        env['PYTHONPATH'] = f"{script_dir}:{env['PYTHONPATH']}"
-    else:
-        env['PYTHONPATH'] = script_dir
-
-    # Observe-only: push INSTRUMENT_CALL_ID + INSTRUMENT_SIDECAR into the subprocess
-    # so primitive/IK telemetry is tagged with this call. No-op when disabled.
-    env.update(_instr.child_env())
-
-    # Use sys.executable to ensure we use the same Python interpreter as the MCP server
-    # This preserves conda/virtualenv environment and ROS2 DDS configuration
-    import sys
-    python_executable = sys.executable
-
-    cmd_parts = [
-        f"cd {script_dir}/primitives",
-        f"timeout {timeout} {python_executable} -u {script_name} {command_args}".strip()
-    ]
-    
-    cmd = "\n".join(cmd_parts)
-    
-    try:
-        # Use Popen with threading to capture output in real-time
-        process = subprocess.Popen(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Combine stderr into stdout
-            text=True,
-            bufsize=1,  # Line buffered
-            universal_newlines=True,
-            env=env
-        )
-        
-        # Read output in a separate thread to avoid blocking
-        output_lines = []
-        output_lock = threading.Lock()
-        read_complete = threading.Event()
-        
-        def read_output():
-            try:
-                for line in iter(process.stdout.readline, ''):
-                    if line:
-                        with output_lock:
-                            output_lines.append(line)
-                    if process.poll() is not None:
-                        break
-                # Read any remaining output
-                remaining = process.stdout.read()
-                if remaining:
-                    with output_lock:
-                        output_lines.append(remaining)
-            except Exception:
-                pass
-            finally:
-                read_complete.set()
-        
-        # Start reading thread
-        read_thread = threading.Thread(target=read_output, daemon=True)
-        read_thread.start()
-        
-        # Wait for process to complete or timeout
-        start_time = time.time()
-        while process.poll() is None:
-            if time.time() - start_time > timeout + 10:
-                # Process timed out, kill it
-                process.kill()
-                try:
-                    process.wait()
-                except:
-                    pass
-                break
-            time.sleep(0.1)
-        
-        # Ensure process is terminated
-        if process.poll() is None:
-            process.kill()
-            try:
-                process.wait()
-            except:
-                pass
-        
-        # Wait a bit for output thread to finish reading
-        read_complete.wait(timeout=1)
-        
-        # Get return code
-        returncode = process.returncode
-        
-        # Combine all output and strip ANSI color codes from ROS2 logging
-        with output_lock:
-            output = _ANSI_RE.sub("", "".join(output_lines))
-
-        # Check if output contains JSON markers (parse even on timeout)
-        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
-            # Extract JSON portion - use rfind to get the LAST occurrence
-            # This handles cases where subprocess output also contains markers with ROS logger prefixes
-            start_marker = "__RESULT_JSON__"
-            end_marker = "__END_RESULT_JSON__"
-            start_idx = output.rfind(start_marker) + len(start_marker)
-            end_idx = output.rfind(end_marker)
-            json_str = output[start_idx:end_idx].strip()
-
-            try:
-                # Parse and return the JSON directly (no extra fields)
-                import json
-                result = json.loads(json_str)
-                # UNIFORM FAILURE CONTEXT: some primitives emit a bare result:failure with no
-                # error text — weak models flail on contextless failures and the P3 replay
-                # envelope surfaces `error` verbatim. The primitive's own log lines (combined
-                # stdout+stderr, ANSI-stripped) are right here before the marker — reattach
-                # their tail instead of discarding them. Gates already return prose; this
-                # closes the gap for the execution path. No-op when error/message present.
-                if (isinstance(result, dict) and result.get("result") == "failure"
-                        and not (result.get("error") or result.get("message"))):
-                    pre = output[:output.rfind(start_marker)]
-                    tail = [l.strip() for l in pre.strip().splitlines() if l.strip()][-6:]
-                    result["error"] = ((f"{error_prefix} failed without detail. Last output: "
-                                        + " | ".join(tail))[:500] if tail
-                                       else f"{error_prefix} failed (primitive returned no detail).")
-                return result
-            except json.JSONDecodeError:
-                # If JSON parsing fails, fall through to old format handling
-                pass
-
-        # If process was killed by timeout command (exit code 124), add timeout message
-        if returncode == 124:
-            if output:
-                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
-            else:
-                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode}
-
-        # If process was killed by us (returncode -9 or None), it timed out
-        if returncode is None or returncode == -9:
-            if output:
-                return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
-            else:
-                return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": returncode or -9}
-
-        # Old format (backward compatible)
-        return {"output": output if output else "", "returncode": returncode}
-        
-    except subprocess.TimeoutExpired as e:
-        # Fallback: try to get any output from the exception
-        output = ""
-        if hasattr(e, 'stdout') and e.stdout:
-            output += e.stdout
-        if hasattr(e, 'stderr') and e.stderr:
-            output += e.stderr
-        if output:
-            return {"output": f"{output}\n\nError: {error_prefix} timed out after {timeout} seconds", "returncode": None}
-        else:
-            return {"output": f"Error: {error_prefix} timed out after {timeout} seconds", "returncode": None}
-    except Exception as e:
-        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}", "returncode": None}
-
-def _run_query(script_name: str, command_args: str = "", timeout: int = 10, error_prefix: str = "Query") -> Dict[str, Any]:
-    """Helper function to run query scripts and return raw output.
-    
-    Args:
-        script_name: Name of the query script (e.g., "get_scene_info.py", "get_current_grasp_points_pose.py")
-        command_args: Optional command-line arguments to pass to the script
-        timeout: Timeout for the subprocess (default: 10 seconds)
-        error_prefix: Prefix for error messages (default: "Query")
-    
-    Returns:
-        Dictionary with output from the query script (stdout + stderr)
-    """
-    import subprocess
-    import os
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    cmd_parts = [
-        f"cd {script_dir}/queries",
-        f"timeout {timeout} /usr/bin/python3 {script_name} {command_args}".strip()
-    ]
-    
-    cmd = "\n".join(cmd_parts)
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            executable='/bin/bash',
-            capture_output=True,
-            text=True,
-            timeout=timeout + 5  # Add buffer for subprocess timeout
-        )
-
-        # Return combined stdout and stderr, strip ANSI color codes from ROS2 logging
-        output = result.stdout if result.stdout else ""
-        if result.stderr:
-            output += result.stderr
-        output = _ANSI_RE.sub("", output)
-
-        # Check if output contains JSON markers (parse JSON if present)
-        if output and "__RESULT_JSON__" in output and "__END_RESULT_JSON__" in output:
-            # Extract JSON portion - use rfind to get the LAST occurrence
-            # This handles cases where subprocess output also contains markers with ROS logger prefixes
-            start_marker = "__RESULT_JSON__"
-            end_marker = "__END_RESULT_JSON__"
-            start_idx = output.rfind(start_marker) + len(start_marker)
-            end_idx = output.rfind(end_marker)
-            json_str = output[start_idx:end_idx].strip()
-
-            try:
-                # Parse and return the JSON directly (no extra fields)
-                import json
-                result_json = json.loads(json_str)
-                return result_json
-            except json.JSONDecodeError:
-                # If JSON parsing fails, fall through to returning raw output
-                pass
-
-        # Fallback: return raw output if no JSON markers or parsing failed
-        return {"output": output}
-
-    except subprocess.TimeoutExpired:
-        return {"output": f"Error: {error_prefix} timed out after {timeout} seconds"}
-    except Exception as e:
-        return {"output": f"Error: Failed to execute {error_prefix.lower()}: {str(e)}"}
-
-
-def _snapshot_robot_state(command_args):
-    """Observe-only: read joints + gripper + EE pose for the before/after snapshot.
-
-    Registered as instrument's snapshot hook so the timing decorator can bracket
-    every tool call with robot state WITHOUT touching the primitives. Returns the
-    parsed dict or None (fail-loud — instrument records "MISSING" on None).
-    Reads the mode from the primitive's --mode arg; defaults to sim.
-    """
-    try:
-        m = re.search(r"--mode\s+(\w+)", command_args or "")
-        mode = (m.group(1).strip().lower() if m else "sim")
-        if mode not in ("sim", "real"):
-            mode = "sim"
-        raw = _run_query("get_robot_state.py", f"--mode {mode}", timeout=6, error_prefix="Robot state")
-        if isinstance(raw, dict) and "joints_rad" in raw:
-            return raw
-        return None
-    except Exception:
-        return None
-
-
-# Wire the snapshot hook into the observe-only instrument (no-op if disabled).
-try:
-    _instr.register_snapshot_hook(_snapshot_robot_state)
-except Exception:
-    pass
-
 
 ## ############################################################################################## ##
 ##
@@ -1326,7 +1577,7 @@ def get_scene_info(
         grasps: list of grasp points, each with id (int, pass to move_to_grasp/verify_grasp/translate_object), position {x, y, z}, orientation {x, y, z, w} — live poses in world frame
         current_pose: position {x, y, z} and orientation {quat: {x, y, z, w}}
         target_pose: position {x, y, z} and valid_orientations (list of {quat: {x, y, z, w}}) — all fold-symmetric equivalents"""
-    mode = _remap_mode(mode)
+    mode = cfg.route_mode(mode)
     cmd = f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}"
     return _run_with_retry(_run_query, "get_scene_info.py", cmd, timeout=10, error_prefix="Get scene info")
 
@@ -1349,12 +1600,37 @@ def verify_grasp(
         object_name: the object checked
         mode: "sim" or "real"
         error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
+    routed = cfg.route_mode(mode)
+    # seam 3 (real route-mode): the agent doesn't pass grasp_id/orientation in real —
+    # they are chained from the state store. Sim route-mode: grasp_id comes from the
+    # agent (state store inactive -> resolve_pose returns None,None).
+    store_grasp_id, store_orientation = cfg.resolve_pose(object_name)
     if grasp_id is None:
-        return {"result": "failure", "object_name": object_name, "mode": mode,
+        grasp_id = store_grasp_id
+
+    if cfg.pose_store and routed == "real":
+        # REAL-direct path (folded from server.py): full real grasp check needs the
+        # object's current orientation; both are chained from the state store.
+        missing = []
+        if grasp_id is None:
+            missing.append("grasp_id (get from get_scene_info)")
+        if store_orientation is None:
+            missing.append("current_object_orientation [x,y,z,w] (get from get_scene_info current_pose)")
+        if missing:
+            return {"result": "failure", "object_name": object_name, "mode": "real",
+                   "error": f"Real mode requires: {', '.join(missing)}"}
+        if not isinstance(store_orientation, list) or len(store_orientation) != 4:
+            return {"result": "failure", "object_name": object_name, "mode": "real",
+                   "error": "current_object_orientation must be a list of 4 floats [x, y, z, w]"}
+        quat_str = " ".join(str(v) for v in store_orientation)
+        cmd = f"--object-name \"{object_name}\" --mode real --grasp-id {grasp_id} --current-object-orientation {quat_str}"
+        return _run_with_retry(_run_query, "verify_grasp.py", cmd, timeout=30, error_prefix="Verify grasp")
+
+    # SIM route-mode (canonical remap): primitives execute sim, grasp_id required.
+    if grasp_id is None:
+        return {"result": "failure", "object_name": object_name, "mode": routed,
                "error": "grasp_id is required — pass the grasp point ID used during move_to_grasp"}
     cmd = f"--object-name \"{object_name}\" --mode sim --radius 0.06 --grasp-id {grasp_id}"
-
     return _run_with_retry(_run_query, "verify_grasp.py", cmd, timeout=30, error_prefix="Verify grasp")
 
 
@@ -1404,14 +1680,33 @@ def verify_assembly(
 
     Returns:
         Single object: result ("success"/"failure"), object_name, base_name, assembly_order, position_error_m {x,y,z}, orientation_error_deg {roll,pitch,yaw}, within_tolerance (bool), unassembled_objects (list), error
-        check_all=True: result, base_name, all_assembled (bool), assembled_objects (list), unassembled_objects (list), error"""
-    mode = _remap_mode(mode)
+        check_all=True: result, base_name, all_assembled (bool), assembled_objects (list), unassembled_objects (list), error
+
+    Real-mode check_all is occlusion-tolerant: a part absent from /objects_poses_real
+    that was certified assembled earlier THIS run still counts assembled (DOMAIN
+    INVARIANT: a certified part cannot move until assembly completes, so absent ==
+    occluded, never disturbed). The certification lives in the run_id-scoped state
+    store; the CLI rescues only when the store's run_id matches this run."""
+    mode = cfg.route_mode(mode)
     if check_all:
-        result = _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify assembly")
+        extra = ""
+        if cfg.pose_store and mode == "real":
+            # Hand the CLI the absolute state path + this run's id so its rescue
+            # reads the SAME file the server writes (cwd-independent) and ignores a
+            # store left over from a different run (fail-closed on mismatch).
+            extra = f" --primitive-state-path \"{_state_path()}\" --run-id \"{_CURRENT_RUN_ID or ''}\""
+        result = _run_with_retry(_run_query, "verify_assembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all{extra}", timeout=30, error_prefix="Verify assembly")
     elif object_name:
         result = _run_with_retry(_run_query, "verify_assembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify assembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
+
+    # Real-mode single-object success -> certify the object assembled for this run (seated-set
+    # oracle, §4). By the domain invariant it stays assembled, so a later check_all can rescue
+    # it once a subsequent part occludes it from perception. No-op for the sim route-mode.
+    if (cfg.pose_store and mode == "real" and not check_all and object_name
+            and isinstance(result, dict) and result.get("result") == "success"):
+        _set_object_state(object_name, assembled=True)
 
     return result
 
@@ -1451,62 +1746,13 @@ def verify_disassembly(
     Returns:
         Single object: result ("success"/"failure"), object_name, base_name, disassembly_order (1=first to remove), position_error_m {x,y,z}, orientation_error_deg {roll,pitch,yaw}, error (order violations with skipped_objects and disturbed_objects)
         check_all=True: result, base_name, all_disassembled (bool), disassembled_objects (list), still_assembled_objects (list), error"""
-    mode = _remap_mode(mode)
+    mode = cfg.route_mode(mode)
     if check_all:
         return _run_with_retry(_run_query, "verify_disassembly.py", f"--base-name \"{base_name}\" --mode {mode} --check-all", timeout=30, error_prefix="Verify disassembly")
     elif object_name:
         return _run_with_retry(_run_query, "verify_disassembly.py", f"--object-name \"{object_name}\" --base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify disassembly")
     else:
         return {"result": "failure", "error": "Either object_name or check_all=True must be specified"}
-
-class ClearanceResult(BaseModel):
-    result: Literal["success", "failure"]
-    base_name: str
-    ready_for_assembly: bool
-    error: Optional[str] = None
-    missing_objects: Optional[List[str]] = Field(default=None, description="Sim: never missing. Real: operator is prompted to fix.")
-    objects_with_clearance_issues: Optional[List[str]] = Field(default=None, description="Sim: agent must call restore scene. Real: operator is prompted to fix.")
-
-@mcp.tool(meta={"category": "hint"})
-async def verify_clearance(
-    base_name: str,
-    ctx: Context[ServerSession, None],
-    mode: Mode,
-) -> ClearanceResult:
-    """Verify all objects have enough clearance for the gripper to operate.
-
-    Returns:
-        result: "success" or "failure"
-        base_name: the assembly base checked
-        ready_for_assembly: bool indicating if all objects have clearance
-        error: failure reason (only on failure)
-        missing_objects: objects not found (real mode: operator prompted to fix)
-        objects_with_clearance_issues: objects too close together (sim: restore scene; real: operator prompted)"""
-    mode = _remap_mode(mode)
-    result = _run_with_retry(_run_query, "verify_clearance.py", f"--base-name \"{base_name}\" --mode {mode}", timeout=30, error_prefix="Verify clearance")
-    return result
-
-
-async def _invoke_scene_setup(ctx: Context[ServerSession, None]) -> Dict[str, Any]:
-    """Invoke scene setup elicitation to confirm real workspace is ready.
-
-    Loads the setup_real_scene elicitation module and presents a form
-    asking the human to place objects and spawn the real robot.
-    """
-    try:
-        import importlib.util as _ilu
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        setup_path = os.path.join(script_dir, "elicitations", "setup_real_scene.py")
-
-        spec = _ilu.spec_from_file_location("elicitations.setup_real_scene", setup_path)
-        module = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        message = module.build_elicitation_message({"phase": 3})
-        return await _handle_elicitation(ctx, "setup_real_scene", message, {"phase": 3})
-
-    except Exception as e:
-        return {"status": "error", "message": f"Scene setup elicitation failed: {str(e)}"}
 
 
 ## ############################################################################################## ##
@@ -1526,13 +1772,14 @@ def move_home(mode: Mode) -> MoveHomeResult:
 Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
-    gate_err = _assert_home_preconditions(mode)  # pre-gate: empty gripper + at safe height
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
+        gate_err = _assert_home_preconditions(mode)  # pre-gate: empty gripper + at safe height
+        if gate_err:
+            return gate_err
     raw = _run_with_retry(_run_primitive, "move_home.py", f"--mode {mode}", timeout=45, error_prefix="Move home")
     return _parse_result(MoveHomeResult, raw)
 
@@ -1558,34 +1805,13 @@ Returns:
         "Gripper jammed: fingers are asymmetric." — indicate collisions between the gripper and the object meaning the grasp id is not reachable in the objects current orientation.
         "Gripper already holding an object."
         "Gripper blocked: pressing against object its holding, cannot reach target width." — open gripper to release the object"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
     raw = _run_with_retry(_run_primitive, "control_gripper.py", f"{command} --mode {mode}", timeout=60, error_prefix="Gripper control")
     return _parse_result(GripperResult, raw)
-
-class ScanWorkspaceResult(BaseModel):
-    result: Literal["success", "failure"]
-    error: Optional[str] = None
-
-@mcp.tool(meta={"category": "motion"})
-def scan_workspace(
-    object_name: Annotated[str, Field(description="-")],
-    mode: Mode = "real",
-) -> ScanWorkspaceResult:
-    """Scan workspace at fixed height to locate an object. Follows a predefined path across x,y
-and stops when the object is detected.
-
-Returns:
-    result: "success" or "failure"
-    error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
-    raw = _run_with_retry(_run_primitive, "scan_workspace.py", f"--object-name \"{object_name}\" --mode {mode}", timeout=300, error_prefix="Scan workspace")
-    return _parse_result(ScanWorkspaceResult, raw)
 
 class Quaternion(BaseModel):
     x: float
@@ -1626,16 +1852,41 @@ Returns:
     current_object_position: {x, y, z} after movement
     current_object_orientation: {quat: {x, y, z, w}} after movement
     error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
-    gate_err = _assert_assembly_order(object_name, mode)  # base inferred from object_name
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
+        gate_err = _assert_assembly_order(object_name, mode)  # base inferred from object_name
+        if gate_err:
+            return gate_err
+    else:
+        # REAL route-mode (folded from server.py): order gate reads the certified store.
+        gate_err = _assert_assembly_order_real(object_name, mode)
+        if gate_err:
+            return gate_err
+        # Picking an object means it is being handled, not seated -> clear its
+        # certification. No-op on a first grasp; under the domain invariant a certified
+        # object is never re-picked, but this keeps the set honest if one ever is.
+        if cfg.pose_store and mode == "real":
+            _set_object_state(object_name, assembled=False)
     cmd = f"--object-name \"{object_name}\" --grasp-id {grasp_id} --mode {mode}"
     raw = _run_with_retry(_run_primitive, "move_to_grasp.py", cmd, timeout=60, error_prefix="Move to grasp")
-    return _parse_result(MoveToGraspResult, raw)
+    result = _parse_result(MoveToGraspResult, raw)
+    # State store (real route-mode): capture orientation and grasp_id on success so later
+    # pose-chaining tools (verify_grasp / translate / rotate) read them. No-op in sim.
+    if cfg.pose_store:
+        if isinstance(result, dict) and result.get("result") == "success":
+            orient = result.get("current_object_orientation")
+            if orient and isinstance(orient, dict):
+                quat = orient.get("quat", {})
+                if quat:
+                    _set_object_state(object_name, orientation=[quat["x"], quat["y"], quat["z"], quat["w"]], grasp_id=grasp_id)
+        elif hasattr(result, 'result') and result.result == "success":
+            if result.current_object_orientation and result.current_object_orientation.quat:
+                q = result.current_object_orientation.quat
+                _set_object_state(object_name, orientation=[q.x, q.y, q.z, q.w], grasp_id=grasp_id)
+    return result
 
 class TranslateObjectResult(BaseModel):
     result: Literal["success", "failure"]
@@ -1683,23 +1934,37 @@ Returns:
             — Object is not grasped.
         "Object orientation error is {X} degrees (tolerance: {Y} degrees)."
             — Object needs rotation before insert."""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
     if action == "insert" and not base_name:
         return {"result": "failure",
                 "error": f"Action '{action}' requires: base_name"}
 
+    # Order gate: an insert is an assembly action -> enforce predecessor order before
+    # motion. place_down is not an assembly seat, so it is not gated.
     if action == "insert":
-        gate_err = _assert_assembly_order(object_name, mode, base_name)
+        if cfg.full_harness:
+            gate_err = _assert_assembly_order(object_name, mode, base_name)
+        else:
+            gate_err = _assert_assembly_order_real(object_name, mode, base_name)
         if gate_err:
             return gate_err
 
-    cmd = f"--mode sim --object-name \"{object_name}\""
+    # seam 3 (real route-mode): inject grasp_id + orientation chained from the state store.
+    store_grasp_id, store_orientation = cfg.resolve_pose(object_name)
+
+    cmd = f"--mode {mode} --object-name \"{object_name}\""
     if base_name:
         cmd += f" --base-name \"{base_name}\""
     cmd += f" --{action.replace('_', '-')}"
+    if store_grasp_id is not None:
+        cmd += f" --grasp-id {store_grasp_id}"
+    if store_orientation is not None:
+        cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in store_orientation)}"
+    cmd += cfg.real_extras_for(mode)  # seam 4: --use-default-base-position when real
 
     # Adjust timeout based on action
     if action == "insert":
@@ -1733,18 +1998,29 @@ Returns:
     initial_object_orientation: {quat: {x, y, z, w}} before rotation
     final_object_orientation: {quat: {x, y, z, w}} after rotation
     error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
-    gate_err = _assert_assembly_order(object_name, mode, base_name)
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (before order; see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
+        gate_err = _assert_assembly_order(object_name, mode, base_name)
+        if gate_err:
+            return gate_err
+    else:
+        gate_err = _assert_assembly_order_real(object_name, mode, base_name)
+        if gate_err:
+            return gate_err
+
+    # seam 3 (real route-mode): orientation chained from the state store.
+    _store_grasp_id, store_orientation = cfg.resolve_pose(object_name)
+
     # Verify grasp as a separate subprocess before rotate_object to avoid
     # nested DDS participant churn that causes discovery race conditions.
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vg_script = os.path.join(script_dir, 'queries', 'verify_grasp.py')
-    vg_cmd = [sys.executable, vg_script, '--object-name', object_name, '--mode', 'sim']
+    vg_cmd = [sys.executable, vg_script, '--object-name', object_name, '--mode', mode]
+    if mode == 'real':
+        vg_cmd.append('--width-only')
     try:
         vg_proc = subprocess.run(vg_cmd, capture_output=True, text=True, timeout=15,
                                  env={**os.environ, 'PYTHONPATH': f"{script_dir}:{os.environ.get('PYTHONPATH', '')}"})
@@ -1762,9 +2038,24 @@ Returns:
                 pass
         return _parse_result(RotateObjectResult, {"result": "failure", "error": error})
 
-    cmd = f"--mode sim --object-name \"{object_name}\" --base-name \"{base_name}\" --skip-verify-grasp"
+    cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\" --skip-verify-grasp"
+    if store_orientation is not None:
+        cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in store_orientation)}"
     raw = _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
-    return _parse_result(RotateObjectResult, raw)
+    result = _parse_result(RotateObjectResult, raw)
+    # State store (real route-mode): update orientation on success. No-op in sim.
+    if cfg.pose_store:
+        if isinstance(result, dict) and result.get("result") == "success":
+            final = result.get("final_object_orientation")
+            if final and isinstance(final, dict):
+                quat = final.get("quat", {})
+                if quat:
+                    _set_object_state(object_name, orientation=[quat["x"], quat["y"], quat["z"], quat["w"]])
+        elif hasattr(result, 'result') and result.result == "success":
+            if result.final_object_orientation and result.final_object_orientation.quat:
+                q = result.final_object_orientation.quat
+                _set_object_state(object_name, orientation=[q.x, q.y, q.z, q.w])
+    return result
 
 class MoveToSafeHeightResult(BaseModel):
     result: Literal["success", "failure"]
@@ -1786,10 +2077,11 @@ the declared state is verified against the gripper before moving.
 Returns:
     result: "success" or "failure"
     error: failure reason (only on failure)"""
-    mode = _remap_mode(mode)
-    gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
-    if gate_err:
-        return gate_err
+    mode = cfg.route_mode(mode)
+    if cfg.full_harness:
+        gate_err = _assert_init_saved(mode)  # init pre-gate (see PRE-GATE REGISTRY note)
+        if gate_err:
+            return gate_err
     hold_err = _assert_holding_state(mode, holding, object_name, base_name, grasp_id)  # payload pre-gate
     if hold_err:
         return hold_err
@@ -1800,6 +2092,24 @@ Returns:
     raw = _run_with_retry(_run_primitive, "move_to_safe_height.py", args, timeout=45, error_prefix="Move to safe height")
     return _parse_result(MoveToSafeHeightResult, raw)
 
+
+@mcp.tool(meta={"category": "config"})
+def clear_primitive_state(run_id: Optional[str] = None) -> dict:
+    """Host-only: reset the primitive state store at run/phase start. Atomically writes
+    {run_id, objects:{}} so no stale 'assembled' certification from a prior run
+    survives. Pass the ablation run-dir name as run_id to tie the store to this
+    run (defaults to a fresh id). MUST be called in every real-mode phase onStart
+    via @tool-exec:ros-mcp-server__clear_primitive_state() — occlusion-tolerant
+    check_all and the real order gate trust the store only when a clear has stamped
+    a run_id this run. NOT part of the agent tool surface (host @tool-exec only,
+    like set_task_phase); the host path bypasses tool-states."""
+    global _CURRENT_RUN_ID
+    rid = run_id or _uuid.uuid4().hex
+    with _state_lock():
+        _save_state_unlocked({"run_id": rid, "objects": {}})
+    _CURRENT_RUN_ID = rid
+    return {"result": "success", "run_id": rid}
+
 ## ############################################################################################## ##
 ##
 ##                      TRIGGER TOOLS
@@ -1807,7 +2117,6 @@ Returns:
 ## ############################################################################################## ##
 
 from triggers.signal_phase_complete import handle_phase_signal
-from triggers.pre_assembly_check import handle_clearance_failure
 
 def _verify_all_disassembled(base_name: str, mode: str) -> Dict[str, Any]:
     """Run verify_disassembly with check_all for gating phase completion."""
@@ -1833,7 +2142,7 @@ async def signal_phase_complete(
         status: "success" or "failure" (may be overridden by gate checks)
         requires_response: False when no further action needed from the LLM
         error: failure reason (only on gate check failure)"""
-    mode = _remap_mode(mode)
+    mode = cfg.route_mode(mode)
     # Phase-number pre-gate: a drifted phase must be refused BEFORE handle_phase_signal, or it
     # resolves a signal no client hook matches. requires_response=True keeps the handshake
     # pending (the POST-gate below must not see this as terminal).
@@ -1862,6 +2171,14 @@ async def signal_phase_complete(
     if isinstance(result, dict) and result.get("requires_response") is False:
         global _PHASE_SIGNALED
         _PHASE_SIGNALED = True
+        # Terminal SUCCESS retires the commit floor: the phase ends at signal_phase_complete, so
+        # the within-phase rollback guard no longer has any claim — and the post-phase replay
+        # VALIDATOR (a client/host feature, outside the phase) must be free to restore 'init' to
+        # certify the recipe reproduces. The floor STAYS on terminal failure: it is the @switch
+        # cascade discriminator, already read inside handle_phase_signal above, so clearing here
+        # never affects the failure routing.
+        if result.get("status") == "success":
+            _clear_commit_floor()
         logger.info(f"[phase-gate] phase {phase} signal resolved "
                     f"(status={result.get('status')}, override={result.get('override', False)})")
     return result
@@ -1934,7 +2251,7 @@ Returns:
     requires_response: False when committed; True when a gate failed (act on message)
     message: "'X' committed." or the combined remedies for the failed gates
     commit: True on success (the stitcher commit boundary; _meta category "commit")"""
-    mode = _remap_mode(mode)
+    mode = cfg.route_mode(mode)
     # Phase-number pre-gate: refuse a drifted phase (e.g. "next object => next phase") before
     # the commit gates run — a commit recorded under the wrong phase number poisons the ledger.
     gate_err = _assert_phase_number(phase)
@@ -1978,43 +2295,6 @@ Returns:
     return res
 
 
-@mcp.tool(meta={"category": "signal"})
-def signal_verify_results(
-    phase: Annotated[Literal[1, 2], Field(description="1=disassembly, 2=assembly")],
-    base_name: Annotated[str, Field(description="Assembly base object name")],
-    mode: Mode,
-    replay_data: Annotated[str, Field(description="JSON string with orchestrator replay outcome")],
-) -> Dict[str, Any]:
-    """Verify scene state after orchestrator replay of discovered sequences.
-
-    Called by the orchestrator after replaying logged tool_sequences.
-    Do not call directly. Runs verify_assembly (phase 2) or
-    verify_disassembly (phase 1) on the current scene, then constructs
-    a response combining replay outcome with verification result.
-
-    replay_data JSON shape:
-        replay: "success" or "failure"
-        failed_object: object name (only on replay failure)
-        failed_step: tool call string (only on replay failure)
-        error: error message (only on replay failure)
-        completed_objects: list of objects replayed successfully
-        remaining_objects: list of objects not attempted (only on replay failure)
-
-    Returns:
-        result: "success" or "failure"
-        message: agent-facing instructions (what to fix or confirmation)
-        verification: full verify result from scene state check"""
-    from triggers.signal_verify_results import handle_verify_results
-    return handle_verify_results(
-        phase=phase,
-        base_name=base_name,
-        mode=mode,
-        replay_data=replay_data,
-        verify_disassembly_fn=_verify_all_disassembled,
-        verify_assembly_fn=_verify_all_assembled,
-    )
-
-
 class SignalOperatorResult(BaseModel):
     result: Literal["success", "failure"]
     action: str = Field(description="Operator decision: 'proceed' or 'abort'")
@@ -2035,11 +2315,12 @@ async def signal_operator(
         action: operator decision ("proceed" or "abort")
         reason: the reason tag provided
         feedback: optional operator feedback text"""
-    # Remap real->sim BEFORE the sim auto-abort guard. On this (Remap) server the
-    # agent operates in mode='real' (the phase-3 prompt is mode='real') and the
-    # server remaps execution to sim; the guard must key on the EFFECTIVE mode, or
-    # a headless ablation run blocks forever on the operator elicitation below.
-    mode = _remap_mode(mode)
+    # Remap real->sim BEFORE the sim auto-abort guard (sim/canonical route-mode). On the
+    # remap server the agent operates in mode='real' and execution is sim; the guard must
+    # key on the EFFECTIVE mode, or a headless ablation run blocks forever on the operator
+    # elicitation below. The real-direct route-mode (identity) keeps real -> real, so a
+    # genuine operator is elicited.
+    mode = cfg.route_mode(mode)
     if mode == "sim":
         return {
             "result": "success",
@@ -2152,7 +2433,7 @@ async def _handle_elicitation(ctx: Context[ServerSession, None], elicitation_scr
             "error": str(e)
         }
 
-@mcp.tool()
+@mcp.tool(meta={"category": "config"})
 def set_task_phase(phase: str, phase_number: Optional[int] = None,
                    mode: Optional[str] = None) -> Dict[str, Any]:
     """Host-only: set the current task phase for the phase-aware order gate ('assembly' or
@@ -2168,6 +2449,13 @@ def set_task_phase(phase: str, phase_number: Optional[int] = None,
     applicability — declared-real turns the checkpoint-family gates (init pre-gate, commit G4)
     OFF (no checkpoints exist in real choreography), while predicate sources keep following
     the executed (remapped) mode. Without it gates key on executed mode as before."""
+    # HOST-ONLY GUARD (drift fix §6): set_task_phase arms the order gate and is framework-
+    # required, host-injected by design. It is NOT in the agent tool manifest and was not
+    # deny-listed — close the leak so an agent that calls it directly cannot flip gate state.
+    if not _is_host_call():
+        return {"result": "failure",
+                "error": ("set_task_phase is host-only (injected by the phase onStart via "
+                          "@tool-exec). Agents must not set the task phase.")}
     global _TASK_PHASE, _TASK_PHASE_NUMBER, _TASK_MODE, _PHASE_SIGNALED
     p = (phase or "").strip().lower()
     if p not in _VALID_PHASES:
@@ -2199,6 +2487,7 @@ def set_task_phase(phase: str, phase_number: Optional[int] = None,
     _TASK_MODE = m           # None when not injected (gates fall back to executed-mode keying)
     _PHASE_SIGNALED = False  # new phase -> completion handshake pending again
     _clear_commit_floor()    # new phase -> fresh monotonic floor
+    _clear_scene_states()    # new phase -> sweep stale checkpoints (ENTRY ONLY — not at success)
     logger.info(f"[order-gate] set_task_phase -> '{p}' (number={phase_number}, mode={m}, pid={os.getpid()}, gate_on={_order_gate_on()})")
     return {"result": "success", "phase": p}
 
@@ -2239,23 +2528,26 @@ def _assert_order_config_consistent():
     return problems
 
 
-# Startup observability + fail-closed config check (runs at import; the server hosts the gate).
-try:
-    _bb, _ = _order_maps()
-    logger.info(f"[order-gate] file={os.path.abspath(__file__)} "
-                f"MCP_ORDER_GATE={'on' if _order_gate_on() else 'off'} "
-                f"bases={list(_bb.keys())} task_phase={_TASK_PHASE}")
-    _assert_order_config_consistent()
-    logger.info("[order-gate] assembly/disassembly config consistency OK")
-except Exception as _e:
-    logger.error(f"[order-gate] startup config check error: {_e}")
-    raise
+def run_startup_checks():
+    """Startup observability + fail-closed config check. Called by the thin entry at import
+    (kept a function so importing server_core for AST/parity checks doesn't force the gate
+    validation, which would raise without the eval_resources present)."""
+    try:
+        _bb, _ = _order_maps()
+        logger.info(f"[order-gate] file={os.path.abspath(__file__)} "
+                    f"MCP_ORDER_GATE={'on' if _order_gate_on() else 'off'} "
+                    f"bases={list(_bb.keys())} task_phase={_TASK_PHASE}")
+        _assert_order_config_consistent()
+        logger.info("[order-gate] assembly/disassembly config consistency OK")
+    except Exception as _e:
+        logger.error(f"[order-gate] startup config check error: {_e}")
+        raise
 
 
-if __name__ == "__main__":
+def serve():
+    """Start services + run the MCP server over stdio (the production entrypoint body)."""
     # Start services BEFORE MCP server runs (outside async context)
     _start_services()
-
     try:
         mcp.run(transport="stdio")
     except KeyboardInterrupt:

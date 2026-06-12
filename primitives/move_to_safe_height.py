@@ -36,7 +36,7 @@ class MoveToSafeHeight(Node):
                  object_name='', base_name='', grasp_id=None):
         super().__init__('move_to_safe_height')
         # Payload-edge metadata, plumbed from the move_to_safe_height tool. The holding
-        # PRE-GATE that verifies these is enforced server-side (server_remap._assert_holding_state)
+        # PRE-GATE that verifies these is enforced server-side (server_core._assert_holding_state)
         # BEFORE this primitive runs; they are accepted here for end-to-end provenance and reserved
         # for future use (e.g. base_name -> collision-aware lift around the inserted base). The lift
         # motion itself is unchanged and payload-agnostic today.

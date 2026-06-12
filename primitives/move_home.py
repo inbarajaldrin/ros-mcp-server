@@ -47,7 +47,7 @@ def main(args=None):
     parsed = parser.parse_args()
 
     # NOTE: the refuse-while-holding guard lives server-side now (_assert_not_holding in
-    # server_remap.py — the centralized verify_grasp width-only predicate, sim AND real).
+    # server_core.py — the centralized verify_grasp width-only predicate, sim AND real).
     # The bespoke sim-only check that used to run here was its inline duplicate.
 
     if parsed.joint_space:

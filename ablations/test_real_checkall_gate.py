@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Test harness for real-mode occlusion-tolerant verify_assembly --check-all + the
-ported assembly-order gate (server.py + queries/verify_assembly.py).
+ported assembly-order gate (server_core.py + queries/verify_assembly.py).
 
 No hardware / no ROS runtime needed: exercises the real functions with a temp state
 store and simulated /objects_poses_real drop-outs. Covers the GPT must-fix list +
 the safety property (present-but-pose-wrong is NEVER rescued).
+
+NOTE (2026-06-12 consolidation): the real-mode state-store + the real assembly-order
+gate now live in server_core.py (the consolidated surface). The real gate is named
+_assert_assembly_order_real (the sim/phase-aware _assert_assembly_order no-ops in real).
+This harness loads server_core directly and exercises that real gate.
 
 Run on a4500:  source /opt/ros/humble/setup.bash && .venv/bin/python ablations/test_real_checkall_gate.py
 """
@@ -25,8 +30,17 @@ def _load(name, path):
     spec.loader.exec_module(m)
     return m
 
-sp3 = _load("sp3_under_test", os.path.join(REPO, "server.py"))
+# Load the consolidated core directly (the real state-store + real order gate live here).
+# server_core defaults to the canonical (sim) ModeConfig at import; the state-store
+# functions exercised here are mode-agnostic, and the real order gate is called by name.
+sp3 = _load("sp3_under_test", os.path.join(REPO, "server_core.py"))
 va = _load("va_under_test", os.path.join(REPO, "queries", "verify_assembly.py"))
+
+# The real assembly-order gate was named _assert_assembly_order on the frozen real-direct
+# server.py; in server_core the real-mode gate is _assert_assembly_order_real (the
+# sim/phase-aware _assert_assembly_order returns None in real mode). Alias so the
+# assertions below read unchanged.
+sp3._assert_assembly_order = sp3._assert_assembly_order_real
 
 STATE = sp3._state_path()
 ORDER = ["u_brown", "u_orange", "line_green", "inverted_u_yellow"]  # base1

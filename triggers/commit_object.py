@@ -18,7 +18,7 @@ Uniform across every object — no object is special. HOME is NOT checked here; 
 enforced only at phase transitions (signal_phase_complete / onStart), so there is no
 per-object "final object" / rule-(c) detection.
 
-No agent status/comment and no elicitation — see the @mcp.tool in server_remap.py. The
+No agent status/comment and no elicitation — see the @mcp.tool in server_core.py. The
 four *_fn callbacks are injected by that wrapper; this module stays free of ROS/subprocess
 and is unit-testable with stub callbacks. Verdicts come from primitives.shared.predicates.
 """
@@ -124,7 +124,7 @@ def handle_object_commit(
     # so there is no per-object "final object" / rule-(c) detection.
 
     # --- G4: per-object checkpoint saved -----------------------------------------------
-    # Opt-in: the server_remap wrapper passes ordered_objects + checkpoints_fn ONLY when
+    # Opt-in: the server_core wrapper passes ordered_objects + checkpoints_fn ONLY when
     # MCP_CHECKPOINT_GATE is on (sim). When either is None the gate is OFF -> skipped, so
     # commit behaves exactly as before. DECISION delegated to predicates.is_checkpoint_saved
     # (k==0 in the phase-appropriate order => the shared 'init' baseline; else "{object}").

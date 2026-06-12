@@ -221,7 +221,7 @@ def is_checkpoint_saved(object_name, ordered_objects, saved_checkpoints):
     scene-state file present), only for the first object. Mirrors is_order_correct
     — the CALLER passes the phase-appropriate ordered_objects (assembly_order, or
     its reverse for disassembly, exactly like _assert_assembly_order's
-    `removal = list(reversed(order))` at server_remap.py:260) — so this predicate
+    `removal = list(reversed(order))` at server_core.py) — so this predicate
     carries NO phase logic.
 
     Checkpoint naming: the FIRST object in the sequence shares the baseline name

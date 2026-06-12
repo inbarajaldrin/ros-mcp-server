@@ -6,7 +6,7 @@ and triggers.signal_phase_complete.handle_phase_signal), but driven directly fro
 subprocess-backed query callbacks — no MCP client, no YAML study harness, no LLM. It lets you
 check the commit and phase-complete gates against a live sim/real scene by hand.
 
-It deliberately MIRRORS server_remap.py's wiring (same query scripts, same flags):
+It deliberately MIRRORS server_core.py's wiring (same query scripts, same flags):
   - commit  G1 verify_assembly(object)   G2 verify_grasp(release)   G3 is_at_safe_height
             (G4 checkpoint is OFF here, matching MCP_CHECKPOINT_GATE unset)
   - signal  _phase_complete = verify_*(check_all) + is_home
@@ -14,7 +14,7 @@ The grasp gate is grasp-aware in sim: it passes --base-name + --grasp-id so veri
 the gripper width against THAT grasp's approach width (each grasp_id has its own width). Real
 keeps --width-only (the full real grasp check additionally needs object orientation).
 
-If server_remap's wiring changes, update the callbacks below to match — that drift is the point
+If server_core's wiring changes, update the callbacks below to match — that drift is the point
 of keeping this probe close to the real flow.
 
 Usage:
@@ -49,7 +49,7 @@ from primitives.shared.predicates import is_object_grasped, is_at_safe_height, i
 def _run_query(script: str, args: str, *, domain: str, mode: str, timeout: int = 60) -> dict:
     """Run a queries/*.py script and parse the JSON between the __RESULT_JSON__ markers.
 
-    Mirrors server_remap._run_query: shell invocation, marker extraction, fail-closed dict.
+    Mirrors server_core._run_query: shell invocation, marker extraction, fail-closed dict.
     PYTHONPATH is PREPENDED (not replaced) so the ROS2 rclpy path in the ambient env survives.
     """
     cmd = f"{sys.executable} {ROOT}/queries/{script} {args}"
@@ -71,7 +71,7 @@ def _run_query(script: str, args: str, *, domain: str, mode: str, timeout: int =
 
 
 def make_callbacks(domain: str, mode: str, base: str, grasp_id):
-    """Build the verify/grasp/state callbacks, wired exactly like server_remap's injected ones."""
+    """Build the verify/grasp/state callbacks, wired exactly like server_core's injected ones."""
 
     def verify_assembly_obj(base_name, m, object_name=None):
         if object_name:
@@ -119,7 +119,7 @@ def run_commit(args):
 
 
 def run_home(args):
-    """MIRRORS server_remap._assert_home_preconditions (the move_home pre-gate):
+    """MIRRORS server_core._assert_home_preconditions (the move_home pre-gate):
     empty (verify_grasp --width-only, explicit-verdict fail-closed) AND (at safe height OR
     already home). Same query flags, same predicate calls, same refusal logic — drift here
     means the probe needs updating, which is the point."""
