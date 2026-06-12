@@ -425,16 +425,36 @@ def _has_commit_floor() -> bool:
 
 
 def _clear_commit_floor() -> None:
-    """New phase => fresh floor (cleared alongside the phase's scene_states)."""
+    """New phase => fresh floor + fresh scene_states. The server is the single authority for
+    phase-boundary resource state: the 181616 run proved stale resources from a PRIOR run can
+    materialize in the shared dir AFTER this clear (host restore ordering) — every branch logs
+    so a silent no-op can never hide in forensics again."""
     path = _commit_floor_path()
     if not path:
+        logger.warning("[floor-gate] clear skipped: BASE_OUTPUT_DIR unset (no shared resources dir)")
         return
     try:
         if os.path.exists(path):
             os.remove(path)
             logger.info("[floor-gate] commit floor cleared")
+        else:
+            logger.info("[floor-gate] no floor to clear")
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"[floor-gate] could not clear commit floor: {e}")
+    # scene_states: stale checkpoints from a prior phase/run are never restorable (the floor
+    # gate scopes restores within the phase) but they CAN wrongly block bracket saves via the
+    # write-once gate (181616 seq=31) — clear them with the floor.
+    d = os.path.join(BASE_OUTPUT_DIR, "resources", "scene_states")
+    try:
+        n = 0
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.endswith(".json"):
+                    os.remove(os.path.join(d, f))
+                    n += 1
+        logger.info(f"[floor-gate] scene_states cleared ({n} stale checkpoint(s))")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[floor-gate] could not clear scene_states: {e}")
 
 
 def _is_host_call() -> bool:
