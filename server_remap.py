@@ -1161,6 +1161,19 @@ def _run_primitive(script_name: str, command_args: str = "", timeout: int = 60, 
                 # Parse and return the JSON directly (no extra fields)
                 import json
                 result = json.loads(json_str)
+                # UNIFORM FAILURE CONTEXT: some primitives emit a bare result:failure with no
+                # error text — weak models flail on contextless failures and the P3 replay
+                # envelope surfaces `error` verbatim. The primitive's own log lines (combined
+                # stdout+stderr, ANSI-stripped) are right here before the marker — reattach
+                # their tail instead of discarding them. Gates already return prose; this
+                # closes the gap for the execution path. No-op when error/message present.
+                if (isinstance(result, dict) and result.get("result") == "failure"
+                        and not (result.get("error") or result.get("message"))):
+                    pre = output[:output.rfind(start_marker)]
+                    tail = [l.strip() for l in pre.strip().splitlines() if l.strip()][-6:]
+                    result["error"] = ((f"{error_prefix} failed without detail. Last output: "
+                                        + " | ".join(tail))[:500] if tail
+                                       else f"{error_prefix} failed (primitive returned no detail).")
                 return result
             except json.JSONDecodeError:
                 # If JSON parsing fails, fall through to old format handling
