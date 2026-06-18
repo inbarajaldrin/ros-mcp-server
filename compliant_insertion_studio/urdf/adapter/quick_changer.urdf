@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!-- Standalone URDF for the OnRobot Quick-Changer (15 mm coupler) for the studio RViz.
+     One link: quick_changer_link. Its frame = the UR flange (tool0) mounting face;
+     the quick_changer mesh extends +15 mm in the link's +Z (toward the RG2), matching
+     ur_onrobot_rg2_ros/.../onrobot_quick_changer.urdf.xacro (origin 0,0,0.015, rpy pi/2,pi,0).
+     Mesh in meters (~71 mm disc, 16 mm thick). package:// paths are rewritten to file://
+     at launch (the repo is not a ROS2 package). -->
+<robot name="onrobot_quick_changer">
+  <link name="quick_changer_link">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.5707963 3.1415927 0"/>
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/adapter/meshes/quick_changer.dae"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.015" rpy="1.5707963 3.1415927 0"/>
+      <geometry>
+        <mesh filename="package://compliant_insertion_studio/urdf/adapter/meshes/quick_changer.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

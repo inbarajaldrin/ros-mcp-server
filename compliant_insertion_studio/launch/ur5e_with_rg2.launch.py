@@ -197,6 +197,43 @@ def generate_launch_description():
     def _make_static_tf(context):
         rpy = context.launch_configurations.get("tf_rpy", "0 0 0").split()
         xyz = context.launch_configurations.get("tf_xyz", "0 0 0").split()
+        adapter = context.launch_configurations.get("adapter", "true").lower() != "false"
+        if adapter:
+            # Insert the 15 mm OnRobot Quick-Changer between tool0 and the RG2:
+            #   tool0 -> quick_changer_link        : coincident at the flange; the QC
+            #                                        mesh extends +15 mm along its +Z.
+            #   quick_changer_link -> rg2_base_link: +15 mm along +Z (= tool0 +Z) plus
+            #                                        the gripper's yaw (tf_rpy).
+            # Net tool0 -> rg2_base = the old single-TF transform + 15 mm in tool0 +Z,
+            # so the gripper keeps its orientation and moves 15 mm out, with the QC
+            # rendered in the gap. Toggle off with adapter:=false (original behaviour).
+            z_rg2 = str(float(xyz[2]) + 0.015)
+            return [
+                Node(
+                    package="tf2_ros",
+                    executable="static_transform_publisher",
+                    name="tool0_to_quick_changer",
+                    output="screen",
+                    arguments=[
+                        "--x", "0", "--y", "0", "--z", "0",
+                        "--roll", "0", "--pitch", "0", "--yaw", "0",
+                        "--frame-id", "tool0",
+                        "--child-frame-id", "quick_changer_link",
+                    ],
+                ),
+                Node(
+                    package="tf2_ros",
+                    executable="static_transform_publisher",
+                    name="quick_changer_to_rg2_base_link",
+                    output="screen",
+                    arguments=[
+                        "--x", xyz[0], "--y", xyz[1], "--z", z_rg2,
+                        "--roll", rpy[0], "--pitch", rpy[1], "--yaw", rpy[2],
+                        "--frame-id", "quick_changer_link",
+                        "--child-frame-id", "rg2_base_link",
+                    ],
+                ),
+            ]
         return [
             Node(
                 package="tf2_ros",
@@ -212,9 +249,41 @@ def generate_launch_description():
             ),
         ]
 
+    def _load_adapter_description(context):
+        """robot_state_publisher for the standalone Quick-Changer URDF (namespace
+        /quick_changer) so RViz renders the QC mesh at the quick_changer_link frame.
+        Skipped if adapter:=false. package:// is rewritten to file:// like the RG2."""
+        if context.launch_configurations.get("adapter", "true").lower() == "false":
+            return []
+        path = REPO / "compliant_insertion_studio" / "urdf" / "adapter" / "quick_changer.urdf"
+        text = path.read_text().replace(
+            "package://compliant_insertion_studio/",
+            f"file://{REPO}/compliant_insertion_studio/",
+        )
+        return [
+            Node(
+                package="robot_state_publisher",
+                executable="robot_state_publisher",
+                namespace="quick_changer",
+                name="quick_changer_state_publisher",
+                output="screen",
+                parameters=[{"robot_description": text}],
+            ),
+        ]
+
     static_tf_tool0_to_rg2 = OpaqueFunction(function=_make_static_tf)
 
     rg2_state_publisher_action = OpaqueFunction(function=_load_rg2_description)
+
+    adapter_state_publisher_action = OpaqueFunction(function=_load_adapter_description)
+
+    adapter_arg = DeclareLaunchArgument(
+        "adapter",
+        default_value="true",
+        description="true (default): insert the 15 mm Quick-Changer between tool0 and "
+                    "rg2_base_link (two static TFs + QC robot_state_publisher). "
+                    "false: original single tool0 -> rg2_base_link TF.",
+    )
 
     # When --rg2_only, we still need a base_link → tool0 chain so RViz can
     # render the gripper. Use a single static TF world → tool0 to anchor.
@@ -251,9 +320,11 @@ def generate_launch_description():
             gripper_bridge_arg,
             rpy_arg,
             xyz_arg,
+            adapter_arg,
             ur_launch,
             static_tf_tool0_to_rg2,
             rg2_state_publisher_action,
+            adapter_state_publisher_action,
             static_tf_world_to_tool0,
             rviz,
         ]
