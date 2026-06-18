@@ -45,7 +45,7 @@ from primitives.shared.ik import dh_params, forward_kinematics
 from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
-from utils.data_path_finder import get_symmetry_dir
+from utils.data_path_finder import get_symmetry_dir, load_grasp_candidate
 from primitives.shared.config import (
     TABLE_HEIGHT, TABLE_HEIGHT_WORLD, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, FAST_FREE_MOVE,
     grasp_offset_mm, table_clearance_shift_m, TABLE_CLEARANCE_MARGIN_MM,
@@ -341,7 +341,7 @@ def output_result(result):
 
 
 class DirectObjectMove(Node):
-    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None, grip_width_mm=None):
+    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None, grip_width_mm=None, grasp_candidate=None):
         super().__init__('direct_object_move')
 
         # Mode must be explicitly specified - no default
@@ -383,10 +383,55 @@ class DirectObjectMove(Node):
         self.height = height  # None means use offset, otherwise use exact height
         self.target_xyz = target_xyz  # Optional target position [x, y, z]
         self.target_xyzw = target_xyzw  # Optional target orientation [x, y, z, w]
-        self.grasp_id = grasp_id  # Specific grasp point ID to use
-        # Look up expected gripper_width_mm for this object+grasp_id
+        # --- Candidate-native grasp (Option B): grasp_candidate = grasp_point_id*100 + direction_id ---
+        # When set, this addresses a schema_version-2 CAD grasp candidate (e.g. 101 = gp1/dir1 x-close,
+        # 202 = gp2/dir2 y-close). We reuse ALL the existing marker-matching/tracking machinery by
+        # aliasing self.grasp_id to the composite id (the candidate publisher emits markers with that
+        # id), and drive width/orientation/standoff from the candidate JSON instead of the legacy
+        # x-only grasp-validity table. See .local/design-notes/move_to_grasp-candidate-rewire-*.md.
+        self.grasp_candidate = grasp_candidate
+        self._candidate_meta = None        # the candidate dict (width_mm, standoff_m, approach_quaternion…)
+        self._candidate_gripper = None     # the file-level gripper block (clearance_mm…)
+        self._candidate_standoff_m = None
+        cand_W_open = None
+        cand_W_grip = None
+        if grasp_candidate is not None:
+            if mode == 'real':
+                # Repo rule: no unverified real-arm path. The candidate-native top-down gate + the
+                # W-dynamic SIM fingertip curve are sim-only until verified in-lab. (Also keeps the
+                # real-mode step-3 block, which assumes legacy yaw, from seeing candidate ids.)
+                raise ValueError(
+                    "grasp_candidate is sim-only for now (candidate-native top-down path not verified "
+                    "on the real UR5e). Use --mode sim.")
+            grasp_id = grasp_candidate  # reuse marker machinery (markers carry the composite id)
+            cand, gmeta = load_grasp_candidate(object_name, grasp_candidate)
+            if cand is None:
+                raise ValueError(
+                    f"grasp_candidate {grasp_candidate} not found for object '{object_name}' in the "
+                    f"grasp_candidates JSON.")
+            self._candidate_meta = cand
+            self._candidate_gripper = gmeta
+            clearance_mm = float(gmeta.get('clearance_mm', 14.0))  # from the file, NOT a hardcoded const
+            cand_W_open = float(cand['width_mm'])                  # open approach width (= part wall + clearance)
+            cand_W_grip = cand_W_open - clearance_mm               # closed grip width = the part wall the jaws clamp
+            if cand_W_grip <= 0:
+                raise ValueError(
+                    f"grasp_candidate {grasp_candidate}: W_grip = width_mm({cand_W_open}) - "
+                    f"clearance_mm({clearance_mm}) = {cand_W_grip:.1f} <= 0; bad candidate.")
+            self._candidate_standoff_m = float(cand.get('standoff_m', 0.115))
+            # Standoff replaces the hardcoded hover for the candidate path (top-down gate guarantees
+            # the world +Z standoff == the candidate -approach direction; see _candidate_facedown_from_gate).
+            self.hover_height_offset = self._candidate_standoff_m
+
+        self.grasp_id = grasp_id  # Specific grasp point ID to use (== composite candidate id when candidate-native)
+        # Look up expected gripper_width_mm. Candidate mode takes W_open from the candidate (bypassing
+        # load_grasp_validity_data — validity.get(101) would be None); legacy grasp-id mode uses the
+        # x-only grasp-validity table. expected_gripper_width only gates the pre-grasp open-CHECK; the
+        # actual pre-grasp open command comes from control_gripper --phase pre_grasp.
         self.expected_gripper_width = None
-        if grasp_id is not None and object_name:
+        if grasp_candidate is not None:
+            self.expected_gripper_width = cand_W_open
+        elif grasp_id is not None and object_name:
             validity = load_grasp_validity_data(object_name)
             self.expected_gripper_width = validity.get(grasp_id)
         self._gripper_settle_pending = False  # True after first below-threshold reading
@@ -416,7 +461,9 @@ class DirectObjectMove(Node):
         # binding the pad-face at W_grip lands it exactly on the grasp point at the deepest finger config
         # (tip = grasp_z - 14.9). W_grip is a geometric predict-time value (~1mm of the live settle width);
         # falls back to the looked-up approach width when not supplied.
-        self.grip_width_mm = grip_width_mm
+        # Candidate mode anchors the W-dynamic offset at W_grip (= part wall along the closing axis);
+        # legacy mode uses the caller-supplied grip_width_mm (else the looked-up approach width).
+        self.grip_width_mm = cand_W_grip if grasp_candidate is not None else grip_width_mm
         offset_width = self.grip_width_mm if self.grip_width_mm is not None else self.expected_gripper_width
         self._grasp_tool_offset = grasp_offset_mm(offset_width, self.mode)
         self.get_logger().info(
@@ -619,6 +666,58 @@ class DirectObjectMove(Node):
             self.get_logger().info(f"Using {mode_str} mode: Moving to object '{object_name}'")
         self.get_logger().info(f"Duration: auto-computed per step")
         
+    def _candidate_facedown_from_gate(self, marker_quat):
+        """Top-down gate + yaw recovery for a candidate-native grasp (Option B).
+
+        `marker_quat` carries R_WT (the candidate's world TCP frame, composed by the publisher as
+        R_WO @ R_OT). Returns a face-down target quaternion carrying the candidate's yaw, or None
+        (and sets error_message + should_exit) if the candidate is not top-down within tolerance.
+
+        ── Deferred true-6-DOF command path (NOT implemented here) ──────────────────────────────────
+        For an arbitrary (non-top-down) candidate, execution must become a SEPARATE command path,
+        not a silent extension of this face-down one. The math (GPT session 019eda93, full detail in
+        .local/design-notes/move_to_grasp-candidate-rewire-gpt-math.md):
+          • IK target: p_WF = p_WT − R_WT · o_FT(W),  R_WF = R_WT   (offset rotates WITH R_WT)
+          • table clearance from the POSED pad geometry, not the scalar tip offset:
+                z_min = p_z + min_i e_z·(R_WT · x_i);  shift along −approach when (−a_W)·e_z > eps,
+                else reject (near-horizontal approach can't be lifted along world +Z).
+          • broader IK seeds (all UR branch families, relaxed elbow bounds, TCP-frame jaw symmetry).
+        Until that path exists, we gate to top-down and run the verified vertical descent.
+        ──────────────────────────────────────────────────────────────────────────────────────────────
+        """
+        R_WT = R.from_quat(marker_quat).as_matrix()
+        a_W = R_WT @ np.array([0.0, 0.0, 1.0])          # approach/descent axis (TCP +Z)
+        cos_t = float(np.clip(a_W @ np.array([0.0, 0.0, -1.0]), -1.0, 1.0))
+        theta_deg = math.degrees(math.acos(cos_t))
+        # Strict gate: step-1/step-2 descends vertically and offsets the standoff along world +Z,
+        # which only equals the candidate −approach when (near-)exactly top-down. At 10° tilt the
+        # lateral error is 0.115·sin(10°) ≈ 20 mm, so REJECT above 5° (warn above 2°).
+        if theta_deg > 5.0:
+            self.error_message = (
+                f"grasp_candidate {self.grasp_candidate} is not top-down (approach tilt "
+                f"{theta_deg:.1f}° > 5°). True 6-DOF execution is a deferred separate command path; "
+                f"this top-down primitive rejects it.")
+            self.get_logger().error(self.error_message)
+            self.should_exit = True
+            return None
+        if theta_deg > 2.0:
+            self.get_logger().warn(
+                f"grasp_candidate {self.grasp_candidate} approach tilt {theta_deg:.1f}° (>2° warn).")
+        # Recover yaw from the projected world X axis. The candidate's approach_quaternion already
+        # owns the in-plane (closing-axis) rotation — do NOT also add in_plane_rotation_deg.
+        x_W = R_WT @ np.array([1.0, 0.0, 0.0])
+        if math.hypot(x_W[0], x_W[1]) < 1e-6:
+            self.error_message = (
+                f"grasp_candidate {self.grasp_candidate}: world X axis has ~no horizontal projection; "
+                f"cannot recover yaw.")
+            self.get_logger().error(self.error_message)
+            self.should_exit = True
+            return None
+        yaw_deg = math.degrees(math.atan2(x_W[1], x_W[0]))
+        self.get_logger().info(
+            f"Candidate {self.grasp_candidate}: top-down gate OK (tilt {theta_deg:.1f}°), yaw {yaw_deg:.1f}°")
+        return _face_down_quaternion(yaw_deg)
+
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees"""
         # Roll
@@ -1129,25 +1228,30 @@ class DirectObjectMove(Node):
                 return
             
             if grasp_point_has_orientation:
-                # Extract grasp point orientation and apply fold symmetry matching
+                # Extract grasp point orientation
                 grasp_point_quat = np.array([
                     self.selected_grasp_point.pose.orientation.x,
                     self.selected_grasp_point.pose.orientation.y,
                     self.selected_grasp_point.pose.orientation.z,
                     self.selected_grasp_point.pose.orientation.w
                 ])
-                
-                # Try to find canonical match with increasing thresholds
-                canonical_quat, canonical_match, match_distance = self._try_canonical_match_with_threshold(
-                    grasp_point_quat, self.object_name
-                )
-                
-                # Extract yaw from returned quaternion (canonical match or fallback)
-                grasp_point_yaw = _extract_yaw(canonical_quat)
-                
-                # Create face-down quaternion with grasp point yaw (QUATERNION-BASED, no gimbal lock)
-                target_quaternion = _face_down_quaternion(grasp_point_yaw)
-                
+
+                if self.grasp_candidate is not None:
+                    # Candidate-native: the marker carries the true world TCP frame R_WT. Run the
+                    # top-down gate + yaw recovery directly (the candidate yaw is authoritative — do
+                    # NOT canonical/fold-symmetry match it).
+                    target_quaternion = self._candidate_facedown_from_gate(grasp_point_quat)
+                    if target_quaternion is None:
+                        return  # gate rejected (not top-down) — error_message/should_exit set
+                else:
+                    # Legacy grasp-id: marker inherited the OBJECT orientation; recover yaw via the
+                    # fold-symmetry canonical match, then build a face-down quaternion.
+                    canonical_quat, canonical_match, match_distance = self._try_canonical_match_with_threshold(
+                        grasp_point_quat, self.object_name
+                    )
+                    grasp_point_yaw = _extract_yaw(canonical_quat)
+                    target_quaternion = _face_down_quaternion(grasp_point_yaw)
+
                 step_msg = "Step 2: Fine positioning" if self.step1_completed else "Step 1: Moving to hover position"
                 self.get_logger().info(step_msg)
                 self.get_logger().info(f"Object at: ({grasp_point_position[0]:.3f}, {grasp_point_position[1]:.3f}, {grasp_point_position[2]:.3f})")
@@ -2241,8 +2345,16 @@ def main(args=None):
                        help='Optional target orientation [x, y, z, w] quaternion')
     parser.add_argument('--grasp-points-topic', type=str, default="/grasp_points",
                        help='Topic name for grasp points subscription')
-    parser.add_argument('--grasp-id', type=int, required=True,
-                       help='Specific grasp point ID to use (required - will use grasp point instead of object center)')
+    parser.add_argument('--grasp-id', type=int, default=None,
+                       help='LEGACY raw marker id to match on the grasp topic. With the candidate-native '
+                            'publisher the markers carry COMPOSITE ids (grasp_point_id*100+direction_id), so '
+                            'pass --grasp-candidate instead; --grasp-id only matches a raw marker id and does '
+                            'no candidate width/standoff/gate logic. Exactly one of --grasp-id/--grasp-candidate.')
+    parser.add_argument('--grasp-candidate', type=int, default=None,
+                       help='Candidate-native grasp id = grasp_point_id*100 + direction_id (e.g. 101 = gp1 '
+                            'x-close, 202 = gp2 y-close). Drives width/orientation/standoff from the CAD '
+                            'grasp-candidate JSON + a top-down gate. SIM only. Exactly one of '
+                            '--grasp-id/--grasp-candidate.')
     parser.add_argument('--offset', type=float, default=None,
                        help='Vertical offset below grasp point for gripper center in meters (default: 0 = gripper center at grasp point)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
@@ -2256,21 +2368,29 @@ def main(args=None):
         args = parser.parse_args()
     else:
         args = parser.parse_args(args)
-    
+
+    # Enforce exactly one of --grasp-id / --grasp-candidate, then derive the effective marker id
+    # (the candidate composite id IS the marker id when candidate-native).
+    if (args.grasp_id is None) == (args.grasp_candidate is None):
+        parser.error("Provide exactly one of --grasp-id (legacy raw marker id) or "
+                     "--grasp-candidate (candidate-native id = grasp_point_id*100+direction_id).")
+    effective_grasp_id = args.grasp_candidate if args.grasp_candidate is not None else args.grasp_id
+
     rclpy.init(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
-                      offset=args.offset, mode=args.mode, grip_width_mm=args.grip_width)
+                      offset=args.offset, mode=args.mode, grip_width_mm=args.grip_width,
+                      grasp_candidate=args.grasp_candidate)
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling
     while node.current_ee_pose is None and rclpy.ok() and not node.should_exit:
         rclpy.spin_once(node, timeout_sec=0.1)
 
-    # Wait for grasp points if using grasp_id mode
-    if args.grasp_id is not None:
+    # Wait for grasp points if using grasp_id / grasp_candidate mode
+    if effective_grasp_id is not None:
         while node.latest_grasp_points is None and rclpy.ok() and not node.should_exit:
             rclpy.spin_once(node, timeout_sec=0.1)
 

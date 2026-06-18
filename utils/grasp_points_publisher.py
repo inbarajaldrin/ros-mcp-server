@@ -62,9 +62,10 @@ class GraspPointsPublisher(Node):
         
         # Set up data directory
         if data_dir is None:
-            # Auto-discover aruco-grasp-annotator data directory
+            # Auto-discover aruco-grasp-annotator data directory.
+            # Candidate-native (schema_version 2): grasp_candidates/, NOT the legacy grasp_points/.
             aruco_data_dir = get_aruco_data_dir()
-            self.data_dir = aruco_data_dir / "grasp_points"
+            self.data_dir = aruco_data_dir / "grasp_candidates"
         else:
             self.data_dir = Path(data_dir)
         
@@ -176,13 +177,15 @@ class GraspPointsPublisher(Node):
 
     
     def load_grasp_data(self):
-        """Load all grasp points JSON files from data directory"""
+        """Load all grasp CANDIDATE JSON files (schema_version 2) from data directory."""
         if not self.data_dir.exists():
             self.get_logger().warn(f"Data directory does not exist: {self.data_dir}")
             return
-        
-        # Find all grasp points JSON files
-        pattern = "*_grasp_points.json"
+
+        # Candidate-native hard-switch: read *_grasp_candidates.json (schema_version 2), not the
+        # legacy *_grasp_points.json. Each file's grasp_candidates[] carries per-candidate
+        # width_mm / standoff_m / approach_quaternion (the true TCP orientation in object frame).
+        pattern = "*_grasp_candidates.json"
         for grasp_file in self.data_dir.glob(pattern):
             try:
                 with open(grasp_file, 'r') as f:
@@ -192,7 +195,7 @@ class GraspPointsPublisher(Node):
                         self.grasp_data[object_name_json] = data
                         self.object_name_map[object_name_json] = object_name_json
 
-                        self.get_logger().info(f"  Loaded: {object_name_json} ({data.get('total_grasp_points', 0)} grasp points)")
+                        self.get_logger().info(f"  Loaded: {object_name_json} ({data.get('total_grasp_candidates', 0)} grasp candidates)")
             except Exception as e:
                 self.get_logger().error(f"Error loading {grasp_file}: {e}")
     
@@ -243,45 +246,43 @@ class GraspPointsPublisher(Node):
                 'header': transform.header
             }
 
-    def transform_grasp_point(self, grasp_point_local, object_pose):
+    def transform_candidate(self, candidate, object_pose):
         """
-        Transform grasp point from CAD center frame to base frame using object pose.
-        Grasp point inherits the orientation of the object.
+        Transform a grasp CANDIDATE (schema_version 2) from CAD-center frame to world (base) frame.
+
+        Position: p_W = p_WO + R_WO @ grasp_candidate_position.
+        Orientation: the candidate carries `approach_quaternion` = R_OT, the TCP/grasp frame
+        orientation expressed IN THE OBJECT frame. The world TCP frame is therefore
+            R_WT = R_WO @ R_OT  ->  q_WT = q_WO (X) q_approach
+        so the published marker carries the TRUE world TCP frame (face-down + the candidate's
+        in-plane yaw baked in), NOT the bare object orientation. move_to_grasp's top-down gate then
+        recovers the approach axis and yaw directly from this quaternion — no face-down assumption
+        here, no canonical/fold-symmetry matching downstream.
 
         Args:
-            grasp_point_local: Dict with position (x, y, z) relative to CAD center
+            candidate: one entry of grasp_candidates[] (has grasp_candidate_position + approach_quaternion)
             object_pose: Dict with translation and quaternion of object in base frame
-        
+
         Returns:
-            Transformed position and orientation in base frame
+            (pos_world [3], quat_world [x,y,z,w])
         """
         # Local position (relative to CAD center)
-        pos_local = np.array([
-            grasp_point_local['position']['x'],
-            grasp_point_local['position']['y'],
-            grasp_point_local['position']['z']
-        ])
-        
+        gp = candidate['grasp_candidate_position']
+        pos_local = np.array([gp['x'], gp['y'], gp['z']])
+
         # Object pose in base frame
         obj_translation = object_pose['translation']
-        obj_quaternion = object_pose['quaternion']
-        
-        # Create rotation matrix from quaternion
+        obj_quaternion = object_pose['quaternion']  # [x, y, z, w]
+
         r_object_world = R.from_quat(obj_quaternion)
-        rot_matrix = r_object_world.as_matrix()
 
         # Transform position to world frame
-        pos_base = obj_translation + rot_matrix @ pos_local
+        pos_base = obj_translation + r_object_world.as_matrix() @ pos_local
 
-        # Grasp point inherits object's orientation directly - no conversion needed
-        # 
-        # Note: The move_to_grasp code ensures the gripper is always pointing down
-        # (face-down, pitch=180°), so we can use the object's orientation as-is.
-        # The approach vector [0,0,1] defined in the JSON file only affects position
-        # transformation, not orientation. If grasp point orientation differs from
-        # object orientation in the future, the code will need to be updated to handle
-        # that transformation.
-        quat_base = obj_quaternion
+        # Compose world TCP orientation: R_WT = R_WO @ R_OT
+        aq = candidate['approach_quaternion']
+        q_approach = np.array([aq['x'], aq['y'], aq['z'], aq['w']])  # [x, y, z, w]
+        quat_base = (r_object_world * R.from_quat(q_approach)).as_quat()
 
         return pos_base, quat_base
 
@@ -301,26 +302,26 @@ class GraspPointsPublisher(Node):
             if object_name_json not in self.grasp_data:
                 continue
             
-            # Get grasp points for this object
-            grasp_points_local = self.grasp_data[object_name_json].get('grasp_points', [])
-            
-            # Transform and add each grasp point
-            # All grasp points are published regardless of axis validity.
-            # Axis-based gripper state filtering is handled by get_scene_info.py.
-            for gp_local in grasp_points_local:
+            # Get grasp candidates for this object
+            grasp_candidates_local = self.grasp_data[object_name_json].get('grasp_candidates', [])
+
+            # Transform and add each candidate. One marker per candidate; the composite id
+            # (grasp_point_id*100 + direction_id) lets a caller address e.g. 101 (gp1/x-close)
+            # vs 102 (gp1/y-close). All candidates are published; gating is done by the consumer.
+            for cand in grasp_candidates_local:
                 try:
-                    pos_base, quat_base = self.transform_grasp_point(gp_local, object_pose)
-                    
+                    pos_base, quat_base = self.transform_candidate(cand, object_pose)
+
                     marker = Marker()
                     marker.header.stamp = now.to_msg()
                     marker.header.frame_id = "base"
-                    
+
                     # Store object name in namespace
                     marker.ns = object_name_topic
-                    
-                    # Store grasp ID
-                    marker.id = gp_local.get('id', 0)
-                    
+
+                    # Composite candidate id = grasp_point_id*100 + direction_id
+                    marker.id = cand.get('grasp_point_id', 0) * 100 + cand.get('direction_id', 0)
+
                     # Marker visualization settings
                     marker.type = Marker.SPHERE
                     marker.action = Marker.ADD
@@ -354,7 +355,8 @@ class GraspPointsPublisher(Node):
                     marker_array.markers.append(marker)
                     
                 except Exception as e:
-                    self.get_logger().error(f"Error transforming grasp point {gp_local.get('id')} for {object_name_topic}: {e}")
+                    cid = cand.get('grasp_point_id', 0) * 100 + cand.get('direction_id', 0)
+                    self.get_logger().error(f"Error transforming grasp candidate {cid} for {object_name_topic}: {e}")
         
         return marker_array
     

@@ -26,10 +26,14 @@ def find_aruco_data_dir() -> Optional[Path]:
     for path in documents_dir.rglob(target_name):
         if path.is_dir():
             data_dir = path / "data"
-            # Verify it has the expected structure (grasp_points subdirectory)
-            if data_dir.exists() and (data_dir / "grasp_points").exists():
+            # Verify it has the expected structure. Accept either the candidate-native
+            # layout (grasp_candidates/, the current path) or the legacy grasp_points/ layout
+            # so the finder works during/after the candidate hard-switch.
+            if data_dir.exists() and (
+                (data_dir / "grasp_candidates").exists() or (data_dir / "grasp_points").exists()
+            ):
                 return data_dir
-    
+
     return None
 
 
@@ -52,6 +56,46 @@ def get_aruco_data_dir() -> Path:
 def get_symmetry_dir() -> Path:
     """Get symmetry directory path."""
     return get_aruco_data_dir() / "symmetry"
+
+
+def get_grasp_candidates_dir() -> Path:
+    """Get the grasp_candidates directory (schema_version 2 candidate JSONs)."""
+    return get_aruco_data_dir() / "grasp_candidates"
+
+
+def load_grasp_candidate(object_name: str, candidate_id: int):
+    """Load one grasp candidate (schema_version 2) by composite id.
+
+    candidate_id = grasp_point_id*100 + direction_id (e.g. 101 = gp 1 / dir 1, 202 = gp 2 / dir 2).
+
+    Returns a (candidate_dict, gripper_meta_dict) tuple, or (None, None) if the file or the
+    candidate id is not found. gripper_meta carries the file-level `gripper` block (max_width_mm,
+    clearance_mm, tip_thickness_mm) — the candidate dict alone does NOT include clearance_mm, so
+    callers that derive W_grip = width_mm - clearance_mm must read it from gripper_meta (never a
+    duplicated constant).
+    """
+    try:
+        cand_dir = get_grasp_candidates_dir()
+    except FileNotFoundError:
+        return None, None
+
+    cand_file = cand_dir / f"{object_name}_grasp_candidates.json"
+    if not cand_file.exists():
+        return None, None
+
+    try:
+        with open(cand_file, 'r') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None, None
+
+    gripper_meta = data.get('gripper', {})
+    for cand in data.get('grasp_candidates', []):
+        cid = cand.get('grasp_point_id', 0) * 100 + cand.get('direction_id', 0)
+        if cid == candidate_id:
+            return cand, gripper_meta
+
+    return None, gripper_meta
 
 
 def get_assembly_data_dir() -> Path:

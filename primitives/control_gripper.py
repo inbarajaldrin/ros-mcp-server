@@ -12,15 +12,24 @@ Usage:
     python3 control_gripper.py 55 [--mode sim|real]  # 55mm width
 """
 
+import os
+import sys
+
+# Add project root to path so the utils package imports when running this file directly.
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float64, Float32
 import argparse
 import time
-import sys
 import json
 import threading
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
+from utils.data_path_finder import load_grasp_candidate
 
 # Gripper range: 0.0 - 100.0mm
 GRIPPER_MIN_WIDTH = 0.0
@@ -416,12 +425,52 @@ def output_result(result):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Control gripper with verification')
-    parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (35mm), or 0-100 (width in mm)')
+    parser.add_argument('command', type=str, nargs='?', default=None,
+                       help='Gripper command: "open", "close", "half-open" (35mm), or 0-100 (width in mm). '
+                            'Optional when using candidate-phase mode (--object-name + --grasp-candidate + --phase).')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
+    # Candidate-native phase mode (Option B): resolve the width from the CAD grasp candidate.
+    parser.add_argument('--object-name', type=str, default=None,
+                       help='Object name for candidate-phase mode (with --grasp-candidate + --phase).')
+    parser.add_argument('--grasp-candidate', type=int, default=None,
+                       help='Candidate id = grasp_point_id*100 + direction_id (with --object-name + --phase).')
+    parser.add_argument('--phase', type=str, default=None, choices=['pre_grasp', 'pre_release'],
+                       help='pre_grasp: open to the candidate OPEN approach width (width_mm). '
+                            'pre_release: env-aware release midpoint (NOT yet wired consumer-side).')
 
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
+
+    # Resolve candidate-phase mode -> a concrete width command, or enforce a legacy positional command.
+    if known_args.phase is not None:
+        if not known_args.object_name or known_args.grasp_candidate is None:
+            parser.error("--phase requires --object-name and --grasp-candidate.")
+        cand, gmeta = load_grasp_candidate(known_args.object_name, known_args.grasp_candidate)
+        if cand is None:
+            output_result({
+                "result": "failure", "command": None, "mode": known_args.mode,
+                "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                "error": f"grasp_candidate {known_args.grasp_candidate} not found for object "
+                         f"'{known_args.object_name}' in the grasp_candidates JSON.",
+            })
+            sys.exit(1)
+        if known_args.phase == 'pre_grasp':
+            # Open to the candidate's OPEN approach width (part wall + clearance) — never full-open.
+            known_args.command = f"{float(cand['width_mm']):.1f}"
+        else:  # pre_release
+            # Fast-fail (no silent fallback): the env-aware release midpoint comes from aruco-runner's
+            # release sweep and is not wired consumer-side yet. Don't guess a width.
+            output_result({
+                "result": "failure", "command": None, "mode": known_args.mode,
+                "phase": "pre_release", "grasp_candidate": known_args.grasp_candidate,
+                "error": "pre_release width source not wired yet (aruco-runner's env-aware release "
+                         "midpoint). Pass an explicit <mm> command or coordinate the source.",
+            })
+            sys.exit(1)
+    elif known_args.command is None:
+        parser.error("Provide a gripper command (open|close|half-open|<mm>) OR candidate-phase mode "
+                     "(--object-name + --grasp-candidate + --phase).")
 
     # Initialize variables for result
     success = False
