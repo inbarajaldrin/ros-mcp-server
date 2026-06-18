@@ -46,7 +46,10 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
-from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, FAST_FREE_MOVE
+from primitives.shared.config import (
+    TABLE_HEIGHT, TABLE_HEIGHT_WORLD, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, FAST_FREE_MOVE,
+    grasp_offset_mm, table_clearance_shift_m, TABLE_CLEARANCE_MARGIN_MM,
+)
 from queries.get_scene_info import load_grasp_validity_data
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
@@ -64,7 +67,7 @@ def _face_down_quaternion(yaw_degrees):
     return R.from_euler('xyz', [0, 180, yaw_degrees], degrees=True).as_quat()
 
 
-def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, dx=0.001, prefer_elbow_down=True):
+def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, dx=0.001, prefer_elbow_down=True, tool_offset=None):
     """IK solver with wrist_3 joint range extended to (-2pi, 2pi).
 
     Constrains the robot to maintain a consistent "elbow-down" picking configuration:
@@ -81,8 +84,11 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
     original_position = np.array(position)
     target_rot_matrix = R.from_euler('xyz', rpy, degrees=True).as_matrix()
 
-    # Convert gripper center target to flange target
-    flange_position = original_position - target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+    # Convert gripper center target to flange target. tool_offset, when supplied by the caller, is the
+    # W-dynamic flange->grasp(face) offset for this grasp's gripper width (see config.grasp_offset_mm);
+    # falls back to the fixed mode-aware constant so non-grasp callers are unchanged.
+    offset = GRIPPER_CENTER_TOOL_OFFSET if tool_offset is None else tool_offset
+    flange_position = original_position - target_rot_matrix @ offset
 
     target_pose = np.eye(4)
     target_pose[:3, 3] = flange_position
@@ -335,7 +341,7 @@ def output_result(result):
 
 
 class DirectObjectMove(Node):
-    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
+    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None, grip_width_mm=None):
         super().__init__('direct_object_move')
 
         # Mode must be explicitly specified - no default
@@ -349,6 +355,11 @@ class DirectObjectMove(Node):
         # Movement parameters (configurable)
         self.hover_height_offset = 0.1  # Hover height above grasp point in step 1 (meters)
         self.table_clearance = 0.01  # Minimum clearance above table for gripper fingers (meters) - 1.0cm
+        # Fingertip table-clearance SHIFT (W-dynamic adapter era). The fingertip sits ~14.9mm below the
+        # pad contact face, so a flat-part face target near the table drives the tips into it; raise the
+        # face target to keep the fingertip >= margin above the table. See config.table_clearance_shift_m.
+        self.apply_table_shift = True
+        self.table_shift_margin_mm = TABLE_CLEARANCE_MARGIN_MM
         
         # Set default topic based on mode if not provided
         if topic_name is None:
@@ -395,6 +406,23 @@ class DirectObjectMove(Node):
         # For small objects near the table, the gripper center must be raised
         # to prevent the lower finger material from hitting the table during closure.
         self.min_gripper_center_z = TABLE_HEIGHT + self.table_clearance  # Ensures clearance for gripper fingers below center
+
+        # W-dynamic flange->grasp(face) offset for THIS grasp, computed from the looked-up gripper width.
+        # Replaces the static GRIPPER_CENTER_TOOL_OFFSET at the grasp call sites (the static frame is only
+        # correct at one nominal width; the RG2 4-bar makes the depth width-dependent). Falls back to the
+        # fixed mode-aware constant when the width is unknown or in real mode. See config.grasp_offset_mm.
+        # Anchor the offset at the CLOSED grip width (W_grip = the part's extent along the closing axis),
+        # not the open approach width: the arm holds tool0 fixed while the jaws force-close to the part, so
+        # binding the pad-face at W_grip lands it exactly on the grasp point at the deepest finger config
+        # (tip = grasp_z - 14.9). W_grip is a geometric predict-time value (~1mm of the live settle width);
+        # falls back to the looked-up approach width when not supplied.
+        self.grip_width_mm = grip_width_mm
+        offset_width = self.grip_width_mm if self.grip_width_mm is not None else self.expected_gripper_width
+        self._grasp_tool_offset = grasp_offset_mm(offset_width, self.mode)
+        self.get_logger().info(
+            f"Grasp tool offset (W_grip={self.grip_width_mm}mm, W_appr={self.expected_gripper_width}mm, "
+            f"{self.mode}): Z={self._grasp_tool_offset[2]*1000:.1f}mm "
+            f"(static was {GRIPPER_CENTER_TOOL_OFFSET[2]*1000:.1f}mm)")
 
         # Vertical offset below the grasp point for the gripper center (meters).
         # IK targets are converted from gripper center to flange using GRIPPER_CENTER_TOOL_OFFSET.
@@ -1317,7 +1345,21 @@ class DirectObjectMove(Node):
             if self.offset is not None and self.offset != 0:
                 target_ee_position[2] -= self.offset
 
-            # Enforce minimum gripper center height to prevent table collision
+            # Fingertip table-clearance SHIFT (W-dynamic adapter era). The face target above lands the pad
+            # contact face on the grasp point, but the fingertip protrudes ~14.9mm below the face, so a
+            # low (flat-part) face target drives the tips into the table. Raise the face target so the
+            # fingertip keeps >= margin above the table. Stricter than (and supersedes for flat parts) the
+            # gripper-CENTER clamp below, which ignored the tip protrusion. Mode-independent.
+            if self.apply_table_shift:
+                shift = table_clearance_shift_m(target_ee_position[2], TABLE_HEIGHT_WORLD, self.table_shift_margin_mm)
+                if shift > 0:
+                    self.get_logger().info(
+                        f"Table-clearance SHIFT +{shift*1000:.1f}mm (fingertip < {self.table_shift_margin_mm:.0f}mm "
+                        f"margin at grasp_z={target_ee_position[2]*1000:.1f}mm): "
+                        f"raising face target to {(target_ee_position[2]+shift)*1000:.1f}mm")
+                    target_ee_position[2] += shift
+
+            # Enforce minimum gripper center height to prevent table collision (legacy secondary floor)
             if target_ee_position[2] < self.min_gripper_center_z:
                 self.get_logger().info(
                     f"Raising gripper center from {target_ee_position[2]*1000:.1f}mm to "
@@ -1399,7 +1441,7 @@ class DirectObjectMove(Node):
         # Only check convergence during step 2 (not step 3 or after step 2 completes)
         if self.step1_completed and not self.step2_completed:
             R_ee = R.from_quat(current_ee_quat).as_matrix()
-            current_gc_position = current_ee_position + R_ee @ GRIPPER_CENTER_TOOL_OFFSET
+            current_gc_position = current_ee_position + R_ee @ self._grasp_tool_offset
             distance_to_target = np.linalg.norm(current_gc_position - target_ee_position)
 
             if distance_to_target <= self.convergence_distance_threshold:
@@ -1467,7 +1509,7 @@ class DirectObjectMove(Node):
             # Compute flange target using topic-measured gripper center delta
             # (avoids FK/topic mismatch that causes ~1-2mm error)
             R_ee_topic = R.from_quat(current_ee_quat).as_matrix()
-            current_gc_topic = current_ee_position + R_ee_topic @ GRIPPER_CENTER_TOOL_OFFSET
+            current_gc_topic = current_ee_position + R_ee_topic @ self._grasp_tool_offset
             gc_error = gc_target - current_gc_topic
             flange_target = current_flange_fk + gc_error
 
@@ -1539,7 +1581,7 @@ class DirectObjectMove(Node):
             return
         else:
             # Step 1: full multi-seed search
-            sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1)
+            sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1, tool_offset=self._grasp_tool_offset)
 
             # Skip sol_b if sol_a is good enough (close to current joints)
             sol_b = None
@@ -1547,9 +1589,9 @@ class DirectObjectMove(Node):
                 ref = np.array(self.current_joint_angles)
                 joint_dist_a = np.linalg.norm(np.array(sol_a) - ref)
                 if joint_dist_a > 1.5:
-                    sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+                    sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1, tool_offset=self._grasp_tool_offset)
             elif sol_a is None:
-                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1, tool_offset=self._grasp_tool_offset)
 
             # Pick solution closest to current joints
             if self.current_joint_angles is not None:
@@ -2205,6 +2247,10 @@ def main(args=None):
                        help='Vertical offset below grasp point for gripper center in meters (default: 0 = gripper center at grasp point)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
                        help='Mode: "sim" for simulation (uses /objects_poses_sim with TFMessage), "real" for real robot (uses /objects_poses_real with TFMessage). REQUIRED - no default.')
+    parser.add_argument('--grip-width', type=float, default=None,
+                       help='Closed grip width W_grip (mm) = the part extent along the closing axis. Used ONLY for the '
+                            'W-dynamic flange->grasp offset, so the pad face anchors on the grasp point at the CLOSED '
+                            '(deepest) finger config. Defaults to the looked-up approach width if omitted.')
     # Parse arguments from sys.argv if args is None
     if args is None:
         args = parser.parse_args()
@@ -2216,7 +2262,7 @@ def main(args=None):
                       height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
-                      offset=args.offset, mode=args.mode)
+                      offset=args.offset, mode=args.mode, grip_width_mm=args.grip_width)
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling
@@ -2250,7 +2296,7 @@ def main(args=None):
                 node.current_ee_pose.pose.position.y,
                 node.current_ee_pose.pose.position.z,
             ])
-            gripper_center = ee_pos + rot.as_matrix() @ GRIPPER_CENTER_TOOL_OFFSET
+            gripper_center = ee_pos + rot.as_matrix() @ node._grasp_tool_offset
             gx, gy = float(gripper_center[0]), float(gripper_center[1])
             node.get_logger().info(f"EE is not face-down — auto-reorienting at XY=({gx:.3f}, {gy:.3f})")
 

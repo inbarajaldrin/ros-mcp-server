@@ -24,6 +24,73 @@ GRIPPER_CENTER_TOOL_OFFSET = (
     GRIPPER_CENTER_TOOL_OFFSET_SIM if RUNTIME_MODE == "sim"
     else GRIPPER_CENTER_TOOL_OFFSET_REAL
 )  # 3D offset from EE flange to gripper center in tool frame (meters)
+
+# --- W-dynamic grasp offset (the 15mm OnRobot Quick-Changer adapter era) ---------------------------
+# The fixed GRIPPER_CENTER_TOOL_OFFSET above aims a STATIC frame: it is correct at only ONE nominal
+# gripper width. Empirically (dual-a4500 ur5e-dt, 2026-06-18) the live /World/RG2_Gripper/gripper_center
+# sits a constant 215.0mm from tool0 = (tool0->fingertip - 14.9) at W~74mm ONLY; for a narrow W~30 hex
+# grip the true contact is ~15mm deeper, so the fixed frame under-reaches. The RG2 is a 4-bar linkage:
+# as it opens the fingertip retracts toward tool0, so the flange->grasp depth is WIDTH-DEPENDENT.
+#
+# Decomposition (shared with aruco-runner's release/grasp predicate; co-derived 2026-06-18):
+#   grasp_offset(W) = coupling(15mm) + base->face(W)            [tool0 -> pad contact centre]
+#                   = tool0->fingertip(W) - TIP_BELOW_FACE_MM   [fingertip is 14.9mm below the face]
+# Only base->face(W) is mode-split; the 14.9 tip-below-face const + the SHIFT/contact-gate are
+# mode-INDEPENDENT (pure pad geometry + scene grasp_z).
+#   SIM  -> the measured Isaac-twin fingertip curve below (captures the twin/linkage modelling bow,
+#           which a single bias on the FK curve cannot).
+#   REAL -> intentionally still the fixed 0.2286 vector: the real W-dynamic FK curve must be wired +
+#           verified on the real UR5e in-lab before it ships (repo rule: no unverified real-arm path).
+TIP_BELOW_FACE_MM = 14.9     # const fingertip protrusion below the pad contact face (= PAD_LEN/2, mesh-verified)
+TABLE_CLEARANCE_MARGIN_MM = 5.0   # min fingertip clearance above the table before a SHIFT is forced (default; calibrate)
+MIN_PAD_CONTACT_MM = 6.0          # min pad-band/part overlap for a secure grasp; below this -> DENY (default; calibrate)
+
+# Measured SIM tool0->fingertip(W) (dual-a4500 ur5e-dt, 2026-06-18 rg2_sweep.sh): (width_mm, tool0_to_fingertip_mm).
+# Monotone + smooth; linear interp error << the ~3mm sim/real modelling delta. Diffed vs aruco-runner's
+# 60-frame FK (rg2_frames.json): agreement within +/-3mm across the range, +/-0.5..2.6mm at FMB widths 25-56mm.
+SIM_FINGERTIP_MM = (
+    (14.29, 247.84), (15.46, 247.68), (17.32, 247.44), (19.29, 247.16), (21.32, 246.85),
+    (24.97, 246.17), (29.18, 245.25), (34.00, 244.13), (45.71, 240.86), (55.85, 237.31),
+    (63.32, 234.17), (74.14, 229.49), (83.75, 224.76), (94.70, 218.91), (99.04, 216.40),
+)
+
+
+def _interp_table(x, table):
+    """Linear interpolation on a sorted (x, y) table; clamps to the endpoints outside the range."""
+    if x <= table[0][0]:
+        return table[0][1]
+    if x >= table[-1][0]:
+        return table[-1][1]
+    for i in range(1, len(table)):
+        x0, y0 = table[i - 1]
+        x1, y1 = table[i]
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return table[-1][1]
+
+
+def grasp_offset_mm(gripper_width_mm=None, mode=None):
+    """Tool0 -> grasp (pad contact face) offset as a 3-vector [0,0,Z] in METERS, tool frame.
+
+    Width-dependent in SIM (the measured Isaac-twin curve). Falls back to the fixed mode-aware
+    GRIPPER_CENTER_TOOL_OFFSET when the width is unknown (W=None) or in REAL mode, so every existing
+    call site that does not thread a width keeps its current behavior byte-for-byte.
+    """
+    m = (mode or RUNTIME_MODE)
+    if gripper_width_mm is None or m != "sim":
+        return GRIPPER_CENTER_TOOL_OFFSET_SIM if m == "sim" else GRIPPER_CENTER_TOOL_OFFSET_REAL
+    z_mm = _interp_table(float(gripper_width_mm), SIM_FINGERTIP_MM) - TIP_BELOW_FACE_MM
+    return np.array([0.0, 0.0, z_mm / 1000.0])
+
+
+def table_clearance_shift_m(grasp_z_world_m, table_z_world_m=TABLE_HEIGHT_WORLD,
+                            margin_mm=TABLE_CLEARANCE_MARGIN_MM):
+    """Vertical lift (meters, >=0) to keep the fingertip >= margin above the table for a top-down grasp.
+
+    shift = max(0, (table_z + margin) - tip_z),  tip_z = grasp_z - 14.9.  Mode-independent.
+    """
+    tip_z_world_m = grasp_z_world_m - TIP_BELOW_FACE_MM / 1000.0
+    return max(0.0, (table_z_world_m + margin_mm / 1000.0) - tip_z_world_m)
 SAFE_HEIGHT_ABOVE_TABLE = 0.5      # Safe/hover height above table surface (meters)
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
