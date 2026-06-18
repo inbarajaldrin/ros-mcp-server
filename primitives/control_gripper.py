@@ -23,13 +23,97 @@ if _project_root not in sys.path:
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float64, Float32
+from tf2_msgs.msg import TFMessage
 import argparse
 import time
 import json
 import threading
+import subprocess
+import tempfile
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from utils.data_path_finder import load_grasp_candidate
+
+# --- Dynamic (live-scene) pre_grasp/pre_release width resolution -------------------------------------
+# When control_gripper is called with --phase + --base-name, the opening width is resolved from the LIVE
+# sim scene (NOT the static candidate width): a snapshot of /objects_poses_sim is swept against the
+# neighbour meshes by aruco-runner's grip_widths.py. That predicate needs open3d + the bundle's
+# mesh/FK assets and is hardcoded REPO=Path("."), so we cannot import it into the ROS python env — we
+# subprocess it via `uv run` (cwd = the bundle) through the grip_widths_cli.py seam. See
+# .local/design-notes/pre_release-wiring-IMPL-PLAN.md.
+_GRIP_WIDTHS_MARKER = "__GRIP_WIDTHS_JSON__"
+
+
+def _decode_candidate_id(cid):
+    """candidate id -> (gid, axis, error). id = grasp_point_id*100 + direction_id (1=x, 2=y)."""
+    direction_id = cid % 100
+    gid = cid // 100
+    if direction_id not in (1, 2):
+        return None, None, f"grasp_candidate {cid}: direction_id {direction_id} not in (1=x, 2=y)."
+    return gid, ("x" if direction_id == 1 else "y"), None
+
+
+def _snapshot_object_poses(object_name, base_name, timeout=5.0):
+    """Snapshot ONE /objects_poses_sim message that contains BOTH object_name and base_name.
+
+    Returns (live_poses, names_seen): live_poses is {name: {position{x,y,z}, quaternion{x,y,z,w}}}
+    (metres, world) or None on timeout; names_seen is the last set of frames observed. Assumes rclpy
+    is already initialized. Taken immediately before the width computation (live-scene-at-command).
+    """
+    node = rclpy.create_node('grip_widths_pose_snapshot')
+    latest = {}
+
+    def cb(msg):
+        d = {}
+        for tr in msg.transforms:
+            t = tr.transform.translation
+            q = tr.transform.rotation
+            d[tr.child_frame_id] = {
+                "position": {"x": t.x, "y": t.y, "z": t.z},
+                "quaternion": {"x": q.x, "y": q.y, "z": q.z, "w": q.w},
+            }
+        latest.clear()
+        latest.update(d)
+
+    node.create_subscription(TFMessage, '/objects_poses_sim', cb, 5)
+    start = time.time()
+    live = None
+    while time.time() - start < timeout and rclpy.ok():
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if object_name in latest and base_name in latest:
+            live = dict(latest)
+            break
+    names = sorted(latest.keys())
+    node.destroy_node()
+    return live, names
+
+
+def _run_grip_widths(obj, gid, axis, base_name, live_poses, timeout=60.0):
+    """Subprocess grip_widths_cli.py (in the bundle) via `uv run`. Returns (result_dict, error)."""
+    bundle = os.environ.get("ARUCO_TC_BUNDLE", os.path.expanduser("~/aruco-tc-bundle"))
+    cli = os.path.join(bundle, ".local/scripts/grip_widths_cli.py")
+    if not os.path.exists(cli):
+        return None, f"grip_widths_cli.py not found at {cli} (set ARUCO_TC_BUNDLE to the bundle root)."
+    req = {"obj": obj, "gid": gid, "axis": axis, "base": base_name, "live_poses": live_poses}
+    tf = tempfile.NamedTemporaryFile(mode='w', delete=False, dir='/tmp', suffix='.json')
+    try:
+        json.dump(req, tf)
+        tf.close()
+        try:
+            proc = subprocess.run(["uv", "run", "--no-project", cli, tf.name],
+                                  cwd=bundle, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, "dynamic_width_timeout"
+        line = next((l for l in proc.stdout.splitlines() if l.startswith(_GRIP_WIDTHS_MARKER)), None)
+        if line is None:
+            return None, (f"grip_widths returned no result line (rc={proc.returncode}); "
+                          f"stderr_tail={proc.stderr[-400:]!r} stdout_tail={proc.stdout[-200:]!r}")
+        return json.loads(line[len(_GRIP_WIDTHS_MARKER):].strip()), None
+    finally:
+        try:
+            os.unlink(tf.name)
+        except OSError:
+            pass
 
 # Gripper range: 0.0 - 100.0mm
 GRIPPER_MIN_WIDTH = 0.0
@@ -436,38 +520,57 @@ def main(args=None):
     parser.add_argument('--grasp-candidate', type=int, default=None,
                        help='Candidate id = grasp_point_id*100 + direction_id (with --object-name + --phase).')
     parser.add_argument('--phase', type=str, default=None, choices=['pre_grasp', 'pre_release'],
-                       help='pre_grasp: open to the candidate OPEN approach width (width_mm). '
-                            'pre_release: env-aware release midpoint (NOT yet wired consumer-side).')
+                       help='pre_grasp: open to the grasp width. pre_release: open just enough to free '
+                            'the part. With --base-name the width is resolved DYNAMICALLY from the live '
+                            'scene; without it, pre_grasp uses the static candidate width_mm and '
+                            'pre_release fast-fails.')
+    parser.add_argument('--base-name', type=str, default=None,
+                       help='Base/board object name. Its presence enables the DYNAMIC neighbour-aware '
+                            'pre_grasp/pre_release widths: a live /objects_poses_sim snapshot is swept '
+                            'vs grip_widths.py (sim-only). Without it, the static path is used.')
 
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
 
-    # Resolve candidate-phase mode -> a concrete width command, or enforce a legacy positional command.
+    # --- Phase resolution: pure-arg validation + STATIC widths here; DYNAMIC widths after rclpy.init ---
+    # (The dynamic path needs ROS up to snapshot /objects_poses_sim, so it is deferred below — never
+    #  call rclpy.init twice.)
+    dynamic_phase = False
+    dyn_gid = dyn_axis = None
     if known_args.phase is not None:
         if not known_args.object_name or known_args.grasp_candidate is None:
             parser.error("--phase requires --object-name and --grasp-candidate.")
-        cand, gmeta = load_grasp_candidate(known_args.object_name, known_args.grasp_candidate)
-        if cand is None:
-            output_result({
-                "result": "failure", "command": None, "mode": known_args.mode,
-                "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
-                "error": f"grasp_candidate {known_args.grasp_candidate} not found for object "
-                         f"'{known_args.object_name}' in the grasp_candidates JSON.",
-            })
-            sys.exit(1)
-        if known_args.phase == 'pre_grasp':
-            # Open to the candidate's OPEN approach width (part wall + clearance) — never full-open.
-            known_args.command = f"{float(cand['width_mm']):.1f}"
-        else:  # pre_release
-            # Fast-fail (no silent fallback): the env-aware release midpoint comes from aruco-runner's
-            # release sweep and is not wired consumer-side yet. Don't guess a width.
-            output_result({
-                "result": "failure", "command": None, "mode": known_args.mode,
-                "phase": "pre_release", "grasp_candidate": known_args.grasp_candidate,
-                "error": "pre_release width source not wired yet (aruco-runner's env-aware release "
-                         "midpoint). Pass an explicit <mm> command or coordinate the source.",
-            })
-            sys.exit(1)
+        if known_args.base_name is not None:
+            # DYNAMIC, neighbour-aware width — resolved from the live scene after rclpy.init.
+            if known_args.mode != 'sim':
+                parser.error("--base-name (dynamic pre_grasp/pre_release) is sim-only: grip_widths uses "
+                             "sim meshes + the live sim scene. Use --mode sim.")
+            dyn_gid, dyn_axis, decode_err = _decode_candidate_id(known_args.grasp_candidate)
+            if decode_err:
+                parser.error(decode_err)
+            dynamic_phase = True
+        else:
+            # STATIC path (no live scene): pre_grasp -> candidate width_mm; pre_release -> fast-fail.
+            cand, gmeta = load_grasp_candidate(known_args.object_name, known_args.grasp_candidate)
+            if cand is None:
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                    "error": f"grasp_candidate {known_args.grasp_candidate} not found for object "
+                             f"'{known_args.object_name}' in the grasp_candidates JSON.",
+                })
+                sys.exit(1)
+            if known_args.phase == 'pre_grasp':
+                # Open to the candidate's OPEN approach width (part wall + clearance) — never full-open.
+                known_args.command = f"{float(cand['width_mm']):.1f}"
+            else:  # pre_release without --base-name
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": "pre_release", "grasp_candidate": known_args.grasp_candidate,
+                    "error": "pre_release needs --base-name to resolve the env-aware width from the live "
+                             "scene (grip_widths), or pass an explicit <mm> command. Won't guess.",
+                })
+                sys.exit(1)
     elif known_args.command is None:
         parser.error("Provide a gripper command (open|close|half-open|<mm>) OR candidate-phase mode "
                      "(--object-name + --grasp-candidate + --phase).")
@@ -481,6 +584,40 @@ def main(args=None):
 
     try:
         rclpy.init(args=args)
+
+        # DYNAMIC phase: snapshot the live scene + run grip_widths, set the width command. Any failure
+        # fast-fails with the full predicate payload (never guesses). rclpy.shutdown() runs in finally.
+        if dynamic_phase:
+            live, names = _snapshot_object_poses(known_args.object_name, known_args.base_name, timeout=5.0)
+            if live is None:
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                    "error": f"/objects_poses_sim snapshot missing object '{known_args.object_name}' "
+                             f"and/or base '{known_args.base_name}' within 5s.",
+                    "scene_objects": names, "scene_object_count": len(names),
+                })
+                sys.exit(1)
+            result, gw_err = _run_grip_widths(
+                known_args.object_name, dyn_gid, dyn_axis, known_args.base_name, live)
+            if gw_err is not None:
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                    "error": gw_err, "scene_object_count": len(names),
+                })
+                sys.exit(1)
+            ok_key = "pre_grasp_ok" if known_args.phase == "pre_grasp" else "pre_release_ok"
+            if not result.get(ok_key, False):
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                    "error": f"{known_args.phase} DENY by grip_widths (not {ok_key}).",
+                    "predicate": result,
+                })
+                sys.exit(1)
+            width = result["pre_grasp"] if known_args.phase == "pre_grasp" else result["pre_release"]
+            known_args.command = f"{float(width):.1f}"
 
         controller = GripperController(known_args.command, known_args.mode)
 
@@ -582,6 +719,12 @@ def main(args=None):
         "command": known_args.command,
         "mode": known_args.mode,
     }
+    # Candidate-phase traceability (which phase/candidate this width came from)
+    if known_args.phase is not None:
+        result["phase"] = known_args.phase
+        result["grasp_candidate"] = known_args.grasp_candidate
+        if dynamic_phase:
+            result["width_source"] = "dynamic_grip_widths"
 
     # Width fields: only final_width for jammed/blocked (initial and change are misleading)
     is_blocked = controller is not None and controller.blocked and not success
