@@ -1,0 +1,40 @@
+# OnRobot RG2 — CAD-grounded gripper model (single source of truth; sim == control-model == real).
+# Provenance: manufacturer RG2_v2.STEP measured in Fusion (aruco-runner).
+#   See ~/Share/rg2-control-refs/CAD-GROUND-TRUTH.md and PARITY-LEDGER.md.
+# Geometry (R, parallelogram, arc, depth-swing) is CAD-exact. The ~1mm fingertip-offset and the
+# raw-0 anchor await the REAL device's getWidth/getWidthWithOffset readback (see calibration.pending).
+
+rg2:
+  # --- driving joint (husarion-native URDF, arm nudged 55.5 -> 55.0 to match CAD) ---
+  joint_name: rg2_gripper_joint        # axis Z (hand frame); +theta = OPENING
+  theta_closed_rad: -0.452             # rubber gap = 0 (CAD)
+  theta_open_rad:   0.782              # raw width = 110 (CAD offset 4.45); firmware offset 4.9 -> 0.756
+  alpha_zero_deg:   27.95              # alpha = alpha_zero + degrees(theta); moment-arm angle at theta=0
+
+  # --- 4-bar arc (CAD-exact parallelogram, R = 55.0) ---
+  arm_radius_mm: 55.0                  # |A-B| = |C-D|, from manufacturer pivot-hole centers (~0.1mm)
+  # rubber pad-to-pad CONTACT gap (the grasp predicate number; NONLINEAR — replaces the linear viz map):
+  #   gap_rubber(alpha) = 2*R*sin(alpha) + 2*c  =  110*sin(alpha) - 3.96     [c = -1.98 mm/side]
+  gap_rubber_c_mm: -1.98
+  # fingertip depth from flange (width<->depth COUPLING; table clearance):
+  #   depth(alpha) = R*cos(alpha) + depth_offset
+  depth_offset_mm: 142.9
+  depth_swing_mm:  38.7                # close->open: 197.9 -> 159.2 from flange
+
+  # --- OnRobot width protocol (mirrors getWidth / getWidthWithOffset; tonydle + RG Input/Output) ---
+  width_min_mm: 0.0
+  width_max_mm: 110.0                  # datasheet/firmware stroke. NOT 100 (husarion driver + pip pkg cap is wrong)
+  fingertip_offset_mm: 4.9            # firmware REG 1031 (structural mounting plate); CAD geom = 4.45. PARAM.
+  # raw width (getWidth = structural/aluminum gap) -> rubber contact gap (getWidthWithOffset):
+  #   rubber_gap = clamp(raw - 2*fingertip_offset, 0, width_max)   [constant subtraction, parallelogram-exact]
+
+  # --- force ---
+  force_min_n: 3.0
+  force_max_n: 40.0
+
+  # --- calibration provenance ---
+  calibration:
+    geometry: cad_exact               # R, parallelogram, arc, depth-swing -- locked from STEP
+    pending_real_device:              # ~1mm; pin from real getWidth/getWidthWithOffset readback
+      - fingertip_offset_mm           # CAD 4.45 vs firmware 4.9
+      - raw_zero_anchor               # rubber-touch vs mounting datum at raw=0
