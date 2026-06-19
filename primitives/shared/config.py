@@ -12,14 +12,14 @@ TABLE_HEIGHT_WORLD = 0.0    # Table surface Z in world frame (meters)
 TABLE_HEIGHT = TABLE_HEIGHT_WORLD - ROBOT_BASE_Z  # Table surface Z in robot base frame (meters)
 TABLE_COLLISION_MARGIN_SIDEWAYS = 0.08  # Safety margin for sideways/horizontal EE orientations
 TABLE_COLLISION_MARGIN_FACEDOWN = 0.08  # Safety margin for face_down EE orientation 
-# Mode-aware EE-flange -> gripper-center offset (tool frame, meters). The sim
-# (Isaac ur5e-dt) twin and the real RG2+coupling differ in flange->grasp-frame
-# distance, so the value must track the mode. Real=0.2286 (real-world-verified
-# 2026-05-07), Sim=0.23 (historical sim value, lost when commit 2b42e33 collapsed
-# the SIM/REAL toggle to a single hardcoded real value — this restores it as a
-# proper mode switch instead of a manual comment toggle).
+# Mode-aware EE-flange -> gripper-center offset (tool frame, meters). This is only the W=None
+# FALLBACK (the candidate/grasp pipeline always threads a width, so the W-dynamic CAD path in
+# grasp_offset_mm runs, not this). Real=0.2286 (real-world-verified 2026-05-07). The SIM fallback
+# was 0.23 — a stale value measured on the OLD Robotiq-relabeled twin; it is now the CAD-arc depth
+# at a nominal grip width: sim_tool0_to_fingertip_mm(35mm) - 14.9 = 209.3mm = 0.2093m (husarion
+# twin, single-sourced via rg2_arc; see SIM_TOOL0_TO_FLANGE_MM below). REAL stays real-device-gated.
 GRIPPER_CENTER_TOOL_OFFSET_REAL = np.array([0.0, 0.0, 0.2286])  # real RG2 + coupling
-GRIPPER_CENTER_TOOL_OFFSET_SIM  = np.array([0.0, 0.0, 0.23])    # Isaac ur5e-dt twin
+GRIPPER_CENTER_TOOL_OFFSET_SIM  = np.array([0.0, 0.0, 0.2093])  # husarion twin, CAD-arc @ W=35mm fallback
 GRIPPER_CENTER_TOOL_OFFSET = (
     GRIPPER_CENTER_TOOL_OFFSET_SIM if RUNTIME_MODE == "sim"
     else GRIPPER_CENTER_TOOL_OFFSET_REAL
@@ -45,14 +45,32 @@ TIP_BELOW_FACE_MM = 14.9     # const fingertip protrusion below the pad contact 
 TABLE_CLEARANCE_MARGIN_MM = 5.0   # min fingertip clearance above the table before a SHIFT is forced (default; calibrate)
 MIN_PAD_CONTACT_MM = 6.0          # min pad-band/part overlap for a secure grasp; below this -> DENY (default; calibrate)
 
-# Measured SIM tool0->fingertip(W) (dual-a4500 ur5e-dt, 2026-06-18 rg2_sweep.sh): (width_mm, tool0_to_fingertip_mm).
-# Monotone + smooth; linear interp error << the ~3mm sim/real modelling delta. Diffed vs aruco-runner's
-# 60-frame FK (rg2_frames.json): agreement within +/-3mm across the range, +/-0.5..2.6mm at FMB widths 25-56mm.
-SIM_FINGERTIP_MM = (
-    (14.29, 247.84), (15.46, 247.68), (17.32, 247.44), (19.29, 247.16), (21.32, 246.85),
-    (24.97, 246.17), (29.18, 245.25), (34.00, 244.13), (45.71, 240.86), (55.85, 237.31),
-    (63.32, 234.17), (74.14, 229.49), (83.75, 224.76), (94.70, 218.91), (99.04, 216.40),
-)
+# SIM descent depth — SINGLE-SOURCED from the CAD arc (the SAME Rg2Arc the rg2_sim backend uses),
+# so width<->gap and width<->depth can never drift:
+#     tool0->fingertip(W_contact) = arc.depth_mm(arc.theta_of_contact(W)) + SIM_TOOL0_TO_FLANGE_MM
+# REPLACES the old measured Robotiq-twin SIM_FINGERTIP_MM table, which went stale when the twin's
+# gripper was swapped to the CAD-exact husarion-native RG2 (R=55 parallelogram).
+# SIM_TOOL0_TO_FLANGE_MM is the measured tool0-vs-arc-datum offset on the NEW husarion twin
+# (scripts/parity_sweep_husarion_rg2.py, husarion-rg2-twin): 29.90mm with spread 0.00mm across
+# W{0,10,35,55,75,100} (i.e. the CAD depth curve reproduces the twin's tool0->tip to <0.01mm + a
+# pure constant). Gap parity on the same run: <=0.21mm. Regenerate the const by re-running that sweep.
+import sys as _sys
+_RMCP_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _RMCP_ROOT not in _sys.path:
+    _sys.path.insert(0, _RMCP_ROOT)
+from onrobot_rg2_sim_control.onrobot_rg2_sim_control.rg2_arc import Rg2Arc, Rg2ArcParams  # noqa: E402
+_SIM_ARC_YAML = _os.path.join(_RMCP_ROOT, "onrobot_rg2_sim_control", "config", "rg2_gripper.yaml")
+try:
+    _SIM_ARC = Rg2Arc(Rg2ArcParams.from_yaml(_SIM_ARC_YAML))   # match the backend's params
+except Exception:
+    _SIM_ARC = Rg2Arc()                                        # CAD defaults (backend's own fallback)
+SIM_TOOL0_TO_FLANGE_MM = 29.90
+
+
+def sim_tool0_to_fingertip_mm(width_contact_mm):
+    """tool0 -> fingertip depth (mm) on the husarion twin, single-sourced from the CAD arc."""
+    th = _SIM_ARC.theta_of_contact(float(width_contact_mm))
+    return _SIM_ARC.depth_mm(th) + SIM_TOOL0_TO_FLANGE_MM
 
 
 def _interp_table(x, table):
@@ -79,7 +97,7 @@ def grasp_offset_mm(gripper_width_mm=None, mode=None):
     m = (mode or RUNTIME_MODE)
     if gripper_width_mm is None or m != "sim":
         return GRIPPER_CENTER_TOOL_OFFSET_SIM if m == "sim" else GRIPPER_CENTER_TOOL_OFFSET_REAL
-    z_mm = _interp_table(float(gripper_width_mm), SIM_FINGERTIP_MM) - TIP_BELOW_FACE_MM
+    z_mm = sim_tool0_to_fingertip_mm(gripper_width_mm) - TIP_BELOW_FACE_MM
     return np.array([0.0, 0.0, z_mm / 1000.0])
 
 
