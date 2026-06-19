@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Bridge the established /gripper_command (std_msgs/String) interface to the
+"""DEPRECATED (2026-06-19) — superseded by the rg2_sim contact-width seam.
+
+    Use `onrobot_rg2_sim_control/rg2_sim_backend.py` instead. The control path is now:
+        control_gripper.py --mode sim  --(CONTACT m)-->  /rg2_sim/finger_width_cmd
+        rg2_sim_backend (rg2_arc: contact <-> theta)  -->  /rg2_sim/joint_target (rad)
+        Isaac ur5e-dt twin applies theta to rg2_gripper_joint, pubs /rg2_sim/joint_state
+        backend re-derives + echoes /gripper_width_sim (contact mm, compat).
+
+    This node is OBSOLETE for two reasons: (1) it consumes the retired String
+    /gripper_command interface (the twin's joint-actuator migration dropped it), and (2) it
+    uses a LOCAL linear width->finger_joint map against the OLD Robotiq-2F-relabeled linkage
+    (finger_joint limits 0.785/-0.559) — NOT the CAD-exact husarion RG2 (single actuated
+    rg2_gripper_joint + 5 PhysxMimicJointAPI joints; non-linear CAD arc). Do NOT wire new work
+    to it. Kept only so any legacy RViz-only launch still animates; it logs a deprecation
+    warning on startup. The correct width<->theta math lives in `rg2_arc.py` (one model
+    everywhere); if you need an RViz bridge for the husarion model, drive rg2_gripper_joint
+    from /rg2_sim/joint_target via the arc, never this local map.
+
+Bridge the established /gripper_command (std_msgs/String) interface to the
 articulated RG2 in RViz.
 
 Reference (command contract): isaac-sim-mcp ur5e-dt extension
@@ -54,8 +72,13 @@ class RG2CommandBridge(Node):
         self.width_pub = self.create_publisher(Float64, "/gripper_width_sim", 10)
         self.create_subscription(String, "/gripper_command", self._on_cmd, 10)
         self.create_timer(1.0 / self.rate_hz, self._tick)
+        self.get_logger().warn(
+            "rg2_command_bridge is DEPRECATED — superseded by rg2_sim_backend.py (CONTACT-width "
+            "seam /rg2_sim/finger_width_cmd + the CAD husarion arc). This node uses the retired "
+            "String /gripper_command and an OBSOLETE Robotiq finger_joint linear map; do not wire "
+            "new work to it. See the module docstring.")
         self.get_logger().info(
-            "RG2 bridge up: /gripper_command (String) -> /rg2/gripper_command "
+            "RG2 bridge up (legacy): /gripper_command (String) -> /rg2/gripper_command "
             "(finger_joint) + /gripper_width_sim echo")
 
     def _on_cmd(self, msg: String):

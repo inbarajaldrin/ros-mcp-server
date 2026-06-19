@@ -115,10 +115,15 @@ def _run_grip_widths(obj, gid, axis, base_name, live_poses, timeout=60.0):
         except OSError:
             pass
 
-# Gripper range: 0.0 - 100.0mm
+# Gripper range: CONTACT (rubber pad-to-pad) gap in mm. Max = raw 110 - 2*offset = 100.2mm
+# (the rg2_sim_backend max_contact; commands clamp here, the backend re-clamps too).
 GRIPPER_MIN_WIDTH = 0.0
-GRIPPER_MAX_WIDTH = 100.0
+GRIPPER_MAX_WIDTH = 100.2
 GRIPPER_HALF_OPEN_WIDTH = 35.0  # mm
+# Sim seam (migrated): publish CONTACT width (METERS) to the rg2_sim backend, which maps
+# contact -> theta -> /rg2_sim/joint_target (rad) for the Isaac twin and republishes the
+# achieved contact width on /gripper_width_sim (mm, compat) for verification here.
+SIM_CMD_TOPIC = "/rg2_sim/finger_width_cmd"   # std_msgs/Float64, CONTACT metres
 
 MAX_RETRIES = 3
 RETRY_DELAY = 0.5  # Seconds to wait between retries
@@ -143,33 +148,32 @@ class GripperController(Node):
         self.current_effort = 0.0  # Total measured joint effort
         self.effort_threshold = 0.05  # Effort above this means gripper is pressing against something
 
-        # Publisher for gripper commands
-        self.gripper_pub = self.create_publisher(String, '/gripper_command', 10)
+        # Publisher for gripper commands — mode-aware.
+        # SIM: CONTACT width (metres) to the rg2_sim backend (migrated seam).
+        # REAL: legacy String /gripper_command (unchanged; the real OnRobot driver consumes it).
+        if self.mode == 'sim':
+            self.cmd_pub = self.create_publisher(Float64, SIM_CMD_TOPIC, 10)
+        else:
+            self.gripper_pub = self.create_publisher(String, '/gripper_command', 10)
 
         # Subscriber based on mode - both use width now
         if self.mode == 'sim':
-            # Sim mode: use gripper width sim
+            # Sim mode: verify against the backend-republished CONTACT width (mm, compat).
             self.width_sub = self.create_subscription(
                 Float64,
                 '/gripper_width_sim',
                 self.width_callback,
                 10
             )
-            # Effort topic for blocked detection
-            self.effort_sub = self.create_subscription(
-                Float64,
-                '/gripper_effort_sim',
-                self.effort_callback,
-                10
-            )
-            # Asymmetry topic for jam detection
-            self.asymmetry_sub = self.create_subscription(
-                Float64,
-                '/gripper_asymmetry_sim',
-                self.asymmetry_callback,
-                10
-            )
-            self.get_logger().info("Using SIM mode: monitoring /gripper_width_sim + /gripper_effort_sim + /gripper_asymmetry_sim")
+            # NOTE (migration b): the twin's pure joint-actuator seam no longer publishes
+            # /gripper_effort_sim or /gripper_asymmetry_sim. Effort/jam detection therefore
+            # DEGRADES to width-only verification here — self.blocked / self.asymmetry stay at
+            # their inert defaults (False / 0.0), so the jam/grip-by-effort branches are no-ops.
+            # Per-joint effort IS available in /rg2_sim/joint_state.effort; surfacing it (and
+            # asymmetry from the two finger links) is a tracked follow-up for the grasp loop.
+            self.get_logger().info(
+                "Using SIM mode: monitoring /gripper_width_sim (contact mm). "
+                "Effort/asymmetry detection DISABLED (topics removed by the joint-actuator migration).")
         else:
             # Real mode: use gripper width with fingertip offset (Float32)
             self.width_sub = self.create_subscription(
@@ -180,29 +184,39 @@ class GripperController(Node):
             )
             self.get_logger().info("Using REAL mode: monitoring /gripper_width_offset")
         
-        # Determine target state
+        # Determine target state. numeric_value stays in the legacy 0-1000 (= width_mm*10)
+        # units the verification logic uses; target_contact_mm is the CONTACT width we publish
+        # to the sim backend (open = max contact 100.2mm, NOT a raw 110). ros_command is the
+        # legacy String for REAL mode only.
         if command.lower() == "open":
             self.target_state = "open"
             self.ros_command = "open"
-            self.numeric_value = 1000
+            self.target_contact_mm = GRIPPER_MAX_WIDTH       # 100.2 (max contact)
+            self.numeric_value = int(round(GRIPPER_MAX_WIDTH * 10))
         elif command.lower() == "close":
             self.target_state = "close"
             self.ros_command = "close"
+            self.target_contact_mm = 0.0
             self.numeric_value = 0
         elif command.lower() == "half-open":
             # Half-open: uses GRIPPER_HALF_OPEN_WIDTH
             self.target_state = "numeric"
+            self.target_contact_mm = GRIPPER_HALF_OPEN_WIDTH
             self.numeric_value = int(GRIPPER_HALF_OPEN_WIDTH * 10)  # Convert mm to 0-1000 range
             self.ros_command = str(self.numeric_value)
         else:
-            # Numeric value 0-100 (convert to 0-1000 for ROS)
+            # Numeric value = CONTACT width in mm (0 .. max contact). Legacy >=110 (a raw-width
+            # value or a 0-1000 *10 value) maps to full open.
             try:
                 value = float(command)
-                if not (0 <= value <= 100):
-                    self.get_logger().error(f"Value {value} out of range. Use 0-100.")
+                if value >= 110:
+                    value = GRIPPER_MAX_WIDTH
+                if not (0 <= value <= GRIPPER_MAX_WIDTH):
+                    self.get_logger().error(f"Value {value} out of range. Use 0-{GRIPPER_MAX_WIDTH} (contact mm).")
                     sys.exit(1)
                 self.target_state = "numeric"
-                self.numeric_value = int(value * 10)  # Convert 0-100 to 0-1000
+                self.target_contact_mm = value
+                self.numeric_value = int(value * 10)  # Convert to legacy 0-1000 for verification
                 self.ros_command = str(self.numeric_value)
             except ValueError:
                 self.get_logger().error(f"Invalid command '{command}'. Use 'open', 'close', 'half-open', or 0-100.")
@@ -439,11 +453,20 @@ class GripperController(Node):
             time.sleep(check_interval)
     
     def send_gripper_command(self):
-        """Send gripper command via ROS2 topic"""
-        msg = String()
-        msg.data = self.ros_command
-        self.gripper_pub.publish(msg)
-        self.get_logger().info(f"Sent gripper command: {self.ros_command}")
+        """Send the gripper command. SIM: CONTACT width (metres) to the rg2_sim backend.
+        REAL: legacy String /gripper_command (unchanged)."""
+        if self.mode == 'sim':
+            msg = Float64()
+            msg.data = float(self.target_contact_mm) / 1000.0   # mm -> m (explicit seam)
+            self.cmd_pub.publish(msg)
+            self.get_logger().info(
+                f"Sent contact-width command: {self.target_contact_mm:.2f}mm "
+                f"({msg.data:.4f}m) -> {SIM_CMD_TOPIC}")
+        else:
+            msg = String()
+            msg.data = self.ros_command
+            self.gripper_pub.publish(msg)
+            self.get_logger().info(f"Sent gripper command: {self.ros_command}")
         time.sleep(0.1)  # Small delay to ensure message is sent
     
     def verify_gripper_state_threaded(self, initial_value):
