@@ -640,7 +640,12 @@ def main(args=None):
             start_time = time.time()
             last_log_time = start_time
 
-            while not (node.object_pose_received and node.ee_pose_received and node.gripper_width_received and node.gripper_asymmetry_received):
+            # NOTE: /gripper_asymmetry_sim was REMOVED by the joint-actuator migration (the twin's
+            # pure joint-actuator seam no longer publishes effort/asymmetry — see control_gripper.py),
+            # so DON'T block on gripper_asymmetry_received here or the wait times out forever. It is
+            # already guarded everywhere it's USED (only applied if received), so degrading the WAIT
+            # to width-only is correct — matches control_gripper's width-only degrade.
+            while not (node.object_pose_received and node.ee_pose_received and node.gripper_width_received):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 time.sleep(0.1)
 
@@ -654,8 +659,6 @@ def main(args=None):
                         missing.append("end-effector")
                     if not node.gripper_width_received:
                         missing.append("gripper_width")
-                    if not node.gripper_asymmetry_received:
-                        missing.append("gripper_asymmetry")
                     node.get_logger().info(f"Waiting for ({', '.join(missing)})... ({elapsed:.1f}s)")
                     last_log_time = current_time
 
