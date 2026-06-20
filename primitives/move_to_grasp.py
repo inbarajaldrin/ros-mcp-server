@@ -412,12 +412,12 @@ class DirectObjectMove(Node):
             self._candidate_meta = cand
             self._candidate_gripper = gmeta
             clearance_mm = float(gmeta.get('clearance_mm', 14.0))  # from the file, NOT a hardcoded const
-            cand_W_open = float(cand['width_mm'])                  # open approach width (= part wall + clearance)
-            cand_W_grip = cand_W_open - clearance_mm               # closed grip width = the part wall the jaws clamp
+            object_solid = float(cand['object_solid_mm'])         # gripper-AGNOSTIC CAD solid along the closing axis
+            cand_W_grip = object_solid                             # closed grip width = the solid the jaws clamp
+            cand_W_open = object_solid + clearance_mm              # open approach width = solid + gripper margin
             if cand_W_grip <= 0:
                 raise ValueError(
-                    f"grasp_candidate {grasp_candidate}: W_grip = width_mm({cand_W_open}) - "
-                    f"clearance_mm({clearance_mm}) = {cand_W_grip:.1f} <= 0; bad candidate.")
+                    f"grasp_candidate {grasp_candidate}: object_solid_mm ({object_solid}) <= 0; bad candidate.")
             self._candidate_standoff_m = float(cand.get('standoff_m', 0.115))
             # Standoff replaces the hardcoded hover for the candidate path (top-down gate guarantees
             # the world +Z standoff == the candidate -approach direction; see _candidate_facedown_from_gate).
