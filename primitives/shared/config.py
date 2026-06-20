@@ -50,10 +50,20 @@ MIN_PAD_CONTACT_MM = 6.0          # min pad-band/part overlap for a secure grasp
 #     tool0->fingertip(W_contact) = arc.depth_mm(arc.theta_of_contact(W)) + SIM_TOOL0_TO_FLANGE_MM
 # REPLACES the old measured Robotiq-twin SIM_FINGERTIP_MM table, which went stale when the twin's
 # gripper was swapped to the CAD-exact husarion-native RG2 (R=55 parallelogram).
-# SIM_TOOL0_TO_FLANGE_MM is the measured tool0-vs-arc-datum offset on the NEW husarion twin
-# (scripts/parity_sweep_husarion_rg2.py, husarion-rg2-twin): 29.90mm with spread 0.00mm across
-# W{0,10,35,55,75,100} (i.e. the CAD depth curve reproduces the twin's tool0->tip to <0.01mm + a
-# pure constant). Gap parity on the same run: <=0.21mm. Regenerate the const by re-running that sweep.
+# SIM_TOOL0_TO_FLANGE_MM is the UR-IK-flange (wrist3) -> arc-datum offset. The IK applies the tool
+# offset from the UR flange; this constant bridges the flange to the gripper's CAD arc depth.
+# 2026-06-19 UPDATE 29.90 -> 45.82: the prior 29.90 was measured by parity_sweep when the RG2 was
+# welded DIRECTLY at the flange (no Quick-Changer) — so it was really the GRIPPER-MOUNT->arc-datum
+# offset, not the FLANGE->arc-datum one. This session restored the real QC link (isaac-sim-mcp
+# bd327d9): wrist3 -> QC tool_mount = +15.92mm measured, now sits between the flange and the gripper
+# mount in the USD/physics. The IK tool offset must grow by that QC weld or it under-reaches ~16mm
+# (gripper drives too deep -> thin parts jam on the table). Confirmed by the live width sweep
+# (current twin, post +90/QC): (wrist3->fingertip - (arc.depth+29.90)) = +16.2..+17.3mm CONSTANT
+# across W{16..100} (arc itself matches the gripper-mount->tip to ~1mm = NO bow). 45.82 = 29.90 +
+# the 15.92 QC weld. PENDING closed-loop confirm (command face above table, measure) for the sub-2mm
+# residual (finger-link-tip vs the 14.9 rubber-pad TIP_BELOW_FACE; face-frame fit varies ~+/-0.7mm).
+# Re-measure properly via parity_sweep ONLY if it samples from the UR flange, not the gripper mount.
+SIM_TOOL0_TO_FLANGE_MM_PRE_QC = 29.90   # historical: gripper-mount->arc-datum (no QC)
 import sys as _sys
 _RMCP_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 if _RMCP_ROOT not in _sys.path:
@@ -64,7 +74,7 @@ try:
     _SIM_ARC = Rg2Arc(Rg2ArcParams.from_yaml(_SIM_ARC_YAML))   # match the backend's params
 except Exception:
     _SIM_ARC = Rg2Arc()                                        # CAD defaults (backend's own fallback)
-SIM_TOOL0_TO_FLANGE_MM = 29.90
+SIM_TOOL0_TO_FLANGE_MM = 45.82   # 29.90 (gripper-mount->arc-datum) + 15.92 QC weld = UR-flange->arc-datum
 
 
 def sim_tool0_to_fingertip_mm(width_contact_mm):
