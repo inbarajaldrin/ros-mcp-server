@@ -13,9 +13,11 @@ Units are explicit at every seam: ROS topics = METERS / radians; the arc module 
 
 Pipeline:
   /rg2_sim/finger_width_cmd (Float64, CONTACT m)  --arc.theta_of_contact-->  /rg2_sim/joint_target (Float64 rad)
-  Isaac applies theta to rg2_gripper_joint, publishes /rg2_sim/joint_state (JointState)
-  here: joint_state.theta --arc--> contact/raw/depth  ->  /rg2_sim/{contact_width(m),raw_width(m),depth(m),
-        theta(rad), actual_valid(Bool)} + /gripper_width_sim (Float64, contact mm, compat)
+  Isaac applies theta to rg2_gripper_joint, publishes /rg2_sim/joint_state (JointState) AND the geometric
+  measured pad-to-pad gap /rg2_sim/pad_gap_m (Float64 m).
+  here: contact_width(m) = MEASURED /rg2_sim/pad_gap_m (the TRUE physical gap; gates actual_valid).
+        actuated_width(m) = arc(joint_state.theta) = DIAGNOSTIC (free-space-faithful, under-reports under
+        contact-stall). raw/depth/theta also arc(theta) diagnostics. /gripper_width_sim = TRUE gap mm (compat).
 """
 import os
 import rclpy
@@ -44,15 +46,24 @@ class Rg2SimBackend(Node):
         # state (STALE until first fresh joint_state; never fall back to commanded — fix #3/#6)
         self._last_theta = None
         self._last_js_t = None
+        # MEASURED pad-to-pad gap (the TRUE contact width) from Isaac's geometry. contact_width must be
+        # the physical rubber-pad-to-pad gap, NOT arc(theta): under contact-stall the force drive pushes
+        # the (rigid) linkage ~2.45deg past the free-space position for the gap, so arc(theta) under-reports
+        # the real gap (~0 at open, ~2mm at tight grips). Verified parity 0.10mm at proper grips (u_brown).
+        self._last_pad_gap_m = None
+        self._last_pad_t = None
 
         # command in: CONTACT gap in METERS
         self.create_subscription(Float64, "/rg2_sim/finger_width_cmd", self._on_cmd, 10)
         # joint feedback from Isaac
         self.create_subscription(JointState, "/rg2_sim/joint_state", self._on_js, 10)
+        # MEASURED pad-to-pad gap from Isaac (geometric inner-pad-face distance) -> the TRUE contact width
+        self.create_subscription(Float64, "/rg2_sim/pad_gap_m", self._on_pad_gap, 10)
         # joint target out: RADIANS
         self.pub_target = self.create_publisher(Float64, "/rg2_sim/joint_target", 10)
         # diagnostics / state (meters, except the deprecated mm compat)
-        self.pub_contact = self.create_publisher(Float64, "/rg2_sim/contact_width", 10)   # m
+        self.pub_contact = self.create_publisher(Float64, "/rg2_sim/contact_width", 10)   # m — TRUE measured pad gap
+        self.pub_actuated = self.create_publisher(Float64, "/rg2_sim/actuated_width", 10) # m — arc(theta) DIAGNOSTIC (under-reports under contact-stall load)
         self.pub_raw = self.create_publisher(Float64, "/rg2_sim/raw_width", 10)           # m
         self.pub_depth = self.create_publisher(Float64, "/rg2_sim/depth", 10)             # m
         self.pub_theta = self.create_publisher(Float64, "/rg2_sim/theta", 10)             # rad
@@ -77,20 +88,35 @@ class Rg2SimBackend(Node):
         self._last_theta = float(msg.position[i])
         self._last_js_t = self.get_clock().now().nanoseconds * 1e-9
 
+    def _on_pad_gap(self, msg: Float64):
+        # the measured physical pad-to-pad gap (meters) from Isaac -> the TRUE contact width
+        self._last_pad_gap_m = float(msg.data)
+        self._last_pad_t = self.get_clock().now().nanoseconds * 1e-9
+
     def _tick(self):
         now = self.get_clock().now().nanoseconds * 1e-9
-        fresh = (self._last_theta is not None and self._last_js_t is not None
-                 and (now - self._last_js_t) <= STALE_SEC)
-        self.pub_valid.publish(Bool(data=bool(fresh)))
-        if not fresh:
-            return  # STALE -> publish no actual values (never fall back to commanded)
-        th = self._last_theta
-        contact_mm = self.arc.contact_of_theta(th)
-        self.pub_contact.publish(Float64(data=contact_mm / 1000.0))      # m
-        self.pub_raw.publish(Float64(data=self.arc.raw_width_mm(th) / 1000.0))
-        self.pub_depth.publish(Float64(data=self.arc.depth_mm(th) / 1000.0))
-        self.pub_theta.publish(Float64(data=th))
-        self.pub_compat.publish(Float64(data=contact_mm))                # mm, deprecated compat
+        theta_fresh = (self._last_theta is not None and self._last_js_t is not None
+                       and (now - self._last_js_t) <= STALE_SEC)
+        pad_fresh = (self._last_pad_gap_m is not None and self._last_pad_t is not None
+                     and (now - self._last_pad_t) <= STALE_SEC)
+        # actual_valid gates the TRUE contact width (= measured pad gap). NEVER fall back to arc(theta) for
+        # contact_width — arc(theta) under-reports under contact-stall; it is published as actuated_width only.
+        self.pub_valid.publish(Bool(data=bool(pad_fresh)))
+
+        # TRUE contact width = the measured rubber-pad-to-pad gap from Isaac
+        if pad_fresh:
+            g = float(self._last_pad_gap_m)
+            self.pub_contact.publish(Float64(data=g))                    # m, TRUE measured gap
+            self.pub_compat.publish(Float64(data=g * 1000.0))            # mm, deprecated compat (now the TRUE gap)
+
+        # actuated-joint diagnostics (arc inference of the rg2_gripper_joint angle): faithful in free space,
+        # under-reports the gap under contact-stall -> diagnostic only, NOT the contact width.
+        if theta_fresh:
+            th = self._last_theta
+            self.pub_actuated.publish(Float64(data=self.arc.contact_of_theta(th) / 1000.0))  # m, arc(theta) diagnostic
+            self.pub_raw.publish(Float64(data=self.arc.raw_width_mm(th) / 1000.0))
+            self.pub_depth.publish(Float64(data=self.arc.depth_mm(th) / 1000.0))
+            self.pub_theta.publish(Float64(data=th))
 
 
 def main():
