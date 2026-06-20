@@ -84,15 +84,15 @@ def load_grasp_validity_data(object_name):
         for gp in data.get('grasp_points', []):
             gp_id = gp.get('id', 0)
             grasp_validity = gp.get('grasp_validity', {})
-            widths = []
-            if ENABLE_X_AXIS_GRASPS:
-                w = grasp_validity.get('x_axis_gripper_width_mm')
-                if w is not None:
-                    widths.append(w)
-            if ENABLE_Y_AXIS_GRASPS:
-                w = grasp_validity.get('y_axis_gripper_width_mm')
-                if w is not None:
-                    widths.append(w)
+            # Axis-agnostic: the grasp data itself declares the executable axis — a
+            # blocked/invalid axis has width None (e.g. jenga: x_axis=None because the
+            # X-approach hits neighbours, y_axis=86). Report whatever axis is non-None
+            # rather than gating on a global ENABLE_X/Y flag, so FMB1 (X-grasps) and
+            # jenga (Y-grasps) coexist with no per-run config and no new tool param —
+            # the candidate's own closing_axis + approach_quaternion drive the motion.
+            widths = [w for w in (grasp_validity.get('x_axis_gripper_width_mm'),
+                                  grasp_validity.get('y_axis_gripper_width_mm'))
+                      if w is not None]
             id_to_width[gp_id] = min(widths) if widths else None
 
         return id_to_width
