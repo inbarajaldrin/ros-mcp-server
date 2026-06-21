@@ -279,10 +279,31 @@ class GraspPointsPublisher(Node):
         # Transform position to world frame
         pos_base = obj_translation + r_object_world.as_matrix() @ pos_local
 
-        # Compose world TCP orientation: R_WT = R_WO @ R_OT
-        aq = candidate['approach_quaternion']
-        q_approach = np.array([aq['x'], aq['y'], aq['z'], aq['w']])  # [x, y, z, w]
-        quat_base = (r_object_world * R.from_quat(q_approach)).as_quat()
+        # Orientation (UN-BAKED redesign): derive the face-down TCP at the LIVE pose from the
+        # candidate's closing axis, instead of reading a frozen baked R_OT.
+        #   R_WT = R_facedown(world-down, R_WO @ closing_axis)
+        # +Z = world-down (approach), +X = horizontal projection of the clamp line, +Y = Z x X.
+        # Azimuth-invariant; move_to_grasp's top-down gate + yaw-recovery handle the rest. Falls back
+        # to the legacy baked approach_quaternion only if there is no usable (horizontal) clamp axis.
+        ca = candidate.get('closing_axis')
+        axis_local = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0]}.get(ca)
+        quat_base = None
+        if axis_local is not None:
+            clamp_w = r_object_world.as_matrix() @ np.array(axis_local)
+            horiz = np.array([clamp_w[0], clamp_w[1], 0.0])
+            n = np.linalg.norm(horiz)
+            if n >= 1e-6:                       # clamp line is graspable top-down at this pose
+                xa = horiz / n
+                za = np.array([0.0, 0.0, -1.0])
+                ya = np.cross(za, xa)
+                quat_base = R.from_matrix(np.column_stack([xa, ya, za])).as_quat()
+        if quat_base is None:                   # legacy / non-top-down fallback
+            aq = candidate.get('approach_quaternion')
+            if aq is not None:
+                quat_base = (r_object_world * R.from_quat(
+                    np.array([aq['x'], aq['y'], aq['z'], aq['w']]))).as_quat()
+            else:
+                quat_base = r_object_world.as_quat()  # last resort (will not pass the top-down gate)
 
         return pos_base, quat_base
 
