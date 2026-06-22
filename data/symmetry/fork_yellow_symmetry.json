@@ -1,0 +1,56 @@
+{
+    "object_name": "fork_yellow",
+    "fold_axes": {
+        "x": {
+            "fold": 1,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                }
+            ]
+        },
+        "y": {
+            "fold": 2,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                },
+                {
+                    "angle_deg": 180,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 1,
+                        "z": 0,
+                        "w": 0
+                    }
+                }
+            ]
+        },
+        "z": {
+            "fold": 1,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                }
+            ]
+        }
+    }
+}

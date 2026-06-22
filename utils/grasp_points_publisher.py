@@ -285,8 +285,15 @@ class GraspPointsPublisher(Node):
         # +Z = world-down (approach), +X = horizontal projection of the clamp line, +Y = Z x X.
         # Azimuth-invariant; move_to_grasp's top-down gate + yaw-recovery handle the rest. Falls back
         # to the legacy baked approach_quaternion only if there is no usable (horizontal) clamp axis.
+        # Prefer the explicit clamp_dir (object-frame unit clamp vector) — it carries NON-AXIS flat-pair
+        # normals (e.g. the hex across-flats, closing_axis 'normal'). For principal-axis candidates it is
+        # just the axis, so this is backward-compatible with the x/y/z map (kept as the fallback).
+        cd_vec = candidate.get('clamp_dir')
         ca = candidate.get('closing_axis')
-        axis_local = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0]}.get(ca)
+        if cd_vec is not None and len(cd_vec) == 3:
+            axis_local = [float(v) for v in cd_vec]
+        else:
+            axis_local = {'x': [1.0, 0.0, 0.0], 'y': [0.0, 1.0, 0.0], 'z': [0.0, 0.0, 1.0]}.get(ca)
         quat_base = None
         if axis_local is not None:
             clamp_w = r_object_world.as_matrix() @ np.array(axis_local)

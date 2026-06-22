@@ -1,12 +1,19 @@
 """
 Path Finder Utility
-Recursively searches for aruco-grasp-annotator data directory in Documents folder.
+Resolves the grasp/assembly data directory. PRIMARY source is the IN-REPO ros-mcp-server/data/
+(self-contained; curated + pushed from the Mac aruco-grasp-annotator pipeline). The legacy recursive
+search for a local aruco-grasp-annotator/data checkout is kept ONLY as a fallback — that checkout on
+dual-a4500 is STALE and must not be the source of truth.
 Provides shared assembly JSON loading functions.
 """
+import os
 import json
 import glob as glob_module
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+
+# In-repo data dir: ros-mcp-server/data (this file is ros-mcp-server/utils/data_path_finder.py).
+_REPO_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def find_aruco_data_dir() -> Optional[Path]:
@@ -39,17 +46,30 @@ def find_aruco_data_dir() -> Optional[Path]:
 
 def get_aruco_data_dir() -> Path:
     """
-    Get aruco-grasp-annotator data directory.
-    
+    Resolve the grasp/assembly data directory.
+
+    Order: $ROS_MCP_DATA_DIR override -> the in-repo ros-mcp-server/data/ (PRIMARY, curated from the Mac
+    pipeline) -> recursive search for a local aruco-grasp-annotator/data checkout (STALE fallback only).
+
     Returns:
-        Path to data directory (raises FileNotFoundError if not found)
+        Path to data directory (raises FileNotFoundError if none found)
     """
+    env = os.environ.get("ROS_MCP_DATA_DIR")
+    if env and Path(env).exists():
+        return Path(env)
+
+    if _REPO_DATA_DIR.exists() and (
+        (_REPO_DATA_DIR / "grasp_candidates").exists() or (_REPO_DATA_DIR / "grasp_points").exists()
+    ):
+        return _REPO_DATA_DIR
+
     found_dir = find_aruco_data_dir()
     if found_dir:
         return found_dir
-    
+
     raise FileNotFoundError(
-        "Could not find aruco-grasp-annotator data directory in Documents folder."
+        "No grasp data dir: set ROS_MCP_DATA_DIR, populate ros-mcp-server/data/, "
+        "or place an aruco-grasp-annotator/data checkout in Documents."
     )
 
 

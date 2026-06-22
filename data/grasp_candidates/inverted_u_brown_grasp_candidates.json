@@ -1,0 +1,103 @@
+{
+  "object_name": "inverted_u_brown",
+  "schema_version": 3,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "tip_thickness_mm": 20
+  },
+  "width_model": "object_solid_mm = 3D pad-footprint contact gap; no clearance baked; runtime derives R_facedown from the live R_WO + closing_axis (no baked R_OT)",
+  "total_grasp_candidates": 5,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.044377148705394956,
+        "y": 0.025981483011432008,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.0001910182339604944,
+        "y": -0.010995331435715783,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 49.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.0001910182339604944,
+        "y": -0.010995331435715783,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 1,
+      "closing_axis": "x",
+      "clamp_dir": [
+        -1.0,
+        0.0,
+        -0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 42.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.0001910182339604944,
+        "y": -0.010995331435715783,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 3,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.04399511223747397,
+        "y": 0.025981483011432008,
+        "z": 0.0
+      }
+    }
+  ]
+}

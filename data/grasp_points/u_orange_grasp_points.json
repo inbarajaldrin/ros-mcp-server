@@ -1,0 +1,170 @@
+{
+  "object_name": "u_orange",
+  "display_name": "U Orange",
+  "source_marker_id": 27,
+  "object_thickness": 0.020999999046325685,
+  "total_grasp_points": 3,
+  "coordinate_frame": "cad_center",
+  "filter_applied": true,
+  "filter_params": {
+    "gripper_max_width_mm": 100.0,
+    "grasp_clearance_mm": 14.0,
+    "gripper_tip_thickness_mm": 20.0,
+    "max_gap_px": 20,
+    "symmetry_tolerance_mm": 10.0
+  },
+  "grasp_points": [
+    {
+      "id": 1,
+      "position": {
+        "x": 0.02550870976794511,
+        "y": -0.013207987692560999,
+        "z": 0.0
+      },
+      "type": "center_point",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "grasp_validity": {
+        "x_axis_gripper_width_mm": 35.0,
+        "y_axis_gripper_width_mm": null
+      }
+    },
+    {
+      "id": 2,
+      "position": {
+        "x": -0.0002019335957057774,
+        "y": 0.023570721574705092,
+        "z": 0.0
+      },
+      "type": "center_point",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "grasp_validity": {
+        "x_axis_gripper_width_mm": 84.0,
+        "y_axis_gripper_width_mm": 38.5
+      }
+    },
+    {
+      "id": 3,
+      "position": {
+        "x": -0.02591257695935667,
+        "y": -0.013207987692560999,
+        "z": 0.0
+      },
+      "type": "center_point",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "grasp_validity": {
+        "x_axis_gripper_width_mm": 35.0,
+        "y_axis_gripper_width_mm": null
+      }
+    }
+  ],
+  "markers": [
+    {
+      "aruco_id": 22,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": -0.035,
+          "y": -0.0245,
+          "z": 0.0
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": -1.5707963267948966,
+          "yaw": 3.141592653589793
+        }
+      }
+    },
+    {
+      "aruco_id": 23,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": 0.035,
+          "y": -0.0245,
+          "z": 0.0
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 1.5707963267948966,
+          "yaw": 3.141592653589793
+        }
+      }
+    },
+    {
+      "aruco_id": 24,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": 0.0245,
+          "y": -0.034999999999999976,
+          "z": 0.0
+        },
+        "rotation": {
+          "roll": 1.5707963267948966,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      }
+    },
+    {
+      "aruco_id": 25,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": 0.0245,
+          "y": 0.034999999999999976,
+          "z": 0.0
+        },
+        "rotation": {
+          "roll": -1.5707963267948966,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      }
+    },
+    {
+      "aruco_id": 26,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": -0.0245,
+          "y": 0.0245,
+          "z": -0.010499999523162846
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      }
+    },
+    {
+      "aruco_id": 27,
+      "size": 0.021,
+      "pose_absolute": {
+        "position": {
+          "x": -0.0245,
+          "y": 0.0245,
+          "z": 0.010499999523162842
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      }
+    }
+  ]
+}

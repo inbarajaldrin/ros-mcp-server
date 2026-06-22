@@ -45,12 +45,29 @@ _GRIP_WIDTHS_MARKER = "__GRIP_WIDTHS_JSON__"
 
 
 def _decode_candidate_id(cid):
-    """candidate id -> (gid, axis, error). id = grasp_point_id*100 + direction_id (1=x, 2=y)."""
+    """candidate id -> (gid, axis, error). id = grasp_point_id*100 + direction_id.
+    axis = 'x'/'y' for the x/y-only grip_widths neighbour sweep; None for z (3) or a NON-AXIS flat-pair
+    normal (direction_id >= 4, closing_axis='normal'). When axis is None the caller uses the STATIC
+    candidate width (object_solid_mm + clearance) — the live neighbour sweep is x/y-only; full clamp_dir
+    neighbour-awareness for non-axis normals is the Thread 2/§1c work, not this path."""
     direction_id = cid % 100
     gid = cid // 100
-    if direction_id not in (1, 2):
-        return None, None, f"grasp_candidate {cid}: direction_id {direction_id} not in (1=x, 2=y)."
-    return gid, ("x" if direction_id == 1 else "y"), None
+    if direction_id == 1:
+        return gid, "x", None
+    if direction_id == 2:
+        return gid, "y", None
+    return gid, None, None   # z / non-axis normal -> static width (no x/y neighbour sweep)
+
+
+def _static_open_width_mm(cand, gmeta):
+    """pre_grasp OPEN approach width = the clamp solid + gripper clearance. Reads object_solid_mm
+    (schema v3); falls back to the legacy width_mm if present. Works for any closing_axis incl 'normal'."""
+    clearance = float(gmeta.get('clearance_mm', 14.0))
+    if 'object_solid_mm' in cand:
+        solid = float(cand['object_solid_mm'])
+    else:
+        solid = float(cand.get('width_mm', 0.0)) - clearance
+    return solid + clearance
 
 
 def _snapshot_object_poses(object_name, base_name, timeout=5.0):
@@ -584,8 +601,8 @@ def main(args=None):
                 })
                 sys.exit(1)
             if known_args.phase == 'pre_grasp':
-                # Open to the candidate's OPEN approach width (part wall + clearance) — never full-open.
-                known_args.command = f"{float(cand['width_mm']):.1f}"
+                # Open to the candidate's OPEN approach width (clamp solid + clearance) — never full-open.
+                known_args.command = f"{_static_open_width_mm(cand, gmeta):.1f}"
             else:  # pre_release without --base-name
                 output_result({
                     "result": "failure", "command": None, "mode": known_args.mode,
@@ -610,7 +627,24 @@ def main(args=None):
 
         # DYNAMIC phase: snapshot the live scene + run grip_widths, set the width command. Any failure
         # fast-fails with the full predicate payload (never guesses). rclpy.shutdown() runs in finally.
-        if dynamic_phase:
+        if dynamic_phase and dyn_axis is None:
+            # z / non-axis flat-pair normal: the grip_widths neighbour sweep is x/y-only, so resolve the
+            # STATIC open width (object_solid_mm + clearance). A pick is isolated (no neighbour); full
+            # clamp_dir neighbour-awareness for non-axis normals is the Thread 2/§1c work.
+            cand, gmeta = load_grasp_candidate(known_args.object_name, known_args.grasp_candidate)
+            if cand is None:
+                output_result({
+                    "result": "failure", "command": None, "mode": known_args.mode,
+                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
+                    "error": f"grasp_candidate {known_args.grasp_candidate} not found for object "
+                             f"'{known_args.object_name}' in the grasp_candidates JSON.",
+                })
+                sys.exit(1)
+            known_args.command = f"{_static_open_width_mm(cand, gmeta):.1f}"
+            print(f"[control_gripper] candidate {known_args.grasp_candidate} (non-axis/z): static open "
+                  f"width {known_args.command}mm (grip_widths x/y-sweep N/A; Thread2/§1c pending).",
+                  file=sys.stderr)
+        elif dynamic_phase:
             live, names = _snapshot_object_poses(known_args.object_name, known_args.base_name, timeout=5.0)
             if live is None:
                 output_result({

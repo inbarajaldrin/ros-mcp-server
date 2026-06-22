@@ -1,0 +1,126 @@
+{
+  "timestamp": "2026-02-02T02:49:22.780Z",
+  "components": [
+    {
+      "name": "base2",
+      "type": "board",
+      "assembly_order": 0,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "rotation": {
+        "rpy": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "w": 1
+        }
+      }
+    },
+    {
+      "name": "hex_blue",
+      "type": "object",
+      "subtype": "peg",
+      "assembly_order": 4,
+      "axis": "y",
+      "position": {
+        "x": 0.0526,
+        "y": 0,
+        "z": 0.03
+      },
+      "rotation": {
+        "rpy": {
+          "x": 1.570796326794896,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": 0.7071067811865472,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865478
+        }
+      }
+    },
+    {
+      "name": "hex_red",
+      "type": "object",
+      "subtype": "peg",
+      "assembly_order": 3,
+      "axis": "y",
+      "position": {
+        "x": -0.0526,
+        "y": 0,
+        "z": 0.03
+      },
+      "rotation": {
+        "rpy": {
+          "x": 1.570796326794896,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": 0.7071067811865472,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865478
+        }
+      }
+    },
+    {
+      "name": "inverted_u_brown",
+      "type": "object",
+      "subtype": "socket",
+      "assembly_order": 2,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.04
+      },
+      "rotation": {
+        "rpy": {
+          "x": -1.570796326794896,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": -0.7071067811865472,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865478
+        }
+      }
+    },
+    {
+      "name": "u_green",
+      "type": "object",
+      "subtype": "block",
+      "assembly_order": 1,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.022
+      },
+      "rotation": {
+        "rpy": {
+          "x": -1.5707963267948961,
+          "y": 1.570796326794896,
+          "z": 0
+        },
+        "quaternion": {
+          "x": -0.5000000000000001,
+          "y": 0.4999999999999999,
+          "z": -0.49999999999999967,
+          "w": 0.5000000000000003
+        }
+      }
+    }
+  ]
+}

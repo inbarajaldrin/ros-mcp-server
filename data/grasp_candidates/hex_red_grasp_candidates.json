@@ -1,0 +1,68 @@
+{
+  "object_name": "hex_red",
+  "schema_version": 3,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "tip_thickness_mm": 20
+  },
+  "width_model": "object_solid_mm = 3D pad-footprint contact gap; no clearance baked; runtime derives R_facedown from the live R_WO + closing_axis (no baked R_OT)",
+  "total_grasp_candidates": 3,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 70.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.1288627292960885e-05,
+        "y": -0.010171943454984575,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 70.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.8721356415189803e-05,
+        "y": 0.010855279507017696,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 4,
+      "closing_axis": "normal",
+      "clamp_dir": [
+        -0.866025,
+        0.0,
+        -0.5
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 14.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.8721356415189803e-05,
+        "y": 0.010855279507017696,
+        "z": 0.0
+      },
+      "in_plane_angle_deg": 60.0
+    }
+  ]
+}

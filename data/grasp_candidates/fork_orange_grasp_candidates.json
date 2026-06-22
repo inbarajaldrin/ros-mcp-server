@@ -1,0 +1,301 @@
+{
+  "object_name": "fork_orange",
+  "schema_version": 3,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "tip_thickness_mm": 20
+  },
+  "width_model": "object_solid_mm = 3D pad-footprint contact gap; no clearance baked; runtime derives R_facedown from the live R_WO + closing_axis (no baked R_OT)",
+  "total_grasp_candidates": 16,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.050051775420438475,
+        "y": 0.017803651659619054,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 1,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 46.9,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.050051775420438475,
+        "y": 0.017803651659619054,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 1,
+      "direction_id": 1,
+      "closing_axis": "x",
+      "clamp_dir": [
+        -1.0,
+        0.0,
+        -0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 14.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.050051775420438475,
+        "y": 0.017803651659619054,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.026940620058517894,
+        "y": -0.006852726299174128,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 10.5,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.026940620058517894,
+        "y": -0.006852726299174128,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 3,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837598e-05,
+        "y": 0.01780365165961906,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 3,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 70.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837598e-05,
+        "y": 0.01780365165961906,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 3,
+      "direction_id": 1,
+      "closing_axis": "x",
+      "clamp_dir": [
+        -1.0,
+        0.0,
+        -0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837598e-05,
+        "y": 0.01780365165961906,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 4,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837079e-05,
+        "y": -0.024589194367624807,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 4,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 70.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837079e-05,
+        "y": -0.024589194367624807,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 4,
+      "direction_id": 1,
+      "closing_axis": "x",
+      "clamp_dir": [
+        -1.0,
+        0.0,
+        -0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -6.718359116837079e-05,
+        "y": -0.024589194367624807,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 5,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.026806252876181148,
+        "y": -0.006852726299174121,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 5,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 10.5,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.026806252876181148,
+        "y": -0.006852726299174121,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 6,
+      "direction_id": 3,
+      "closing_axis": "z",
+      "clamp_dir": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "approach_name": "standing_top",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.049917408238101736,
+        "y": 0.017803651659619068,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 6,
+      "direction_id": 2,
+      "closing_axis": "y",
+      "clamp_dir": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 46.9,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.049917408238101736,
+        "y": 0.017803651659619068,
+        "z": 0.0
+      }
+    },
+    {
+      "grasp_point_id": 6,
+      "direction_id": 1,
+      "closing_axis": "x",
+      "clamp_dir": [
+        -1.0,
+        0.0,
+        -0.0
+      ],
+      "approach_name": "top",
+      "object_solid_mm": 14.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.049917408238101736,
+        "y": 0.017803651659619068,
+        "z": 0.0
+      }
+    }
+  ]
+}

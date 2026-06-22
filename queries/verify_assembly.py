@@ -385,6 +385,13 @@ class VerifyAssembly(Node):
                 "y": round(float(position_error_vector[1]), 2),
                 "z": round(float(position_error_vector[2]), 2)
             },
+            # Full-precision residual in mm (the *_m field above rounds to 1cm, which crushes the
+            # 2-5mm Z-bias signal the GT-regen needs). Additive; existing consumers unaffected.
+            "position_error_mm": {
+                "x": round(float(position_error_vector[0]) * 1000.0, 3),
+                "y": round(float(position_error_vector[1]) * 1000.0, 3),
+                "z": round(float(position_error_vector[2]) * 1000.0, 3)
+            },
             "orientation_error_deg": {
                 "roll": round(float(orientation_error_rpy_deg[0]), 2),
                 "pitch": round(float(orientation_error_rpy_deg[1]), 2),
