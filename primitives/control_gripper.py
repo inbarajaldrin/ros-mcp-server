@@ -105,13 +105,14 @@ def _snapshot_object_poses(object_name, base_name, timeout=5.0):
     return live, names
 
 
-def _run_grip_widths(obj, gid, axis, base_name, live_poses, timeout=60.0):
-    """Subprocess grip_widths_cli.py (in the bundle) via `uv run`. Returns (result_dict, error)."""
+def _run_grip_widths(obj, candidate_id, base_name, live_poses, timeout=60.0):
+    """Subprocess grip_widths_cli.py (in the bundle) via `uv run`. Returns (result_dict, error).
+    Passes the composite candidate_id; the predicate resolves clamp_dir (incl non-axis flat-pair normals)."""
     bundle = os.environ.get("ARUCO_TC_BUNDLE", os.path.expanduser("~/aruco-tc-bundle"))
     cli = os.path.join(bundle, ".local/scripts/grip_widths_cli.py")
     if not os.path.exists(cli):
         return None, f"grip_widths_cli.py not found at {cli} (set ARUCO_TC_BUNDLE to the bundle root)."
-    req = {"obj": obj, "gid": gid, "axis": axis, "base": base_name, "live_poses": live_poses}
+    req = {"obj": obj, "candidate_id": candidate_id, "base": base_name, "live_poses": live_poses}
     tf = tempfile.NamedTemporaryFile(mode='w', delete=False, dir='/tmp', suffix='.json')
     try:
         json.dump(req, tf)
@@ -576,7 +577,6 @@ def main(args=None):
     # (The dynamic path needs ROS up to snapshot /objects_poses_sim, so it is deferred below — never
     #  call rclpy.init twice.)
     dynamic_phase = False
-    dyn_gid = dyn_axis = None
     if known_args.phase is not None:
         if not known_args.object_name or known_args.grasp_candidate is None:
             parser.error("--phase requires --object-name and --grasp-candidate.")
@@ -585,9 +585,8 @@ def main(args=None):
             if known_args.mode != 'sim':
                 parser.error("--base-name (dynamic pre_grasp/pre_release) is sim-only: grip_widths uses "
                              "sim meshes + the live sim scene. Use --mode sim.")
-            dyn_gid, dyn_axis, decode_err = _decode_candidate_id(known_args.grasp_candidate)
-            if decode_err:
-                parser.error(decode_err)
+            # No axis decode: the predicate resolves the clamp direction from the candidate's clamp_dir
+            # (handles non-axis flat-pair normals like the hex 204). Just pass the composite id through.
             dynamic_phase = True
         else:
             # STATIC path (no live scene): pre_grasp -> candidate width_mm; pre_release -> fast-fail.
@@ -627,24 +626,7 @@ def main(args=None):
 
         # DYNAMIC phase: snapshot the live scene + run grip_widths, set the width command. Any failure
         # fast-fails with the full predicate payload (never guesses). rclpy.shutdown() runs in finally.
-        if dynamic_phase and dyn_axis is None:
-            # z / non-axis flat-pair normal: the grip_widths neighbour sweep is x/y-only, so resolve the
-            # STATIC open width (object_solid_mm + clearance). A pick is isolated (no neighbour); full
-            # clamp_dir neighbour-awareness for non-axis normals is the Thread 2/§1c work.
-            cand, gmeta = load_grasp_candidate(known_args.object_name, known_args.grasp_candidate)
-            if cand is None:
-                output_result({
-                    "result": "failure", "command": None, "mode": known_args.mode,
-                    "phase": known_args.phase, "grasp_candidate": known_args.grasp_candidate,
-                    "error": f"grasp_candidate {known_args.grasp_candidate} not found for object "
-                             f"'{known_args.object_name}' in the grasp_candidates JSON.",
-                })
-                sys.exit(1)
-            known_args.command = f"{_static_open_width_mm(cand, gmeta):.1f}"
-            print(f"[control_gripper] candidate {known_args.grasp_candidate} (non-axis/z): static open "
-                  f"width {known_args.command}mm (grip_widths x/y-sweep N/A; Thread2/§1c pending).",
-                  file=sys.stderr)
-        elif dynamic_phase:
+        if dynamic_phase:
             live, names = _snapshot_object_poses(known_args.object_name, known_args.base_name, timeout=5.0)
             if live is None:
                 output_result({
@@ -655,8 +637,10 @@ def main(args=None):
                     "scene_objects": names, "scene_object_count": len(names),
                 })
                 sys.exit(1)
+            # Pass the composite candidate_id; grip_widths resolves clamp_dir (axis-aligned OR non-axis
+            # normal) and returns pre_grasp = W_clear-CAPPED, pre_release = MIDPOINT.
             result, gw_err = _run_grip_widths(
-                known_args.object_name, dyn_gid, dyn_axis, known_args.base_name, live)
+                known_args.object_name, known_args.grasp_candidate, known_args.base_name, live)
             if gw_err is not None:
                 output_result({
                     "result": "failure", "command": None, "mode": known_args.mode,
