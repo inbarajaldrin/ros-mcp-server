@@ -1355,6 +1355,66 @@ def run_move_down(mode=None):
 # Main
 # ---------------------------------------------------------------------------
 
+_INSERT_GATE_MARKER = "__GRIP_WIDTHS_JSON__"
+
+
+def _insert_feasibility_gate(object_name, base_name, grasp_id, timeout=120.0):
+    """(b) RUNTIME INSERT HARD-GATE (task #26). Before the sim descend, re-run the pre_insert feasibility
+    for object_name at its GT TARGET / SEATED config (the part + already-placed neighbours at their seated
+    poses, z_floor=part_bottom) and DENY if the chosen candidate (grasp_id) is NOT in the clearing set —
+    i.e. the agent is about to descend an INFEASIBLE/denied grasp that collides with a neighbour at the
+    slot. Inline hard-stop mirroring control_gripper / move_to_grasp; it ENFORCES (a)'s feasibility at the
+    insert step regardless of what the agent selected. SIM-only (grip_widths in the aruco-tc bundle).
+    Fail-OPEN when unevaluable (no GT / no bundle / timeout). Returns (ok, info).
+    Evaluated at the GT target (the seated pose is where neighbour collision binds — NOT the current held
+    pose, which is away from the slot). Catches geometric INfeasibility only; a feasible grasp that merely
+    places inaccurately is verify_assembly + the agent's restore/re-pick loop, not this gate."""
+    import tempfile
+    try:
+        jf = find_assembly_json_by_base_name(base_name, str(get_assembly_data_dir()))
+        components = json.load(open(jf)).get("components") if jf else None
+    except Exception as e:
+        return True, {"gate": "skipped", "reason": f"assembly GT load failed: {e}"}
+    if not components:
+        return True, {"gate": "skipped", "reason": f"no assembly GT for base {base_name}"}
+
+    bundle = os.environ.get("ARUCO_TC_BUNDLE", os.path.expanduser("~/aruco-tc-bundle"))
+    cli = os.path.join(bundle, ".local/scripts/grip_widths_cli.py")
+    if not os.path.exists(cli):
+        return True, {"gate": "skipped", "reason": f"grip_widths_cli.py not found at {cli}"}
+    req = {"mode": "pre_insert", "components": components, "base": base_name,
+           "parts": [object_name], "z_floor": "part_bottom"}
+    tf = tempfile.NamedTemporaryFile(mode='w', delete=False, dir='/tmp', suffix='.json')
+    try:
+        json.dump(req, tf)
+        tf.close()
+        try:
+            proc = subprocess.run(["uv", "run", "--no-project", cli, tf.name],
+                                  cwd=bundle, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return True, {"gate": "skipped", "reason": "grip_widths timeout"}
+        line = next((l for l in proc.stdout.splitlines() if l.startswith(_INSERT_GATE_MARKER)), None)
+        if line is None:
+            return True, {"gate": "skipped", "reason": f"no grip_widths result (rc={proc.returncode})"}
+        res = json.loads(line[len(_INSERT_GATE_MARKER):].strip())
+    finally:
+        try:
+            os.unlink(tf.name)
+        except OSError:
+            pass
+    p = next((x for x in res.get("parts", []) if x.get("part") == object_name), None)
+    if p is None:
+        return True, {"gate": "skipped", "reason": f"{object_name} not in pre_insert result"}
+    clearing_ids = [c["candidate_id"] for c in p.get("clearing_candidates", [])]
+    if int(grasp_id) in clearing_ids:
+        return True, {"gate": "pass", "candidate_id": int(grasp_id), "clearing": clearing_ids}
+    return False, {"gate": "DENY", "candidate_id": int(grasp_id), "clearing": clearing_ids,
+                   "part_verdict": p.get("verdict"),
+                   "reason": (f"candidate {grasp_id} is NOT feasible at the seated pose for "
+                              f"{object_name} (clearing={clearing_ids}) — descending it would collide "
+                              f"with a neighbour")}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Translate Object - Move held object to assembly position',
@@ -1499,8 +1559,20 @@ def main():
 
         if args.insert:
             if args.mode == 'sim':
-                success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True, object_orientation=args.current_object_orientation)
-                if success:
+                # (b) RUNTIME INSERT HARD-GATE (task #26): DENY an infeasible insert BEFORE the descend,
+                # mirroring the inline gates in control_gripper / move_to_grasp. Fail-open if unevaluable.
+                gate_ok, gate_info = (True, {"gate": "skipped", "reason": "no --grasp-id"})
+                if args.grasp_id is not None:
+                    gate_ok, gate_info = _insert_feasibility_gate(args.object_name, args.base_name, args.grasp_id)
+                node.get_logger().info(f"[insert-gate] {gate_info}")
+                if not gate_ok:
+                    success = False
+                    node.error_message = ("insert DENIED by feasibility gate "
+                                          f"(grip_widths, z_floor=part_bottom): {gate_info.get('reason', 'infeasible')}")
+                    node.get_logger().warn(node.error_message)
+                else:
+                    success = node.translate_for_target_sim(args.object_name, args.base_name, hover=True, object_orientation=args.current_object_orientation)
+                if gate_ok and success:
                     # Let the robot settle at hover before reading fresh poses.
                     # The old two-subprocess approach had ~3-5s of LLM round-trip
                     # between hover and insert; this replicates that settling window.

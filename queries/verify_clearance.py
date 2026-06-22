@@ -58,6 +58,43 @@ GRIPPER_LENGTH = 0.200     # ~20cm total length (palm to fingertip)
 # Clearance margin for safety (meters)
 CLEARANCE_MARGIN = 0.01    # 1cm safety margin
 
+# --- grip_widths-backed clearance (replaces the legacy AABB + constant-GRIPPER_WIDTH check) -----------
+# The real finger-mesh arc-sweep predicate (grip_widths) needs open3d + the bundle's mesh/FK assets and
+# is hardcoded REPO=Path("."), so it cannot be imported into the ROS python env. We subprocess it via
+# `uv run` (cwd = the bundle) through grip_widths_cli.py — the SAME seam control_gripper uses. The CLI's
+# pre_grasp / pre_insert batch modes evaluate every candidate per part. See the design note:
+# aruco-grasp-annotator/.local/plans/insert-feasibility-preflight-design-20260622.md.
+import subprocess
+import tempfile
+
+_GRIP_WIDTHS_MARKER = "__GRIP_WIDTHS_JSON__"
+
+
+def _run_bundle_cli(request, timeout=180.0):
+    """Shell to grip_widths_cli.py in the aruco-tc bundle. Returns (result_dict, error)."""
+    bundle = os.environ.get("ARUCO_TC_BUNDLE", os.path.expanduser("~/aruco-tc-bundle"))
+    cli = os.path.join(bundle, ".local/scripts/grip_widths_cli.py")
+    if not os.path.exists(cli):
+        return None, f"grip_widths_cli.py not found at {cli} (set ARUCO_TC_BUNDLE to the bundle root)."
+    tf = tempfile.NamedTemporaryFile(mode='w', delete=False, dir='/tmp', suffix='.json')
+    try:
+        json.dump(request, tf)
+        tf.close()
+        try:
+            proc = subprocess.run(["uv", "run", "--no-project", cli, tf.name],
+                                  cwd=bundle, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, "grip_widths_cli timeout"
+        line = next((l for l in proc.stdout.splitlines() if l.startswith(_GRIP_WIDTHS_MARKER)), None)
+        if line is None:
+            return None, f"no result line (rc={proc.returncode}); stderr_tail={proc.stderr[-400:]!r}"
+        return json.loads(line[len(_GRIP_WIDTHS_MARKER):].strip()), None
+    finally:
+        try:
+            os.unlink(tf.name)
+        except OSError:
+            pass
+
 
 def load_object_dimensions(object_name, assembly_config):
     """
@@ -200,6 +237,85 @@ class VerifyClearance(Node):
     def get_assembly_components(self):
         """Get list of all components in the assembly"""
         return [comp.get('name', '') for comp in self.assembly_config.get('components', [])]
+
+    def live_poses_dict(self):
+        """Current scene poses as {name: {position{x,y,z}, quaternion{x,y,z,w}}} (metres, world) —
+        the shape grip_widths_cli expects for the pre_grasp live scene."""
+        out = {}
+        for name, tr in self.current_poses.items():
+            t = tr.transform.translation
+            q = tr.transform.rotation
+            out[name] = {"position": {"x": t.x, "y": t.y, "z": t.z},
+                         "quaternion": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}}
+        return out
+
+    def run_feasibility(self, do_pre_grasp, do_pre_insert, parts):
+        """grip_widths-backed gates (replace the AABB clearance check). pre_grasp = live-pose pick
+        access; pre_insert = GT-target insert feasibility (z_floor=part_bottom) + write the grasp-id
+        manifest. Returns dict(report, manifest_path, infeasible_grasp, infeasible_insert, error)."""
+        report, infeasible_grasp, infeasible_insert, manifest_path = {}, [], [], None
+        if do_pre_grasp:
+            res, err = _run_bundle_cli({"mode": "pre_grasp", "live_poses": self.live_poses_dict(),
+                                        "base": self.base_name, "parts": parts})
+            if err:
+                return dict(report=report, manifest_path=None, infeasible_grasp=[],
+                            infeasible_insert=[], error=f"pre_grasp: {err}")
+            report["pre_grasp"] = res
+            infeasible_grasp = [p["part"] for p in res["parts"] if p["verdict"] != "feasible"]
+        if do_pre_insert:
+            res, err = _run_bundle_cli({"mode": "pre_insert",
+                                        "components": self.assembly_config.get('components', []),
+                                        "base": self.base_name, "z_floor": "part_bottom", "parts": parts})
+            if err:
+                return dict(report=report, manifest_path=None, infeasible_grasp=infeasible_grasp,
+                            infeasible_insert=[], error=f"pre_insert: {err}")
+            report["pre_insert"] = res
+            infeasible_insert = [p["part"] for p in res["parts"] if p["verdict"] != "feasible"]
+            manifest_path = self._write_manifest(res)
+        return dict(report=report, manifest_path=manifest_path, infeasible_grasp=infeasible_grasp,
+                    infeasible_insert=infeasible_insert, error=None)
+
+    def _write_manifest(self, pre_insert_res):
+        """Write the up-front insert-feasibility manifest the assembly agent reasons over. Results-file
+        shape ({"assembly_order": [ ... ]}), per part: verdict + the FEASIBLE candidate set + the DENIED
+        set (with reasons). It does NOT assert a single 'best' pick — the gate's clearance filter has no
+        notion of best; the AGENT analyses this CAD-derived info and CHOOSES (and on a gate/verify hit,
+        restores + re-picks from the feasible set). This is what replaces Phase-1 empirical discovery."""
+        base = os.getenv("MCP_CLIENT_OUTPUT_DIR", "").strip()
+        if not base:
+            self.get_logger().warn("MCP_CLIENT_OUTPUT_DIR unset — pre_insert manifest not written")
+            return None
+        order = {c["name"]: c.get("assembly_order", 0) for c in self.assembly_config.get('components', [])}
+        assembly_id = self.assembly_config.get("assembly_id", self.base_name)
+
+        def _fmt(c):
+            # self-describing fields for the agent; only present keys (denied 'not top-down' carry no widths)
+            out = {"candidate_id": c.get("candidate_id"), "axis": c.get("axis"),
+                   "grip_width_mm": c.get("obj_w"), "clearance_mm": c.get("W_clear"),
+                   "margin_mm": c.get("margin"), "reason": c.get("reason")}
+            return {k: v for k, v in out.items() if v is not None}
+
+        entries = []
+        for p in pre_insert_res["parts"]:
+            entries.append({"object_name": p["part"], "assembly_order": order.get(p["part"], 0),
+                            "verdict": p["verdict"],
+                            "clearing_candidates": [_fmt(c) for c in p["clearing_candidates"]],
+                            "denied_candidates": [_fmt(c) for c in p.get("denied_candidates", [])]})
+        entries.sort(key=lambda e: e["assembly_order"])
+        manifest = {
+            "assembly_id": assembly_id, "base_name": self.base_name,
+            "generated_by": "verify_clearance --pre-insert (analytic; z_floor=part_bottom)",
+            "note": ("clearing_candidates = grasps that clear neighbours at the seated pose (feasible). "
+                     "No single 'best' is asserted — choose from these by reasoning over the geometry "
+                     "(grip_width_mm, clearance_mm, margin_mm, axis). denied_candidates must NOT be used. "
+                     "On a gate-deny or a placement/verify failure: restore the scene, pick a different "
+                     "clearing candidate, and re-run (backtracking is expected)."),
+            "assembly_order": entries}
+        from pathlib import Path
+        path = Path(base) / "logs" / f"InsertFeasibility_{assembly_id}_results.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2))
+        return str(path)
 
     def is_object_present(self, object_name):
         """Check if object is in the scene"""
@@ -518,41 +634,25 @@ class VerifyClearance(Node):
                     'message': f'Object {normalized_name} is assembled to base (clearance check skipped)'
                 })
             else:  # status == 'unassembled'
-                # Check clearance for unassembled objects against:
-                # - The base (unassembled objects must have clearance from base)
-                # - Other unassembled objects
-                # Exclude only assembled objects (not the base)
-                clearance_result = self.check_clearance_for_object(
-                    normalized_name,
-                    exclude_objects=assembled_objects
-                )
+                # AABB clearance check RETIRED (2026-06-22): clearance is now the grip_widths-backed
+                # --pre-grasp / --pre-insert gates (real finger-mesh, run in main via run_feasibility).
+                # Here we only record presence/status + collect the unassembled set those gates act on.
                 results['components'].append({
                     'name': normalized_name,
-                    'status': 'unassembled',
-                    'clearance': clearance_result
+                    'status': 'unassembled'
                 })
 
-                if clearance_result['status'] in ['ok', 'ok_isolated']:
-                    clearance_ok_count += 1
-                else:
-                    clearance_issues.append({
-                        'object': normalized_name,
-                        'clearance_status': clearance_result['status'],
-                        'message': clearance_result['message'],
-                        'issues': clearance_result.get('clearance_issues', [])
-                    })
-
-        # Summary
+        # Summary. Clearance verdicts now come from the grip_widths gates (run_feasibility in main),
+        # not from this presence pass — so we surface the unassembled set those gates operate on.
+        unassembled_objects = [n for n, s in object_status.items() if s == 'unassembled']
         results['summary'] = {
             'total_components': len(components),
             'present_in_scene': present_count,
             'missing': len(missing_objects),
             'assembled': assembled_count,
             'unassembled': present_count - assembled_count,
-            'unassembled_with_ok_clearance': clearance_ok_count,
-            'unassembled_with_clearance_issues': len(clearance_issues),
             'missing_objects': missing_objects,
-            'clearance_issues': clearance_issues
+            'unassembled_objects': unassembled_objects
         }
 
         return results
@@ -579,7 +679,16 @@ def main():
                         help='Timeout for waiting for poses (seconds)')
     parser.add_argument('--pretty', action='store_true',
                         help='Pretty print output for terminal readability')
+    parser.add_argument('--pre-grasp', action='store_true',
+                        help='Run ONLY the pre_grasp gate (live-pose pick access). Default: both gates.')
+    parser.add_argument('--pre-insert', action='store_true',
+                        help='Run ONLY the pre_insert gate (GT-target insert feasibility + manifest). '
+                             'Default: both gates.')
     args = parser.parse_args()
+
+    # Default: run both gates, in order pre_grasp -> pre_insert. A flag selects only that one.
+    do_pre_grasp = args.pre_grasp or not (args.pre_grasp or args.pre_insert)
+    do_pre_insert = args.pre_insert or not (args.pre_grasp or args.pre_insert)
 
     # Convert base_name from hyphenated to underscored for internal use
     base_name = args.base_name.replace('-', '_')
@@ -593,11 +702,11 @@ def main():
     try:
         node = VerifyClearance(base_name=base_name, mode=args.mode)
         detailed_result = node.run_verification()
-        node.destroy_node()
-        rclpy.shutdown()
 
         # Check for errors in detailed result
         if 'error' in detailed_result:
+            node.destroy_node()
+            rclpy.shutdown()
             error_msg = detailed_result['error']
             simple_result = {
                 'result': 'failure',
@@ -606,38 +715,47 @@ def main():
                 'error': error_msg
             }
         else:
-            # Extract summary information
             summary = detailed_result.get('summary', {})
             missing = summary.get('missing_objects', [])
-            clearance_issues = summary.get('clearance_issues', [])
-            objects_with_issues = [issue['object'] for issue in clearance_issues]
+            unassembled = summary.get('unassembled_objects', [])
 
-            # Determine success
+            # grip_widths-backed gates on the present-but-unassembled parts (node still alive for poses).
+            feas = node.run_feasibility(do_pre_grasp, do_pre_insert, unassembled)
+            node.destroy_node()
+            rclpy.shutdown()
+
+            grasp_infeasible = feas['infeasible_grasp']
+            insert_infeasible = feas['infeasible_insert']
             all_present = len(missing) == 0
-            all_clearances_ok = len(objects_with_issues) == 0
-            success = all_present and all_clearances_ok
+            success = (feas['error'] is None and all_present
+                       and not grasp_infeasible and not insert_infeasible)
 
-            # Build simple result
             simple_result = {
                 'result': 'success' if success else 'failure',
                 'base_name': detailed_result.get('base_detected', base_name),
-                'ready_for_assembly': success
+                'ready_for_assembly': success,
+                'gates': {'pre_grasp': do_pre_grasp, 'pre_insert': do_pre_insert},
             }
+            if feas['manifest_path']:
+                simple_result['insert_manifest'] = feas['manifest_path']
 
-            # Add error details on failure
             if not success:
                 issues = []
+                if feas['error']:
+                    issues.append(feas['error'])
                 if missing:
                     issues.append(f"{len(missing)} missing")
-                if objects_with_issues:
-                    issues.append(f"{len(objects_with_issues)} clearance issues")
-
-                simple_result['error'] = ', '.join(issues)
-
-                if missing:
                     simple_result['missing_objects'] = missing
-                if objects_with_issues:
-                    simple_result['objects_with_clearance_issues'] = objects_with_issues
+                if grasp_infeasible:
+                    issues.append(f"{len(grasp_infeasible)} not pickable (pre_grasp)")
+                    # route to the existing fix_scene elicitation (scene-setup is the human's to fix)
+                    simple_result['objects_with_clearance_issues'] = grasp_infeasible
+                if insert_infeasible:
+                    # insert-infeasible = an assembly DESIGN/order problem (fixing the scene won't help);
+                    # surface as failure but NOT via fix_scene. Proper handler is the step-5 wiring.
+                    issues.append(f"{len(insert_infeasible)} not insertable (pre_insert)")
+                    simple_result['objects_infeasible_insert'] = insert_infeasible
+                simple_result['error'] = '; '.join(issues)
 
         output_result(simple_result, pretty=args.pretty)
         sys.exit(0 if success else 1)

@@ -233,11 +233,15 @@ def _move_home(*, mode: str = "real") -> dict:
 
 
 def _move_to_grasp(object_name: str, grasp_id: int, *, mode: str = "real") -> dict:
+    # The id is a candidate-native composite (grasp_point_id*100 + direction_id), e.g. from the
+    # pre_insert manifest. Pass --grasp-candidate so move_to_grasp resolves clamp_dir / object_solid /
+    # standoff from the candidate. The legacy --grasp-id path mis-resolves the composite id (wrong
+    # expected width) and the close fails — fixed 2026-06-22 (task #24).
     return _run(
-        f"move_to_grasp {object_name} grasp_id={grasp_id}",
+        f"move_to_grasp {object_name} grasp_candidate={grasp_id}",
         ["python3", "-m", "primitives.move_to_grasp",
          "--object-name", object_name,
-         "--grasp-id", str(grasp_id),
+         "--grasp-candidate", str(grasp_id),
          "--mode", mode],
         timeout_s=120,
     )
@@ -434,13 +438,25 @@ def main() -> int:
     if args.already_held and args.current_object_orientation is None:
         p.error("--already-held requires --current-object-orientation")
 
-    # Auto-resolve grasp_width from fmb1_assembly.json if not given.
+    # Auto-resolve the pre-open approach width. grasp_id is a candidate-native composite id, so resolve
+    # W_open = object_solid_mm + clearance_mm from the candidate (the gripper-agnostic CAD solid), NOT the
+    # legacy per-(object,grasp_id) table — which mis-resolved the composite id to a wrong width (~65mm)
+    # and made the close fail. Falls back to the legacy table only if the candidate is unavailable.
     if args.grasp_width is None:
-        from primitives.shared.config import get_gripper_width_mm
-        w = get_gripper_width_mm(args.object_name, args.grasp_id, default_mm=35)
-        args.grasp_width = int(round(float(w)))
-        print(_green(f"Auto-resolved --grasp-width {args.grasp_width} mm "
-                     f"for ({args.object_name}, grasp_id={args.grasp_id})"))
+        from utils.data_path_finder import load_grasp_candidate
+        cand, gmeta = load_grasp_candidate(args.object_name, args.grasp_id)
+        if cand is not None:
+            clearance = float((gmeta or {}).get('clearance_mm', 14.0))
+            solid = float(cand.get('object_solid_mm', float(cand.get('width_mm', 0.0)) - clearance))
+            args.grasp_width = int(round(solid + clearance))
+            print(_green(f"Auto-resolved --grasp-width {args.grasp_width} mm from candidate "
+                         f"{args.grasp_id} (object_solid {solid:.1f} + clearance {clearance:.1f})"))
+        else:
+            from primitives.shared.config import get_gripper_width_mm
+            w = get_gripper_width_mm(args.object_name, args.grasp_id, default_mm=35)
+            args.grasp_width = int(round(float(w)))
+            print(_green(f"Auto-resolved --grasp-width {args.grasp_width} mm (legacy table fallback) "
+                         f"for ({args.object_name}, grasp_id={args.grasp_id})"))
 
     print(_bold(f"\n=== Assembly step: insert {args.object_name} into "
                 f"{args.base_name} (grasp_id={args.grasp_id}) ==="))
