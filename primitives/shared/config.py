@@ -64,16 +64,21 @@ MIN_PAD_CONTACT_MM = 6.0          # min pad-band/part overlap for a secure grasp
 # residual (finger-link-tip vs the 14.9 rubber-pad TIP_BELOW_FACE; face-frame fit varies ~+/-0.7mm).
 # Re-measure properly via parity_sweep ONLY if it samples from the UR flange, not the gripper mount.
 SIM_TOOL0_TO_FLANGE_MM_PRE_QC = 29.90   # historical: gripper-mount->arc-datum (no QC)
-import sys as _sys
-_RMCP_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-if _RMCP_ROOT not in _sys.path:
-    _sys.path.insert(0, _RMCP_ROOT)
-from onrobot_rg2_sim_control.onrobot_rg2_sim_control.rg2_arc import Rg2Arc, Rg2ArcParams  # noqa: E402
-_SIM_ARC_YAML = _os.path.join(_RMCP_ROOT, "onrobot_rg2_sim_control", "config", "rg2_gripper.yaml")
+# a4500 packaging adaptation (vs dual-a4500's vendored layout): onrobot_rg2_sim_control is
+# COLCON-installed (single-level `onrobot_rg2_sim_control.rg2_arc`, yaml via the package share dir),
+# NOT vendored under ros-mcp-server. SOFT import-guard so legacy primitives that import config.py
+# still load when the overlay is absent; grasp_offset_mm() then fails LOUD rather than masking the
+# wrong-depth bug with a static fallback.
 try:
-    _SIM_ARC = Rg2Arc(Rg2ArcParams.from_yaml(_SIM_ARC_YAML))   # match the backend's params
+    from onrobot_rg2_sim_control.rg2_arc import Rg2Arc, Rg2ArcParams  # noqa: E402  (colcon overlay)
+    try:
+        from ament_index_python.packages import get_package_share_directory as _gpsd
+        _SIM_ARC_YAML = _os.path.join(_gpsd("onrobot_rg2_sim_control"), "config", "rg2_gripper.yaml")
+        _SIM_ARC = Rg2Arc(Rg2ArcParams.from_yaml(_SIM_ARC_YAML))   # match the backend's params
+    except Exception:
+        _SIM_ARC = Rg2Arc()                                        # CAD defaults (backend's own fallback)
 except Exception:
-    _SIM_ARC = Rg2Arc()                                        # CAD defaults (backend's own fallback)
+    _SIM_ARC = None    # overlay not on path: legacy primitives still import config; W-dynamic disabled
 SIM_TOOL0_TO_FLANGE_MM = 45.82   # 29.90 (gripper-mount->arc-datum) + 15.92 QC weld = UR-flange->arc-datum
 
 
@@ -107,6 +112,13 @@ def grasp_offset_mm(gripper_width_mm=None, mode=None):
     m = (mode or RUNTIME_MODE)
     if gripper_width_mm is None or m != "sim":
         return GRIPPER_CENTER_TOOL_OFFSET_SIM if m == "sim" else GRIPPER_CENTER_TOOL_OFFSET_REAL
+    if _SIM_ARC is None:
+        # FAIL LOUD: a width was threaded (candidate-native path) but Rg2Arc is unavailable. Do NOT
+        # fall back to the static offset — that silently reintroduces the wrong-depth grasp bug.
+        raise RuntimeError(
+            "grasp_offset_mm: W-dynamic SIM offset requested (width=%r) but Rg2Arc is unavailable "
+            "(onrobot_rg2_sim_control overlay not sourced). Refusing the static fallback; source the "
+            "colcon overlay (ROS_WS_SETUP) so the candidate-native grasp depth resolves." % gripper_width_mm)
     z_mm = sim_tool0_to_fingertip_mm(gripper_width_mm) - TIP_BELOW_FACE_MM
     return np.array([0.0, 0.0, z_mm / 1000.0])
 
