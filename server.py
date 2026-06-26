@@ -9,7 +9,7 @@ All tool definitions, the harness (gates / commit_object / set_task_phase / floo
 predicates / signals), the 14 shared backend fns, and the real-world state-store live in
 server_core.py. server_quat.py is UNTOUCHED (separate file + config).
 
-Mode selection (one env knob, base substrate = remap; ROS_DOMAIN_ID=7 always):
+Mode selection (one env knob, base substrate = remap; ROS_DOMAIN_ID=0 always):
   ROS_MCP_MODE unset / "sim"   -> sim/canonical route-mode (real->sim redirect, full harness,
                                   ground-truth pose). This is the proven remap-sim behavior.
   ROS_MCP_MODE = "real"        -> real-direct route-mode (identity, order-only pre-gates,

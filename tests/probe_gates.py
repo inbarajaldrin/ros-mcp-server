@@ -28,7 +28,7 @@ Usage:
   # disassembly is phase 1 (verify_disassembly is used automatically):
   python3 tests/probe_gates.py --tool commit --object u_green --base base2 --grasp-id 1 --phase 1 --mode sim
 
-Env: ROS_DOMAIN_ID defaults to 7 (override with --domain); ROS_MCP_MODE is set from --mode so the
+Env: ROS_DOMAIN_ID defaults to 0 (override with --domain); ROS_MCP_MODE is set from --mode so the
 primitives/queries bind the right sim/real config.
 """
 import argparse
@@ -166,7 +166,7 @@ def main():
     p.add_argument("--grasp-id", type=int, default=None, help="grasp id used to grasp the object (commit/sim)")
     p.add_argument("--status", default="success", choices=["success", "failure"], help="agent-reported status (signal)")
     p.add_argument("--comment", default="", help="agent comment (signal)")
-    p.add_argument("--domain", default="7", help="ROS_DOMAIN_ID (default 7)")
+    p.add_argument("--domain", default="0", help="ROS_DOMAIN_ID (default 0)")
     args = p.parse_args()
 
     if args.tool == "commit" and not args.object:
