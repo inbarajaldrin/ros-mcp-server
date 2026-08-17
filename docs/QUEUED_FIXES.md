@@ -90,6 +90,49 @@ Meta records only the last, so multi-false-fire runs can't be reconstructed post
 
 ---
 
+## Blocked — needs new data, not a code change
+
+### 0. `line_green` rotates at grasp and seats wedged; nothing available detects it
+
+**This is not a tuning problem and should not be attacked as one.** Operator assessment
+2026-08-16: `line_green` is strongly inclined to rotate in the jaws at grasp. It then seats
+proud/wedged rather than flat, and the only recovery is a full re-seat. Solving it requires
+**more force data and camera-pose work** — the signals the decision currently rests on are not
+accurate enough to build any predicate on.
+
+Why no threshold fixes it — measured across two passes on the same part:
+
+| | depth_err | pos_dev | ori_dev | truth |
+|---|---|---|---|---|
+| pass 1 | −1.65 mm | 0.8 mm | 0.74° | **genuine seat** |
+| pass 2 | −2.32 mm | 0.5 mm | 0.45° | **wedged** |
+
+- `depth_err` separates them by only **0.67 mm**, so any threshold sits knife-edge at ~−2.0 mm.
+- `pos_dev` and `ori_dev` are **inverted** — the wedge scores *better* on both. They are blind
+  to this failure.
+- The torque check that would catch tilt was deliberately disabled (`prismatic_peg_insertion.py`
+  ~L96): it "never fires even when the part is correctly seated". Its `avg_Tx`/`avg_Ty` are
+  printed as `ignored` in the success line.
+
+So both available signals have failed on this part. The gap is upstream — grasp stability and
+pose accuracy — not the acceptance criterion.
+
+Downstream consequence: a wedged `line_green` sits proud and blocks `inverted_u_yellow`. On the
+2026-08-16 pass 2, yellow only seated after the operator pushed `line_green` home by hand. Any
+report of "4/4" must state whether an operator touched the parts.
+
+`EXIT_GEOMETRIC_Z_TOL_BELOW_M = 0.0080` (8 mm) is undeniably permissive, but tightening it
+without better signals converts silent false accepts into unreliable false rejects. Leave it
+until there is data to place it.
+
+### 0b. `prismatic_peg_insertion` can hang after reporting success
+
+Observed 2026-08-16: printed `[SUCCESS] Insertion complete on attempt 3` and never returned;
+the replay stalled until killed. A primitive that succeeds and does not exit blocks the whole
+assembly with no error to act on — the operator has to notice.
+
+---
+
 ## Robustness / process
 
 ### 8. `move_to_grasp` gaps
