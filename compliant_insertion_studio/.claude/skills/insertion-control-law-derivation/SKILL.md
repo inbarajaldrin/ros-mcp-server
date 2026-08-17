@@ -161,7 +161,16 @@ Looser settings (e.g. `gain=1.5 damp=0.025`) feel less resistive in operator-dri
 | 4 | Comparing runs at different gain/damping | Two variables confounded. | Hold compliance constant. |
 | 5 | Treating FSM "STUCK" verdict as ground truth | Verdict comes from same buggy predicate. | Look at raw CSV for actual peg motion. |
 | 6 | Letting tilt go unused as a feedback signal | The signal is sitting right there in the quat columns. | Close the feedback loop on tilt magnitude + direction. |
-| 7 | Allowing rotating force direction (R<0.88) | GOLD has R=0.88 (fixed direction); operator does NOT rotate during search. | Fixed direction toward best seat estimate; refine estimate online via tilt. |
+| 7 | Allowing rotating force direction (R<0.88) | GOLD has R=0.88 (fixed direction); operator does NOT rotate during search. **See correction below — 0.88 does not reproduce.** | Fixed direction toward best seat estimate; refine estimate online via tilt. |
+
+> **CORRECTION 2026-08-16 (anti-pattern 7).** Re-measured across the full corpus (79 GOLD
+> demos, all four parts), straightness `R = |net displacement| / path length` over the
+> contact→SIGUSR1 window is **0.150 / 0.361 / 0.475 / 0.597** (yellow / green / brown /
+> orange) — not 0.88. Operators are *directionally persistent*, which is not the same as a
+> fixed direction, and 0.88 may have come from a different window or metric. The comparative
+> claim still holds and is strong: GOLD is **2.6–5.1× straighter than the autonomous spiral**
+> in every part (AUTO_OK: 0.058 / 0.139 / 0.093 / 0.148). Do not build a controller that
+> assumes a near-straight operator path.
 | 8 | Using `F=0` perfect-zero dwell windows | GOLD's `T_lat` relaxation came from operator-introduced motion, not perfect zero. | Sustained sub-tolerance push during chamfer engagement window. |
 | 9 | Using FSM stdout / signals.json labels as truth | Circular — labels derived from same model under test. | Recompute labels from raw CSV with a script. |
 | 10 | Using CAD `predicted_tcp_at_seat` as ground truth | Empirically 11+ mm off. | Treat as estimate; refine via contact feedback. |
@@ -172,7 +181,31 @@ These are NOT to be violated even with strong empirical motivation, without an e
 
 - `cmd_fz` magnitude ≤ 9 N. Operator's `|Fz_t|` peaks at ~17.9 N (operator's hand contributed ~10 N), but autonomous can't replicate this within the safety envelope. Compensate via geometry (tilt-aware steering, online seat estimate refinement, chamfer engagement detection via orientation derivative) — not by raising `cmd_fz`.
 - `|cmd_F_lat|` ≤ 6 N.
-- `selection_vector` must remain all-True (force-controlled in all 6 DOFs). Locking XY position-tracked breaks chamfer engagement (refuted at v91 in the prior session).
+- `selection_vector` must remain all-True (force-controlled in all 6 DOFs) — **EXCEPT IN SEARCH.**
+
+  > **CORRECTION 2026-08-16 — read this before "fixing" the code to match the rule above.**
+  > SEARCH commands `(True, True, True, False, False, False)`: **rotation LOCKED**. This is
+  > required, not an oversight. An agent read the all-True rule as stated, unlocked rotation at
+  > both SEARCH command sites, and broke the insert for five consecutive real-arm runs.
+  >
+  > Mechanism (observed physically by the operator): with rotation compliant, lateral force
+  > applies a **moment about the grasp point**. The part pivots in the jaws while the gripper
+  > translates, so the peg tip barely moves. TCP displacement stops being peg displacement, and
+  > every swept-area / coverage figure computed from TCP becomes fiction — which is exactly how
+  > that session concluded "the hole is not within 6 mm" about a hole 3.38 mm away.
+  >
+  > Evidence: every 2026-05-07 run that actually seated commanded `(1,1,1,0,0,0)` during SEARCH
+  > (11–24 issues per run; see the `insert_u_brown_20260507_*.cmd_wrench_raw.csv` sidecars).
+  > Reverting to locked seated the part on the next run.
+  >
+  > The all-True rule still holds where it was derived — the XY-locked *position-tracked* case
+  > refuted at v91 is a different thing from rotational compliance during a lateral sweep.
+  > **Corollary:** the "Tilt-relax detector — tilt < 0.01° throughout under full 6-DOF
+  > compliance" entry in the project anti-pattern list is a *consequence of this clamp*, not a
+  > measurement of contact physics. Unlocking rotation on 2026-08-16 did make tilt responsive
+  > (excursion 0.004° → 0.25°, peak 0.59°), but still far below the ~3° GOLD shows at chamfer
+  > engagement — and it did not change the outcome. Do not cite the tilt figure as grounds for
+  > unlocking, and do not treat §3/§13's tilt-steering recommendation as available in SEARCH.
 - Direction of corrective force = TOWARD seat (or per Section 3, toward the tilt direction when tilt is over tolerance). NEVER counter-residual (tested at v77/v78 — destabilizing Z-rotation cross-coupling).
 - All primitive subprocesses use module mode: `python3 -m primitives.X`, never script path.
 - The state-independent global seat detector (added v87) must remain.
@@ -447,6 +480,48 @@ Combined with the 3N threshold + 0.1s smoothing + bias subtraction, contact dete
 - Residual F/T zero bias up to ~2.5N
 - Brief operator-induced perturbations during the STEP-BACK gate
 
+### 16.3 Settle the ARM before taking any force reference (2026-08-16)
+
+**Hard rule: never sample a force zero or baseline while the arm is still moving.** The
+trajectory controller reports "complete" when the commanded position is reached, not when the
+mechanical ring-down has finished. A reference taken in that window is confidently wrong and
+nothing downstream can detect it — the failure mode is always a *plausible number* that
+something then acts on, never an error.
+
+Found in four independent places on 2026-08-16. Every one waited *after* the sample; none
+waited *before* it:
+
+| site | what it waited for | what was missing | symptom |
+|---|---|---|---|
+| `compliant_insert` ZERO phase | step-back gate, set to 0.0s | arm settle before `zero_ftsensor` | post-zero bias **15.6 N**, force_mode drove TCP **116 mm UP** |
+| `translate_object` insert | same, `--auto-step-back-seconds 0.0` | same | same path |
+| `move_to_grasp` baseline | `sleep(0.1)` | arm settle before sampling | phantom **59.6 N** "contact" |
+| `move_to_grasp` sensor zero | `sleep(0.5)` **after** zeroing | arm settle **before** zeroing | phantom **56.5 N** "contact" |
+
+Calibration measured this session: **0.0 s settle → 15.6 N residual; 5.36 s settle → 0.11 N.**
+Use ≥1.5 s after a Cartesian move; anything between 0 and 5.36 s is uncharacterised.
+
+Guard rather than trust: `--bias-abort-n` (default 5 N) now **aborts** rather than subtracting
+a residual that large, because a bias that big is a botched zero, not sensor bias. Good runs
+sit at 0.07–0.54 N, so the margin is ~10×.
+
+### 16.4 Contact predicates need a sustain window, not a threshold crossing
+
+The wrench stream carries brief impulses that are indistinguishable from contact on a single
+sample. Measured at 50 Hz during a `move_to_grasp` descent, nothing touched:
+
+```
++0.18, +19.32, +56.98, +20.56, +0.36 N     ~60 ms, symmetric, from and back to a quiet baseline
+```
+
+That tripped a 40 N single-sample threshold. Peak amplitude varies 40–60 N run to run, so
+re-zeroing, re-baselining and slowing the descent all move the number without fixing anything —
+three separate "fixes" were attributed to it before the raw trace was recorded.
+
+**Record the trace before theorising about a force number.** Real contact holds an elevated
+force; an impulse does not. `move_to_grasp` now requires `z_force_sustain_s = 0.15`, mirroring
+how the v4 predicate uses `off_sustain_s`. Any new force predicate needs the same treatment.
+
 ---
 
 ## 17. At-Target marker uses absolute predicted_tcp_z (multi-contact safe)
@@ -573,6 +648,14 @@ Verified case 2026-05-06: u_brown peg fell straight through during APPROACH, bri
 
 `inverted_u_yellow` failed where u_orange/u_brown succeeded. Operator-mode GUIDED has Z **LOCKED** (selection_vector `T,T,F,F,F,F`); autonomous SEARCH has Z **COMPLIANT** with commanded Fz=-9N. Result:
 - Operator's `|fz|` during drag: median 3.14N, p5=0.20N, 50% time <3N
+  > **CORRECTION 2026-08-16:** these figures are specific to this object/window and do NOT
+  > generalise. Across the corpus (contact→SIGUSR1, tool frame), GOLD median `|fz|` is
+  > **3.30–8.89 N** depending on part, and the fraction below 3 N ranges **7.7%–45.3%**.
+  > The *self-normalising* version (fraction below 0.5× that episode's own median) is
+  > 6.1% / 35.9% / 24.5% / 15.6% — a 29.8-point spread, so there is no single operator
+  > "unload duty cycle" to copy and it cannot be used as a cross-part target. What does hold
+  > in all four parts: successful autonomous runs unload MORE than failed ones. Direction is
+  > real; the level is part-specific.
 - Autonomous's `|fz|` during search: median 7.26N, p5=6.06N, 0% time <3N
 
 For multi-prong parts (multiple contact points), Z-compliant push-down keeps `|fz|` saturated regardless of whether one prong is over a chamfer. The v4 collapse signal that worked for single-peg parts doesn't appear.
