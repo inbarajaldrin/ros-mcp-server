@@ -87,6 +87,25 @@ def generate_launch_description():
         default_value="192.0.2.1",
         description="Robot IP — set when use_fake_hardware:=false.",
     )
+    # Headless external control: the driver sends its control script over the
+    # primary interface at startup instead of waiting for the External Control
+    # URCap program to be played on the pendant. Requires the pendant in REMOTE
+    # CONTROL mode. reverse_ip is THIS PC's address on the robot's subnet (the
+    # address the robot dials back on); 0.0.0.0 lets the driver auto-derive it.
+    # Defaults reproduce the URCap path, so existing bringups are unchanged.
+    headless_mode_arg = DeclareLaunchArgument(
+        "headless_mode",
+        default_value="false",
+        description="true: driver sends its control script directly (no .urp on the "
+                    "pendant; needs Remote Control mode). false: wait for the "
+                    "External Control URCap to connect.",
+    )
+    reverse_ip_arg = DeclareLaunchArgument(
+        "reverse_ip",
+        default_value="0.0.0.0",
+        description="Host address the robot connects back on. Only meaningful with "
+                    "headless_mode:=true.",
+    )
 
     # UR5e bringup — real or fake. Includes ur_control.launch.py directly
     # (rather than ur5e.launch.py) so we can pass launch_rviz:=false — the
@@ -106,6 +125,8 @@ def generate_launch_description():
             "fake_sensor_commands": LaunchConfiguration("fake_sensor_commands"),
             "activate_joint_controller": "false",
             "launch_rviz": "false",
+            "headless_mode": LaunchConfiguration("headless_mode"),
+            "reverse_ip": LaunchConfiguration("reverse_ip"),
         }.items(),
         condition=UnlessCondition(LaunchConfiguration("rg2_only")),
     )
@@ -189,6 +210,8 @@ def generate_launch_description():
             use_fake_hardware_arg,
             fake_sensor_commands_arg,
             robot_ip_arg,
+            headless_mode_arg,
+            reverse_ip_arg,
             rpy_arg,
             xyz_arg,
             ur_launch,

@@ -32,10 +32,12 @@ mkdir -p "$LOG_DIR"
 MODE=""
 ROBOT_IP="192.168.1.111"
 USE_RVIZ=false
+HEADLESS=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         real|fake) MODE="$1"; shift ;;
         --rviz) USE_RVIZ=true; shift ;;
+        --headless) HEADLESS=true; shift ;;
         --ip) ROBOT_IP="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,20p' "$0" | sed 's/^# \?//'
@@ -87,6 +89,19 @@ if [[ "$MODE" == "real" ]]; then
     fi
     echo "[launch_robot] Reachable. Launching real-hardware bringup with RG2 visualization..."
     HW_ARGS="use_fake_hardware:=false robot_ip:=$ROBOT_IP"
+    # --headless: the driver sends its own control script over the primary
+    # interface, so no External Control .urp has to be loaded and played on the
+    # pendant. Requires the pendant in REMOTE CONTROL mode. reverse_ip is this
+    # host's address on the robot's subnet — derived from the route to the robot.
+    if [[ "$HEADLESS" == "true" ]]; then
+        REVERSE_IP=$(ip -4 route get "$ROBOT_IP" 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')
+        if [[ -z "${REVERSE_IP:-}" ]]; then
+            echo "ERROR: could not derive reverse_ip (this host's address on $ROBOT_IP's subnet)." >&2
+            exit 3
+        fi
+        echo "[launch_robot] Headless external control — reverse_ip=$REVERSE_IP"
+        HW_ARGS="$HW_ARGS headless_mode:=true reverse_ip:=$REVERSE_IP"
+    fi
 elif [[ "$MODE" == "fake" ]]; then
     echo "[launch_robot] Launching fake-hardware bringup with RG2 visualization..."
     HW_ARGS="use_fake_hardware:=true fake_sensor_commands:=true"
