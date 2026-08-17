@@ -86,7 +86,7 @@ python3 compliant_insertion_studio/shared/ft_calibration.py \
    Operator load contaminates every measurement and silently corrupts the
    recovered mass + CoG. The script announces "HANDS OFF" and waits 3
    seconds before starting; honor this.
-5. **Pendant in Local mode is fine** — no Remote-mode services are called.
+5. **Pendant mode:** the calibration itself calls no mode-restricted services, so either mode works for this procedure. In practice the pendant sits in **Remote Control**, because the headless bringup this runs on top of (`launch_robot.sh real --headless`) cannot be established from Local. *(Updated 2026-08-16 — this line previously read "Local mode is fine", written when Local was the standing default.)*
 6. **Standard ROS2 bringup is up**: `scaled_joint_trajectory_controller`
    active, `force_torque_sensor_broadcaster` publishing on
    `/force_torque_sensor_broadcaster/wrench` at ~500 Hz.
@@ -270,12 +270,36 @@ Diagnose:
 A `std_srvs/srv/Trigger` call to `/io_and_status_controller/zero_ftsensor`
 that sets the *current* sensor reading as the new zero. Single-pose bias
 subtraction. Fast, cheap, automatic. Done by the episode wrapper in its
-PRE phase, immediately after the smoke test passes and immediately before
-entering force mode.
+PRE phase, after the smoke test passes and before entering force mode.
+
+### ⚠️ Settle the arm BEFORE the zero — this is the whole ballgame
+
+> **Added 2026-08-16 after four independent instances of the same bug.**
+>
+> `zero_ftsensor` freezes whatever the sensor reads *at that instant* as the new zero. If the arm
+> is still ringing down from a move, that instant contains transient load, and the zero is
+> confidently wrong with nothing downstream able to tell.
+>
+> **The trajectory controller reports "complete" when the commanded position is reached, not when
+> the arm has stopped moving.** A `zero_ftsensor` fired on that completion callback is fired mid-
+> ring-down.
+>
+> **Required: ≥ 1.5 s of arm settle after any Cartesian move, before the zero call.** Measured
+> this session: **0.0 s settle → 15.6 N post-zero bias**; **5.36 s settle → 0.11 N**. That 15.6 N
+> bias drove the TCP **116 mm upward** once force mode engaged. A separately mis-baselined
+> `move_to_grasp` reported a **59.6 N "contact"** with nothing touched.
+>
+> The failure signature is never "sensor error" — it is a plausible number that something then
+> acts on. All four instances had a wait *after* the sample and none had a wait *before* it.
+>
+> **Never shorten a settle or step-back window for speed.** The `--step-back-seconds` gate in
+> `compliant_insert` and the `--auto-step-back-seconds` gate in `translate_object` are this
+> settle window; 0.0 is how the 15.6 N zero happened.
 
 ### When to run
 
-- Inside the wrapper, every episode, in PRE phase, after the smoke test
+- Inside the wrapper, every episode, in PRE phase, after the smoke test, **and after the arm has
+  come to rest** (see above)
 - **Never as a substitute for foundational calibration** — if you find
   yourself wanting to re-zero between every motion, the foundational
   calibration is wrong and you need Layer 1, not more Layer-3 calls
@@ -285,11 +309,15 @@ entering force mode.
 The wrapper handles this automatically. Manual invocation for debugging:
 
 ```bash
+# 1. Arm must already be at rest — ≥ 1.5 s since the last Cartesian move. This wait is
+#    mandatory and comes BEFORE the zero, not after it.
+# 2. Then zero:
 ros2 service call /io_and_status_controller/zero_ftsensor std_srvs/srv/Trigger
+# 3. Then wait ≥ 0.5 s before reading /wrench, so the broadcaster has published post-zero
+#    samples. This second wait is a publishing-latency allowance only — it does NOT
+#    substitute for step 1, and on its own it is exactly the inverted ordering that produced
+#    the 56.5 N phantom contact in move_to_grasp.
 ```
-
-After the call, wait ≥ 0.5 s before reading `/wrench` so the broadcaster
-publishes post-zero samples (settle window per stash convention).
 
 ### What zero does, and what it doesn't
 

@@ -5,7 +5,7 @@ You are taking over a single, narrow task: **drive the operator through 15 guide
 ## What's already true (don't re-derive)
 
 1. The robot bringup is up. `launch_robot.sh real` was run earlier and now automatically calls `set_payload` with the calibrated mass + CoG. Force-mode gravity comp is in place. **TCP drift during APPROACH is ~0.83mm** (was 7.85mm before the fix earlier today).
-2. The operator is at the robot. Pendant is in Local mode. Camera perception (aruco) is publishing both topics. Part u_orange is currently held by the gripper.
+2. The operator is at the robot. Pendant is in Remote Control with the driver headless (*updated 2026-08-16; this briefing was written when the pendant sat in Local with an External Control `.urp` played by hand*). Camera perception (aruco) is publishing both topics. Part u_orange is currently held by the gripper.
 3. The collection script does everything per-demo: rotate_object, hover (with offset injection), force-mode entry, telemetry logging. The operator guides each insertion manually and Ctrl+Cs when done.
 4. The chained held_quat preserves R_grasp's fold info; rotate_object converges EE to canonical from any starting pose. **Don't propose changes to held_quat handling.** The default in the script is the validated -X-fold value.
 
@@ -13,7 +13,7 @@ You are taking over a single, narrow task: **drive the operator through 15 guide
 
 ### Step 1 — confirm the operator is ready
 
-Just say: "Pendant green and ready? I'll launch the collection script when you say so." Wait for confirmation.
+Just say: "Robot up, pendant in Remote, ready? I'll launch the collection script when you say so." Wait for confirmation.
 
 ### Step 2 — launch the script
 

@@ -75,7 +75,24 @@ For each demo, extract the GUIDED segment `[t_contact, t_sigusr1]` and the INSER
 | `vz_rise_from_min_1s` | vz at its 1-s window minimum | **0.92** |
 | `fz_drop_from_peak_1s` | fz drop magnitude over 1 s | **0.82** |
 
-Tilt is a non-signal in this dataset because the FSM's full 6-DOF compliance + the operator's gentle drag keep the peg face-down to within 0.01° throughout. **Predicates that depend on tilt-relax (the original hypothesis) cannot be built from this data.**
+Tilt is a non-signal in this dataset: the peg stays face-down to within 0.01° throughout. **Predicates that depend on tilt-relax (the original hypothesis) cannot be built from this data.**
+
+> **CORRECTED 2026-08-16.** The original wording of this paragraph attributed the 0.01° figure to
+> "the FSM's full 6-DOF compliance." Both halves of that were wrong.
+>
+> 1. **The FSM is not 6-DOF compliant.** Every `selection_vector` in `contact_search_fsm.py` is
+>    `(True, True, True, False, False, False)` — translation compliant, **rotation LOCKED** —
+>    and has been since 2026-05-06.
+> 2. **The 0.01° is therefore a consequence of that clamp**, not a measurement of contact
+>    physics. It says nothing about whether tilt *would* carry signal under rotational
+>    compliance, and must not be cited as evidence that tilt steering is impossible.
+>
+> Unlocking rotation on 2026-08-16 did make tilt responsive (excursion 0.004° → 0.25°, peak
+> 0.59°) — still far short of the ~3° GOLD shows at chamfer engagement, and it did not change the
+> outcome. It *did* break the insert for five consecutive real-arm runs, because lateral force
+> then applies a moment about the grasp point: the part pivots in the jaws while the gripper
+> translates, so TCP displacement stops being peg displacement. **Rotation stays locked in
+> SEARCH.** See `SKILL.md` §10 and `docs/HANDOFF_NEXT_AGENT.md` anti-patterns.
 
 ### Step 2 — first attempt, instantaneous-threshold predicate (failed)
 

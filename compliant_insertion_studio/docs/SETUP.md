@@ -8,8 +8,26 @@ before the first bring-up of a fresh session.**
 > this project, get the whole stack running, and either verify a wrapper
 > or collect Phase 3 demo data.
 >
-> **Latest update:** 2026-05-03 — after WRAP-VERIFY end-to-end PASSED on
-> u_brown. See `.planning/STATE.md` for current phase status.
+> **Latest update:** 2026-08-16 — bring-up is now **headless** (§3.1) and the real
+> assembly runs only from branch `ur5e-fmb1-demo` (§0). Sections 4.3, 6 and 9 are
+> **historical**, dated 2026-05-03, and are marked as such in place.
+>
+> **Fastest path on `ur5e-fmb1-demo`:** `bash compliant_insertion_studio/scripts/stack_up.sh`
+> brings up driver → gripper → camera → grasp points in one command, verifying each stage;
+> `stack_down.sh` tears it down. §3 below is the per-stage version of the same sequence, for
+> when you need to bring one piece up by hand or debug a stage.
+
+---
+
+## 0. Which tree — read before running anything real
+
+**Branch `ur5e-fmb1-demo` (working tree `~/Documents/ros-mcp-server-verified`) is the tree that
+runs the real assembly.** `main` cannot: its grasp publisher emits composite marker ids
+(101…303) after the June candidate-native migration, while the assembly JSONs still carry flat
+ids (1, 2), so every pick fails with `"Grasp point 1 not found"`. The replacement
+`--grasp-candidate` flag refuses `--mode real` by design. Use `ur5e-fmb1-demo`, or a worktree at
+tag `real-world-verified-2026-05-07` — and start the grasp points publisher **from that same
+tree** (§3.3).
 
 ---
 
@@ -30,7 +48,7 @@ before the first bring-up of a fresh session.**
 
 **Hardware:** UR5e at `192.168.1.111` (operator's workstation at `192.168.1.10`), OnRobot RG2 attached at `tool0`, RealSense camera over the workspace.
 
-**Pendant mode:** Local (operator retains manual control). `dashboard_client/play|stop|recover` services are blocked — power-on / brake-release / play / clear protective stop are pendant-manual-only.
+**Pendant mode: REMOTE CONTROL** (top-right in PolyScope). Headless bring-up cannot be established from Local. Only the pendant needs to be booted — no program is loaded and nothing is played. With Remote set, `dashboard_client` power-on / brake-release / mode queries work; **clearing a protective stop is still a manual action at the pendant**, and wrapper code must not assume `dashboard_client/recover` works.
 
 ---
 
@@ -76,29 +94,36 @@ PYTHONPATH=$(pwd):$PYTHONPATH python3 -m compliant_insertion_studio.shared.ft_ca
 
 Run these in order. Each step has its own check.
 
-### 3.1 Real bringup + RViz
+### 3.1 Real bringup + RViz (headless)
 ```bash
-cd ~/Documents/ros-mcp-server
-bash compliant_insertion_studio/scripts/launch_robot.sh real --rviz
+cd ~/Documents/ros-mcp-server-verified          # the ur5e-fmb1-demo tree — see §0
+bash compliant_insertion_studio/scripts/launch_robot.sh real --headless --rviz
 ```
 - Pings robot at `192.168.1.111` first (fails fast if unreachable)
 - Launches `ur5e_with_rg2.launch.py` with real hardware
+- `--headless`: the driver sends its own control script over the primary interface, so **no
+  External Control `.urp` is loaded and nothing is played on the pendant**. There is no program
+  named `external_control.urp` on this controller — don't go looking for one.
+- Sets the F/T payload from `configs/ft_calibration_*.yaml` — **required** (§2.4)
 - Activates `scaled_joint_trajectory_controller`
-- Logs to `/tmp/ur_bringup_logs/real_bringup_<ts>.log`
+- Logs to `/tmp/ur_bringup_logs/real_bringup_<ts>.log`; wait for `Robot connected to reverse interface`
 
-**On the pendant (Local mode):**
-1. Power on robot, release brakes
-2. Load `external_control.urp`
-3. Press **Play** ▶
-4. **If bringup was restarted** mid-session: press **STOP** ⏹ then **PLAY** ▶ again. The URCap loses its link on bringup restart; without this cycle, ros2_control trajectories silently fail with "velocity limits exceeded" even though `program_running` reports true.
+**On the pendant:** power on, release brakes, and make sure the mode selector reads **Remote
+Control**. That is all — nothing to load, nothing to play.
 
 **Verify:**
 ```bash
-ros2 service call /dashboard_client/program_running ur_dashboard_msgs/srv/IsProgramRunning
-# expect: success: True, program_running: True
 ros2 control list_controllers | grep -E "scaled_joint|force_torque"
 # expect both ACTIVE
 ```
+
+> **URCap path (only if you deliberately omit `--headless`)**
+> Then the pendant must have an External Control `.urp` loaded and you press **Play** ▶ yourself,
+> and after any bringup restart you must press **STOP** ⏹ then **PLAY** ▶ again — the URCap loses
+> its link on restart and without the cycle ros2_control trajectories silently fail with
+> "velocity limits exceeded" while `program_running` still reports true. Verify with
+> `ros2 service call /dashboard_client/program_running ur_dashboard_msgs/srv/IsProgramRunning`.
+> Headless bring-up has neither the step nor the failure mode.
 
 ### 3.2 Camera node (publishes `/objects_poses_real`)
 ```bash
@@ -112,18 +137,24 @@ ros2 topic echo --once /objects_poses_real | head -10
 ```
 
 ### 3.3 Grasp points publisher (publishes `/grasp_points_real`)
+
+**Must run from the `ur5e-fmb1-demo` tree** (§0). `main`'s copy publishes composite marker ids and
+every pick fails, no matter which tree the assembly script itself runs from.
+
 ```bash
 nohup bash -c 'source /opt/ros/humble/setup.bash; \
     source ~/Desktop/ros2_ws/install/setup.bash; \
-    cd ~/Documents/ros-mcp-server; \
-    python3 utils/grasp_points_publisher.py --mode real' \
+    cd ~/Documents/ros-mcp-server-verified; \
+    python3 -u utils/grasp_points_publisher.py --mode real' \
     > /tmp/grasp_pub.log 2>&1 &
 ```
 **Verify:**
 ```bash
 ros2 topic list | grep grasp_points_real
-ros2 topic hz /grasp_points_real    # expect ~10 Hz
+ros2 topic hz /grasp_points_real    # expect ~5 Hz
 ```
+This publisher **dies silently** if the camera localizer restarts. Re-check the topic before any
+pick.
 
 ### 3.4 OnRobot RG2 bridge (publishes `/gripper_width`, accepts `/gripper_command`)
 ```bash
@@ -192,11 +223,17 @@ The orientation must come from the **previous primitive's output** (state-tracki
 
 ### 4.3 Per-object grasp_id & grasp_width
 
-**Confirmed:**
-- `u_brown`: `--grasp-id 1 --grasp-width 35`
+> **CORRECTED 2026-08-16.** All four parts are confirmed and have been running in production
+> since 2026-05-07. **Nothing needs verifying here.** `grasp_id` and `gripper_width_mm` are
+> auto-resolved from `ablations/eval_resources/fmb1_assembly.json` via
+> `primitives.shared.config.get_gripper_width_mm()` / `get_grasp_id_for_assembly()` —
+> `run_assembly_step.py`, `regrasp_held_object.py` and `loop_autonomous_insert.sh` all do this.
+> Pass `--grasp-width N` / `--grasp-id N` only to override. The original text and the manual
+> lookup snippet are kept below for the case where you're adding a **new** part.
 
-**Need verification before Phase 3 collection** (5-min check via grasp_points JSONs):
-- `u_orange`, `line_green`, `inverted_u_yellow`
+*(Historical, 2026-05-03.)* Confirmed: `u_brown`: `--grasp-id 1 --grasp-width 35`. Needed
+verification at the time: `u_orange`, `line_green`, `inverted_u_yellow`. Manual lookup for a new
+part:
 
 ```bash
 for obj in u_orange line_green inverted_u_yellow; do
@@ -224,13 +261,18 @@ pkill -9 -f "socat.*ttyUR"
 ```
 **Why `kill -9` for `gripper_control` and `socat`:** they're not X11-bearing processes, and the bridge's `kill_socat()` cleanup is unreliable across rapid restarts. SIGKILL is safe here. *Never* use `kill -9` on RViz / Gazebo / tkinter — see global CLAUDE.md.
 
-**Pendant:** stop the `external_control.urp` program manually (`STOP` ⏹) before ending if you'll restart bringup later.
+**Pendant:** nothing to do under headless bring-up — no program is running. (URCap path only: stop the External Control program manually with `STOP` ⏹ before ending if you'll restart bringup later.)
+
+On `ur5e-fmb1-demo`, `bash compliant_insertion_studio/scripts/stack_down.sh` does the whole teardown in one command.
 
 ---
 
-## 6. Bug-fix inventory (uncommitted as of 2026-05-03)
+## 6. Bug-fix inventory (historical — 2026-05-03)
 
-These are the local modifications that make WRAP-VERIFY work end-to-end. **Operator approval needed before any commit.**
+> **Historical record.** All of these were committed long ago and are in the tree; the section is
+> kept because §7's troubleshooting entries refer back to it. Do not read it as pending work.
+
+These were the local modifications that made WRAP-VERIFY work end-to-end.
 
 ### 6.1 In THIS repo (`~/Documents/ros-mcp-server`)
 
@@ -271,11 +313,11 @@ ros2 topic echo --once /gripper_status
 **Software fix** (Modbus power-cycle — DOCUMENTED but NOT yet auto-wired):
 1. Send Modbus write: `unit=63 (Compute Box), addr=0, value=2`
 2. Gripper Compute Box power-cycles (~10s)
-3. **Pendant: STOP then PLAY** to re-attach the URCap to the rebooted tool
+3. Re-establish the tool link: under **headless** bring-up, restart the driver (§3.1). Under the URCap path, press **STOP then PLAY** on the pendant.
 4. Re-launch the bridge (§3.4)
 5. Re-verify `Circuit1:False` `Circuit2:False`
 
-Reference implementation in upstream Osaka lib: `restartPowerCycle()` in `onrobot_rg_modbus_tcp/comModbusTcp.py`. **Caveat:** the Modbus connection breaks during reboot (expected proof-of-cycle), and the URCap link goes stale until pendant cycle.
+Reference implementation in upstream Osaka lib: `restartPowerCycle()` in `onrobot_rg_modbus_tcp/comModbusTcp.py`. **Caveat:** the Modbus connection breaks during reboot (expected proof-of-cycle), and the tool link goes stale until step 3.
 
 **Manual fallback:** physically cycle the safety switches on the RG2 body (push-release each). Or full robot power-cycle.
 
@@ -294,7 +336,7 @@ Reference implementation in upstream Osaka lib: `restartPowerCycle()` in `onrobo
 
 ### 7.4 Bringup runs but trajectories rejected with "velocity or acceleration limits exceeded"
 
-URCap link is stale after a bringup restart. **Pendant: STOP then PLAY.** This is documented in `launch_robot.sh`'s `NEXT STEPS` block.
+**URCap path only.** The URCap link is stale after a bringup restart — **Pendant: STOP then PLAY**. Under headless bring-up (§3.1) there is no URCap link to go stale and this failure mode does not occur; if you see it, check that `--headless` was actually passed and that the pendant is in Remote Control.
 
 ### 7.5 ANSI codes in script output
 
@@ -357,16 +399,25 @@ Sources:
 
 This 15-step sequence is what the orchestrator implements (steps 14-15 are handled inside the wrapper's DONE path).
 
+> **CORRECTED 2026-08-16.** The sequence is **not** uniform across parts. Each object is **8 or
+> 15 steps** — `line_green` **skips the regrasp** (steps 7–11), going straight from the first
+> safe-height to the second rotate and the insert. Read the per-object entry in
+> `Assembly_fmb_assembly_1_results.json` rather than assuming 15 steps, and note that order
+> matters across objects because the parts nest.
+
 ---
 
-## 9. What's next (Phase 3 starting line)
+## 9. What's next
 
-1. Run §3 to bring up the stack
-2. Run §4.3 to confirm grasp_ids for the 3 unverified objects
-3. Place each FMB1 object in workspace one at a time, run §4.1 per object
-4. Manually guide part during ACTIVE on at least 1 demo per object (DATA-02 quota)
-5. After each demo: confirm CSV+meta JSON written to `compliant_insertion_studio/logs/`
-6. After all 20 demos: run §5 cleanup
-7. Phase 4 dashboard work can proceed at-away on the collected data
+**Phase 3 collection closed in May 2026.** For current state, open work and the running order of
+the full assembly, read `docs/HANDOFF_NEXT_AGENT.md` — that is the live handoff. Open fixes from
+the 2026-08-16 session are in `docs/QUEUED_FIXES.md` (`ur5e-fmb1-demo` only).
 
-See `.planning/HANDOFF.json` `next_action` block for the verbatim resume sequence.
+> *Historical — the Phase 3 starting line, 2026-05-03:*
+> 1. Run §3 to bring up the stack
+> 2. Run §4.3 to confirm grasp_ids for the 3 unverified objects
+> 3. Place each FMB1 object in workspace one at a time, run §4.1 per object
+> 4. Manually guide part during ACTIVE on at least 1 demo per object (DATA-02 quota)
+> 5. After each demo: confirm CSV+meta JSON written to `compliant_insertion_studio/logs/`
+> 6. After all 20 demos: run §5 cleanup
+> 7. Phase 4 dashboard work can proceed at-away on the collected data

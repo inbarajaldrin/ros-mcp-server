@@ -14,7 +14,15 @@ You are iterating to decode a force-compliant peg-in-hole primitive from operato
 1. **DO NOT modify `compliant_insertion_studio/wrapper/` directly.** All FSM changes are written as `iterations/staged/<NNN>-<slug>/PATCH.diff`. The operator applies the patch at-robot. Validation happens at-robot, never in this loop.
 2. **DO NOT modify `compliant_insertion_studio/configs/`.** Same reason — that's an FSM-runtime config; modifications are part of `PATCH.diff`.
 3. **DO NOT use FSM stdout claims as ground-truth labels.** See `STATE.json:trust_hierarchy`. The CSV is the only source of truth.
-4. **DO NOT lock XY via `selection_vector`** (REFUTED v91).
+4. **DO NOT lock XY via `selection_vector`** (REFUTED v91). This rule is about the **translational**
+   axes only: XY must stay force-controlled so the peg can find the chamfer. It is **not** a
+   licence to make all six DOFs compliant. **Rotation stays LOCKED in SEARCH** —
+   `selection_vector = (True, True, True, False, False, False)`. Unlocking it broke the insert for
+   five consecutive real-arm runs on 2026-08-16: with rotation compliant, lateral force applies a
+   moment about the grasp point, the part pivots in the jaws while the gripper translates, and TCP
+   displacement stops being peg displacement — so every swept-area figure computed from TCP is
+   fiction. `SKILL.md` §10's unqualified "all-True" phrasing is wrong for SEARCH; see the
+   correction block there.
 5. **DO NOT use counter-residual direction for force corrections** (use TOWARD-seat per I003).
 6. **DO NOT exceed `cmd_fz = -9 N` or `|cmd_F_lat| = 6 N`.**
 7. **DO NOT remove the state-independent global seat detector** (validated v87).

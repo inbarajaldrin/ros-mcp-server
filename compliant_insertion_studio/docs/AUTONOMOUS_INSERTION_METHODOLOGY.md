@@ -8,6 +8,19 @@
 >
 > Unification of the two paths is queued as future work.
 >
+> **Which tree (2026-08-16):** the real path runs only from branch `ur5e-fmb1-demo` (or a worktree
+> at the tag above), with the grasp publisher started from that same tree. On `main` the grasp
+> publisher emits composite marker ids (101…303) while the assembly JSONs carry flat ids, so every
+> pick fails with `"Grasp point 1 not found"`. See `docs/HANDOFF_NEXT_AGENT.md`.
+>
+> **Re-verified 2026-08-16:** one genuine autonomous 4/4 pass. A second pass was **not** 4/4 —
+> `line_green` was false-accepted at a wedge and `inverted_u_yellow` seated only after the
+> operator pushed line_green in by hand. The prismatic path's seat-acceptance criterion is not
+> solved; see §9.4.
+>
+> **Rotation stays LOCKED in SEARCH** — `selection_vector = (T,T,T,F,F,F)`, see §2. `SKILL.md`
+> §10's "all-True" rule is wrong here and following it broke five consecutive real-arm runs.
+>
 > Pair this doc with the `insertion-control-law-derivation` skill, especially §13–§19, before changing code.
 
 ---
@@ -79,8 +92,16 @@ if |e| > ε:
 else:
     F_xy = 0
 F_z      = −F_press
-selection_vector = (T, T, T, F, F, F)
+selection_vector = (T, T, T, F, F, F)     # X/Y/Z compliant, rotation LOCKED — not optional
 ```
+
+**The rotation lock is load-bearing.** With rotation compliant, lateral force applies a **moment
+about the grasp point**: the part pivots in the jaws while the gripper translates, so TCP
+displacement stops being peg displacement and every swept-area / coverage figure computed from TCP
+becomes fiction. `SKILL.md` §10 states `selection_vector` "must remain all-True" as a hard rule —
+that is **wrong for SEARCH**, and an agent who followed it broke the insert for five consecutive
+real-arm runs on 2026-08-16. Every 2026-05-07 run that seated commanded `(1,1,1,0,0,0)` during
+SEARCH; check the `cmd_wrench_raw` sidecars before trusting any written rule to the contrary.
 
 The sign-flip is empirical: peg moves opposite-direction of commanded F_lat in our `base_link↔base` 180° setup. Single-axis behavior validated by `verify_baselink_motion.py`; multi-axis SEARCH inverted in practice. **Measure on your robot** before assuming sign convention.
 
@@ -120,8 +141,8 @@ if (peg progress in 1s window) / (spiral arc grown in 1s window) < 0.15:
 | `pitch_m` | 0.002 (2mm) | Chamfer-capture, not clearance |
 | `v_s_m_s` | 0.005 (5mm/s) | Operator drag speed |
 | `R_max_m` | 0.008 (8mm) | Per-grasp + cal-residual disk |
-| `Fmax_N` | 5.0 | Above stiction, below 30N abort |
-| `F_press_N` | 5.0–7.0 | 5 for multi-prong, 7-9 for single peg |
+| `Fmax_N` | 5.0 → **8.0 tuned** | Above stiction, below 30N abort. `translate_object` passes 8.0; 5.0 is measurably worse on u_brown. |
+| `F_press_N` | 5.0–7.0 → **9.0 tuned** | Originally 5 for multi-prong, 7-9 for single peg. `translate_object` now passes 9.0. |
 | `lag_pause_thresh_m` | 0.002 | Peg-to-ref tolerance |
 | `stall_progress_ratio` | 0.15 | tcp progress vs spiral arc |
 | `stall_window_s` | 1.0 | Detection window |
@@ -213,6 +234,9 @@ The autonomous SEARCH director was reached in 8 iterations from "no autonomous i
 | Excluding SEARCH/APPROACH from seat detector | Peg-already-seated cases aborted on lateral_stall | State-independent seat detector |
 | Using v4 thresholds derived from Z-locked operator demos for Z-compliant autonomous | Multi-prong parts saturate `|fz|` even at chamfer | Lower F_press to match operator drag; future: drop-relative-to-baseline detection |
 | Freezing spiral on chamfer-edge dip | Peg sits in marginal spot, doesn't fall in | Active gradient-following: continue motion in dip-direction |
+| **Unlocking rotation in SEARCH** (2026-08-16) | An agent read `SKILL.md` §10's "all-True" rule literally and made all 6 DOFs compliant. Lateral force then applied a moment about the grasp point: the part pivoted in the jaws while the gripper translated, TCP displacement stopped tracking peg displacement, and the swept-area figures computed from TCP were fiction — one session concluded "the hole is not within 6 mm" about a hole 3.38 mm away. Five consecutive failed real-arm runs. | Rotation stays LOCKED: `(T,T,T,F,F,F)`. Verify against the `cmd_wrench_raw` sidecars of runs that actually seated, not against a written rule. |
+| **Sampling a force reference on a still-settling arm** (2026-08-16) | The trajectory controller reports "complete" at commanded position, not at rest. A zero taken there is confidently wrong and nothing downstream can tell: 0.0 s settle → 15.6 N post-zero bias → force mode drove the TCP 116 mm upward. | Settle ≥ 1.5 s **before** the zero (5.36 s measured clean). Never shorten a settle/step-back window for speed. |
+| **Single-sample contact thresholds** (2026-08-16) | The wrench carries ~60 ms impulses reaching 40–60 N with nothing touched (`+0.18, +19.32, +56.98, +20.56, +0.36 N` at 50 Hz), tripping a 40 N gate. Peak varies run to run, so re-zeroing or slowing the move changes the number without fixing it. | Require the threshold to hold over a sustained window, the way v4 uses `off_sustain_s`. |
 
 ---
 
@@ -231,9 +255,36 @@ Possible directions:
 
 When a part must clear through an alignment phase before the final slot. The "underlying object" the spiral pushes against might itself move with the spiral. Operator-flagged but not yet implemented. Likely needs a separate FSM state with constraints on lateral force / spiral coverage.
 
-### 9.3 Sign convention root cause
+### 9.3 Sign convention root cause *(numbering continues; §9.4–§9.6 added 2026-08-16)*
 
 The empirical `F_xy = -Fmax * unit(e)` sign-flip works but the underlying convention conflict between `verify_baselink_motion`'s single-axis result and SEARCH's multi-axis behavior is unresolved. A clean fix requires a controlled multi-axis test in force-mode.
+
+### 9.4 Prismatic seat acceptance is too permissive — it false-accepted a wedge
+
+Opened 2026-08-16. `EXIT_GEOMETRIC_Z_TOL_BELOW_M = 8 mm`, but the real separation between a seat
+and a wedge is more than an order of magnitude tighter:
+
+| Case | depth_err | pos_dev | ori_dev |
+|---|---|---|---|
+| good `line_green` seat | **−1.65 mm** | 0.8 mm | 0.74° |
+| accepted wedge | **−2.32 mm** | 0.5 mm | 0.45° |
+
+**0.67 mm apart on depth, and `pos_dev` / `ori_dev` do not discriminate at all — the wedge scored
+*better* on both.** So the two secondary gates cannot be used to rescue the depth gate. This needs
+tuning against more seats; until it is done, do not treat a `[SUCCESS]` from the prismatic path as
+a seat without checking depth against the known-good figure for that part.
+
+### 9.5 `line_green` rotates at grasp
+
+Known, unsolved. When it happens the part seats proud or wedged, and the only recovery is a full
+re-seat. **Camera pose and force reads are both unreliable for detecting this state**, so there is
+no autonomous detector today — this is what forced the manual intervention in the second
+2026-08-16 pass. Any fix probably needs a signal neither of those two channels provides.
+
+### 9.6 `prismatic_peg_insertion` hangs after success
+
+Observed printing `[SUCCESS] Insertion complete on attempt 3` and then not exiting. Blocks
+unattended chaining of the assembly.
 
 ---
 
@@ -257,7 +308,7 @@ The empirical `F_xy = -Fmax * unit(e)` sign-flip works but the underlying conven
 ## 11. The minimum-viable port to a new (object, base)
 
 1. Confirm part is in `fmb1_assembly.json` with correct `grasp_id` and `gripper_width_mm`. If not, add it.
-2. Verify `DEFAULT_BASE_POSITION` is calibrated for this base (one-time per fixture; redo if fixture moves).
+2. Verify `DEFAULT_BASE_POSITION` is calibrated for this base (one-time per fixture; redo only if the fixture is physically moved). **A residual disagreement of ~11.6 mm between `DEFAULT_BASE_POSITION` and the camera is expected and is the documented CAD-prior error** — the chain is empirically 5–17 mm off. It is not evidence that the fixture moved; base1 is fixed and correct. Do not re-derive the calibration on the strength of that residual, and do not fold it into the FSM as a bias — absorbing it is what the spiral is for (see §8, anti-pattern 1).
 3. Run a centered-grasp GUIDED demo on this (object, grasp_id) to validate hole_observed matches CAD prediction within ~2mm.
 4. Run `loop_autonomous_insert.sh 1 --object <name> --no-randomize --regrasp`. If success → run with N=3 for stability.
 5. If failure: check `|fz|` profile during SEARCH. If saturated >5N throughout, lower F_press. If peg never moves, raise Fmax. If spiral exhausts without v4, the per-slot calibration error exceeds R_max — use centered-grasp demo to derive base correction.

@@ -96,9 +96,9 @@ Quick text note (not sensor data) per demo, in `analysis/data_collection_log.txt
 
 Before each batch:
 
-1. F/T sensor smoke test: `bash compliant_insertion_studio/scripts/ft_smoke_test.sh` (if it exists; otherwise just zero F/T and visually verify ~0 baseline at face-down EE)
+1. F/T sensor smoke test: `bash compliant_insertion_studio/scripts/ft_smoke_test.sh` (if it exists; otherwise just zero F/T and visually verify ~0 baseline at face-down EE). **Let the arm come to rest for ≥ 1.5 s before zeroing** — a zero taken on a still-settling arm reads plausible and is wrong (0.0 s settle measured 15.6 N of post-zero bias).
 2. Confirm aruco perception is publishing both topics (per SETUP.md §3.2-3.3)
-3. Confirm payload is set to 2.11 kg in the pendant (CLAUDE.md note)
+3. Confirm the **driver-side** payload was set at bringup — watch `launch_robot.sh` output for `Setting driver payload from ft_calibration_*.yaml:` … `success=True` (mass ≈ 2.11 kg). *Corrected 2026-08-16: setting payload on the pendant does **not** propagate to the ROS-side force_mode controller; only the `/io_and_status_controller/set_payload` service call does. See `docs/SETUP.md` §2.4.*
 
 After each demo:
 

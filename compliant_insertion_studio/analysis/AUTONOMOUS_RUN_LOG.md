@@ -65,6 +65,13 @@ python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
   --autonomous-search
 ```
 
+> **CORRECTED 2026-08-16 — do not copy `--step-back-seconds 1.0` out of this record.** That gate
+> is the arm-settle window before `zero_ftsensor`, and 1.0 s is inside the danger band: measured
+> this session, **0.0 s settle → 15.6 N post-zero bias**, which drove the TCP **116 mm upward**
+> once force mode engaged; 5.36 s → 0.11 N. Use **≥ 1.5 s**, and 5.0 s to match the collection
+> protocol. The reading is never an obvious error — it is a plausible number that force mode then
+> acts on. Left in place because it is what iter 1 actually ran.
+
 ### Run outcome (Iter 1 — FAILED, ABORT timeout)
 
 - Outcome: `abort, fsm_abort: SEARCH timeout 15.0s`
@@ -242,9 +249,23 @@ DONE / SEATED:    1778075609.62s    +5.0s after INSERT_DESCENT
 
 **Outcome: success / fsm_seated. Total time from APPROACH-contact to seated: ~10 s.**
 
-### Working configuration (frozen)
+### Working configuration (frozen at iter 8, 2026-05-06)
 
-| Component | Value | Source |
+> **CORRECTED 2026-08-16 — this table is a snapshot of iter 8, not the current configuration.**
+> Three rows were superseded within days of being written; read
+> `docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` §2.1 and the defaults in
+> `wrapper/contact_search_fsm.py:SearchDirector` for what actually runs.
+>
+> | Row | Frozen here | Current | Why it changed |
+> |---|---|---|---|
+> | Spiral center | CAD prior **+ (−3.66, −5.81) mm bias** | `predicted_tcp_xy`, **no FSM-side bias** | The hardcoded bias is the project's #1 anti-pattern — it conflates fixture-calibration error with per-grasp offset, so it "worked" for u_orange and broke u_brown. Fixture error belongs in `DEFAULT_BASE_POSITION`; per-grasp offset is what the spiral exists to absorb. |
+> | `r0` | 0.5 mm | **1.5 mm** | 0.5 mm still lands close enough to centre to stall for want of a traversal direction. |
+> | `F_press` / `Fmax` | 7 N / 5 N | **9 N / 8 N** via `translate_object` | Tuned since; 5/5 is measurably worse on u_brown. |
+>
+> The rest of the table (pitch, v_s, R_max, gain, damping, v4 thresholds, stall params, the
+> negated `F_lat` sign) still matches the code.
+
+| Component | Value (iter 8) | Source |
 |---|---|---|
 | Spiral center | CAD prior + (-3.66, -5.81) mm bias | Empirical from 10 GUIDED demos |
 | r0 | 0.5 mm | GPT |

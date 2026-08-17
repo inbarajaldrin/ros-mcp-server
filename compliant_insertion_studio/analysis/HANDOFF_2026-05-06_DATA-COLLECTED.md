@@ -241,4 +241,4 @@ If you have 20 minutes: just do the inventory script at the top, confirm dataset
 - Don't trust `fsm_seated` outcome label without verifying descent + final_xy from CSV. The skill explicitly warns about this.
 - Don't propose a parameter-sweep iteration loop. Operator has been burned by this multiple times.
 - Don't try to "fix" `fold_angle_err` by rotating EE. It's camera noise, not real geometry.
-- Don't add code that requires Remote pendant mode. Operator runs Local mode.
+- ~~Don't add code that requires Remote pendant mode. Operator runs Local mode.~~ **Reversed 2026-08-16:** the pendant now runs in **Remote Control** and the driver comes up headless (`launch_robot.sh real --headless`) — headless control cannot be established from Local. Remote-mode `dashboard_client` calls are fine; clearing a protective stop is still a manual pendant action.

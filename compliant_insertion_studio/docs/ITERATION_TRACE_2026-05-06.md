@@ -55,7 +55,14 @@ Results across 10 demos:
 | `vz` at-event | 0.90 (lower-is-event) |
 | `vz_rise_from_min_1s` | **0.92** (best single feature) |
 
-**First major surprise**: tilt was unobservable (FSM full-compliance keeps peg face-down to <0.01°). The original hypothesis "tilt-relax detector" was structurally invalid in this dataset.
+**First major surprise**: tilt was unobservable (<0.01° throughout). The original hypothesis "tilt-relax detector" was structurally invalid in this dataset.
+
+> **CORRECTED 2026-08-16.** I wrote "FSM full-compliance" here; that was wrong on both counts. The
+> FSM was **not** 6-DOF compliant — `selection_vector` is `(T,T,T,F,F,F)`, rotation LOCKED — so
+> the <0.01° is a **consequence of that clamp**, not a property of the contact. It is not evidence
+> that tilt carries no signal, and it must not be cited as grounds for unlocking rotation.
+> Unlocking rotation on 2026-08-16 did make tilt responsive (0.004° → 0.25° excursion) — and broke
+> the insert for five consecutive runs. See `analysis/CONTROL_LAW.md` and `SKILL.md` §10.
 
 **Second surprise**: `r_cop` magnitude is dominated by 1/Fz divergence at low Fz. Useful only when Fz is high.
 
@@ -253,6 +260,14 @@ inverted_u_yellow exposed hardcoded `--grasp-width 35`. Wrong (needs 56.7). Wire
 
 inverted_u_yellow autonomous: `|fz|` saturates 7N throughout SEARCH. Operator-mode demo on same part: median 3.14N. Difference: operator demos lock Z (selection_vector T,T,F,F,F,F); autonomous uses Z-compliant with Fz=-9N command. Multi-prong contact + Z-compliant = `|fz|` never collapses.
 
+> **CORRECTED 2026-08-16 — the 3.14 N figure does not generalise.** It came from a single demo and
+> was subsequently quoted as a corpus-wide operator statistic ("median 3.14 N, 50% of the time
+> below 3 N"). Re-measured across the whole GOLD corpus (contact→SIGUSR1, tool frame), operator
+> median `|fz|` is **3.30–8.89 N depending on the part**, and the fraction below 3 N ranges
+> **7.7%–45.3%**. There is no single operator drag pressure. The *qualitative* point this section
+> makes — autonomous Z-compliant SEARCH saturates `|fz|` where operator Z-locked GUIDED does not —
+> still stands; the number does not.
+
 Lowered F_press 9 → 5N. Helps but doesn't fundamentally fix. Next agent needs:
 - Relative `|fz|` detection (drop vs recent median)
 - Or peg-z descent dominance
@@ -264,7 +279,7 @@ Lowered F_press 9 → 5N. Helps but doesn't fundamentally fix. Next agent needs:
 
 | Original assumption | What data showed | Updated assumption |
 |---|---|---|
-| Tilt-relax is the Found Hole signal | Tilt < 0.01° throughout (FSM compliance keeps peg face-down) | Use `\|fz\|` magnitude state-transition |
+| Tilt-relax is the Found Hole signal | Tilt < 0.01° throughout — *corrected 2026-08-16: this is a consequence of the rotation clamp `(T,T,T,F,F,F)`, not of contact physics; see §A.1* | Use `\|fz\|` magnitude state-transition |
 | SIGUSR1 = Found Hole event | SIGUSR1 fires 2-6s AFTER actual rim-cross | Detect rim-cross (at chamfer edge), not operator mark |
 | `-r_cop` direction predicts hole | True in Q4 of search (+0.77 alignment) but only because operator chose direction | Don't use it autonomously — friction confound |
 | Single bias correction generalizes | u_orange: 6/6 success. u_brown: failed because bias wrong for that slot/grasp | Calibrate DEFAULT_BASE_POSITION; absorb per-grasp via spiral r_launch |

@@ -76,7 +76,7 @@ Demo collection is **three actors moving in lockstep**, not one operator command
 
 ### Operator preconditions per session
 
-1. **Pendant in Local mode** — agent commands robot via ROS, operator retains override authority on the pendant.
+1. **Pendant in Remote Control**, driver headless (`launch_robot.sh real --headless`) — agent commands robot via ROS, operator retains physical override at the pendant (E-stop, mode switch) and is the only one who can clear a protective stop. *(Updated 2026-08-16; collection demos through May 2026 ran with the pendant in Local and an External Control `.urp` played by hand.)*
 2. **F/T payload calibration valid** — `set_target_payload(mass, cog)` in bringup, smoke test passes per-session before any demo.
 3. **Hands-clear protocol** — for the 5-second STEP-BACK gate before each ZERO + force-mode entry, operator stands back. After zeroing, operator may approach.
 

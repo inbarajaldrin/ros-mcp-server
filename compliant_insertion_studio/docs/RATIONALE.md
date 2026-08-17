@@ -31,8 +31,13 @@
 - If you find yourself wanting to spawn an agent for routine work, ask first
 - The 4-researcher init at project start was right because the 4 surveys were genuinely independent (each researcher knew nothing about the others), parallel (5 min instead of 20), and produced artifacts (the .md files) rather than intermediate chatter that would have polluted the main context
 ### Safety conventions detail
-- Operator's pendant preference is Local mode (manual control retained)
-- Don't call `dashboard_client/recover`, `dashboard_client/play`, or other Remote-mode services
+- **Superseded 2026-08-16:** the pendant now sits in **Remote Control** and the driver comes up
+  headless (`launch_robot.sh real --headless`) — no program loaded, nothing played, and headless
+  control cannot be established from Local. The original rationale below was written when Local
+  was the standing preference; the *reason* it existed (operator keeps physical override, and
+  nothing in the wrapper may assume it can recover the robot in software) still holds.
+- ~~Operator's pendant preference is Local mode (manual control retained)~~
+- Don't call `dashboard_client/recover` — protective-stop recovery is still a manual action at the pendant, in either mode
 - Recovery from protective stops is manual on the pendant
 - After protective stop, operator clears it; only then can your code resume
 - Force-mode wrench limits exist because gear/part/fixture damage is the binding constraint, not benchmark performance

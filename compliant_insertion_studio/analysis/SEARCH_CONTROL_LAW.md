@@ -1,6 +1,27 @@
-# Search Director — Active F/T-Driven Control Law
+# Search Director — Active F/T-Driven Control Law (`-r_cop`)
 
-**Status:** derived from 10 GUIDED demos (Contact → rim-cross). Pending live validation.
+> ## ⚠️ HISTORICAL — this control law was tried and REFUTED. Do not implement it.
+>
+> **Status (corrected 2026-08-16):** derived from 10 GUIDED demos, run live on 2026-05-06, and
+> **refuted**. The `-r_cop` direction signal is a **friction positive-feedback loop**: the sensed
+> lateral reaction reinforces whatever direction was just commanded, so the controller confirms
+> its own heading and walks the peg away from the hole. The `+0.66` alignment with the operator's
+> drag below is real but confounded — it holds only because *the operator* chose the direction.
+> See `docs/ITERATION_TRACE_2026-05-06.md` and the anti-pattern lists in
+> `docs/HANDOFF_NEXT_AGENT.md` and `docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` §8.
+>
+> **The director actually in production** is the Archimedean spiral with constant-force tracking,
+> lag-pause and gradient-following override — specified in
+> **`docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` §2**, implemented in
+> `wrapper/contact_search_fsm.py:SearchDirector`. Read that, not this.
+>
+> **The one statement here that is still current** is the SEARCH selection vector below:
+> `(True, True, True, False, False, False)` — X/Y/Z compliant, **rotation LOCKED**. That is not
+> optional; unlocking rotation broke five consecutive real-arm runs on 2026-08-16.
+>
+> Everything else — the parameter table, the Expectation Declaration, the predicted failure modes,
+> the iteration plan — is the pre-run record of a hypothesis that did not survive contact with the
+> robot. Kept so the reasoning stays readable.
 
 **Companion to:** `CONTROL_LAW.md` (Found Hole detector).
 
@@ -11,7 +32,7 @@ APPROACH → Contact → SEARCH (active) → v4 fires → INSERT_DESCENT → Sea
 
 ---
 
-## Hypothesis
+## Hypothesis *(refuted — see banner)*
 
 When the peg is pressed down on the rim around the hole:
 1. Contact is at the rim edge — off the peg's central axis.
@@ -47,7 +68,7 @@ The fact that `-r_cop_base` predicts the OVERALL contact→rim_cross direction
 even better (+0.67) shows that the time-averaged search direction matches
 the geometric direction to the chamfer.
 
-## Control Law (v1)
+## Control Law (v1) *(refuted — kept for the record, do not implement)*
 
 At each tick during the SEARCH state:
 
@@ -101,12 +122,18 @@ return (F_lat_cmd_x, F_lat_cmd_y, F_z_cmd, 0, 0, 0)
 
 ```
 selection_vector = (True, True, True, False, False, False)
-                   # X, Y, Z compliant; rotations locked
+                   # X, Y, Z compliant; rotations LOCKED
 ```
 
-Same as APPROACH/INSERT_DESCENT. Different from GUIDED (which had Z locked
-because operator was pushing externally — autonomous needs Z compliant to
-press down).
+**This line is still current and still binding** — unlike the rest of this document. Same as
+APPROACH/INSERT_DESCENT. Different from GUIDED (which had Z locked because operator was pushing
+externally — autonomous needs Z compliant to press down).
+
+Rotation must stay locked. With rotation compliant, lateral force applies a moment about the
+grasp point: the part pivots in the jaws while the gripper translates, so TCP displacement stops
+being peg displacement and any swept-area or coverage figure computed from TCP is invalid. The
+"all-True selection vector" rule in `SKILL.md` §10 is wrong for SEARCH; following it broke the
+insert for five consecutive real-arm runs on 2026-08-16.
 
 ### Force-mode params
 

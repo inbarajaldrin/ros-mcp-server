@@ -169,9 +169,21 @@ Validated entries (kept in code):
 
 - v86 — seating predicate accepts 25mm-from-surface
 - v87 — state-independent global seat detector
-- v92 — selection_vector all-force-controlled (admittance everywhere)
+- v92 — selection_vector all-force-controlled (admittance everywhere) — **superseded, see below**
 - v93 — aggressive 15s stuck detection (URCap stress mitigation)
 - v96 — INITIAL_PRESS as a phase (direction must be data-derived per-attempt)
+
+> **CORRECTED 2026-08-16 (v92).** This entry is no longer "kept in code" and must not be cited as
+> a validated decision. Since 2026-05-06 every `selection_vector` tuple in
+> `contact_search_fsm.py` is `(True, True, True, False, False, False)` — **X/Y/Z compliant,
+> rotation LOCKED** — including both SEARCH command sites. See
+> `SESSION_STATE_2026-05-06.md` (rotation-lock row) for when it changed, and `SKILL.md` §10 for
+> the mechanism. An agent that read v92 (or SKILL.md's unqualified all-True rule) and re-enabled
+> rotational compliance broke the insert for five consecutive real-arm runs: with rotation
+> compliant, lateral force applies a moment about the grasp point, the part pivots in the jaws,
+> and TCP displacement stops being peg displacement — invalidating every swept-area figure
+> computed from TCP. The v92 finding remains true only in its original narrow sense (admittance
+> in the *translational* axes beats XY position-tracking, refuted at v91).
 
 **Meta-lesson:** parameter sweeps (v85/v89/v90/v94) consumed ~half the session and produced nothing. Cross-run CSV analysis (done at session END) produced all the actionable findings. The discovery-mode ralph loop encodes this as default behavior.
 
