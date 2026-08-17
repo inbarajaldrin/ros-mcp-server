@@ -298,11 +298,17 @@ def _subprocess_fast_path():
             *[f"{v:.6f}" for v in args.current_object_orientation],
             '--fz', '-9.0',
             '--step-back', 'auto',
-            # 2026-05-07: dropped to 0.0s. Operator is always pre-cleared
-            # before invoking the orchestrated assembly via this thin shell;
-            # the step-back gate is a redundant wait. Auto-mode with zero
-            # seconds short-circuits the gate's while-loop.
-            '--auto-step-back-seconds', '0.0',
+            # The gate serves two purposes: clearing the operator, and letting
+            # the arm come to rest before zero_ftsensor samples its baseline.
+            # Only the first is redundant here. The ZERO phase retracts ~5.4mm,
+            # and zeroing while that motion is still settling captures the
+            # transient instead of a static baseline: measured 0.0s settle ->
+            # post_zero_bias Fz = 15.6N, which force_mode then relieved by
+            # driving the TCP 116mm UP before the no-contact timeout fired.
+            # A 5.36s settle on the same arm/payload gave Fz = 0.11N.
+            # Anything between 0.0s and 5.36s is uncharacterized; the
+            # post-zero drift check in the wrapper is the actual guard.
+            '--auto-step-back-seconds', '3.0',
             '--no-prompt-notes',
             '--override-fz-cap',
             # 2026-05-07: skip the PRE F/T smoke test (~5-6s) — saves time on

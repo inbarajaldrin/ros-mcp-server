@@ -32,6 +32,46 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Hard ceiling on commanded lateral force, per SKILL.md section 10. Not tunable:
+# raising it requires explicit operator approval recorded in STATE.json.
+HARD_MAX_F_LAT_N = 6.0
+
+# Lateral traverse rate the peg actually achieves under force-mode compliance.
+# Measured across 350+ logged episodes and all four FMB1 parts: GOLD 1.29-1.42,
+# autonomous-success 1.07-1.15, autonomous-fail 1.13-1.40 mm/s. It is a property
+# of the arm + controller, not of any part, so it is safe to use for sizing the
+# search budget without becoming a per-part constant.
+SEARCH_TRAVERSE_M_S = 0.0014
+
+# Multiplier on the ideal sweep time, so the clock is a safety cap rather than the
+# normal terminator. 2.5x covers the observed 26s-to->69s spread on a single fixed
+# grasp; the search still ends early via spiral_exhausted once R_max is reached.
+SEARCH_BUDGET_HEADROOM = 2.5
+
+
+def spiral_sweep_seconds(r0_m: float, R_max_m: float, pitch_m: float,
+                         traverse_m_s: float = SEARCH_TRAVERSE_M_S) -> float:
+    """Wall-clock needed for an Archimedean spiral to sweep r0 -> R_max.
+
+    dr/dt = pitch * v / (2*pi*r)  =>  t = pi * (R_max^2 - r0^2) / (pitch * v).
+
+    Sizing the SEARCH deadline by hand is how the search came to be configured for
+    a radius it could never reach: R_max was 8mm while the 15s timeout affords
+    roughly 3.7mm at the measured traverse rate.
+    """
+    if pitch_m <= 0 or traverse_m_s <= 0:
+        return float("inf")
+    ideal = math.pi * max(0.0, R_max_m ** 2 - r0_m ** 2) / (pitch_m * traverse_m_s)
+    # HEADROOM: the formula assumes uninterrupted tracking. In practice theta stalls
+    # whenever the peg lags past lag_pause_thresh, and the gradient override replaces
+    # spiral tracking entirely while it is active (advancing no theta at all).
+    # Measured 2026-08-16 on one fixed u_brown grasp, hole at r=5.17mm / theta=661deg:
+    #   seated  25.9s   seated  53.8s   aborted at theta=471deg on a 69s budget
+    # A deadline set at the theoretical optimum therefore misses roughly half the
+    # runs. Time is a SAFETY cap here; the normal terminator is the director's
+    # spiral_exhausted abort once the reference actually reaches R_max.
+    return SEARCH_BUDGET_HEADROOM * ideal
+
 
 @dataclass
 class FSMAction:
@@ -161,6 +201,13 @@ class SearchDirector:
         self.last_v_tcp: tuple[float, float] = (0.0, 0.0)
         self.last_cmd_base: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self.last_mode: str = "uninit"
+        # Diagnostics (read by _tick_search for the per-command telemetry line).
+        # Without these the director is a black box: three separate paths can stall
+        # theta (fz_gate, lag-pause, gradient override) and the logs cannot tell them
+        # apart, which is why the SEARCH plateau resisted diagnosis.
+        self.last_spiral_advanced: bool = False
+        self.last_e_mag: float = 0.0
+        self.last_gradient_active: bool = False
         self.abort_reason: Optional[str] = None  # set when stall/radius abort
 
     def set_center(self, center_xy_base: tuple[float, float]) -> None:
@@ -172,6 +219,37 @@ class SearchDirector:
         self._spiral_arc_at_stall_start = 0.0
         self._tcp_pos_at_stall_start = None
         self._fz_buf.clear()
+        # Timing/velocity state must reset too: the soft re-SEARCH path calls this as
+        # a full reset, and without these the second search inherits a stale dt (the
+        # gap across the intervening INSERT_DESCENT) and stale velocity samples from
+        # the first search, corrupting both the damping term and the gradient override.
+        self._last_t = None
+        self._tcp_buf.clear()
+
+    def resume_after_false_detection(self) -> None:
+        """Continue the existing spiral instead of restarting it.
+
+        A v4 fire that the FSM then REJECTS (peg nowhere near the predicted seat)
+        is a false positive, not a reason to forget where the search has already
+        been. Restarting via set_center() threw away the accumulated radius.
+
+        Measured 2026-08-16 (u_brown, instrumented): SEARCH #1 expanded smoothly
+        to r=3.54mm over 6.8s; the rejected v4 fire reset it to r0=0.8mm at a new
+        center; the retry only regained 2.12mm before the timeout. The search
+        never got past ~3.5mm — not because it was slow, but because every false
+        detection wiped it.
+
+        Keep the center and theta (hence the radius already reached); clear only
+        the transient state that the intervening INSERT_DESCENT excursion
+        invalidated (stall tracker, force/velocity buffers, timestep).
+        """
+        self._t_stall_start = None
+        self._spiral_arc_at_stall_start = 0.0
+        self._tcp_pos_at_stall_start = None
+        self._fz_buf.clear()
+        self._last_t = None
+        self._tcp_buf.clear()
+        self.abort_reason = None
 
     def _estimate_velocity(self, t: float, tcp_x: float, tcp_y: float
                             ) -> tuple[float, float]:
@@ -241,6 +319,8 @@ class SearchDirector:
             self._theta += theta_dot * dt
             spiral_advanced = True
         # else: peg is lagging — hold theta until peg catches up.
+        self.last_spiral_advanced = spiral_advanced
+        self.last_e_mag = prev_e_mag
 
         new_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
         self.last_radius_m = new_r
@@ -290,6 +370,7 @@ class SearchDirector:
         gradient_active = (d_fz_dt < self.gradient_d_fz_dt_thresh  # fz dropping fast enough
                            and abs_fz < self.gradient_fz_thresh    # already at/near chamfer threshold
                            and v_mag > self.gradient_v_thresh)     # peg actually moving
+        self.last_gradient_active = gradient_active
 
         if gradient_active:
             # Continue in current peg-velocity direction at full Fmax.
@@ -315,9 +396,11 @@ class SearchDirector:
             # NEGATIVE sign: move-toward-target requires opposite-direction commanded F_lat
             Fx_cmd = -self.Fmax * ux_e - self.Kd * v_x
             Fy_cmd = -self.Fmax * uy_e - self.Kd * v_y
-            # Re-saturate at 1.25*Fmax (allows damping headroom)
+            # Re-saturate at 1.25*Fmax (allows damping headroom), but never above the
+            # SKILL.md section 10 hard ceiling: |cmd_F_lat| <= 6 N. With Fmax = 5 N the
+            # bare 1.25x factor permits 6.25 N, which breaches that limit.
             F_mag = math.hypot(Fx_cmd, Fy_cmd)
-            cap = self.Fmax * 1.25
+            cap = min(self.Fmax * 1.25, HARD_MAX_F_LAT_N)
             if F_mag > cap:
                 scale = cap / F_mag
                 Fx_cmd *= scale
@@ -583,6 +666,15 @@ class ContactSearchFSM:
         # picks up the chamfer signal.
         self.search_max_duration_s: float = float(self.cfg.get("search_max_duration_s", 15.0))
         self._search_entered: bool = False
+        # Set when re-entering SEARCH after a REJECTED v4 fire. SEARCH's first-tick
+        # branch re-seeds the spiral center (resetting theta, hence radius); on a
+        # resume that would undo resume_after_false_detection() and put us straight
+        # back to restarting the search from r0 every false positive.
+        self._search_resuming: bool = False
+        # Non-resettable across resumes (unlike _search_start_t, which restarts
+        # each segment). Bounds the total time the peg may spend on the rim.
+        self._search_total_start_t: Optional[float] = None
+        self._search_total_max_s: float = 0.0
         self._search_start_t: Optional[float] = None
         self._search_last_cmd_t: Optional[float] = None
         self._search_cmd_period_s: float = float(self.cfg.get("search_cmd_period_s", 0.10))
@@ -1673,12 +1765,36 @@ class ContactSearchFSM:
             # Per-grasp offset (the actual unknown at runtime) is what the
             # spiral search must discover by sweeping outward from the predicted
             # seat. Verified against u_brown centered-grasp demo bias = (+1.5, -4) mm.
-            if self.predicted_tcp_xy is not None:
+            # Total-search deadline: set once on the FIRST entry and never reset,
+            # so repeated resumes cannot extend the episode without bound. Sized
+            # from the spiral geometry and the measured traverse rate rather than
+            # guessed. The per-segment timeout still applies on top of this.
+            if self._search_total_start_t is None:
+                self._search_total_start_t = t
+                sd = self.search_director
+                self._search_total_max_s = spiral_sweep_seconds(
+                    sd.r0, sd.R_max, sd.pitch)
+            if self._search_resuming:
+                # Resuming after a rejected v4 — keep the existing center/theta.
+                self._search_resuming = False
+            elif self.predicted_tcp_xy is not None:
                 self.search_director.set_center(self.predicted_tcp_xy)
             else:
                 self.search_director.set_center((tcp_x, tcp_y))
             Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
             wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
+            # Rotation LOCKED in SEARCH. This is deliberate and empirically required,
+            # despite SKILL.md section 10 stating all-True as a hard rule:
+            #   - every 2026-05-07 run that actually seated commanded (1,1,1,0,0,0)
+            #     here (11-24 issues per run; see the cmd_wrench_raw sidecars)
+            #   - with rotation compliant, lateral force applies a MOMENT about the
+            #     grasp point, so the part pivots in the jaws and the gripper
+            #     translates while the peg tip barely moves. TCP displacement then
+            #     stops being peg displacement and the swept-area figures are
+            #     fiction (observed directly by the operator, 2026-08-16).
+            # The "tilt < 0.01 deg" note in the anti-pattern list is a consequence of
+            # this clamp, not evidence about contact physics -- but the clamp is
+            # wanted, so tilt steering stays unavailable by design here.
             sel = (True, True, True, False, False, False)
             action.new_wrench = True
             action.wrench_baselink = wrench
@@ -1695,14 +1811,6 @@ class ContactSearchFSM:
                           f"Fmax={self.search_director.Fmax:.1f}N "
                           f"first_cmd=({Fx:+.2f},{Fy:+.2f},{Fz:+.2f})N")
             self._search_last_cmd_t = t
-            return action
-
-        # Timeout safety
-        if t - self._search_start_t > self.search_max_duration_s:
-            action.kind = "exit_abort"
-            action.abort_reason = (
-                f"SEARCH timeout {self.search_max_duration_s}s — peg never crossed rim "
-                f"(v4 didn't fire). Likely r_cop direction reversed or peg stuck on rim corner.")
             return action
 
         # v4 detector — fires on rim-cross. SEARCH always autofires (v4 is the
@@ -1740,6 +1848,19 @@ class ContactSearchFSM:
             action.state = self.INSERT_DESCENT
             return action
 
+        # Timeout safety — checked AFTER the v4 detector above, deliberately. When this
+        # ran first, a rim crossing that completed its off_sustain window on the same
+        # tick as the deadline was discarded without ever being evaluated, turning a
+        # successful detection into "peg never crossed rim".
+        if (self._search_total_start_t is not None
+                and (t - self._search_total_start_t) > self._search_total_max_s):
+            action.kind = "exit_abort"
+            action.abort_reason = (
+                f"SEARCH total budget {self._search_total_max_s:.0f}s exhausted "
+                f"(swept to r={1000*self.search_director.last_radius_m:.2f}mm of "
+                f"R_max={1000*self.search_director.R_max:.1f}mm) — peg never crossed rim.")
+            return action
+
         # Per-tick spiral update (high-rate inner loop on the PD position-tracker)
         Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
         # Director self-aborted (spiral exhausted or stall)?
@@ -1756,6 +1877,18 @@ class ContactSearchFSM:
         if (self._search_last_cmd_t is None
                 or (t - self._search_last_cmd_t) >= self._search_cmd_period_s):
             wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
+            # Rotation LOCKED in SEARCH. This is deliberate and empirically required,
+            # despite SKILL.md section 10 stating all-True as a hard rule:
+            #   - every 2026-05-07 run that actually seated commanded (1,1,1,0,0,0)
+            #     here (11-24 issues per run; see the cmd_wrench_raw sidecars)
+            #   - with rotation compliant, lateral force applies a MOMENT about the
+            #     grasp point, so the part pivots in the jaws and the gripper
+            #     translates while the peg tip barely moves. TCP displacement then
+            #     stops being peg displacement and the swept-area figures are
+            #     fiction (observed directly by the operator, 2026-08-16).
+            # The "tilt < 0.01 deg" note in the anti-pattern list is a consequence of
+            # this clamp, not evidence about contact physics -- but the clamp is
+            # wanted, so tilt steering stays unavailable by design here.
             sel = (True, True, True, False, False, False)
             action.new_wrench = True
             action.wrench_baselink = wrench
@@ -1764,8 +1897,14 @@ class ContactSearchFSM:
             action.damping = 0.7
             self._search_last_cmd_t = t
             # Diagnostic per cmd cycle
+            sd = self.search_director
             action.msg = (f"SEARCH t+{t-self._search_start_t:.1f}s "
-                          f"r={1000*self.search_director.last_radius_m:.2f}mm "
+                          f"r={1000*sd.last_radius_m:.2f}mm "
+                          f"theta_adv={'Y' if sd.last_spiral_advanced else 'n'} "
+                          f"lag_e={1000*sd.last_e_mag:.2f}mm "
+                          f"grad={'Y' if sd.last_gradient_active else 'n'} "
+                          f"mode='{sd.last_mode}' "
+                          f"|fz|={abs(fz_smoothed):.2f}N "
                           f"cmd=({Fx:+.2f},{Fy:+.2f})N "
                           f"tcp=({1000*tcp_x:+.1f},{1000*tcp_y:+.1f})mm")
 
@@ -1884,23 +2023,37 @@ class ContactSearchFSM:
                     # - r0, pitch, R_max tightened to keep the search local
                     # - gradient thresholds dropped so any fz dip + slow drift
                     #   is enough to switch from spiral to follow-the-gradient
+                    # Soften the CONTACT FORCES only. Geometry (r0, pitch, R_max,
+                    # v_s) is deliberately left alone: the instrumented run showed
+                    # the spiral expanding correctly, so re-tightening it only
+                    # shrinks coverage. Lower press/lateral force reduces wedging
+                    # risk during the continued search without discarding progress.
                     self.search_director.F_press = 4.0    # was 9.0
                     self.search_director.Fmax    = 3.0    # was 8.0
-                    self.search_director.v_s     = 0.001  # 1mm/s (was 5)
-                    self.search_director.r0      = 0.0008  # 0.8mm
-                    self.search_director.pitch   = 0.001   # 1mm
-                    self.search_director.R_max   = 0.005   # 5mm
-                    # Loosen gradient-follower thresholds so it dominates
-                    self.search_director.gradient_d_fz_dt_thresh = -1.0
-                    self.search_director.gradient_fz_thresh      = 5.0
-                    self.search_director.gradient_v_thresh       = 1e-4
                     # Reduce damping so peg can move with light forces
                     self.search_director.Kd      = 10.0   # was 40
-                    # Reset SearchDirector internal state via set_center
-                    # (clears stall-tracker, theta, fz_buf, etc.) — center
-                    # at current TCP xy so the soft spiral grows from the
-                    # second-contact location, not the original.
-                    self.search_director.set_center((float(tcp_x), float(tcp_y)))
+                    # Gradient thresholds left at defaults: loosening them made the
+                    # override fire on ordinary force noise (|fz| median 4.31N sits
+                    # below the loosened 5.0N gate), replacing the spiral with
+                    # follow-your-own-velocity — the friction self-confirming drift
+                    # that SKILL.md section 19.2 refuted.
+                    #
+                    # RESUME rather than restart: this v4 fire was rejected by the
+                    # z-check, so it was a false positive. Keep the center and the
+                    # radius already covered.
+                    self.search_director.resume_after_false_detection()
+                    self._search_resuming = True
+                    # Allow the NEXT false detection to resume too. This gate was
+                    # one-shot per insert; combined with the resume it meant a
+                    # second false v4 re-entered INSERT_DESCENT with no path back
+                    # to SEARCH. The false site fires roughly every 6s, so a search
+                    # long enough to sweep R_max will meet it repeatedly. The
+                    # non-resettable total deadline below is what bounds this now.
+                    self._soft_research_fired = False
+                    # Require a fresh rim contact -> collapse cycle before v4 may
+                    # fire again, so the same false site cannot immediately re-trip
+                    # it (it fired at the identical xy on two consecutive runs).
+                    self.found_hole_detector.reset()
                     # Allow more time for the soft search
                     self._search_start_t = t
                     self.state = self.SEARCH
@@ -1911,7 +2064,9 @@ class ContactSearchFSM:
                         f"{tcp_z*1000:.2f}mm, |fz|={abs(fz_smoothed):.2f}N, "
                         f"|dz/dt|={speed_z*1000:.3f}mm/s, "
                         f"|tcp_z-predicted_seat|={abs(tcp_z-self.predicted_tcp_z)*1000:.2f}mm "
-                        f"(>5mm) → soft params: F_press=4N Fmax=3N r0=0.8mm pitch=1mm R_max=5mm"
+                        f"(>5mm, FALSE v4) → RESUME spiral at "
+                        f"r={1000*self.search_director.last_radius_m:.2f}mm "
+                        f"(soft forces: F_press=4N Fmax=3N Kd=10)"
                     )
                     action.state = self.SEARCH
                     # Reset insert_descent flag so re-entry from second SEARCH

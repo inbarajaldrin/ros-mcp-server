@@ -459,6 +459,11 @@ class DirectObjectMove(Node):
         self.force_monitor_timer = None
         self.force_check_interval = 0.02  # 20ms
         self.force_check_grace_period = 0.5  # seconds after movement starts
+        # Contact must persist this long to count. The observed spurious impulse is
+        # ~60ms wide; 0.15s clears it with margin while still stopping well within
+        # a 2.5s / 100mm descent (~6mm of further travel after true contact).
+        self.z_force_sustain_s = 0.15
+        self._z_exceed_since = None
         self.force_movement_start_time = None
         self.force_threshold_reached = False
         self.current_force = np.zeros(3)
@@ -775,6 +780,18 @@ class DirectObjectMove(Node):
         # Record when movement actually starts (for grace period)
         self.force_movement_start_time = _time.time()
         self.force_threshold_reached = False
+        # The 0.1s wait above is not enough for the arm to settle after the
+        # preceding hover move, so this sample can capture a motion transient as
+        # the reference. df_z then grows as the arm settles toward its true
+        # resting wrench, and trips the threshold with nothing touched.
+        # Observed 2026-08-16 on line_green: contact reported at Fz=59.6N with no
+        # physical contact. u_brown/u_orange escaped it only by accident -- their
+        # markers were occluded when the jaws opened, forcing a 2.5s retreat that
+        # happened to let the arm settle before the baseline was taken.
+        # Re-baseline once the grace period expires (see _check_force): by then
+        # the transient has decayed and the descent is at constant velocity,
+        # which contributes no inertial force.
+        self._baseline_rebased = False
         if self.force_monitor_timer is None:
             self.force_monitor_timer = self.create_timer(self.force_check_interval, self._check_force)
         self.get_logger().info(f"Force monitoring started with baseline: F={self.baseline_force}, T={self.baseline_torque}")
@@ -820,9 +837,36 @@ class DirectObjectMove(Node):
         if self.baseline_force is None:
             return
 
+        # First tick after the grace period: re-take the baseline from a settled
+        # arm. See _start_force_monitoring for why the pre-motion sample is unsafe.
+        if not getattr(self, '_baseline_rebased', True):
+            self._baseline_rebased = True
+            self.baseline_force = self.current_force.copy()
+            self.baseline_torque = self.current_torque.copy()
+            self.get_logger().info(
+                f"Force baseline re-taken after settle: F={self.baseline_force}")
+            return
+
         # Step 2 is top-down vertical descent - check Z force delta magnitude for contact
         df_z = self.current_force[2] - self.baseline_force[2]
-        z_triggered = abs(df_z) >= self.z_force_threshold
+
+        # DEBOUNCE. Real contact holds an elevated force; the wrench stream carries
+        # brief impulses that do not. Measured 2026-08-16 on line_green at 50Hz:
+        #   +0.18, +19.32, +56.98, +20.56, +0.36 N
+        # -- a symmetric ~60ms spike from and back to a quiet 0.0-0.4N baseline,
+        # with nothing touched. Firing on a single sample crossing turned that into
+        # a reported 57.7N "contact". Peak amplitude varies run to run (40.3-59.9N),
+        # which is why re-zeroing, re-baselining and slowing the descent each moved
+        # the number without fixing anything.
+        # Require the threshold to hold for a sustained window instead, mirroring
+        # the insert FSM's off_sustain_s treatment of its own force predicate.
+        if abs(df_z) >= self.z_force_threshold:
+            if self._z_exceed_since is None:
+                self._z_exceed_since = _time.time()
+        else:
+            self._z_exceed_since = None
+        z_triggered = (self._z_exceed_since is not None
+                       and (_time.time() - self._z_exceed_since) >= self.z_force_sustain_s)
 
         if z_triggered:
             self.get_logger().warn(f"Contact detected during step 2: Fz={df_z:.1f}N (threshold: {self.z_force_threshold}N). Soft stopping.")
@@ -1603,9 +1647,21 @@ class DirectObjectMove(Node):
         # Zero force sensor only in step 2, right before first trajectory execution
         # This ensures sensor is zeroed only after object is found, not during retries
         if self.step1_completed and self.baseline_force is None and not self.force_sensor_zeroed_for_step2:
+            import time as _time
+            # SETTLE BEFORE ZEROING. The trajectory controller reports step 1
+            # complete before the arm has finished ringing down, so a zero taken
+            # here bakes that transient into the sensor's own offset -- every
+            # reading downstream is then wrong by that amount, and the software
+            # baseline faithfully re-measures a corrupted signal.
+            # Observed 2026-08-16 on line_green: zero taken ~0.5s after the hover
+            # move, then a phantom 56.5N "contact" against a 40N threshold with
+            # nothing touched. u_brown/u_orange escaped only because an occluded
+            # marker forced a 2.5s retreat between the zero and the descent.
+            # The pre-existing sleep below waits for the SENSOR after zeroing;
+            # it does nothing about the ARM before it. Both are needed.
+            _time.sleep(1.5)
             self.zero_force_sensor()
             self.force_sensor_zeroed_for_step2 = True
-            import time as _time
             _time.sleep(0.5)  # Wait for sensor to settle after zeroing
 
         # Execute trajectory (same for both modes: mark as in progress and wait for completion)

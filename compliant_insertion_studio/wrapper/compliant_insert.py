@@ -84,11 +84,18 @@ DEFAULT_RATE_HZ = 100.0          # TELE-04: subsample 500 Hz wrench every 5th
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_AUTO_STEP_BACK_S = 5.0
 DEFAULT_BIAS_WARN_N = 2.0
-DEFAULT_DRIFT_WINDOW_S = 0.0     # 2026-05-07: was 1.0s. The drift check just
-                                 # samples bias for meta-JSON reporting; it
-                                 # doesn't gate operation. Skipping the wait
-                                 # saves ~1s per insert. If we later need to
-                                 # diagnose F/T drift, restore to 1.0.
+# A post-zero residual this large means zero_ftsensor sampled a transient rather
+# than a static baseline — subtracting it as if it were real bias feeds force_mode
+# a phantom load. Measured 2026-08-16: a zero taken with 0.0s settle left Fz =
+# 15.6N, which force_mode "relieved" by driving the TCP 116mm UP until the
+# no-contact timeout fired. Abort instead of proceeding on a baseline this bad.
+DEFAULT_BIAS_ABORT_N = 5.0
+DEFAULT_DRIFT_WINDOW_S = 1.0     # Window between the two post-zero bias samples.
+                                 # Was dropped to 0.0 on 2026-05-07 to save ~1s,
+                                 # which made the drift check structurally unable
+                                 # to observe drift (both samples taken at the
+                                 # same instant) — it reported None in every run
+                                 # since, including the 4/4 successes.
 
 # Controller names
 POS_CTRL = "scaled_joint_trajectory_controller"
@@ -145,6 +152,9 @@ def _parse_args(argv=None):
                    help="ACTIVE-phase max duration before clean exit as 'timeout'")
     p.add_argument("--bias-warn-n", type=float, default=DEFAULT_BIAS_WARN_N,
                    help="warn (not abort) if any axis post-zero bias exceeds this")
+    p.add_argument("--bias-abort-n", type=float, default=DEFAULT_BIAS_ABORT_N,
+                   help="ABORT if any axis post-zero bias exceeds this — the zero "
+                        "captured a transient, not a baseline")
     # Phase 5: per-shape termination config
     p.add_argument("--config", default=None,
                    help="path to a per-shape YAML in compliant_insertion_studio/configs/. "
@@ -1122,6 +1132,17 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
     )
 
     max_axis_f = max(abs(bias["Fx"]), abs(bias["Fy"]), abs(bias["Fz"]))
+    if max_axis_f > ep.args.bias_abort_n:
+        # Do NOT subtract a residual this large: it is not sensor bias, it is a
+        # botched zero. Subtracting it would hand force_mode a phantom load.
+        ep.get_logger().error(
+            f"Post-zero residual force {max_axis_f:.2f} N > {ep.args.bias_abort_n} N "
+            f"— zero_ftsensor captured a transient, not a static baseline. "
+            f"Refusing to enter force mode. Check that the arm is at rest before "
+            f"the zero (see --auto-step-back-seconds)."
+        )
+        ep.meta.set_outcome(s.OUTCOME_ABORT, f"post_zero_bias_too_large:{max_axis_f:.2f}N")
+        return s.PHASE_ABORT
     if max_axis_f > ep.args.bias_warn_n:
         ep.get_logger().warn(
             f"Post-zero residual force {max_axis_f:.2f} N > {ep.args.bias_warn_n} N "
@@ -1627,13 +1648,22 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 tcp_quat_xyzw=(float(_q.x), float(_q.y), float(_q.z), float(_q.w)),
             )
 
-            # Throttled diagnostic
+            # Throttled diagnostic.
+            # The FSM sets action.msg only on its own command cycle, so ANDing that
+            # against this 1s throttle meant the two almost never coincided and the
+            # SEARCH telemetry was silently dropped — the search looked like a black
+            # box for the whole 2026-08-16 debugging session. Latch the most recent
+            # message instead and emit whatever is current when the throttle expires.
             if not hasattr(ep, '_last_fsm_diag_t'):
                 ep._last_fsm_diag_t = 0.0
+                ep._latched_fsm_msg = ""
+            if fsm_action.msg:
+                ep._latched_fsm_msg = fsm_action.msg
             if (t_now_fsm - ep._last_fsm_diag_t) >= 1.0:
                 ep._last_fsm_diag_t = t_now_fsm
-                if fsm_action.msg:
-                    ep.get_logger().info(fsm_action.msg)
+                if ep._latched_fsm_msg:
+                    ep.get_logger().info(ep._latched_fsm_msg)
+                    ep._latched_fsm_msg = ""
 
             # State-transition log (always)
             if fsm_action.transitioned:
