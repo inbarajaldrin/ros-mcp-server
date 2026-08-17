@@ -116,8 +116,19 @@ LAUNCH_PID=$!
 echo "[launch_robot] Bringup PID: $LAUNCH_PID"
 
 # --- wait for controller_manager to be live ---
+# A wedged ros2 CLI daemon makes every `ros2 control` query return empty, which
+# reads as "controllers never came up" even when the driver is healthy. Observed
+# 2026-08-17: bringup declared failed while ur_ros2_control_node was running and
+# the reverse interface was connected. Restart the daemon before trusting the check.
+ros2 daemon stop >/dev/null 2>&1; sleep 2; ros2 daemon start >/dev/null 2>&1; sleep 2
+
+# 2026-08-17: was 15x2s. A cold start (robot just powered on) is still loading
+# ur_configuration_controller / freedrive_mode_controller / tool_contact_controller
+# at the 30s mark. Bailing here skips BOTH the controller activation and the
+# set_payload below -- and force mode without payload has no gravity compensation,
+# so a naive retry runs the arm in a worse state than a clean failure would.
 echo "[launch_robot] Waiting for controller_manager + force_torque_sensor_broadcaster..."
-for i in $(seq 1 15); do
+for i in $(seq 1 45); do
     sleep 2
     CM_OK=$(timeout 1 ros2 control list_controllers 2>/dev/null | grep -c "force_torque_sensor_broadcaster.*active" || true)
     if [[ "$CM_OK" -ge "1" ]]; then
@@ -126,7 +137,7 @@ for i in $(seq 1 15); do
     fi
 done
 if [[ "$CM_OK" -lt "1" ]]; then
-    echo "WARN: bringup didn't fully come up in 30s. Check log: $LOG_FILE" >&2
+    echo "WARN: bringup didn't fully come up in 90s. Check log: $LOG_FILE" >&2
     tail -10 "$LOG_FILE" | sed 's/^/  log: /'
     exit 4
 fi

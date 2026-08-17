@@ -38,6 +38,10 @@ source /opt/ros/humble/setup.bash 2>/dev/null
 source "$HOME/Desktop/ros2_ws/install/setup.bash" 2>/dev/null
 set -u
 
+# A wedged CLI daemon silently breaks every check below (queries return empty, so
+# a healthy stack reads as absent). Cheap to rule out up front.
+ros2 daemon stop >/dev/null 2>&1; sleep 2; ros2 daemon start >/dev/null 2>&1; sleep 2
+
 echo "════════════════════════════════════════════════════════════"
 echo "  stack_up — tree: $REPO"
 echo "════════════════════════════════════════════════════════════"
@@ -61,6 +65,13 @@ fi
 step 1/5 "UR driver (headless external control)"
 if timeout 8 ros2 control list_controllers 2>/dev/null | grep -q "scaled_joint_trajectory_controller.*active"; then
     ok "driver already up"
+    # An earlier launch_robot.sh that timed out mid-bringup leaves the controllers
+    # loaded but never reaches set_payload. "Driver up" therefore does NOT imply
+    # the payload is set, and force mode without it has no gravity compensation.
+    if ! grep -qs "Payload has been set successfully" /tmp/ur_bringup_logs/*.log; then
+        warn "payload not confirmed in any bringup log — set it before running force mode:"
+        warn "  see launch_robot.sh's set_payload block, or relaunch the driver cleanly"
+    fi
 else
     bash "$REPO/compliant_insertion_studio/scripts/launch_robot.sh" real --headless >/tmp/stack_up_driver.log 2>&1 \
         || { tail -15 /tmp/stack_up_driver.log; die "driver bringup failed (see /tmp/stack_up_driver.log)" 3; }
@@ -124,7 +135,15 @@ fi
 # ---------------------------------------------------------------- 5. verify
 step 5/5 "Pre-flight"
 FAIL=0
-FRAMES="$(timeout 12 ros2 topic echo --once /objects_poses_real 2>/dev/null | grep -c child_frame_id)"
+# Read a few times: detection needs a moment to stabilise after the camera starts,
+# and a single early read undercounts (observed 3 frames when 5 were present).
+FRAMES=0
+for _ in 1 2 3; do
+    N="$(timeout 12 ros2 topic echo --once /objects_poses_real 2>/dev/null | grep -c child_frame_id)"
+    [ "${N:-0}" -gt "$FRAMES" ] && FRAMES="$N"
+    [ "$FRAMES" -ge 5 ] && break
+    sleep 2
+done
 [ "${FRAMES:-0}" -ge 2 ] && ok "camera sees $FRAMES frames" || { warn "camera sees only ${FRAMES:-0} frames — are the parts in view?"; FAIL=1; }
 
 HZ="$(timeout 8 ros2 topic hz /grasp_points_real 2>&1 | grep -oE 'average rate: [0-9.]+' | head -1)"
