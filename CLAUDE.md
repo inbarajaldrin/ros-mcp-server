@@ -1,252 +1,194 @@
-<!-- GSD:project-start source:PROJECT.md -->
+# ros-mcp-server — UR5e + RG2 FMB1 assembly
 
-## ⚡ Next Agent Start Here
+**Branch `ur5e-fmb1-demo`. This is the tree that runs the real assembly.**
+Last verified **2026-08-16**: FMB1 seated 4/4 (u_brown, u_orange, line_green, inverted_u_yellow)
+with one operator action — placing a part on the table.
 
-**Read `compliant_insertion_studio/docs/HANDOFF_NEXT_AGENT.md` first.** It tells you where you are, what works, what's open, and which docs to read in what order.
-
-State as of **2026-05-07** (tag `real-world-verified-2026-05-07`, commit 75a418d): **all four FMB1 objects insert end-to-end via the replay script** — u_brown, u_orange, line_green, inverted_u_yellow seat correctly with zero manual intervention. Two insertion code paths in production (unification queued for later):
-
-| Object | Path | Why |
-|---|---|---|
-| u_brown, u_orange | `compliant_insert` wrapper (FSM autonomous SEARCH) | tight-fit pegs, XY-locked descent |
-| line_green, inverted_u_yellow | `prismatic_peg_insertion` (stash) via `translate_object` line_green/yellow branch | wide-grip parts; Rx/Ry compliance + geometric exit needed for jaws-on-rim seating |
-
-Routing happens in `primitives/translate_object.py` based on `object_name`. Per-object base offsets in `primitives/shared/config.py:PER_OBJECT_BASE_OFFSET_M` are applied to BOTH paths via `--final-base-pos`.
-
-Working command (full FMB1 assembly, all 4 objects on table, full stack up):
-```bash
-python3 -u ablations/replay_real_assembly.py \
-  --assembly-json ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json \
-  --only <object_name>      # one at a time, fail-stop
-```
-Or single-object autonomous (older API, still works for u_brown/u_orange):
-```bash
-python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
-  --object-name <name> --base-name base1 --grasp-id <N> \
-  --autonomous-search --search-F-press-N 5.0 --search-Fmax-N 5.0 \
-  --fz -9.0 --override-fz-cap --mode real
-```
-
-Multi-iteration regrasp test harnesses:
-```bash
-# u_brown / u_orange (compliant_insert):
-bash compliant_insertion_studio/scripts/loop_autonomous_insert.sh 3 --object <name> --no-randomize --regrasp
-# line_green (prismatic via translate_object):
-bash compliant_insertion_studio/scripts/loop_line_green_prismatic.sh 3
-```
-
-Doc routing (in order):
-1. `compliant_insertion_studio/docs/HANDOFF_NEXT_AGENT.md` — this handoff
-2. `compliant_insertion_studio/docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` — current working architecture (compliant_insert path)
-3. `compliant_insertion_studio/docs/ITERATION_TRACE_2026-05-06.md` — full reasoning trace (avoid re-exploring rejected paths)
-4. `compliant_insertion_studio/.claude/skills/insertion-control-law-derivation/SKILL.md` — methodology rules (binding for FSM changes)
-5. `compliant_insertion_studio/analysis/CONTROL_LAW.md` + `SEARCH_CONTROL_LAW.md` — predicate + director specs
-
-Reference (consult on demand, not on every session):
-- `compliant_insertion_studio/docs/STACK.md` — full tech stack tables, version compat, alternatives considered
-- `compliant_insertion_studio/docs/RATIONALE.md` — detailed rationale + historical Phase 5 architecture (now superseded)
-- `compliant_insertion_studio/docs/SETUP.md` — cold-start runbook (canonical bringup; see §1 for grasp_points_publisher requirement)
+> `main` **cannot** run the real assembly. Its June candidate-native migration made the grasp
+> publisher emit composite ids (101…303) while the assembly JSONs still carry flat ids (1, 2),
+> and the replacement `--grasp-candidate` flag refuses `--mode real` by design. Every pick fails
+> with *"Grasp point 1 not found"*. Work here, or fix that first.
 
 ---
 
-## Commands (the scripts you'll actually call)
+## 1. Bring up the cell
 
-### Bringup (start each session)
+Total ~1 minute. Sequence matters: driver → gripper → camera → grasp points.
+
+### 1.0 Confirm the robot is powered and in Remote Control
+
+Only the pendant needs to be booted. No program loaded, nothing played.
 
 ```bash
-# 1. Start the robot stack (UR driver + controllers, ~15s; add --rviz to also launch RViz):
-bash compliant_insertion_studio/scripts/launch_robot.sh real
-
-# 2. Start the camera (aruco_camera_localizer publishing /objects_poses_real):
-bash compliant_insertion_studio/scripts/launch_camera.sh --background
-
-# 3. Start the grasp-points publisher (publishes /grasp_points_real, required by
-#    move_to_grasp). DIES SILENTLY if the camera localizer restarts — recheck
-#    `ros2 topic list | grep grasp_points_real` before any pickup. (mode=default
-#    publishes both _real and _sim topics.)
-nohup python3 -u utils/grasp_points_publisher.py --mode default > /tmp/grasp_pub.log 2>&1 &
+cd ~/Documents/prismatic-manipulation
+python3 scripts/ur_dashboard.py --host 192.168.1.111 --real mode safety remote
+# want:  Robotmode: RUNNING | Safetystatus: NORMAL | remote: true
 ```
 
-After all three are up, **STOP then PLAY on the pendant** to (re)attach external control. Verify with `ros2 topic hz /tcp_pose_broadcaster/pose` (~500 Hz) and `ros2 topic hz /grasp_points_real` (~5 Hz).
+If `remote: false`, flip the pendant to Remote Control (top-right in PolyScope) — headless
+control cannot be established from Local. If mode is not RUNNING, `… --real power_up` powers on
+and releases brakes.
+
+### 1.1 Driver (headless — no pendant program)
+
+```bash
+bash compliant_insertion_studio/scripts/launch_robot.sh real --headless
+```
+
+Sets the F/T payload from `configs/ft_calibration_*.yaml` — **required**, force mode has no
+gravity compensation without it. Wait for `Robot connected to reverse interface` in
+`/tmp/ur_bringup_logs/real_bringup_*.log`.
+
+Omit `--headless` only if you have an External Control `.urp` on the pendant and want the URCap
+path; then you must press Play yourself.
+
+### 1.2 Gripper
+
+```bash
+nohup bash -c 'source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+  ros2 run onrobot_ros gripper_control' > /tmp/gripper.log 2>&1 &
+sleep 10; tail -3 /tmp/gripper.log      # want "Gripper initialized successfully"
+```
+
+### 1.3 Camera
+
+```bash
+bash compliant_insertion_studio/scripts/launch_camera.sh --background
+```
+
+### 1.4 Grasp points — **must run from THIS tree**
+
+```bash
+nohup bash -c 'source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+  cd '"$PWD"'; python3 -u utils/grasp_points_publisher.py --mode real' > /tmp/grasp_pub.log 2>&1 &
+```
+
+Running `main`'s copy publishes composite ids and every pick fails. Dies silently if the camera
+localizer restarts — re-check before any pick.
+
+### 1.5 Verify before moving the robot
+
+```bash
+ros2 topic echo --once /objects_poses_real | grep child_frame_id   # base1 + all 4 parts
+ros2 topic hz /grasp_points_real                                   # ~5 Hz
+ros2 topic hz /tcp_pose_broadcaster/pose                           # ~500 Hz
+ros2 control list_controllers | grep -E "scaled_joint|force_torque"  # both active
+ros2 topic echo --once /gripper_status                             # Safety/Circuit all False
+```
+
+---
+
+## 2. Run the assembly
+
+One object at a time. The script returns **1** on failure — check it and stop rather than chaining.
+
+```bash
+J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
+python3 -u ablations/replay_real_assembly.py --assembly-json $J --only u_brown
+python3 -u ablations/replay_real_assembly.py --assembly-json $J --only u_orange          --skip-startup
+python3 -u ablations/replay_real_assembly.py --assembly-json $J --only line_green        --skip-startup
+python3 -u ablations/replay_real_assembly.py --assembly-json $J --only inverted_u_yellow --skip-startup
+```
+
+Order matters — parts nest. Each is 8 or 15 steps (pick → rotate → place → regrasp → rotate →
+insert → release); `line_green` skips the regrasp.
+
+Two insertion paths, routed in `primitives/translate_object.py` by `object_name`:
+
+| object | path | typical |
+|---|---|---|
+| u_brown, u_orange | `compliant_insert` FSM (spiral SEARCH) | seats in <10 s, or on touchdown |
+| line_green, inverted_u_yellow | `prismatic_peg_insertion` (stash) | its own 3-attempt recovery ladder |
+
+**Don't trust the FSM's success label.** Verify from the raw CSV: `|tcp_z − predicted_seat| < 5 mm`
+and motion stopped. Good seats land within ±1.7 mm.
+
+### Single insert, part already held
+
+```bash
+python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
+  --object-name u_brown --base-name base1 --grasp-id 1 --mode real \
+  --already-held --current-object-orientation QX QY QZ QW \
+  --autonomous-search --fz -9.0 --override-fz-cap
+```
+
+Search force defaults differ by entry point: `translate_object` passes the **tuned** F_press=9 /
+Fmax=8; the older per-step examples used 5/5, which is weaker and demonstrably worse on u_brown.
 
 ### Shutdown
 
 ```bash
-bash compliant_insertion_studio/scripts/close_robot.sh   # cleanly stops driver + RViz + grippers
+bash compliant_insertion_studio/scripts/close_robot.sh
 pkill -SIGINT -f aruco_camera_localizer
-pkill -SIGTERM -f grasp_points_publisher
-```
-
-### Autonomous insertion (production)
-
-```bash
-# Single run from object on table → pick → rotate → place → regrasp → rotate → insert:
-python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
-  --object-name <name> --base-name base1 --grasp-id <N> \
-  --autonomous-search --search-F-press-N 5.0 --search-Fmax-N 5.0 \
-  --fz -9.0 --override-fz-cap --mode real
-# (--grasp-width auto-resolves from fmb1_assembly.json. --grasp-id auto-resolved by loop wrapper.)
-
-# Multi-iteration test with fresh regrasps between runs:
-bash compliant_insertion_studio/scripts/loop_autonomous_insert.sh 3 \
-  --object <name> --no-randomize --regrasp
-
-# Single autonomous run when peg is ALREADY held (chains from prior insert):
-python3 -u -m compliant_insertion_studio.scripts.run_assembly_step \
-  --object-name <name> --base-name base1 --grasp-id <N> \
-  --already-held --current-object-orientation QX QY QZ QW \
-  --autonomous-search --search-F-press-N 5.0 --search-Fmax-N 5.0 \
-  --fz -9.0 --override-fz-cap --mode real
-
-# Re-grasp a held part (release at clear area + camera-grasp again):
-python3 -u -m compliant_insertion_studio.scripts.regrasp_held_object \
-  --object-name <name> --grasp-id <N> --mode real --skip-camera-check
-```
-
-### Data collection (new objects / re-calibration)
-
-```bash
-# Single GUIDED demo for new object — operator drags peg to hole, hits Enter to mark:
-python3 -u -m compliant_insertion_studio.scripts.collect_regime_data \
-  --object <name> --base base1 --grasp-id <N> --grasp-width <W> \
-  --fz 9.0 --step-back-seconds 5.0 \
-  --held-quat QX QY QZ QW \
-  --variations A_pos_x_10mm --reps 1
-# Reads hole_observed_operator from meta to derive bias for DEFAULT_BASE_POSITION.
-```
-
-### Send SIGUSR1 to the wrapper (for GUIDED data collection mid-drag)
-
-```bash
-# Find PID, then signal:
-kill -SIGUSR1 $(pgrep -f "compliant_insertion_studio.wrapper.compliant_insert" | tail -1)
-# Or send SIGUSR2 to mid-episode re-zero F/T.
-```
-
-### Diagnostics / debugging
-
-```bash
-# Verify camera publishing (5s timeout):
-timeout 5 ros2 topic echo --once /objects_poses_real
-
-# Verify wrench rate (~500 Hz expected):
-ros2 topic hz /force_torque_sensor_broadcaster/wrench
-
-# Read current TCP pose:
-ros2 topic echo --once /tcp_pose_broadcaster/pose
-
-# Stop the robot stack cleanly (use this, not pkill):
-pkill -SIGINT -f "ros2.*launch.*ur5e"
-```
-
-### Common abort/cleanup signals
-
-```bash
-# Send SIGTERM to autonomous run (wrapper triggers safe-state cleanup):
-pkill -SIGTERM -f "compliant_insertion_studio.scripts.run_assembly_step"
-
-# Hard-stop the gripper bridge (NOT pkill -f gripper_control — won't match):
-pkill -f "socat.*ttyUR"
-# Wait 5+ seconds before respawning to avoid PTY/termios race.
+P=grasp_points; pkill -SIGTERM -f "${P}_publisher"
 ```
 
 ---
 
-## Project
+## 3. Hard constraints
 
-**Compliant Insertion Studio** — force-compliant peg-in-hole insert primitive on UR5e + OnRobot RG2. Replaces the broken `prismatic_peg_insertion.py` real-mode insert path. Per-object parameterized algorithm. Proof-of-concept: FMB1 assembly (u_brown, u_orange, line_green, inverted_u_yellow). Single-config-file extension to new parts.
-
-**Stack** (full detail in `docs/STACK.md`): ROS2 Humble + Python 3.10 + `rclpy` + `ur_robot_driver` 2.12 + OnRobot RG2 driver. Force mode via `ur_msgs/srv/SetForceMode` only — no URScript injection.
-
-### Hard constraints
-
-- **Pendant in Local mode.** No `dashboard_client/recover` calls.
-- **Force-mode wrench ≤ 5 N default.** Higher only with explicit operator approval + `--override-fz-cap`.
-- **SIGTERM cleanup must reach safe-state exit** even if force_mode is partway down. Use `os.setsid` + process-group SIGTERM in subprocess chains.
-- **Hands-off during F/T zero**: operator confirmation gate, +1 s post-zero drift check, no operator load during baseline windows.
-- **Safe height before move_home when holding a part.** Direct `move_home` plans straight-line trajectories that ignore inserted bases.
-- **Don't commit unless explicitly approved.** No `Co-Authored-By` lines.
-- **`_references/` and `compliant_insertion_studio/logs/` are gitignored.** Never commit.
-- **All project code under `compliant_insertion_studio/`.** Touch `primitives/` only for host-repo bug fixes.
-
-### F/T calibration is three layers
-
-| Layer | Frequency | Purpose | Trigger |
-|---|---|---|---|
-| **Foundational** payload calibration | Per gripper mount (one-time) | Mass + CoG + bias via `set_target_payload`; written into `launch_robot.sh` | New gripper / sensor remount / orientation-bias observed |
-| **Session** F/T smoke test | Per session | Zero + 5s hold + bias verification in known neutral pose | Start of session / after protective stop / after physical bump |
-| **Per-pose** `zero_ftsensor` | Immediately before force-mode | Single-pose bias subtraction | Inside wrapper's PRE phase |
-
-`zero_ftsensor` does **not** substitute for foundational. `set_payload` from `launch_robot.sh` is what gives force_mode correct gravity comp — pendant payload setting does NOT propagate.
+- **Force mode ≤ 5 N default**, ≤ 9 N with `--override-fz-cap`. Lateral ≤ 6 N (§10 of the skill).
+- **Rotation stays LOCKED in SEARCH** — `selection_vector = (T,T,T,F,F,F)`. The skill's all-True
+  rule is wrong here; see anti-patterns.
+- **Settle the arm before any force zero or baseline** (≥1.5 s after a Cartesian move).
+- **SIGTERM cleanup must reach safe-state exit** even mid-force-mode.
+- **Held-object pose chains, not reads.** The gripper occludes the camera; chain
+  `current_object_orientation` from the previous primitive's `__RESULT_JSON__`.
+- **Safe height before `move_home` while holding a part** — `move_home` plans straight lines
+  that ignore seated parts.
+- **Module mode only:** `python3 -m primitives.X`, never `python3 primitives/X.py`.
 
 ---
 
-## Conventions
+## 4. Anti-patterns that have actually bitten
 
-### Key rules
+- **Taking a force reference on a moving arm.** The trajectory controller reports "complete" at
+  commanded position, not at rest. Found in 4 files on 2026-08-16; symptoms are plausible wrong
+  numbers, never errors — a 15.6 N bad zero drove the TCP **116 mm upward**. 0.0 s settle → 15.6 N;
+  5.36 s → 0.11 N.
+- **Single-sample contact thresholds.** The wrench carries ~60 ms impulses (measured
+  `+0.18, +19.32, +56.98, +20.56, +0.36 N` with nothing touched). Require a sustain window.
+- **Unlocking rotation in SEARCH.** Lateral force then applies a moment about the grasp point:
+  the part pivots in the jaws, the gripper translates, and TCP displacement stops meaning peg
+  displacement — making every swept-area number fiction. Cost: 5 failed runs. Check the
+  `cmd_wrench_raw` sidecars of runs that seated before trusting a written rule.
+- **Trusting a wrapper exit code.** `python3 …; echo "EXIT=$?"` exits 0 regardless.
+- **Tuning parameters before analysing data.** Record the raw trace first — three "fixes" were
+  attributed to a force number before anyone logged the actual signal.
+- **`pkill -f` self-matching its own shell** (exit 144). Build the pattern at runtime:
+  `P=grasp_points; pkill -f "${P}_publisher"`.
+- **Killing the gripper bridge with `pkill -f gripper_control`** — won't match. Use
+  `pkill -f "socat.*ttyUR"`, then wait 5 s before respawning (PTY race).
 
-- **Research before code**: spend 5–15 min on WebSearch/WebFetch before any non-trivial deliverable. Clone references to `_references/repos/`, save articles to `_references/articles/`.
-- **Honesty over confidence**: if you don't know, say so. Pause and research; don't invent SOPs from extrapolation.
-- **Per-piece copy/modify/write-fresh decision** when borrowing from references. Credit sources in code comments.
-- **Inline default**: do work in main conversation so operator can see/intervene. Subagents only for parallel + independent + artifact-producing work.
-- **Phase boundaries are guidance, not gates**: finish coupled work together; update REQUIREMENTS.md traceability where it actually completed.
-- **Held-object pose chains, not reads**: when gripper holds a part, NEVER read its pose from `/objects_poses_real` (camera occluded by gripper). Chain `current_object_orientation` from prior primitive's `__RESULT_JSON__` output.
-- **Strip ANSI before parsing ROS2 CLI**: `ros2 control list_controllers` and others emit `\x1b[…m` color escapes even on pipe. Use `re.sub(r'\x1b\[[0-9;]*m', '', line)` before tokenizing.
+---
 
-### Ask the operator before
+## 5. Where the detail lives
 
-Adding a new top-level dependency, writing > 200 LOC without checkpoint, performing any robot motion, modifying primitives outside `compliant_insertion_studio/`, or departing from a documented decision in PROJECT/REQUIREMENTS/ROADMAP.
-
-### Anti-patterns (don't)
-
-- Tuning parameters before analyzing data. Data first, structural change second.
-- Subagents for routine work.
-- Treating `translate_object --insert` as the insert path. The new wrapper (`compliant_insert.py`) is the replacement.
-- Launching primitives via script path: `python3 primitives/move_to_safe_height.py` fails with ModuleNotFoundError because primitives import siblings. Use module mode: `python3 -m primitives.move_to_safe_height`.
-- Treating wrench data as `base_link` frame. The CSV `wrench_frame_id = tool0_controller`. Direction-aware features (r_cop, F_lat) MUST be computed in tool frame.
-- Counter-residual direction for force corrections during wedge-breaking. When peg is wedged at corner X, wrist sensor reads OPPOSITE direction. Use CAD-derived TOWARD-target instead.
-- Pushing harder downward to break peg-on-rim wedges. Empirically deepens the wedge. Right action: retract 0.5–1.5mm + drop Fz to -2 to -4N + spiral search at lower gains. (Sources in `RATIONALE.md`.)
-- Detecting "stuck" from instantaneous v_z. Force-mode oscillation makes v_z dip momentarily even mid-wedge. Use net z-descent over 2s window with Fz smoothed over 0.5s.
-- Killing the gripper bridge with `pkill -f gripper_control` (won't match — actual cmdline is `python3 /opt/ros/humble/bin/ros2 run …`). Use `pkill -f "socat.*ttyUR"` or `kill -9 <PID>` after `ps aux | grep gripper_control`.
-- Restarting socat-using processes without 5+ second wait between kill and respawn (PTY/termios race produces `(22, 'Invalid argument')` on next pyserial open).
-- **Self-matching `pgrep -f` in `until` loops.** A bash one-liner like `until ! pgrep -f "loop_iterate.*u_orange" >/dev/null; do sleep 2; done` (run via Bash-tool `eval`) **never exits** because the spawning bash itself contains the literal pattern in its cmdline — pgrep matches its own host shell. Fixes: (a) match python invocation specifically (`pgrep -f "python3.*loop_iterate"`), (b) wait on a known PID with `while kill -0 <PID> 2>/dev/null`, or (c) use the Monitor tool.
-
-Plus the autonomous-SEARCH-specific anti-patterns in `docs/HANDOFF_NEXT_AGENT.md` "Anti-patterns the current session worked through (DO NOT repeat)".
-
-### Decision matrix — copy / modify / write-fresh
-
-| Decision | When |
+| need | doc |
 |---|---|
-| **Copy** (lift file, attribute source) | Same language + framework + license + fits architecture as-is |
-| **Modify after copying** | Mostly fits, surface tweaks only (paths, message types) |
-| **Write fresh from algorithm/pattern** | Different language/framework/era; translate the *idea*, not lines |
-| **Skip** | Doesn't fit stack/scope (e.g., needs accelerometer we don't have) |
+| session handoff, open work | `compliant_insertion_studio/docs/HANDOFF_NEXT_AGENT.md` |
+| FSM architecture, SEARCH director | `compliant_insertion_studio/docs/AUTONOMOUS_INSERTION_METHODOLOGY.md` |
+| **binding rules for any FSM change** | `compliant_insertion_studio/.claude/skills/insertion-control-law-derivation/SKILL.md` |
+| why a rejected path was rejected | `compliant_insertion_studio/docs/ITERATION_TRACE_2026-05-06.md` |
+| cold-start runbook, troubleshooting | `compliant_insertion_studio/docs/SETUP.md` |
+| stack versions, alternatives | `compliant_insertion_studio/docs/STACK.md` |
+| predicate + director specs | `compliant_insertion_studio/analysis/CONTROL_LAW.md`, `SEARCH_CONTROL_LAW.md` |
+| per-object grasp id / width | `ablations/eval_resources/fmb1_assembly.json` |
+| queued fixes | `docs/QUEUED_FIXES.md` |
+
+RG2 firmware quirks (no precise positioning mode; `/gripper_width` vs `/gripper_width_offset`
+differ by 9.2 mm; safety-circuit latch needs a Compute Box power-cycle) — `SETUP.md` §6–7.
+
+Sim/real parity: `primitives/shared/config.py` reads `ROS_MCP_MODE` at import, injected per
+subprocess. Real path unchanged when unset.
 
 ---
 
-## OnRobot RG2 firmware quirks (verified 2026-05-03)
+## 6. Conventions
 
-- **No precise positioning mode**: only modes 1 (grip), 8 (stop), 16 (grip_w_offset). Both 1 and 16 are GRIP commands — close past target by 1-5mm. Width-based grasp checks must tolerate ≥5mm error.
-- **Safety circuit latch**: bits 3, 5 of status reg 268. Per OnRobot docs: "can only be reset by power cycling." Software path: Modbus write `unit=63 addr=0 value=2` triggers Compute Box power-cycle (~10s); requires pendant STOP+PLAY after.
-- **Width topics differ by 9.2mm**: `/gripper_width` is RAW mechanism, `/gripper_width_offset` is jaw-tip-to-jaw-tip gap (raw − 2 × 4.6mm fingertip). For grasping, use `/gripper_width_offset`.
-
----
-
-## Subprocess invocation rule
-
-Inside the wrapper / orchestrator scripts, ALWAYS launch primitives via module mode:
-
-```
-python3 -m primitives.move_to_safe_height ...    # CORRECT
-python3 primitives/move_to_safe_height.py ...    # WRONG (ModuleNotFoundError, often swallowed)
-```
-
----
-
-## Per-object lookup (auto-resolved)
-
-`primitives/shared/config.py:get_gripper_width_mm(object, grasp_id)` and `get_grasp_id_for_assembly(object)` read from `ablations/eval_resources/fmb1_assembly.json`. `run_assembly_step.py`, `regrasp_held_object.py`, and `loop_autonomous_insert.sh` auto-resolve. Pass `--grasp-width N` or `--grasp-id N` to override.
-
----
-
-`docs/RATIONALE.md` has the long-form WHY for these rules + the legacy Phase 5 architecture (Mode A/B, iterative-loop workflow, etc.) which has been superseded by the autonomous SEARCH director.
+- Research before non-trivial code; clone references to `_references/repos/`.
+- Say when you don't know. Don't invent an SOP by extrapolation.
+- Ask before: new top-level dependency, >200 LOC unchecked, **any robot motion**, editing
+  primitives outside `compliant_insertion_studio/`, departing from a documented decision.
+- Don't commit unless asked. No `Co-Authored-By` trailers.
+- `_references/` and `compliant_insertion_studio/logs/` are gitignored — never commit.
