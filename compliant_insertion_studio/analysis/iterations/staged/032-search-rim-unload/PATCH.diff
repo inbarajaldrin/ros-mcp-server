@@ -1,0 +1,170 @@
+diff --git a/compliant_insertion_studio/wrapper/contact_search_fsm.py b/compliant_insertion_studio/wrapper/contact_search_fsm.py
+index 5abb397..b46f4be 100644
+--- a/compliant_insertion_studio/wrapper/contact_search_fsm.py
++++ b/compliant_insertion_studio/wrapper/contact_search_fsm.py
+@@ -152,6 +152,15 @@ class SearchDirector:
+                  stall_progress_ratio: float = 0.15,
+                  stall_window_s: float = 1.0,
+                  lag_pause_thresh_m: float = 0.002,
++                 # Rim-stall unload (staged/032-search-rim-unload). Defaults from
++                 # analysis/scripts/42_rim_stall_trigger.py over 29 inserts.
++                 stall_unload_window_s: float = 2.0,
++                 stall_unload_xy_m: float = 0.0003,
++                 unload_press_N: float = 1.5,
++                 unload_max_s: float = 1.5,
++                 unload_caught_up_m: float = 0.0005,
++                 unload_cooldown_s: float = 0.5,
++                 unload_max_attempts: int = 3,
+                  near_miss_fz_thresh_N: float = 4.0,
+                  # 2026-05-07: gradient-follower thresholds. Lowered in soft
+                  # second-stage SEARCH so the gradient mode kicks in on
+@@ -172,6 +181,14 @@ class SearchDirector:
+         self.stall_progress_ratio = float(stall_progress_ratio)
+         self.stall_window_s = float(stall_window_s)
+         self.lag_pause_thresh_m = float(lag_pause_thresh_m)
++        self.stall_unload_window_s = float(stall_unload_window_s)
++        self.stall_unload_xy_m = float(stall_unload_xy_m)
++        self.unload_press = float(unload_press_N)
++        self.unload_max_s = float(unload_max_s)
++        self.unload_caught_up_m = float(unload_caught_up_m)
++        self.unload_cooldown_s = float(unload_cooldown_s)
++        self.unload_max_attempts = int(unload_max_attempts)
++        self._reset_unload()
+         self.near_miss_fz_thresh_N = float(near_miss_fz_thresh_N)
+         # Tunable gradient-follower thresholds (soft mode lowers these)
+         self.gradient_d_fz_dt_thresh = float(gradient_d_fz_dt_thresh)
+@@ -225,6 +242,26 @@ class SearchDirector:
+         # the first search, corrupting both the damping term and the gradient override.
+         self._last_t = None
+         self._tcp_buf.clear()
++        self._reset_unload()
++
++    def _reset_unload(self) -> None:
++        self._rim_xy_hist = deque()
++        self._t_last_advance: Optional[float] = None
++        self._unload_until: Optional[float] = None
++        self._unload_cooldown_until: float = float('-inf')
++        self._unload_attempts: int = 0
++        self._arc_at_unload: float = 0.0
++        # FSM ignores the v4 rim-cross detector until this time: an unload drops |fz|
++        # on purpose, which is exactly the signature v4 fires on.
++        self.v4_suppressed_until: float = float('-inf')
++        self.last_unloading: bool = False
++
++    def _end_unload(self, t: float) -> None:
++        self._unload_until = None
++        self._unload_cooldown_until = t + self.unload_cooldown_s
++        self.v4_suppressed_until = max(self.v4_suppressed_until, self._unload_cooldown_until)
++        self._rim_xy_hist.clear()
++        self._t_last_advance = t
+ 
+     def resume_after_false_detection(self) -> None:
+         """Continue the existing spiral instead of restarting it.
+@@ -271,6 +308,22 @@ class SearchDirector:
+         Fz_cmd = -self.F_press
+         self.abort_reason = None
+ 
++        # RIM-STALL UNLOAD (staged/032-search-rim-unload, 2026-10-07). Pressed on the rim
++        # at F_press, friction can pin the peg ~lag_pause_thresh behind the reference:
++        # theta holds, the lateral push points at a reference that no longer moves, and
++        # nothing changes until the total budget runs out (146 s frozen within 0.2 mm,
++        # insert_u_brown_20261007_211322). The lateral_stall detector below only counts
++        # ADVANCED arc, so it never sees this. While unloading, the press drops to a light
++        # contact so the existing constant-force xy push can slide the peg to the
++        # reference; rotation stays locked (selection vector unchanged).
++        unloading = self._unload_until is not None and t < self._unload_until
++        if self._unload_until is not None and not unloading:
++            self._end_unload(t)
++        if unloading:
++            Fz_cmd = -self.unload_press
++        in_unload_window = unloading or t < self._unload_cooldown_until
++        self.last_unloading = unloading
++
+         # Center must be set by FSM at first tick; if not, default to current.
+         if self._center_xy is None:
+             self.set_center((tcp_x_base, tcp_y_base))
+@@ -292,7 +345,7 @@ class SearchDirector:
+         # If peg is off-rim (small fz), the v4 detector handles transition.
+         # Director still commands Fz_press to keep peg pressed; lateral
+         # command is reduced (peg may already be falling into chamfer).
+-        if abs(fz_smoothed_base) < self.fz_gate:
++        if abs(fz_smoothed_base) < self.fz_gate and not in_unload_window:
+             self.last_mode = "spiral_off_rim"
+             self.last_cmd_base = (0.0, 0.0, Fz_cmd)
+             # Don't advance theta when off rim (peg doesn't need to spiral)
+@@ -322,8 +375,47 @@ class SearchDirector:
+         self.last_spiral_advanced = spiral_advanced
+         self.last_e_mag = prev_e_mag
+ 
++        if unloading and prev_e_mag <= self.unload_caught_up_m:
++            self._end_unload(t)               # slid to the reference: restore the press
++            unloading = False
++            self.last_unloading = False
++            Fz_cmd = -self.F_press
++
++        # Rim-stall trigger: theta held AND the TCP has not moved in xy for a full window.
++        self._rim_xy_hist.append((t, tcp_x_base, tcp_y_base))
++        while self._rim_xy_hist and t - self._rim_xy_hist[0][0] > self.stall_unload_window_s:
++            self._rim_xy_hist.popleft()
++        if spiral_advanced or self._t_last_advance is None:
++            self._t_last_advance = t
++        if (not in_unload_window
++                and t - self._t_last_advance >= self.stall_unload_window_s
++                and self._rim_xy_hist
++                and t - self._rim_xy_hist[0][0] >= 0.9 * self.stall_unload_window_s):
++            hx = [p[1] for p in self._rim_xy_hist]
++            hy = [p[2] for p in self._rim_xy_hist]
++            if math.hypot(max(hx) - min(hx), max(hy) - min(hy)) < self.stall_unload_xy_m:
++                if self._unload_attempts >= self.unload_max_attempts:
++                    self.abort_reason = (
++                        f"rim_stall: pinned on the rim through {self._unload_attempts} "
++                        f"unloads (no xy motion > {1000*self.stall_unload_xy_m:.1f}mm in "
++                        f"{self.stall_unload_window_s:.1f}s)")
++                    self.last_mode = "abort_rim_stall"
++                    self.last_cmd_base = (0.0, 0.0, Fz_cmd)
++                    return 0.0, 0.0, Fz_cmd
++                self._unload_attempts += 1
++                self._unload_until = t + self.unload_max_s
++                self.v4_suppressed_until = self._unload_until + self.unload_cooldown_s
++                self._arc_at_unload = self._spiral_path_len
++                unloading = True
++                self.last_unloading = True
++                Fz_cmd = -self.unload_press
++
+         new_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
+         self.last_radius_m = new_r
++        # Progress = the reference advanced 2 mm of ARC since the last unload, which only
++        # happens while the peg keeps up. (Radius growth undercounts at large r.)
++        if self._unload_attempts and self._spiral_path_len - self._arc_at_unload > 0.002:
++            self._unload_attempts = 0         # the spiral got moving again
+ 
+         # Abort: spiral exhausted
+         if new_r > self.R_max:
+@@ -438,6 +530,8 @@ class SearchDirector:
+ 
+         self.last_cmd_base = (Fx_cmd, Fy_cmd, Fz_cmd)
+         self.last_mode = f"spiral r={1000*new_r:.2f}mm θ={math.degrees(self._theta):.0f}°"
++        if unloading:
++            self.last_mode += f" UNLOAD {self._unload_attempts}/{self.unload_max_attempts}"
+         return Fx_cmd, Fy_cmd, Fz_cmd
+ 
+ 
+@@ -1816,7 +1910,17 @@ class ContactSearchFSM:
+         # v4 detector — fires on rim-cross. SEARCH always autofires (v4 is the
+         # only transition trigger out of SEARCH; SIGUSR1 is not used in
+         # autonomous mode by convention).
+-        v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
++        # Suppressed while the director unloads off a rim stall (staged/032): the
++        # self-inflicted |fz| drop is v4's firing signature. Reset afterwards so it
++        # needs a fresh rim-contact -> collapse cycle.
++        if t < getattr(self.search_director, 'v4_suppressed_until', float('-inf')):
++            v4_fired_now = False
++            self._v4_suppressed_active = True
++        else:
++            if getattr(self, '_v4_suppressed_active', False):
++                self.found_hole_detector.reset()
++                self._v4_suppressed_active = False
++            v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
+         if v4_fired_now:
+             self.v4_predicate_fire = {
+                 "t_s": float(t),

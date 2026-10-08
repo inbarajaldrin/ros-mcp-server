@@ -32,8 +32,14 @@ from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinemat
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 
 class MoveToSafeHeight(Node):
-    def __init__(self, height=None):
+    def __init__(self, height=None, lift_by=None, translate_xy=None):
         super().__init__('move_to_safe_height')
+        # Horizontal translation (m) at constant height, orientation kept — same Cartesian
+        # seam. Used by the seat-check retry to shift a part by its measured offset.
+        self.translate_xy = translate_xy
+        # Relative lift (m): raise the flange this much above where it is now, on the same
+        # straight vertical seam, instead of all the way to SAFE_HEIGHT (2026-10-07).
+        self.lift_by = lift_by
         self.joint_names = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
@@ -257,6 +263,18 @@ class MoveToSafeHeight(Node):
             facedown_offset_z = -GRIPPER_CENTER_TOOL_OFFSET[2]  # -0.2286
             gripper_center_safe_z = self.safe_height + facedown_offset_z
             target_flange_z = gripper_center_safe_z - tool_offset_world[2]
+            if self.lift_by is not None:
+                target_flange_z = float(T_fk[2, 3]) + float(self.lift_by)
+                self.get_logger().info(f"Relative lift: flange {T_fk[2, 3]:.4f} -> {target_flange_z:.4f} m")
+            elif self.translate_xy is not None:
+                target_flange_z = float(T_fk[2, 3])        # translate only: hold the height
+            target_pos = None
+            if self.translate_xy is not None:
+                target_pos = [float(T_fk[0, 3]) + float(self.translate_xy[0]),
+                              float(T_fk[1, 3]) + float(self.translate_xy[1]), target_flange_z]
+                self.get_logger().info(
+                    f"Translate xy: flange ({T_fk[0, 3]:.4f}, {T_fk[1, 3]:.4f}) -> "
+                    f"({target_pos[0]:.4f}, {target_pos[1]:.4f}) at z {target_flange_z:.4f}")
             self.get_logger().info(
                 f"Gripper center safe Z: {gripper_center_safe_z:.4f}, "
                 f"target flange Z: {target_flange_z:.4f} (offset: {tool_offset_world[2]:.4f})"
@@ -264,10 +282,16 @@ class MoveToSafeHeight(Node):
 
             # Use fast Jacobian-based IK for dense waypoints
             self.get_logger().info("Computing dense IK waypoints (Jacobian)...")
-            waypoints = compute_cartesian_waypoints_ik(
-                self.current_joint_angles, target_flange_z,
-                num_waypoints=num_waypoints
-            )
+            if target_pos is not None:
+                waypoints = compute_cartesian_waypoints_ik(
+                    self.current_joint_angles, target_flange_z,
+                    num_waypoints=num_waypoints,
+                    target_pos=target_pos, target_orientation=R_fk)
+            else:
+                waypoints = compute_cartesian_waypoints_ik(
+                    self.current_joint_angles, target_flange_z,
+                    num_waypoints=num_waypoints
+                )
             if waypoints is None:
                 self.error_message = "Motion planning failed: no collision-free path to the safe height could be computed"
                 self.get_logger().error(self.error_message)
@@ -389,9 +413,22 @@ def output_result(result):
 
 
 def main(args=None):
+    import argparse
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument('--lift-by', type=float, default=None,
+                    help='Lift the flange this many metres above its current height (straight '
+                         'up, orientation kept) instead of going to SAFE_HEIGHT. 0 < m <= 0.05.')
+    ap.add_argument('--translate-xy', type=float, nargs=2, default=None, metavar=('DX', 'DY'),
+                    help='Move the flange horizontally by (DX, DY) m in the robot base frame, '
+                         'height (or --lift-by height) held, orientation kept. |each| <= 0.02.')
+    known, _ = ap.parse_known_args()      # --mode / --object-name are accepted and ignored
+    if known.lift_by is not None and not (0.0 < known.lift_by <= 0.05):
+        raise SystemExit("--lift-by must be in (0, 0.05] m")
+    if known.translate_xy is not None and max(abs(v) for v in known.translate_xy) > 0.02:
+        raise SystemExit("--translate-xy components must be within +-0.02 m")
     rclpy.init(args=args)
 
-    node = MoveToSafeHeight()
+    node = MoveToSafeHeight(lift_by=known.lift_by, translate_xy=known.translate_xy)
 
     try:
         if node.error_message:

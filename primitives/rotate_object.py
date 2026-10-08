@@ -237,6 +237,7 @@ class ExtendedCardinalOrientations:
 
 
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+from primitives.shared.camera_up import camera_z
 
 
 class ReorientForAssembly(Node):
@@ -1067,8 +1068,13 @@ class ReorientForAssembly(Node):
             # Round to 1 decimal to avoid floating point boundary issues (e.g., 44.999° vs 45.001°)
             error_bucket = int(round(obj_error, 1) / error_tolerance)
 
-            # SECONDARY: Minimize EE rotation (prefer smallest joint motion)
-            return (error_bucket, 0, ee_rotation)
+            # SECONDARY: camera away from the table (2026-10-07). Within an error bucket the
+            # two wrist rolls give the same object pose; the camera-down one preceded a
+            # toppled staging drop, the camera-up one seated. Never outranks object error.
+            camera_down = 1 if camera_z(R.from_quat(candidate[1]).as_matrix()) < 0 else 0
+
+            # TERTIARY: Minimize EE rotation (prefer smallest joint motion)
+            return (error_bucket, camera_down, ee_rotation)
 
         candidates.sort(key=sort_key)
 
@@ -1083,6 +1089,13 @@ class ReorientForAssembly(Node):
 
             # Note: The sort_key already handles facing-away preference, object error,
             # and EE rotation in the correct priority order. No need for post-sort override.
+            cz = camera_z(R.from_quat(best_cardinal_quat).as_matrix())
+            self.get_logger().info(f"  -> Chose {best_cardinal_name}: camera_z={cz:+.2f} "
+                                   f"({'camera up' if cz >= 0 else 'CAMERA DOWN'})")
+            if cz < 0:
+                self.get_logger().warn(
+                    "  -> No camera-up candidate at this object error — the grasp wrist did not "
+                    "allow one (move_to_grasp --base-name picks it). Proceeding camera-down.")
         
         return (best_cardinal_name, best_cardinal_quat, best_resulting_object_R, 
                 best_matched_target_R, best_object_error, candidates)

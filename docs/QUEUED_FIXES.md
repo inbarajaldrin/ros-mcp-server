@@ -88,6 +88,52 @@ that is what actually governs coverage.
 
 Meta records only the last, so multi-false-fire runs can't be reconstructed post hoc.
 
+### 7b. ~~INSERT_DESCENT seat check is symmetric; a seat *below* prediction is rejected~~ — DONE 2026-10-07 (one-sided band −20 mm…+5 mm, `seat_accept_below_m`)
+
+Added **2026-10-07** (`insert_u_brown_20261007_193849`). The v4 fire was genuine, but the
+z-check `|tcp_z − predicted_seat| > 5 mm` rejected it and resumed a soft search that pressed
+on a seated part until stopped by hand at ~120 s (total SEARCH budget is 173 s here).
+
+| | CAD | observed | offset |
+|---|---|---|---|
+| first contact (rim) | 230.07 mm | 219.3 mm | −10.8 |
+| rest after descent | 199.07 mm | 188.0 mm | −11.1 |
+| descent contact→rest | 31.0 mm | 31.3 mm | +0.3 |
+
+Everything shifted by the grasp (the regrasp held the part 10.9 mm off — root cause was a
+single 11 mm z blip in the step-2 grasp-point sample, fixed in `move_to_grasp` with a median
+of recent samples). A false v4 (rim snag) leaves the peg *above* the seat; ending *below* it
+after descending the full slot depth is a seat. Proposed: make the rejection one-sided, or
+re-anchor the predicted seat by `surface_z − predicted_rim` at first contact. FSM change —
+stage it per the insertion skill before any robot test.
+
+**Second occurrence and cause (2026-10-07, u_orange 215309):** same −11.1 mm deeper seat,
+then SEARCH on a seated part → rim-unload couldn't move it → `rim_stall` abort → replay
+cleanup `move_home` without safe height pulled the part out (cleanup fixed: safe height
+first). Cause of the depth: the grasp-point z of a part on its side flips between two
+values ~10 mm apart (−0.032 / −0.042) with the viewpoint's fold interpretation; regrasp
+flange z 0.1870 vs normal 0.1971 (u_orange) and 0.1862 (u_brown) explains both seats to
+within 0.7 mm. Neither the latest sample nor the hover median picks the right branch
+reliably — open calibration/estimation question, deliberately not chased.
+
+### 7c. Start the SEARCH spiral at a learned per-(object, fold) offset — staged for later
+
+Added **2026-10-07**. Where the hole actually was vs the spiral centre (predicted seat),
+seated runs only (Aug 16-17 + Oct 7):
+
+| object | fold eq (xyzw) | n | mean (dx, dy) | std |
+|---|---|---|---|---|
+| u_brown | (0, .71, -.71, 0) | 8 | (+1.8, -2.4) mm | (0.6, 1.7) mm |
+| u_brown | (-.71, 0, 0, .71) | 4 | 0 for touchdown seats; one bad-grasp outlier (+2.6, +6.7) | — |
+| u_orange | both | 7 | 0.1 mm (always seats on touchdown) | — |
+
+For u_brown's first fold the hole sits consistently ~3 mm toward (+x, -y); the spiral
+sweeps the wrong side first and finds it a full turn later. Proposal: derive a
+per-(object, fold) start-offset table from seated CSVs with a script, and centre the
+spiral at predicted + offset when that (object, fold) has enough consistent history.
+Strictly per fold (SKILL.md §11 — priors mirror between fold equivalents). Force can't
+sense "close" beyond ~0.5-1 mm (#5), so where to start is the lever, not when to switch.
+
 ---
 
 ## Blocked — needs new data, not a code change

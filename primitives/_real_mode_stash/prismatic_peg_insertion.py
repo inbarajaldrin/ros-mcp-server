@@ -84,6 +84,13 @@ APPROACH_SPEED = 0.02           # m/s — trajectory descent speed (duration = d
 DEFAULT_NUM_WAYPOINTS = 60
 SETTLING_TIME = 0.5             # seconds - ignore sensor data after controller switch
 
+# Force zero (2026-10-07, mirrors compliant_insert's DEFAULT_BIAS_ABORT_N): zero only once the
+# measured TCP is still, then refuse force mode if the post-zero residual is a phantom load.
+ZERO_STILL_WINDOW_S = 0.5       # TCP must stay within ZERO_STILL_TOL_M over this window
+ZERO_STILL_TOL_M = 0.0002
+ZERO_STILL_TIMEOUT_S = 5.0
+ZERO_RESIDUAL_ABORT_N = 5.0
+
 # Exit criteria
 Z_TOLERANCE = 0.005             # m — 5mm tolerance (peg may not reach exact target due to tilt/friction)
 EXIT_TORQUE_AVG_THRESHOLD = 0.09  # N-m - rolling average Tx/Ty must be below this to exit
@@ -466,15 +473,63 @@ class PrismaticPegInsertion(Node):
 
     # -- Force sensor --
 
+    def _wait_until_still(self):
+        """Block until the TCP has moved < ZERO_STILL_TOL_M over ZERO_STILL_WINDOW_S (measured
+        pose, not the trajectory's "complete"), or ZERO_STILL_TIMEOUT_S. True if still."""
+        hist = []
+        end = time.time() + ZERO_STILL_TIMEOUT_S
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.01)
+            if self.ee_pose is None:
+                continue
+            now = time.time()
+            hist.append((now, self.get_ee_position()))
+            hist = [h for h in hist if now - h[0] <= ZERO_STILL_WINDOW_S]
+            if now - hist[0][0] >= ZERO_STILL_WINDOW_S * 0.95:
+                pts = np.array([p for _, p in hist])
+                if np.max(np.linalg.norm(pts - pts.mean(axis=0), axis=1)) < ZERO_STILL_TOL_M:
+                    return True
+        return False
+
     def zero_force_sensor(self):
+        # 2026-10-07: same guard as compliant_insert (2026-08-16): a zero taken while the arm
+        # is still moving leaves a phantom load that force mode "relieves" by driving the TCP
+        # up. inverted_u_yellow: -9 N in free air, TCP rose 150-250 mm instead of descending.
+        if not self._wait_until_still():
+            self.get_logger().warn(
+                f"[ZERO] arm not still within {ZERO_STILL_TIMEOUT_S:.0f}s — zeroing anyway, residual check follows")
         self.get_logger().info("Zeroing force sensor...")
         result = subprocess.run(
             ['ros2', 'service', 'call', '/io_and_status_controller/zero_ftsensor', 'std_srvs/srv/Trigger'],
             capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
+        if result.returncode != 0:
+            return False
+        def _residual():
+            samples = []
+            end = time.time() + 0.3
+            while time.time() < end:
+                rclpy.spin_once(self, timeout_sec=0.01)
+                if self.wrench is not None:
+                    f = self.wrench.force
+                    samples.append((f.x, f.y, f.z))
+            return np.max(np.abs(np.median(np.array(samples), axis=0))) if samples else None
+
+        time.sleep(0.3)
+        residual = _residual()
+        if residual is not None and residual > ZERO_RESIDUAL_ABORT_N:
+            # The zero can land after the first read (2026-10-08, u_orange) — re-read once.
             time.sleep(0.5)
-            return True
-        return False
+            residual = _residual()
+        if residual is None:
+            self.get_logger().error("[ZERO] no wrench sample after zero")
+            return False
+        if residual > ZERO_RESIDUAL_ABORT_N:
+            self.get_logger().error(
+                f"[ZERO] post-zero residual {residual:.2f} N > {ZERO_RESIDUAL_ABORT_N} N — "
+                f"zero captured a transient; refusing force mode this attempt")
+            return False
+        self.get_logger().info(f"[ZERO] ok, post-zero residual {residual:.2f} N")
+        return True
 
     # -- Force mode --
 

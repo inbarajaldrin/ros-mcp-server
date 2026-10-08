@@ -92,25 +92,53 @@ def _sigint_handler(signum, frame):
     global _INTERRUPTED
     _INTERRUPTED = True
     print("\n\n!!! SIGINT received — killing active subprocess and aborting replay !!!", flush=True)
-    if _ACTIVE_PROC is not None and _ACTIVE_PROC.poll() is None:
+    if _ACTIVE_PROC is not None:
+        # Wait for the WHOLE process group, not just the direct child: an insert runs
+        # translate_object -> compliant_insert, and the wrapper's SIGINT handler stops
+        # force mode and switches controllers back, which outlived the old 3 s grace.
+        # Exiting early left it finishing alone and, twice on 2026-10-07, left the
+        # robot's external-control program stopped.
         try:
-            os.killpg(os.getpgid(_ACTIVE_PROC.pid), signal.SIGINT)
+            pgid = os.getpgid(_ACTIVE_PROC.pid)
         except Exception:
+            pgid = None
+
+        def _group_alive():
+            if pgid is None:
+                return _ACTIVE_PROC.poll() is None
             try:
-                _ACTIVE_PROC.terminate()
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except Exception:
+                return _ACTIVE_PROC.poll() is None
+
+        def _wait_group(seconds):
+            end = time.time() + seconds
+            while time.time() < end and _group_alive():
+                try:
+                    _ACTIVE_PROC.wait(timeout=0.2)   # reap the direct child
+                except Exception:
+                    time.sleep(0.2)
+            return not _group_alive()
+
+        for sig, grace in ((signal.SIGINT, 20.0), (signal.SIGTERM, 10.0)):
+            if not _group_alive():
+                break
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, sig)
+                else:
+                    _ACTIVE_PROC.send_signal(sig)
             except Exception:
                 pass
-        # Give the child up to 3s to clean up, then kill hard
-        try:
-            _ACTIVE_PROC.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(_ACTIVE_PROC.pid), signal.SIGTERM)
-            except Exception:
-                try:
-                    _ACTIVE_PROC.kill()
-                except Exception:
-                    pass
+            if _wait_group(grace):
+                break
+        # Never SIGKILL: a SIGKILL mid force-mode leaves nothing to switch it off.
+        if _group_alive():
+            print("!!! primitive process group still alive after SIGINT+SIGTERM — "
+                  "run compliant_insertion_studio/scripts/stop_run.sh", flush=True)
     sys.exit(130)  # 128 + SIGINT
 
 
@@ -216,6 +244,134 @@ def snapshot_robot_state(timeout_s: float = 2.0) -> dict:
         return {'error': f'snapshot timeout after {timeout_s}s'}
     except Exception as e:
         return {'error': f'snapshot failed: {e}'}
+
+
+# ---------------------------------------------------------------------------
+# Staging landing check (2026-10-07)
+# ---------------------------------------------------------------------------
+# The recorded with_regrasp sequences place the part down once and assume it lands on
+# the face that lets the second pass insert. 2026-10-07: u_brown was laid on its side
+# and toppled back upright; the regrasp took it anyway and the insert ran with the
+# wrong face held. A landing is just another start state (planning/sequence_planner.py):
+# after the staging regrasp observes it from above, ask the planner's question — can a
+# single pass (pick -> rotate -> insert) seat it from here? If not, run another
+# place-down pass.
+
+STAGING_MAX_RETRIES = 2   # extra place-down passes before giving up
+
+
+def staging_single_pass_ok(obj: str, base_name: str, observed_quat):
+    """(feasible, up_face_err_deg) for a part observed at the staging area, or None if
+    it cannot be evaluated (no observation / no assembly entry)."""
+    from compliant_insertion_studio.planning.sequence_planner import (
+        quat_to_matrix, single_pass_feasible)
+    from primitives.shared.config import DEFAULT_BASE_ORIENTATION
+    from primitives.shared.fold_symmetry import load_symmetry_data
+    from utils.data_path_finder import (find_assembly_json_by_base_name,
+                                        get_assembly_data_dir, get_symmetry_dir)
+    if observed_quat is None or not base_name:
+        return None
+    try:
+        jf = find_assembly_json_by_base_name(base_name, str(get_assembly_data_dir()))
+        comps = json.load(open(jf))['components']
+        tq = next(c for c in comps if c['name'] == obj)['rotation']['quaternion']
+        R_target = (quat_to_matrix(DEFAULT_BASE_ORIENTATION)
+                    @ quat_to_matrix([tq[k] for k in 'xyzw']))
+        fold = load_symmetry_data(obj, str(get_symmetry_dir()))
+        ok, err, _ = single_pass_feasible(quat_to_matrix(observed_quat), R_target, fold)
+        return ok, err
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# --derive-sequence: plan 1 or 2 passes from the observed start pose
+# (ported 2026-10-07 from the 2026-08-17 session; planning/sequence_planner.py)
+# ---------------------------------------------------------------------------
+_OBSERVE_ORIENTATION_HELPER = r"""
+import json, sys, time, rclpy
+from tf2_msgs.msg import TFMessage
+
+want = sys.argv[1]
+deadline_s = float(sys.argv[2])
+want_samples = 3
+
+rclpy.init()
+n = rclpy.create_node('replay_observe_orientation')
+samples = []
+
+def cb(msg):
+    for t in msg.transforms:
+        if t.child_frame_id == want:
+            q = t.transform.rotation
+            p = t.transform.translation
+            samples.append({'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]})
+
+n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
+deadline = time.time() + deadline_s
+while time.time() < deadline and len(samples) < want_samples:
+    rclpy.spin_once(n, timeout_sec=0.1)
+print(json.dumps({'object': want, 'samples': samples,
+                  'waited_s': round(deadline_s - (deadline - time.time()), 2)}))
+n.destroy_node()
+rclpy.shutdown()
+"""
+
+
+def observe_object_orientation(object_name: str, timeout_s: float = 30.0) -> dict:
+    """Observe a part's resting pose on /objects_poses_real. Waits rather than sampling
+    once: the localizer goes quiet while the arm moves, so absence of a detection means
+    "not seen yet", not "not there". The camera only sees what is under the arm — put the
+    arm over the part first (home view or move_to_clear_area --fix-orientation)."""
+    try:
+        proc = subprocess.run(
+            ['python3', '-c', _OBSERVE_ORIENTATION_HELPER, object_name, str(timeout_s)],
+            capture_output=True, text=True, timeout=timeout_s + 10, env=make_env(),
+        )
+        if proc.returncode != 0:
+            return {'error': f'observe rc={proc.returncode}'}
+        line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else '{}'
+        return json.loads(line)
+    except Exception as e:
+        return {'error': f'observe failed: {e}'}
+
+
+def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0):
+    """Build the tool sequence from where the part is actually lying.
+
+    Returns (sequence, note). Falls back to the recorded sequence, unchanged, if the
+    part cannot be observed or the planner cannot answer — deriving is an improvement
+    on the recording, never a new way to fail.
+    """
+    obs = observe_object_orientation(obj, timeout_s)
+    if obs.get('error') or not obs.get('samples'):
+        return recorded, f"observe failed ({obs.get('error', 'no samples')}) -> recorded sequence"
+    try:
+        from scipy.spatial.transform import Rotation as _R
+        from primitives.shared.config import DEFAULT_BASE_ORIENTATION
+        from primitives.shared.fold_symmetry import load_symmetry_data
+        from utils.data_path_finder import (find_assembly_json_by_base_name,
+                                            get_assembly_data_dir, get_symmetry_dir)
+        from compliant_insertion_studio.planning.sequence_planner import (
+            build_tool_sequence, plan_passes, quat_to_matrix)
+
+        R_start = quat_to_matrix(obs['samples'][-1]['quat_xyzw'])
+        jf = find_assembly_json_by_base_name(base_name or 'base1', str(get_assembly_data_dir()))
+        components = json.load(open(jf))['components']
+        target = next(c for c in components if c['name'] == obj)['rotation']['quaternion']
+        R_target = (quat_to_matrix(DEFAULT_BASE_ORIENTATION)
+                    @ quat_to_matrix([target[k] for k in 'xyzw']))
+        fold = load_symmetry_data(obj, str(get_symmetry_dir()))
+        passes = plan_passes(R_start, R_target, fold)
+        sequence = build_tool_sequence(recorded, passes)
+
+        rpy = _R.from_matrix(R_start).as_euler('xyz', degrees=True)
+        note = (f"observed rpy=({rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}) -> "
+                f"{passes} pass{'es' if passes > 1 else ''}, {len(sequence)} steps "
+                f"({'same as recorded' if sequence == recorded else 'RESHAPED from recorded'})")
+        return sequence, note
+    except Exception as e:
+        return recorded, f"derive failed ({e}) -> recorded sequence"
 
 
 def make_env() -> dict:
@@ -432,7 +588,60 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                    log_fh=None, snap_fh=None) -> bool:
     obj = entry['object_name']
     sequence = entry.get('tool_sequence', []) or []
+
     print(f"\n{'='*72}\n  Replaying object: {obj}  ({len(sequence)} steps)\n{'='*72}")
+
+    # Base the object is headed for — move_to_grasp uses it to pick the wrist whose
+    # reorient keeps the camera away from the table (primitives/shared/camera_up.py).
+    base_name = None
+    for s_ in sequence:
+        try:
+            base_name = parse_tool_call(s_)[1].get('base_name') or base_name
+        except Exception:
+            pass
+
+    def execute(step_idx, step, tool_name, kw, tag=""):
+        """Run one primitive. Returns its result dict, or None if the argv build failed."""
+        try:
+            argv, timeout_s = build_argv(tool_name, kw, state,
+                                         base_offset_xy=args.base_offset_xy)
+        except Exception as e:
+            print(f"  [{step_idx}] BUILD FAILED ({e}); aborting.")
+            return None
+        if tool_name == 'move_to_grasp' and base_name:
+            argv += ['--base-name', base_name]
+        if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
+            argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
+        label = f"{obj}#{step_idx}{tag} {tool_name}"
+        snap_before = snapshot_robot_state()
+        _record_snapshot(snap_fh, "before", label, snap_before)
+        result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
+        state.update_from_result(tool_name, result)
+        snap_after = snapshot_robot_state()
+        _record_snapshot(snap_fh, "after", label, snap_after)
+        return result
+
+    def say(msg):
+        print(msg)
+        if log_fh: log_fh.write(msg + "\n")
+
+    executed = []           # (step_idx, step, tool_name, kw) in order, for the staging cycle
+    placed_at_staging = False
+    # Most recent recorded gripper width (mm). move_to_grasp applies it right before its
+    # descent (--pre-grasp-width) instead of the gripper closing to it before the approach.
+    grasp_width = {'mm': None}
+
+    def _width(cmd):
+        try:
+            return float(cmd)
+        except (TypeError, ValueError):
+            return None
+
+    def _next_tool(idx):
+        try:
+            return parse_tool_call(sequence[idx])[0] if idx < len(sequence) else None
+        except Exception:
+            return None
 
     skipping = args.skip_to is not None
     for step_idx, step in enumerate(sequence, start=1):
@@ -473,29 +682,71 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 if log_fh: log_fh.write(msg)
                 return True  # treat as success — operator-requested halt
 
-        try:
-            argv, timeout_s = build_argv(tool_name, kw, state,
-                                          base_offset_xy=args.base_offset_xy)
-        except Exception as e:
-            print(f"  [{step_idx}] BUILD FAILED ({e}); aborting.")
-            return False
+        # Recorded pre-grasp width step right before a grasp: defer it to move_to_grasp, which
+        # sets it just before descending. Closing it here hid a part directly below the
+        # gripper and made move_to_grasp open again to see (2026-10-07).
+        if tool_name == 'control_gripper' and _width(kw.get('command')) is not None:
+            grasp_width['mm'] = _width(kw.get('command'))
+            if _next_tool(step_idx) == 'move_to_grasp':
+                say(f"  [{step_idx}] pre-grasp width {grasp_width['mm']:g} mm deferred to move_to_grasp")
+                continue
 
         if args.dry_run:
+            try:
+                argv, _ = build_argv(tool_name, kw, state, base_offset_xy=args.base_offset_xy)
+            except Exception as e:
+                print(f"  [{step_idx}] BUILD FAILED ({e}); aborting.")
+                return False
+            if tool_name == 'move_to_grasp' and base_name:
+                argv += ['--base-name', base_name]
+            if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
+                argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
             print(f"  [{step_idx}] [DRY] {' '.join(argv)}")
             continue
 
-        label = f"{obj}#{step_idx} {tool_name}"
+        result = execute(step_idx, step, tool_name, kw)
+        if result is None:
+            return False
 
-        # Snapshot joint+TCP state BEFORE the primitive (debug-quality record)
-        snap_before = snapshot_robot_state()
-        _record_snapshot(snap_fh, "before", label, snap_before)
+        # Staging regrasp: move_to_grasp has just turned top-down over the clear area
+        # and observed the part before descending. If the face it landed on cannot be
+        # inserted in one pass, run another place-down pass from here — the part is in
+        # a fresh start state, exactly like the initial pick.
+        if (tool_name == 'move_to_grasp' and placed_at_staging
+                and result.get('result') != 'failure'):
+            first = next((i for i, e in enumerate(executed) if e[2] == 'move_to_grasp'), None)
+            cycle = executed[first + 1:] if first is not None else []
+            for attempt in range(STAGING_MAX_RETRIES + 1):
+                q = (result.get('current_object_orientation') or {}).get('quat')
+                q = [q['x'], q['y'], q['z'], q['w']] if isinstance(q, dict) else None
+                check = staging_single_pass_ok(obj, base_name, q)
+                if check is None:
+                    say(f"  [{step_idx}] staging check: could not evaluate {obj} landing — continuing")
+                    break
+                ok, err = check
+                say(f"  [{step_idx}] staging check: {obj} up-face error {err:.1f} deg -> "
+                    f"{'single pass OK' if ok else 'NEEDS ANOTHER PASS'}")
+                if ok:
+                    break
+                if attempt == STAGING_MAX_RETRIES or not cycle:
+                    say(f"\n!!! {obj} landing still not insertable after {attempt} extra pass(es)")
+                    return False
+                say(f"  [{step_idx}] {obj} toppled at staging — extra place-down pass "
+                    f"{attempt + 1}/{STAGING_MAX_RETRIES}")
+                for (i, st, t, k) in cycle + [(step_idx, step, tool_name, kw)]:
+                    r = execute(i, st, t, k, tag=f"r{attempt + 1}")
+                    if r is None or r.get('result') == 'failure':
+                        print(f"\n!!! STAGING PASS STEP FAILED: {st}")
+                        if r: print(json.dumps(r, indent=2))
+                        return False
+                    time.sleep(0.5)
+                result = r   # the re-run regrasp's observation is checked next
+            placed_at_staging = False
 
-        result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
-        state.update_from_result(tool_name, result)
-
-        # Snapshot joint+TCP state AFTER the primitive
-        snap_after = snapshot_robot_state()
-        _record_snapshot(snap_fh, "after", label, snap_after)
+        executed.append((step_idx, step, tool_name, kw))
+        if tool_name == 'translate_object' and kw.get('action') == 'place_down' \
+                and result.get('result') != 'failure':
+            placed_at_staging = True
 
         # --stop-after <token>: halt AFTER this step (and skip cleanup move_home).
         # Lets the operator finish a partial cycle (e.g. through insert) and then
@@ -558,6 +809,20 @@ def main() -> int:
                    default=None,
                    help="xy offset (m) injected into the insert step's base pose. Useful for "
                         "tuning per-object insert location empirically.")
+    p.add_argument('--derive-sequence', action=argparse.BooleanOptionalAction, default=True,
+                   help="(default ON) Observe every part up front and run 1 or 2 passes as the "
+                        "planner decides (compliant_insertion_studio/planning/"
+                        "sequence_planner.py), instead of the recorded pass count. The camera "
+                        "must see the parts: keep the startup (home + open) or position the arm. "
+                        "--no-derive-sequence replays the recorded sequences as-is.")
+    p.add_argument('--start-from', type=str, default=None, metavar='OBJECT',
+                   help="Skip the parts before OBJECT in assembly order (they are already seated) "
+                        "and run from OBJECT on, e.g. to resume after a stop.")
+    p.add_argument('--post-insert-check', action='store_true',
+                   help="After an object's sequence, read it from the post-release safe-height "
+                        "pose and, if it sits off its correct-seat reference, retry minimally "
+                        "(regrasp, lift 10 mm, insert). Objects in ablations/seat_check.py "
+                        "SEAT_REF only (line_green). Off by default.")
     p.add_argument('--dry-run', action='store_true',
                    help="Print the planned subprocess argv without executing.")
     p.add_argument('--initial-held-quat', type=float, nargs=4,
@@ -649,13 +914,70 @@ def main() -> int:
                     if log_fh: log_fh.write(fail_msg)
                     return 1
 
+        # --derive-sequence: plan EVERY part up front, from wherever the startup left the
+        # arm (home, gripper open — all table parts in view) or the operator put it. Start
+        # poses do not change until a part is picked, and after an insert the arm sits over
+        # the base where the next part may be out of view (a 30 s observe timeout each).
+        if getattr(args, 'derive_sequence', False) and not args.dry_run:
+            names = [e.get('object_name') for e in entries]
+            skip = set(names[:names.index(args.start_from)]) if getattr(args, 'start_from', None) in names else set()
+            for entry in entries:
+                obj = entry.get('object_name')
+                if (args.only and obj != args.only) or obj in skip:
+                    continue
+                seq = entry.get('tool_sequence', []) or []
+                bn = None
+                for s_ in seq:
+                    try:
+                        bn = parse_tool_call(s_)[1].get('base_name') or bn
+                    except Exception:
+                        pass
+                entry['tool_sequence'], note = derive_sequence_for(obj, seq, bn)
+                msg = f"  [derive-sequence] {obj}: {note}"
+                print(msg)
+                if log_fh: log_fh.write(msg + "\n")
+
         completed: list[str] = []
         failed: Optional[str] = None
+        first_object = True
+        started = getattr(args, 'start_from', None) is None
         for entry in entries:
             obj = entry.get('object_name')
             if args.only and obj != args.only:
                 continue
+            # --start-from: resume mid-assembly (earlier parts already seated).
+            if not started:
+                if obj != args.start_from:
+                    continue
+                started = True
+            # Between parts: go home first. Each sequence ends with move_to_safe_height
+            # over the base, and from there the camera cannot see the parts still on the
+            # table — 2026-10-07 the one-command run failed u_orange's pick with "not
+            # detected (out of view)". Safe height already happened (end of the previous
+            # sequence), so a straight move_home here is within the CLAUDE.md rule.
+            if not first_object and not args.dry_run:
+                hdr = f"\n  BETWEEN PARTS: move_home before {obj} (camera view of the table)\n"
+                print(hdr, end='')
+                if log_fh: log_fh.write(hdr)
+                r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                                   label=f'between-parts move_home ({obj})', timeout_s=60,
+                                   log_fh=log_fh)
+                if r.get('result') == 'failure':
+                    failed = obj
+                    break
+            first_object = False
             ok = replay_object(entry, state, args, log_fh=log_fh, snap_fh=snap_fh)
+            # Post-insert seat check (opt-in): the sequence ends at the post-release
+            # safe-height pose, which is where the correct-seat references were recorded.
+            if ok and getattr(args, 'post_insert_check', False) and not args.dry_run:
+                import seat_check
+                if obj in seat_check.SEAT_REF:
+                    from primitives.shared.config import get_gripper_width_mm
+                    w = get_gripper_width_mm(obj, seat_check.SEAT_REF[obj]['grasp_id'])
+                    def _say(m):
+                        print(m)
+                        if log_fh: log_fh.write(m + "\n")
+                    ok = seat_check.run(obj, w, say=_say)
             if ok:
                 completed.append(obj)
             else:
@@ -667,9 +989,18 @@ def main() -> int:
         # the robot stays at the halted pose for operator inspection or
         # follow-on motion).
         if not args.dry_run and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED:
-            header = f"\n{'='*72}\n  CLEANUP: move_home\n{'='*72}\n"
+            header = f"\n{'='*72}\n  CLEANUP: move_to_safe_height -> move_home\n{'='*72}\n"
             print(header, end='')
             if log_fh: log_fh.write(header)
+            # Safe height FIRST (CLAUDE.md hard constraint). A failed insert can leave the
+            # gripper closed on a part in the base — translate_object passes
+            # --no-post-insert-move, so the wrapper's own retract is skipped — and
+            # move_home plans a straight line that ignores seated parts. 2026-10-07: it
+            # pulled a seated u_orange out of base1 and carried it home.
+            run_subprocess(
+                ['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
+                label='cleanup move_to_safe_height', timeout_s=60, log_fh=log_fh,
+            )
             run_subprocess(
                 ['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
                 label='cleanup move_home', timeout_s=60, log_fh=log_fh,

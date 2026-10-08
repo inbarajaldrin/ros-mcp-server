@@ -75,7 +75,8 @@ if timeout 8 ros2 control list_controllers 2>/dev/null | grep -q "scaled_joint_t
 else
     bash "$REPO/compliant_insertion_studio/scripts/launch_robot.sh" real --headless >/tmp/stack_up_driver.log 2>&1 \
         || { tail -15 /tmp/stack_up_driver.log; die "driver bringup failed (see /tmp/stack_up_driver.log)" 3; }
-    grep -q "Payload has been set successfully" /tmp/stack_up_driver.log \
+    # launch_robot.sh echoes the set_payload service response, not a log line.
+    grep -q "SetPayload_Response(success=True)" /tmp/stack_up_driver.log \
         && ok "F/T payload set from ft_calibration_*.yaml" \
         || warn "payload NOT confirmed — force mode will lack gravity comp"
     ok "driver up, controllers active"

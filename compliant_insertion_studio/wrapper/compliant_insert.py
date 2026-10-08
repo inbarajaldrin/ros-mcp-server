@@ -1133,6 +1133,23 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
 
     max_axis_f = max(abs(bias["Fx"]), abs(bias["Fy"]), abs(bias["Fz"]))
     if max_axis_f > ep.args.bias_abort_n:
+        # 2026-10-08: the zero can take effect after the 0.2 s sample above, which then
+        # reads the PRE-zero offset (u_orange: 9.13 N sampled; wrench_raw shows the
+        # zero landing ~0.1 s later at 0.2 N, arm still for 6 s). Re-read once before
+        # calling the zero bad.
+        retry = ep._sample_bias(settle_s=0.5)
+        if retry is not None:
+            retry_f = max(abs(retry["Fx"]), abs(retry["Fy"]), abs(retry["Fz"]))
+            ep.get_logger().warn(
+                f"Post-zero residual {max_axis_f:.2f} N > {ep.args.bias_abort_n} N; "
+                f"re-read after 0.5 s: {retry_f:.2f} N")
+            bias, max_axis_f = retry, retry_f
+            ep.meta.set_post_zero_bias(bias)
+            ep.post_zero_bias_baselink = (
+                float(bias["Fx"]), float(bias["Fy"]), float(bias["Fz"]),
+                float(bias["Tx"]), float(bias["Ty"]), float(bias["Tz"]),
+            )
+    if max_axis_f > ep.args.bias_abort_n:
         # Do NOT subtract a residual this large: it is not sensor bias, it is a
         # botched zero. Subtracting it would hand force_mode a phantom load.
         ep.get_logger().error(
