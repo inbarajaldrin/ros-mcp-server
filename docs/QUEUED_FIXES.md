@@ -206,6 +206,18 @@ Composite vs flat grasp ids, plus `--grasp-candidate` refusing real mode. Either
 candidate-native migration on hardware (verify the top-down gate and W-dynamic offset, lift the
 sim-only guard, remap the assembly JSONs) or port this branch's fixes forward.
 
+### 12. Constant ~2 mm −y offset — camera mount (hand-eye) estimate (queued 2026-10-14)
+
+With the pad-centre grasp (commit 386e31e) the inserts seat, but every part lands ~2.3 mm in
+world −y of its CAD-predicted seat, whatever the part's yaw: u_brown (0.0, −2.3, −0.6) mm,
+u_orange (+0.8, −2.3, +0.8) mm (seat TCP − prediction, raw CSV, 2026-10-14). The operator
+observed the same constant −y on the table. A yaw-independent, world-fixed offset points at the
+camera mount translation (`config/robot_config.yaml` hand-eye, 2026-10-13), not at per-part
+stickers or grasp points. Fix later — the assembly works; the compliant search absorbs it.
+Start: re-solve the hand-eye translation with base1 as a fixture (seat TCP vs prediction over
+several parts/yaws), and re-check `DEFAULT_BASE_POSITION` / `PER_OBJECT_BASE_OFFSET_M`, which
+were fitted with the old shallow grasp and may already absorb part of it.
+
 ---
 
 ## Investigated and closed

@@ -17,9 +17,10 @@
 #      switches controllers back; that takes seconds, not milliseconds.
 #   3. Anything still alive: SIGINT directly, then SIGTERM. Never SIGKILL — a SIGKILL
 #      mid force-mode leaves nothing to switch force mode off.
-#   4. Restore the arm: force_mode_controller inactive, external-control program
-#      running (re-sent if stopped — it was stopped after both mid-insert stops on
-#      2026-10-07), scaled_joint_trajectory_controller active.
+#   4. Restore the arm: external-control program running (re-sent if stopped — it was
+#      stopped after both mid-insert stops on 2026-10-07), every joint-claiming controller
+#      (force mode, passthrough, freedrive, forward_*) off and scaled_joint_trajectory_controller
+#      active, switched in one call and verified; one retry after a program re-send.
 #   5. Report TCP pose and gripper width, so you know whether a part is still held.
 #
 # Exit: 0 stopped and commandable | 1 something survived or the arm is not commandable.
@@ -92,29 +93,51 @@ step 2/3 "Restore a commandable arm"
 ctrl_state() { timeout 8 ros2 control list_controllers 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -v c="$1" '$1==c{print $NF}'; }
 prog_running() { timeout 5 ros2 topic echo --once /io_and_status_controller/robot_program_running 2>/dev/null | grep -q "data: true"; }
 
-if [ "$(ctrl_state force_mode_controller)" = "active" ]; then
-    timeout 10 ros2 control switch_controllers --deactivate force_mode_controller >/dev/null 2>&1
-    [ "$(ctrl_state force_mode_controller)" = "active" ] && warn "force_mode_controller still ACTIVE" \
-        || ok "force_mode_controller deactivated"
-else
-    ok "force_mode_controller inactive"
-fi
+# Controllers that claim the joints and block scaled_joint_trajectory_controller. The prismatic
+# insert leaves passthrough_trajectory_controller active ("Starting position together with
+# trajectory_passthrough is not allowed", 2026-10-14), and force mode can come back while the
+# insert's cleanup finishes. Deactivate whatever is active IN THE SAME switch that activates the
+# trajectory controller, check, and retry once after re-sending the program.
+CONFLICTING="force_mode_controller passthrough_trajectory_controller freedrive_mode_controller
+             joint_trajectory_controller forward_position_controller forward_velocity_controller
+             forward_effort_controller"
+restore_controllers() {
+    local active="" c
+    for c in $CONFLICTING; do [ "$(ctrl_state $c)" = "active" ] && active="$active $c"; done
+    if [ -n "$active" ] || [ "$(ctrl_state scaled_joint_trajectory_controller)" != "active" ]; then
+        [ -n "$active" ] && echo "  deactivating:$active"
+        timeout 15 ros2 control switch_controllers ${active:+--deactivate $active} \
+            --activate scaled_joint_trajectory_controller >/dev/null 2>&1
+    fi
+    for c in $CONFLICTING; do [ "$(ctrl_state $c)" = "active" ] && return 1; done
+    [ "$(ctrl_state scaled_joint_trajectory_controller)" = "active" ]
+}
+resend_program() {
+    timeout 15 ros2 service call /io_and_status_controller/resend_robot_program std_srvs/srv/Trigger "{}" >/dev/null 2>&1
+    for _ in $(seq 1 10); do prog_running && return 0; sleep 1; done
+    return 1
+}
 
 if prog_running; then
     ok "external-control program running"
 else
-    timeout 15 ros2 service call /io_and_status_controller/resend_robot_program std_srvs/srv/Trigger "{}" >/dev/null 2>&1
-    for _ in $(seq 1 10); do prog_running && break; sleep 1; done
-    prog_running && ok "external-control program re-sent and running" \
+    resend_program && ok "external-control program re-sent and running" \
         || { warn "external-control program NOT running — check the pendant (Remote Control? protective stop?)"; exit 1; }
 fi
 
-if [ "$(ctrl_state scaled_joint_trajectory_controller)" != "active" ]; then
-    timeout 10 ros2 control switch_controllers --activate scaled_joint_trajectory_controller >/dev/null 2>&1
+if restore_controllers; then
+    ok "scaled_joint_trajectory_controller active, force/passthrough modes off"
+else
+    sleep 2                                         # an insert cleanup may still be switching
+    resend_program >/dev/null
+    if restore_controllers; then
+        ok "scaled_joint_trajectory_controller active (after program re-send)"
+    else
+        warn "arm NOT commandable: $(timeout 8 ros2 control list_controllers 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+              | awk '$NF=="active"{printf "%s ", $1}')"
+        exit 1
+    fi
 fi
-[ "$(ctrl_state scaled_joint_trajectory_controller)" = "active" ] \
-    && ok "scaled_joint_trajectory_controller active" \
-    || { warn "scaled_joint_trajectory_controller NOT active"; exit 1; }
 
 step 3/3 "Where the arm is"
 POSE="$(timeout 5 ros2 topic echo --once /tcp_pose_broadcaster/pose 2>/dev/null)"

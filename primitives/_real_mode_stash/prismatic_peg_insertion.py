@@ -106,7 +106,10 @@ EXIT_SUSTAINED_TIME = 1.0       # seconds - Z at target + low avg torques must h
 # above EXIT_TORQUE_AVG_THRESHOLD. The torque check then never fires even when
 # the part is correctly seated. Geometric exit replaces "low torque" with
 # "depth reached + low Fz + zero z-velocity":
-EXIT_GEOMETRIC_Z_TOL_ABOVE_M = 0.0010  # 1 mm above predicted (rim contact = false success)
+# 2026-10-14: 1.0 -> 2.5 mm. inverted_u_yellow sat seated and still at +0.99..+1.03 mm for two
+# 60 s attempts (the 1 s hold reset each time noise crossed 1.0 mm); u_orange seated at +0.84.
+# Good seats land within +-1.7 mm (CLAUDE.md); a part on the rim sits many mm higher.
+EXIT_GEOMETRIC_Z_TOL_ABOVE_M = 0.0025  # above predicted (rim contact = false success)
 EXIT_GEOMETRIC_Z_TOL_BELOW_M = 0.0080  # 8 mm below predicted (going deeper = real seat)
 EXIT_GEOMETRIC_FZ_MAX_N      = 4.0     # |Fz| must be light (no hard wedge)
 EXIT_GEOMETRIC_DZ_DT_MAX     = 0.0005  # 0.5 mm/s — z-velocity ≈ 0 (stopped descending)
@@ -147,12 +150,14 @@ def switch_controllers(activate, deactivate):
         print(f"ERROR: list_controllers failed: {result.stderr}")
         return False
 
+    # The state is the LAST column; `'active' in line` also matched "inactive", so every
+    # controller looked active and nothing was ever switched on (2026-10-14).
+    import re
     active = set()
     for line in result.stdout.splitlines():
-        if 'active' in line:
-            parts = line.split()
-            if parts:
-                active.add(parts[0])
+        parts = re.sub(r'\x1b\[[0-9;]*m', '', line).split()
+        if len(parts) >= 2 and parts[-1] == 'active':
+            active.add(parts[0])
 
     to_activate = [c for c in activate if c not in active]
     to_deactivate = [c for c in deactivate if c in active]
@@ -175,21 +180,13 @@ def switch_controllers(activate, deactivate):
 def restore_controllers():
     """Restore scaled_joint_trajectory_controller."""
     print("[CLEANUP] Restoring controllers...")
-    subprocess.run(
-        ['ros2', 'control', 'switch_controllers',
-         '--deactivate', PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER],
-        capture_output=True, text=True, timeout=10
-    )
-    time.sleep(0.5)
-    result = subprocess.run(
-        ['ros2', 'control', 'switch_controllers',
-         '--activate', SCALED_CONTROLLER],
-        capture_output=True, text=True, timeout=10
-    )
-    if result.returncode == 0:
+    # One switch: the driver refuses scaled_joint_trajectory_controller while passthrough is
+    # still active ("Starting position together with trajectory_passthrough is not allowed"),
+    # and the old two-call version left the arm uncommandable when the second call was rejected.
+    if switch_controllers([SCALED_CONTROLLER], [PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER]):
         print("[CLEANUP] Controllers restored")
     else:
-        print(f"[CLEANUP] ERROR restoring controllers: {result.stderr}")
+        print("[CLEANUP] ERROR restoring controllers (stop_run.sh restores them)")
 
 
 def load_grasp_point_position(object_name, grasp_id):
