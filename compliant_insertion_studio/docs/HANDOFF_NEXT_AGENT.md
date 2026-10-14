@@ -2,9 +2,9 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: **2026-08-16**. The 2026-05-07 architecture below still stands; what
-> changed is the branch you must work from, the bringup path, and several claims that were
-> re-measured and did not hold.
+> Date of last update: **2026-10-14** (OptiPlex cell). The 2026-05-07 architecture below still
+> stands; 2026-08-16 changed the branch and bringup path; 2026-10-14 fixed the grasp depth and
+> added robot self-disassembly, a hands-off loop and depth seat checking — see "State of the system".
 
 ## ⚠️ Which tree can run the real assembly
 
@@ -44,6 +44,46 @@ Routing key: `primitives/translate_object.py` `if args.object_name in ('line_gre
 
 Do not cite pass 2 as a second 4/4. The seat-acceptance gap it exposed is open work — see
 "What's still open".
+
+**2026-10-14** — robot disassembles and reassembles itself; 2 consecutive hands-off 4/4 cycles.
+
+| Run | Result |
+|---|---|
+| Loop cycle 1 | disassemble 4/4 + assemble **4/4 hands-off**, 15.4 min (yellow seated on attempt 2) |
+| Loop cycle 2 | disassemble 4/4 + assemble **4/4 hands-off**, 13.7 min |
+| Loop cycle 3 | u_brown, u_orange seated; **line_green tilted** (pitch −2.45°, one end +4.95 mm), top-down reseat did not fix it → run stopped (fail-closed) |
+| Board reset by operator | u_brown, u_orange seated; line_green tilted again (+3.3°); pulled out to the clear area and regrasped: still +3.0°; the top-down reseat after that read flat (0.81°); yellow seated → 4/4 |
+
+What changed, and why (commits on `ur5e-fmb1-demo`, 2026-10-14):
+
+- **Grasp depth was ~14 mm shallow on every part** (`386e31e`). `GRIPPER_CENTER_TOOL_OFFSET`
+  = 0.2286 m is the RG2 **fingertip end**, not the pad centre (closed tips touched base1's top at
+  flange − 230.86 mm). `move_to_grasp --pad-center` puts the pad centre on the grasp point (RG2
+  4-bar linkage + 29.8 mm pad from CAD, `config.rg2_tip_length_m/pad_center_offset_m`), limited so
+  the fingertips stay 4 mm above base1/seated parts at the seat (CAD meshes:
+  `ablations/grasp_depth.py` → `eval_resources/fmb1_grasp_depth.json`) and 2 mm above the table at
+  a pick. The executed depth (`grasp_tool_offset_m`) chains to the insert via `GRASP_TOOL_OFFSET_M`
+  (`config.held_tool_offset`) and is recorded per part for the disassembly. Depths: u_brown/u_orange
+  216.3 mm, line_green 225.8 mm (base top 7 mm under its fingers at the seat), yellow 211.0 mm.
+  Operator's rule: *the grasp point and the pad centre should meet* — not "hold the whole height".
+- **Self-disassembly with the insert's own grasp** (`ablations/disassemble.py`, operator rule: same
+  grasp points as assembly). Free table spots from a median-of-10 depth map, ≥40 mm between parts.
+  `--relocate PART [--from-staging]`, `--only PART --to-staging` (pull a bad seat out to the clear area).
+- **Loop driver** `ablations/fmb1_loop.py --cycles N --start-with {disassemble,assemble}` → per-cycle
+  record in `ablations/logs/fmb1_loop.jsonl` (seat − prediction per insert from the raw CSV).
+- **line_green depth seat check** (`ablations/seat_check.py`): plane fit to the bar's top face from
+  0.56 m (D415 gives no depth closer than ~0.45 m at 1280×720); pitch ≤ 1.5°, height ≤ 2.5 mm;
+  one top-down reseat with the insert grasp if not flat.
+- **Insert recovery** in the replay: a failed insert places the part in the clear area, regrasps,
+  reinserts (`INSERT_MAX_RECOVERIES=1`). `--part-at-staging` resumes a part waiting in the clear area.
+- **Force guards** use a 51-sample (~100 ms) median (`97f0bd1`): the robot-side wrench glitch runs up
+  to 14 consecutive samples; a 15-sample median hit 22.6 N at rest and false-stopped a descent.
+- **`stop_run.sh`** restores a commandable arm unattended (`e5c9dbf`): prismatic leaves
+  `passthrough_trajectory_controller` active, which blocks the trajectory controller. Also fixed:
+  prismatic's controller-state parse matched "inactive" as active; its seat may end ≤ 2.5 mm above
+  the prediction (was 1.0 — yellow sat seated at +1.0 mm through two 60 s timeouts).
+- Camera freshness check before every grasp; subprocess watchdog; per-sticker marker calibration
+  (`aruco_camera_localizer` commit `97df4d5`, `config/sticker_calibration.json`).
 
 ---
 
@@ -245,6 +285,23 @@ From `CLAUDE.md` (project conventions) and `SKILL.md` (methodology):
 0c. **`prismatic_peg_insertion` hangs after success.** Observed printing
     `[SUCCESS] Insertion complete on attempt 3` and then not exiting. Blocks unattended chaining
     of the assembly.
+
+### Opened 2026-10-14
+
+0d. **line_green ends tilted after some inserts (3 of the last 4).** Depth seat check: pitch
+    −2.45° / +3.3° / +3.0°, one end ~5 mm high. A fresh regrasp from the clear area gave the same
+    tilt, so it is in the seat, not the grasp. Suspect: a U part (whose regrasp took the other,
+    fold-symmetric arm, or which needed an extra staging pass) seated the "other way round" so the
+    bar end rests on it — **unverified**. `seat_check.py` is **confirmed by the operator**: every
+    time it reported line_green off, it was off (and flat readings were flat). Trust it as the tell.
+    Operator's route for a real tilt (QUEUED_FIXES #13): approach the bar **at its measured angle**,
+    grasp, safe height as held, fix orientation, reinsert. The top-down reseat cannot fix a tilt.
+0e. **Constant-ish −y seat offset** (QUEUED_FIXES #12): ~2 mm world −y bias plus a few mm of
+    run-to-run scatter; suspected camera mount (hand-eye). Operator: fix later.
+0f. **U parts sometimes tip over when set down in the clear area** (u_orange 2/3 cycles, u_brown
+    1/3); the extra pass always recovered. Cause not investigated.
+0g. **D415 USB-C plug is worn**: dropped off USB twice during wrist rotations; flipping the plug
+    restored 5000 Mbps. The replay refuses a grasp when the camera is not streaming.
 
 ### Critical-path
 
