@@ -58,6 +58,8 @@ import signal
 import subprocess
 import sys
 import time
+
+import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -639,6 +641,69 @@ def _record_snapshot(snap_fh, when: str, label: str, snap: dict) -> None:
 INSERT_MAX_RECOVERIES = 1
 SEAT_CHECK_OBJECTS = ('line_green',)
 RESEAT_MAX = 1
+# Tilted line_green = one end resting on base1's top past the end of its pocket (the 140 mm bar
+# has almost no axial play). Operator's fix, verified 2026-10-14: gripper closed, from safe height,
+# lower beside the high end, push ALONG the bar toward the slot in small steps at <= 5 N (base1 is
+# glued to the table), re-check depth after each step. Regrasps and pressing did not work.
+NUDGE_STEPS_MM = (3, 8, 13, 18)      # finger face past the end's estimated position, per step
+NUDGE_MAX_FORCE_N = 5.0
+NUDGE_PAD_Z_BASE_M = 0.037           # pad centre height (base frame): tips 22 mm, base top 17.5 mm
+NUDGE_AXIAL_BIAS_MM = 7.0            # depth reads a flat, centred bar ~+7 mm along base y (2026-10-14)
+
+
+def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
+    """Push a tilted bar's raised end along its axis into its slot (operator's method). The high
+    end and its position come from the depth seat check `res`; every approach starts at safe
+    height; each <= 5 mm step is force-guarded and followed by a depth re-check."""
+    from seat_check import check
+    from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
+    ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
+    if not ends or not ext:
+        say(f"  [nudge] {obj}: no end heights / axial extent -> cannot nudge"); return False
+    sgn = 1.0 if ends[1] > ends[0] else -1.0                       # +1: the +y (base) end is high
+    end_mm = (ext[1] if sgn > 0 else ext[0]) - NUDGE_AXIAL_BIAS_MM
+    (bx, by, bz), bq = ob
+    Rb = R_.from_quat(bq).as_matrix()
+    world = lambda yb: np.array([bx, by, bz]) + Rb @ np.array([0.0, yb, NUDGE_PAD_Z_BASE_M])
+    fz = lambda p: p[2] + RG2_TIP_CLOSED_M - RG2_PAD_HALF_M          # flange z, closed, top-down
+    half = 10.1                                                      # closed finger block half-width (mm)
+    start = world((end_mm + sgn * (half + 10.0)) / 1000.0)
+    q = ['0.0', '1.0', '0.0', '0.0']
+    X = lambda p, z: [f"{p[0]:.4f}", f"{p[1]:.4f}", f"{z:.4f}"]
+    def go(argv, label, t=60):
+        r = run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
+        return r
+    say(f"  [nudge] {obj}: {'+y' if sgn > 0 else '-y'} end high, est. at {end_mm:+.0f} mm (base) -> nudge toward the slot")
+    for k, past in enumerate(NUDGE_STEPS_MM, 1):
+        face = end_mm - sgn * past
+        push = world((face + sgn * half) / 1000.0)
+        for argv, label in [
+                (['primitives.control_gripper', 'close', '--mode', 'real'], 'nudge close'),
+                (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height'),
+                (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, SAFE_HEIGHT + 0.08), '--quat', *q],
+                 'nudge over the start'),
+                (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, fz(start)), '--quat', *q,
+                  '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '5'],
+                 'nudge lower beside the end')]:
+            r = go(argv, label)
+            if r.get('result') == 'failure':
+                say(f"\n!!! {label} failed: {r.get('error', '')}"); return False
+        time.sleep(1.5)                                              # settle before the force baseline
+        r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(push, fz(push)), '--quat', *q,
+                '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '6'],
+               f'nudge step {k} (face {past} mm past the end)')
+        say(f"  [nudge] step {k}: {'stopped on contact ' + str(r.get('error')) if r.get('contact') else 'full travel'}")
+        for argv, label in [
+                (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, fz(start)), '--quat', *q,
+                  '--min-z', '0.15'], 'nudge back off'),
+                (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height')]:
+            if go(argv, label).get('result') == 'failure':
+                say(f"\n!!! {label} failed"); return False
+        res = check(obj, ob, move=True, out_dir=out_dir)
+        say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ != 'profile_mm'})}")
+        if res.get('ok'):
+            return True
+    return False
 
 
 def seat_check_and_reseat(obj, state, args, say) -> bool:
@@ -657,6 +722,12 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             return True
         if 'pitch_deg' not in res:
             say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
+        if abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5):
+            # tilted = an end on base1's top past the pocket end; a regrasp holds it at its tilt
+            ok = nudge_into_slot(obj, ob, res, say, out_dir)
+            if not ok:
+                say(f"\n!!! {obj} still tilted after the nudge")
+            return ok
         if attempt == RESEAT_MAX:
             say(f"\n!!! {obj} still not flat after {RESEAT_MAX} reseat(s)"); return False
         o = next((e for e in json.load(open(REPO_ROOT / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
