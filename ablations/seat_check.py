@@ -1,229 +1,151 @@
 #!/usr/bin/env python3
-"""Post-insert seat check + minimal retry, measured from the post-release safe-height pose.
+"""Depth check that a seated part is flat and at its seat height (2026-10-14).
 
-Why (2026-10-07): line_green can report SUCCESS from prismatic_peg_insertion while seated
-wrong, and no insert telemetry separates it (QUEUED_FIXES #0). The camera can, from the
-pose the sequence already reaches after release (move_to_safe_height straight above the
-part): relative to base1, line_green read dy +8.5 / +12.3 mm when wrong and +2.1 when
-correct, with +-0.1 mm frame noise (poses_line_green_{WRONG,WRONG2,CORRECT}.json).
+    python3 -u ablations/seat_check.py --object line_green [--no-move] [--out-dir DIR]
 
-Check: median xy error of the part vs its assembly target, over ~2.5 s, minus the part's
-correct-seat reference (the camera has a per-part bias); bad if > tol.
-Retry (minimal): regrasp in place -> lift 10 mm (not safe height) -> insert again (the
-insert re-centres on the target seat; the regrasp centred the gripper on the part, so
-this corrects the measured offset) -> release -> safe height -> re-check.
-
-READ AT SAFE HEIGHT ONLY: the reference was recorded there; other viewpoints are 6-9x
-noisier. Standalone: put the arm at the post-release pose first.
-
-    python3 ablations/seat_check.py --object line_green            # check + retry
-    python3 ablations/seat_check.py --object line_green --check-only
+Views the seat from straight above at flange 0.56 m (the D415 returns no depth closer than
+~0.45 m at 1280x720), takes the median of 10 aligned depth frames, and fits a plane to the
+part's top face inside its CAD footprint in the camera-observed base frame. Reports pitch
+(along the part's long axis — what a bar that pivoted in the jaws shows), roll, and the top-face
+height error. Used by replay_real_assembly after line_green's insert; the result decides whether
+to re-grasp (with the insert's own grasp) and reinsert.
 """
 import argparse
 import json
-import math
 import os
-import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
 REPO = Path(__file__).resolve().parents[1]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / 'ablations'))
 
-# Correct-seat reference (median error vs target, mm) and tolerance, per object.
-# line_green: one correct + two wrong recordings, 2026-10-07 — widen with more data.
-SEAT_REF = {
-    'line_green': {'ref_mm': (1.53, 2.08), 'tol_mm': 4.0, 'grasp_id': 1},
-}
-LIFT_M = 0.010
-MAX_RETRIES = 2
-
-
-def _env():
-    env = os.environ.copy()
-    env['PYTHONPATH'] = f"{REPO}:{env['PYTHONPATH']}" if 'PYTHONPATH' in env else str(REPO)
-    return env
+X_CAM = np.eye(4)   # localizer's calibrated camera mount (config/robot_config.yaml, 2026-10-13)
+X_CAM[:3, :3] = R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957]).as_matrix()
+X_CAM[:3, 3] = [-0.01446, -0.04424, 0.07317]
+VIEW_FLANGE_Z = 0.56
+# Top face in the base frame and the half-extents to sample (CAD, trimmed off the edges).
+# line_green: 25.9 x 140 x 25.9 mm bar along base y, seat centre z 24.5 mm -> top 37.45 mm.
+TOP_FACE = {'line_green': dict(z=0.03745, hx=0.008, hy=0.062, long_axis='y')}
+PITCH_MAX_DEG = 1.5
+HEIGHT_MAX_MM = 2.5
 
 
-def _run(argv, timeout=180):
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=_env(),
-                       cwd=str(REPO))
-    out = p.stdout + p.stderr
-    js = [l for l in out.splitlines() if l.startswith('{"result"')]
-    res = json.loads(js[-1]) if js else {}
-    return p.returncode == 0 and res.get('result') != 'failure', res, out
-
-
-def measure(obj, secs=2.5):
-    """(dx, dy, n): median xy error of `obj` vs its base1 target, in mm, or None."""
-    ok, res, out = _run([sys.executable, __file__, '--measure-json', obj, str(secs)], 30)
-    m = re.findall(r'^MEASURE (.*)$', out, re.M)
-    if not m:
-        return None
-    d = json.loads(m[-1])
-    return (d['dx'], d['dy'], d['n']) if d.get('n') else None
-
-
-def _measure_main(obj, secs):
-    import time
-    import numpy as np
+def capture_world(n=10, timeout=6.0):
     import rclpy
-    from scipy.spatial.transform import Rotation as R
-    from tf2_msgs.msg import TFMessage
-    from utils.data_path_finder import find_assembly_json_by_base_name, get_assembly_data_dir
-    tgt = next(c for c in json.load(open(find_assembly_json_by_base_name(
-        'base1', str(get_assembly_data_dir()))))['components'] if c['name'] == obj)['position']
-    errs = []
-
-    def cb(m):
-        f = {t.child_frame_id: t.transform for t in m.transforms}
-        if 'base1' in f and obj in f:
-            b, o = f['base1'], f[obj]
-            Rb = R.from_quat([b.rotation.x, b.rotation.y, b.rotation.z, b.rotation.w])
-            rel = Rb.inv().apply([o.translation.x - b.translation.x,
-                                  o.translation.y - b.translation.y,
-                                  o.translation.z - b.translation.z])
-            errs.append((1000 * (rel[0] - tgt['x']), 1000 * (rel[1] - tgt['y'])))
-    rclpy.init()
-    n = rclpy.create_node('seat_check_measure')
-    n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
-    end = time.time() + secs
-    while time.time() < end:
-        rclpy.spin_once(n, timeout_sec=0.05)
-    n.destroy_node()
-    rclpy.shutdown()
-    if not errs:
-        print('MEASURE ' + json.dumps({'n': 0}))
-        return
-    a = np.array(errs)
-    print('MEASURE ' + json.dumps({'dx': float(np.median(a[:, 0])), 'dy': float(np.median(a[:, 1])),
-                                   'n': len(a)}))
+    from cv_bridge import CvBridge
+    from geometry_msgs.msg import PoseStamped
+    from sensor_msgs.msg import CameraInfo, Image
+    rclpy.init(); node = rclpy.create_node('seat_check'); st = {'d': []}
+    node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append(m), 20)
+    node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
+    node.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: st.__setitem__('c', m), 2)
+    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st.__setitem__('t', m), 10)
+    t_start = time.time() + 0.3            # frames from after the call, not buffered ones
+    end = time.time() + timeout
+    while time.time() < end and (len([m for m in st['d'] if _stamp(m) > t_start]) < n or 'i' not in st or 't' not in st):
+        rclpy.spin_once(node, timeout_sec=0.02)
+    node.destroy_node(); rclpy.shutdown()
+    frames = [m for m in st['d'] if _stamp(m) > t_start][-n:]
+    if len(frames) < 3 or 'i' not in st or 't' not in st:
+        return None
+    br = CvBridge()
+    d = np.median(np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(float) for m in frames]), 0) / 1000.0
+    K = np.array(st['i'].k).reshape(3, 3)
+    p, o = st['t'].pose.position, st['t'].pose.orientation
+    Tw = np.eye(4); Tw[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); Tw[:3, 3] = [p.x, p.y, p.z]
+    Tc = Tw @ X_CAM
+    v, u = np.nonzero(d > 0.1); z = d[v, u]
+    Pc = np.c_[(u - K[0, 2]) / K[0, 0] * z, (v - K[1, 2]) / K[1, 1] * z, z]
+    color = br.imgmsg_to_cv2(st['c'], 'bgr8') if 'c' in st else None
+    return Pc @ Tc[:3, :3].T + Tc[:3, 3], d, color, len(frames)
 
 
-def check(obj, say=print):
-    ref = SEAT_REF[obj]
-    m = measure(obj)
-    if m is None:
-        # Fail closed: the check is only valid from the post-release safe-height pose; not
-        # seeing the part there is not evidence it is seated (2026-10-07).
-        say(f"  [seat-check] {obj}: NOT OBSERVED — cannot judge -> treating as FAILED")
-        return False, None
-    dx, dy, n = m
-    ex, ey = dx - ref['ref_mm'][0], dy - ref['ref_mm'][1]     # offset from a correct seat
-    dist = math.hypot(ex, ey)
-    ok = dist <= ref['tol_mm']
-    say(f"  [seat-check] {obj}: err vs target ({dx:+.1f}, {dy:+.1f}) mm, n={n} -> "
-        f"{dist:.1f} mm from correct-seat ref (tol {ref['tol_mm']:.0f}) -> {'OK' if ok else 'BAD SEAT'}")
-    return ok, (ex, ey)
+def _stamp(m):
+    return m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec if m.header.stamp.sec else time.time()
 
 
-RETRY_ENABLED = False   # check-only unless explicitly allowed (--allow-retry); see below
+def measure(obj, observed_base, Pw):
+    """Plane fit to the part's top face inside its footprint (base frame)."""
+    f = TOP_FACE[obj]
+    (bx, by, bz), bq = observed_base
+    Tb = np.eye(4); Tb[:3, :3] = R.from_quat(bq).as_matrix(); Tb[:3, 3] = [bx, by, bz]
+    Pb = (Pw - Tb[:3, 3]) @ Tb[:3, :3]                         # world -> base frame
+    m = (np.abs(Pb[:, 0]) < f['hx']) & (np.abs(Pb[:, 1]) < f['hy']) & (np.abs(Pb[:, 2] - f['z']) < 0.012)
+    P = Pb[m]
+    if len(P) < 200:
+        return {'ok': False, 'error': f'only {len(P)} depth points on the {obj} top face'}
+    for _ in range(3):                                         # trimmed least squares: z = a x + b y + c
+        A = np.c_[P[:, 0], P[:, 1], np.ones(len(P))]
+        coef, *_ = np.linalg.lstsq(A, P[:, 2], rcond=None)
+        r = P[:, 2] - A @ coef
+        keep = np.abs(r) < max(0.0015, 2.5 * np.median(np.abs(r)))
+        P = P[keep]
+    a, b, c = coef
+    long_slope, cross_slope = (b, a) if f['long_axis'] == 'y' else (a, b)
+    pitch = float(np.degrees(np.arctan(long_slope)))
+    roll = float(np.degrees(np.arctan(cross_slope)))
+    h_err = float(1000 * (c - f['z']))                         # top-face height at the seat centre
+    ends = [float(1000 * (c + long_slope * s * (f['hy'] + 0.008) - f['z'])) for s in (-1, 1)]
+    ok = abs(pitch) <= PITCH_MAX_DEG and abs(h_err) <= HEIGHT_MAX_MM and max(map(abs, ends)) <= HEIGHT_MAX_MM + 1.5
+    return {'ok': bool(ok), 'pitch_deg': round(pitch, 2), 'roll_deg': round(roll, 2),
+            'height_err_mm': round(h_err, 2), 'end_heights_mm': [round(e, 2) for e in ends],
+            'residual_mm': round(float(1000 * np.std(r[keep])), 2), 'n_points': int(len(P)),
+            'limits': {'pitch_deg': PITCH_MAX_DEG, 'height_mm': HEIGHT_MAX_MM}}
 
 
-def retry_once(obj, width_mm, offset_mm, say=print, log_dir=None):
-    """Minimal retry, fail closed. Returns False (and stops) on the first failed step.
-
-      regrasp in place -> lift LIFT_M straight up -> translate by -offset (the measured
-      error from a correct seat; an estimate) at that height -> prismatic_peg_insertion
-      DIRECTLY (no _run_hover: translate_object's line_green route always re-approaches
-      from safe height) -> release -> safe height.
-
-    All straight moves are move_to_safe_height --lift-by / --translate-xy (Cartesian waypoint
-    IK seeded from the current joints, orientation kept). NOT primitives.core.move_xyz
-    (fixed-seed IK, joint-space — swung the arm on 2026-10-07)."""
-    if not RETRY_ENABLED:
-        say("  [seat-check] retry not enabled (check-only) — not moving")
-        return False
-    import time as _t
-    from primitives.shared.config import (DEFAULT_BASE_ORIENTATION, DEFAULT_BASE_POSITION,
-                                          get_object_base_offset_m)
-    log_dir = Path(log_dir or '/tmp/seat_check_logs')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stamp = _t.strftime('%H%M%S')
-    gid = SEAT_REF[obj]['grasp_id']
-    py = [sys.executable, '-u', '-m']
-
-    def step(name, argv, timeout=180):
-        ok, res, out = _run(argv, timeout)
-        (log_dir / f"{stamp}_{name.replace(' ', '_')}.log").write_text(out)
-        why = '' if ok else (res.get('error') or res.get('outcome_reason') or 'see log')
-        say(f"  [seat-check]   {name}: {'ok' if ok else 'FAILED ' + str(why)}")
-        return ok, res, out
-
-    ok, res, _ = step('regrasp', py + ['primitives.move_to_grasp', '--object-name', obj,
-                      '--grasp-id', str(gid), '--mode', 'real', '--base-name', 'base1',
-                      '--pre-grasp-width', f"{width_mm:g}"])
-    if not ok:
-        return False
-    q = (res.get('current_object_orientation') or {}).get('quat')
-    if not step('close', py + ['primitives.control_gripper', 'close', '--mode', 'real'])[0]:
-        return False
-    if not step('lift', py + ['primitives.move_to_safe_height', '--mode', 'real',
-                              '--lift-by', f"{LIFT_M:.3f}"])[0]:
-        return False
-    tx, ty = -offset_mm[0] / 1000.0, -offset_mm[1] / 1000.0     # move the part back by its error
-    if max(abs(tx), abs(ty)) > 0.02:
-        say(f"  [seat-check]   offset ({1000*tx:+.1f}, {1000*ty:+.1f}) mm exceeds 20 mm — stopping")
-        return False
-    if not step('translate', py + ['primitives.move_to_safe_height', '--mode', 'real',
-                                   '--translate-xy', f"{tx:.4f}", f"{ty:.4f}"])[0]:
-        return False
-    off = get_object_base_offset_m(obj)
-    base = [float(DEFAULT_BASE_POSITION[i]) + float(off[i]) for i in range(3)]
-    argv = py + ['primitives._real_mode_stash.prismatic_peg_insertion', '--object-name', obj,
-                 '--base-name', 'base1', '--grasp-id', str(gid), '--force', '2.0',
-                 '--timeout', '60', '--final-base-pos', *[f"{v:.6f}" for v in base],
-                 '--final-base-orientation', *[f"{v:.6f}" for v in DEFAULT_BASE_ORIENTATION]]
-    if q:
-        argv += ['--current-object-orientation', *[f"{q[k]:.6f}" for k in 'xyzw']]
-    ok, _, out = step('insert (direct)', argv, 600)
-    if not ok or '[SUCCESS]' not in out:
-        say("  [seat-check]   insert did not seat — stopping with the part held, arm stationary")
-        return False
-    if not step('release', py + ['primitives.control_gripper', f"{width_mm:g}", '--mode', 'real'])[0]:
-        return False
-    return step('safe height', py + ['primitives.move_to_safe_height', '--mode', 'real'])[0]
+def view_pose(obj, observed_base):
+    from disassemble import SEAT_EE_QUAT
+    (bx, by, _), _ = observed_base
+    return ['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+            f"{bx:.4f}", f"{by:.4f}", f"{VIEW_FLANGE_Z:.4f}", '--quat', *map(str, SEAT_EE_QUAT)]
 
 
-def run(obj, width_mm, say=print, max_retries=MAX_RETRIES):
-    """Check; on a bad seat retry minimally up to max_retries. True if it ends seated."""
-    for attempt in range(max_retries + 1):
-        ok, offset = check(obj, say)
-        if ok:
-            return True
-        if offset is None or attempt == max_retries:
-            say(f"  [seat-check] {obj} not confirmed seated after {attempt} retr{'y' if attempt == 1 else 'ies'}")
-            return False
-        say(f"  [seat-check] {obj}: minimal retry {attempt + 1}/{max_retries} (regrasp -> lift "
-            f"{1000 * LIFT_M:.0f} mm -> translate ({-offset[0]:+.1f}, {-offset[1]:+.1f}) mm -> insert)")
-        if not retry_once(obj, width_mm, offset, say):
-            return False        # fail closed: never fall through to another check
-    return False
+def check(obj, observed_base, move=True, out_dir=None):
+    if move:
+        env = os.environ.copy(); env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
+        p = subprocess.run(view_pose(obj, observed_base), capture_output=True, text=True, timeout=60,
+                           env=env, cwd=str(REPO))
+        if p.returncode != 0:
+            return {'ok': False, 'error': 'view move failed: ' + (p.stdout + p.stderr).strip().splitlines()[-1][:200]}
+        time.sleep(1.0)                                        # settle before the depth frames
+    cap = capture_world()
+    if cap is None:
+        return {'ok': False, 'error': 'no depth frames'}
+    Pw, d, color, nf = cap
+    res = measure(obj, observed_base, Pw)
+    res['n_frames'] = nf
+    if out_dir:
+        import cv2
+        out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        np.save(out_dir / f'seatcheck_{obj}_{ts}_depth.npy', d.astype(np.float32))
+        if color is not None:
+            cv2.imwrite(str(out_dir / f'seatcheck_{obj}_{ts}_color.png'), color)
+        json.dump(dict(res, observed_base=observed_base), open(out_dir / f'seatcheck_{obj}_{ts}.json', 'w'), indent=1)
+    return res
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == '--measure-json':
-        return _measure_main(sys.argv[2], float(sys.argv[3]))
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--object', required=True, choices=sorted(SEAT_REF))
-    ap.add_argument('--width-mm', type=float, default=None)
-    ap.add_argument('--check-only', action='store_true')
-    ap.add_argument('--allow-retry', action='store_true',
-                    help='Enable the minimal retry (regrasp, 10 mm lift, insert). Off by default.')
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--object', default='line_green', choices=sorted(TOP_FACE))
+    ap.add_argument('--no-move', action='store_true', help='measure from where the arm is')
+    ap.add_argument('--out-dir', default=None)
     a = ap.parse_args()
-    global RETRY_ENABLED
-    RETRY_ENABLED = bool(a.allow_retry)
-    if a.check_only:
-        sys.exit(0 if check(a.object)[0] else 1)
-    width = a.width_mm
-    if width is None:
-        from primitives.shared.config import get_gripper_width_mm
-        width = get_gripper_width_mm(a.object, SEAT_REF[a.object]['grasp_id'])
-    sys.exit(0 if run(a.object, width) else 1)
+    from replay_real_assembly import observe_base_pose
+    from disassemble import observe_base
+    ob = observe_base_pose('base1') if a.no_move else observe_base('base1')
+    if ob is None:
+        print(json.dumps({'ok': False, 'error': 'base1 not observed'})); return 1
+    res = check(a.object, ob, move=not a.no_move, out_dir=a.out_dir)
+    print(json.dumps(res))
+    return 0 if res.get('ok') else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

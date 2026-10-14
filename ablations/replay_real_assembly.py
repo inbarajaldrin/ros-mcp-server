@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+from scipy.spatial.transform import Rotation as R_  # noqa: E402
 LOG_ROOT = REPO_ROOT / "ablations" / "logs"
 
 # Make `primitives.*` importable from this script's own Python process.
@@ -614,6 +615,67 @@ def _record_snapshot(snap_fh, when: str, label: str, snap: dict) -> None:
     snap_fh.flush()
 
 
+INSERT_MAX_RECOVERIES = 1
+SEAT_CHECK_OBJECTS = ('line_green',)
+RESEAT_MAX = 1
+
+
+def seat_check_and_reseat(obj, state, args, say) -> bool:
+    """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
+    grasp (the pose the insert released it from), and insert it again. Fails closed."""
+    from seat_check import check
+    from disassemble import seat_grasp, SEAT_EE_QUAT, HOVER_DZ
+    ob = getattr(args, 'observed_base', None)
+    if ob is None:
+        say(f"  [seat-check] {obj}: no observed base -> skipped"); return True
+    out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
+    for attempt in range(RESEAT_MAX + 1):
+        res = check(obj, ob, move=True, out_dir=out_dir)
+        say(f"  [seat-check] {obj}: {json.dumps(res)}")
+        if res.get('ok'):
+            return True
+        if 'pitch_deg' not in res:
+            say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
+        if attempt == RESEAT_MAX:
+            say(f"\n!!! {obj} still not flat after {RESEAT_MAX} reseat(s)"); return False
+        o = next((e for e in json.load(open(REPO_ROOT / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
+                  if e['object_name'] == obj), None)
+        gid, w = o['grasp_id'], o['gripper_width_mm']
+        tcp = seat_grasp(obj, gid, ob)
+        q = [str(v) for v in SEAT_EE_QUAT]
+        held = (R_.from_quat(ob[1]) * R_.from_quat(_seat_quat(obj))).as_quat()
+        (bx, by, bz), bq = ob
+        from primitives.shared.config import get_object_base_offset_m
+        dz = float(get_object_base_offset_m(obj)[2])
+        steps = [
+            (['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
+              f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q], 'reseat hover', 60),
+            (['primitives.control_gripper', f"{w:g}", '--mode', 'real'], 'reseat open', 30),
+            (['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
+              f"{tcp[2]:.4f}", '--quat', *q, '--min-z', '0.15', '--max-force', '12', '--min-duration', '6'],
+             'reseat descend', 60),
+            (['primitives.control_gripper', 'close', '--mode', 'real'], 'reseat close', 30),
+            (['primitives.translate_object', '--mode', 'real', '--object-name', obj, '--base-name', 'base1',
+              '--insert', '--insertion-type', 'compliant', '--grasp-id', str(gid),
+              '--current-object-orientation', *[f"{v:.6f}" for v in held],
+              '--final-base-pos', f"{bx:.6f}", f"{by:.6f}", f"{bz + dz:.6f}",
+              '--final-base-orientation', *[f"{v:.6f}" for v in bq]], 'reseat insert', 600),
+            (['primitives.control_gripper', f"{w:g}", '--mode', 'real'], 'reseat release', 30),
+            (['primitives.move_to_safe_height', '--mode', 'real'], 'reseat lift', 60),
+        ]
+        say(f"  [seat-check] {obj} not flat -> reseat {attempt + 1}/{RESEAT_MAX} with the insert grasp")
+        for argv, label, t in steps:
+            r = run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
+            if r.get('result') == 'failure':
+                say(f"\n!!! {label} failed: {r.get('error', '')}"); return False
+    return False
+
+
+def _seat_quat(obj, base_name='base1'):
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    return load_seat_pose_in_base(base_name, obj)[1]
+
+
 def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                    log_fh=None, snap_fh=None) -> bool:
     obj = entry['object_name']
@@ -661,6 +723,18 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
     # Most recent recorded gripper width (mm). move_to_grasp applies it right before its
     # descent (--pre-grasp-width) instead of the gripper closing to it before the approach.
     grasp_width = {'mm': None}
+    insert_recoveries = {'n': 0}
+
+    def _release_width(idx):
+        """Width of the recorded release right after step idx (the gripper command that follows)."""
+        for st_ in sequence[idx:]:
+            try:
+                t_, k_ = parse_tool_call(st_)
+            except Exception:
+                continue
+            if t_ == 'control_gripper' and _width(k_.get('command')) is not None:
+                return _width(k_.get('command'))
+        return grasp_width['mm']
 
     def _width(cmd):
         try:
@@ -799,6 +873,34 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 if log_fh: log_fh.write(msg)
                 return True
 
+        if (result.get('result') == 'failure' and tool_name == 'translate_object'
+                and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES):
+            # A missed insert means a bad grasp (the insert itself searches ~5 mm). Set the
+            # part down at the staging area and take a fresh grasp from close above, then
+            # insert again — the operator's recovery that seated yellow on 2026-10-14.
+            insert_recoveries['n'] += 1
+            say(f"  [{step_idx}] insert failed -> recovery {insert_recoveries['n']}/{INSERT_MAX_RECOVERIES}: "
+                f"place at staging, regrasp, reinsert")
+            rel = _release_width(step_idx)
+            rec = [('translate_object', dict(action='place_down', object_name=obj, base_name=base_name)),
+                   ('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
+                   ('move_to_safe_height', {}),
+                   ('move_to_grasp', dict(object_name=obj, grasp_id=state.last_grasp_id or 1)),
+                   ('control_gripper', dict(command='close')),
+                   ('move_to_safe_height', dict(object_name=obj)),
+                   ('rotate_object', dict(object_name=obj, base_name=base_name)),
+                   ('translate_object', dict(kw))]
+            for j, (t_, k_) in enumerate(rec, start=1):
+                r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
+                if r_ is None or r_.get('result') == 'failure':
+                    result = r_ or {'result': 'failure', 'error': 'recovery build failed'}
+                    say(f"  [{step_idx}] recovery step {t_} failed")
+                    break
+                time.sleep(0.5)
+            else:
+                result = r_
+                say(f"  [{step_idx}] recovery insert succeeded")
+
         if result.get('result') == 'failure':
             print(f"\n!!! STEP FAILED: {step}")
             print(json.dumps(result, indent=2))
@@ -807,6 +909,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # Tiny pause between primitives to let TF + topics settle (matches
         # run_assembly_step's settle-window discipline).
         time.sleep(0.5)
+
+    if obj in SEAT_CHECK_OBJECTS and not args.dry_run and getattr(args, 'seat_check', True):
+        if not seat_check_and_reseat(obj, state, args, say):
+            return False
 
     print(f"\n  ✓ {obj} complete")
     return True
@@ -837,6 +943,9 @@ def main() -> int:
                         "--stop-after insert  runs through pick + rotate + place + re-pick "
                         "+ rotate + insert, then halts (skipping the post-insert release + "
                         "safe-height retract). Skips the cleanup move_home as well.")
+    p.add_argument('--seat-check', action=argparse.BooleanOptionalAction, default=True,
+                   help="After line_green's insert, depth-check it is flat at seat height; if not, "
+                        "take it with the insert grasp and reinsert (once). Default on.")
     p.add_argument('--base-from-camera', action=argparse.BooleanOptionalAction, default=True,
                    help="Aim inserts at the camera-observed base pose, measured once at startup "
                         "(default). --no-base-from-camera uses DEFAULT_BASE_POSITION + "
