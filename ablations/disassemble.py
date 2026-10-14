@@ -85,16 +85,26 @@ def depth_free_spots(extents, exclude_xy):
     from sensor_msgs.msg import Image, CameraInfo
     from geometry_msgs.msg import PoseStamped
     from cv_bridge import CvBridge
-    rclpy.init(); n = rclpy.create_node('disassemble_depth'); st = {}
-    n.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st.__setitem__('d', m), 2)
+    # Median of N_DEPTH frames taken after a short settle. One frame grabbed right after the
+    # arm reached home and the gripper opened in view ruled out most of the table (28 candidate
+    # cells vs 170 two minutes later, same scene, 2026-10-14).
+    time.sleep(1.0)
+    rclpy.init(); n = rclpy.create_node('disassemble_depth'); st = {'d': []}
+    t_from = time.time()
+    n.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw',
+                          lambda m: st['d'].append(m) if time.time() > t_from else None, 20)
     n.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
     n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st.__setitem__('t', m), 10)
     end = time.time() + 8
-    while time.time() < end and not all(k in st for k in 'dit'):
+    while time.time() < end and not (len(st['d']) >= N_DEPTH and 'i' in st and 't' in st):
         rclpy.spin_once(n, timeout_sec=0.05)
-    if not all(k in st for k in 'dit'):
+    if len(st['d']) < 3 or 'i' not in st or 't' not in st:
         n.destroy_node(); rclpy.shutdown(); return None, "no depth/camera_info/tcp"
-    d = CvBridge().imgmsg_to_cv2(st['d'], 'passthrough').astype(float) / 1000.0
+    br = CvBridge()
+    D = np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(float) for m in st['d'][-N_DEPTH:]])
+    D[D == 0] = np.nan                                         # no-return pixels don't vote
+    with np.errstate(all='ignore'):
+        d = np.nan_to_num(np.nanmedian(D, 0), nan=0.0) / 1000.0
     K = np.array(st['i'].k).reshape(3, 3); p, o = st['t'].pose.position, st['t'].pose.orientation
     n.destroy_node(); rclpy.shutdown()
     T = np.eye(4); T[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); T[:3, 3] = [p.x, p.y, p.z]
@@ -145,6 +155,7 @@ def depth_free_spots(extents, exclude_xy):
 
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
+N_DEPTH = 10                               # depth frames per free-spot map (median)
 
 
 GRASP_OFFSETS = REPO / 'ablations/logs/grasp_tool_offsets.json'
