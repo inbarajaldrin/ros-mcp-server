@@ -113,13 +113,26 @@ def main():
             out["error"] = f"joint step {step:.2f} rad > {a.max_joint_step}"; result(out); return 1
         dur = max(compute_duration(joint_distance=step, cartesian_distance=dist, profile='s_curve'), a.min_duration)
         F0 = None
-        if a.max_force is not None:                    # baseline: arm still, before the move
-            n.F.clear(); end = time.time() + 2.0
-            while len(n.F) < n.F.maxlen and time.time() < end:
-                rclpy.spin_once(n, timeout_sec=0.01)
-            if len(n.F) < n.F.maxlen:
-                out["error"] = "no wrench for the force guard"; result(out); return 1
-            F0 = np.median(np.array(n.F), axis=0)
+        if a.max_force is not None:
+            # Baseline only once the wrench is steady: two consecutive 0.15 s medians within 1 N.
+            # A gripper still moving from the previous command tripped the guard at 14 N before
+            # the arm had moved (2026-10-14).
+            def window(sec):
+                buf = []; t_end = time.time() + sec
+                while time.time() < t_end:
+                    rclpy.spin_once(n, timeout_sec=0.005)
+                    if n.F:
+                        buf.append(n.F[-1])
+                return np.median(np.array(buf), axis=0) if len(buf) > 10 else None
+            F0 = None; end = time.time() + 4.0
+            prev = window(0.15)
+            while time.time() < end:
+                cur = window(0.15)
+                if prev is not None and cur is not None and np.linalg.norm(cur - prev) < 1.0:
+                    F0 = cur; break
+                prev = cur
+            if F0 is None:
+                out["error"] = "wrench not steady (or absent) for the force-guard baseline"; result(out); return 1
         traj = JointTrajectory(); traj.joint_names = JOINTS
         for p, v, t in s_curve_profile([q0] + list(wps), dur):
             traj.points.append(JointTrajectoryPoint(positions=p, velocities=v,
@@ -133,14 +146,17 @@ def main():
         if F0 is None:
             rclpy.spin_until_future_complete(n, res, timeout_sec=dur + 15.0)
         else:
-            end = time.time() + dur + 15.0
+            end = time.time() + dur + 15.0; t_go = time.time()
             while not res.done() and time.time() < end:
                 rclpy.spin_once(n, timeout_sec=0.005)
                 dF = float(np.linalg.norm(np.median(np.array(n.F), axis=0) - F0))
                 if dF > a.max_force:
                     cf = gh.cancel_goal_async(); rclpy.spin_until_future_complete(n, cf, timeout_sec=3.0)
                     T = forward_kinematics(dh_params, n.q)
+                    Fm = np.median(np.array(n.F), axis=0)
                     out.update(error=f"contact: |dF| {dF:.1f} N > {a.max_force} N", contact=True,
+                               t_after_start_s=round(time.time() - t_go, 3),
+                               F_baseline=[round(float(v), 2) for v in F0], F_now=[round(float(v), 2) for v in Fm],
                                stopped_at=[round(float(v), 4) for v in T[:3, 3]])
                     result(out); return 1
         if res.result() is None or res.result().result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
