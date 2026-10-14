@@ -294,7 +294,7 @@ from tf2_msgs.msg import TFMessage
 
 want = sys.argv[1]
 deadline_s = float(sys.argv[2])
-want_samples = 3
+want_samples = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 
 rclpy.init()
 n = rclpy.create_node('replay_observe_orientation')
@@ -318,14 +318,14 @@ rclpy.shutdown()
 """
 
 
-def observe_object_orientation(object_name: str, timeout_s: float = 30.0) -> dict:
+def observe_object_orientation(object_name: str, timeout_s: float = 30.0, n_samples: int = 3) -> dict:
     """Observe a part's resting pose on /objects_poses_real. Waits rather than sampling
     once: the localizer goes quiet while the arm moves, so absence of a detection means
     "not seen yet", not "not there". The camera only sees what is under the arm — put the
     arm over the part first (home view or move_to_clear_area --fix-orientation)."""
     try:
         proc = subprocess.run(
-            ['python3', '-c', _OBSERVE_ORIENTATION_HELPER, object_name, str(timeout_s)],
+            ['python3', '-c', _OBSERVE_ORIENTATION_HELPER, object_name, str(timeout_s), str(n_samples)],
             capture_output=True, text=True, timeout=timeout_s + 10, env=make_env(),
         )
         if proc.returncode != 0:
@@ -334,6 +334,25 @@ def observe_object_orientation(object_name: str, timeout_s: float = 30.0) -> dic
         return json.loads(line)
     except Exception as e:
         return {'error': f'observe failed: {e}'}
+
+
+def observe_base_pose(base_name: str, timeout_s: float = 15.0):
+    """The base's pose as the camera sees it, for the inserts (2026-10-14).
+
+    Grasps aim at what the camera sees; inserts used to aim at a hand-tuned
+    DEFAULT_BASE_POSITION (~5 mm off the measured base) plus per-part xy fudges. Aiming
+    the inserts at the camera-observed base makes the chain self-consistent: a bias the
+    camera/arm puts on a part's grasp also sits on its insert target, so it cancels.
+    Returns ((x, y, z), (qx, qy, qz, qw)) or None."""
+    obs = observe_object_orientation(base_name, timeout_s, n_samples=15)
+    S = obs.get('samples') or []
+    if obs.get('error') or len(S) < 5:
+        return None
+    import numpy as _np
+    P = _np.median(_np.array([s_['xyz'] for s_ in S]), axis=0)
+    Q = _np.array([s_['quat_xyzw'] for s_ in S]); Q *= _np.sign(Q @ Q[0])[:, None]
+    q = Q.mean(axis=0); q /= _np.linalg.norm(q)
+    return tuple(float(v) for v in P), tuple(float(v) for v in q)
 
 
 def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0):
@@ -494,7 +513,8 @@ class AssemblyState:
 # ---------------------------------------------------------------------------
 
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
-               base_offset_xy: Optional[Tuple[float, float]] = None) -> Tuple[list[str], int]:
+               base_offset_xy: Optional[Tuple[float, float]] = None,
+               observed_base=None) -> Tuple[list[str], int]:
     """Map (tool_name, kwargs) → (subprocess argv, timeout_s). All calls forced to mode=real."""
     py = ['python3', '-u', '-m']
 
@@ -540,6 +560,16 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
             gid = state.last_grasp_id if state.last_grasp_id is not None else 1
             argv += ['--grasp-id', str(gid)]
             argv += state.quat_argv()
+            if observed_base is not None:
+                # Camera-observed base (see observe_base_pose). Per-object offsets keep only
+                # their z (seat depth); their xy were fudges for the hand-tuned default base.
+                from primitives.shared.config import get_object_base_offset_m
+                (ox, oy, oz), oq = observed_base
+                dz = float(get_object_base_offset_m(kw['object_name'])[2])
+                argv += ['--final-base-pos', f"{ox:.6f}", f"{oy:.6f}", f"{oz + dz:.6f}",
+                         '--final-base-orientation', *[f"{v:.6f}" for v in oq]]
+                argv = [a for a in argv if a != '--use-default-base-position']
+                return argv, 600
             if base_offset_xy is not None and (base_offset_xy[0] != 0.0 or base_offset_xy[1] != 0.0):
                 # Override default base position with an xy offset. Pulls
                 # DEFAULT_BASE_POSITION at runtime so calibration stays the
@@ -604,7 +634,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         """Run one primitive. Returns its result dict, or None if the argv build failed."""
         try:
             argv, timeout_s = build_argv(tool_name, kw, state,
-                                         base_offset_xy=args.base_offset_xy)
+                                         base_offset_xy=args.base_offset_xy,
+                                         observed_base=getattr(args, 'observed_base', None))
         except Exception as e:
             print(f"  [{step_idx}] BUILD FAILED ({e}); aborting.")
             return None
@@ -693,7 +724,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         if args.dry_run:
             try:
-                argv, _ = build_argv(tool_name, kw, state, base_offset_xy=args.base_offset_xy)
+                argv, _ = build_argv(tool_name, kw, state, base_offset_xy=args.base_offset_xy,
+                                     observed_base=getattr(args, 'observed_base', None))
             except Exception as e:
                 print(f"  [{step_idx}] BUILD FAILED ({e}); aborting.")
                 return False
@@ -805,6 +837,10 @@ def main() -> int:
                         "--stop-after insert  runs through pick + rotate + place + re-pick "
                         "+ rotate + insert, then halts (skipping the post-insert release + "
                         "safe-height retract). Skips the cleanup move_home as well.")
+    p.add_argument('--base-from-camera', action=argparse.BooleanOptionalAction, default=True,
+                   help="Aim inserts at the camera-observed base pose, measured once at startup "
+                        "(default). --no-base-from-camera uses DEFAULT_BASE_POSITION + "
+                        "per-object offsets as before.")
     p.add_argument('--base-offset-xy', type=float, nargs=2, metavar=('DX', 'DY'),
                    default=None,
                    help="xy offset (m) injected into the insert step's base pose. Useful for "
@@ -936,6 +972,40 @@ def main() -> int:
                 msg = f"  [derive-sequence] {obj}: {note}"
                 print(msg)
                 if log_fh: log_fh.write(msg + "\n")
+
+        # Base pose for the inserts, observed once while the arm is still (startup view).
+        args.observed_base = None
+        if getattr(args, 'base_from_camera', False) and not args.dry_run:
+            bname = 'base1'
+            for e_ in entries:
+                for s_ in e_.get('tool_sequence', []) or []:
+                    try:
+                        bname = parse_tool_call(s_)[1].get('base_name') or bname
+                    except Exception:
+                        pass
+            # Read the base from straight above (flange 0.34 m, top-down), where the parts are
+            # read during grasps — not from home, where the view is far and oblique (base1 read
+            # 3-4 mm and ~2 deg off there, 2026-10-14). Then back home so the picks start with
+            # every table part in view. Skipped (home-view read) if the move is refused.
+            from primitives.shared.config import DEFAULT_BASE_POSITION as _DBP
+            r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                 f"{_DBP[0]:.4f}", f"{_DBP[1]:.4f}", "0.34"],
+                                label='base-view move', timeout_s=60, log_fh=log_fh)
+            above = r_.get('result') == 'success'
+            ob = observe_base_pose(bname)
+            if above:
+                r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                                    label='base-view return home', timeout_s=60, log_fh=log_fh)
+                if r_.get('result') == 'failure':
+                    print("\n!!! base-view return home FAILED — stopping"); return 1
+            if ob is None:
+                msg = f"  [base] {bname} not observed -> DEFAULT_BASE_POSITION + per-object offsets"
+            else:
+                args.observed_base = ob
+                msg = (f"  [base] {bname} observed at ({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}, "
+                       f"{1000*ob[0][2]:.1f}) mm -> inserts aim at it (per-object z offsets kept)")
+            print(msg)
+            if log_fh: log_fh.write(msg + "\n")
 
         completed: list[str] = []
         failed: Optional[str] = None

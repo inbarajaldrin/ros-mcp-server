@@ -219,7 +219,7 @@ PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
 HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)
-DH_PARAMS = [
+DH_PARAMS_NOMINAL = [
     (0,  0.1625,  0,     np.pi/2),
     (0,  0,      -0.425,  0),
     (0,  0,      -0.3922, 0),
@@ -227,6 +227,24 @@ DH_PARAMS = [
     (0,  0.0997,  0,    -np.pi/2),
     (0,  0.0996,  0,     0)
 ]
+# This robot's calibration, as DH deltas (dtheta rad, dd m, da m, dalpha rad) per joint, fitted
+# 2026-10-14 so our FK reproduces the controller's (factory-calibrated) TCP over 486 logged
+# poses: gripper-centre error 1.78 mm median / 2.38 max (nominal) -> 0.08 / 0.6 mm, same on a
+# held-out half. Our IK was aiming ~1.8 mm off everywhere; the camera chain already used the
+# controller's calibrated TCP. The driver logs "calibration parameters ... don't match" because
+# of the same thing. ROS_MCP_NOMINAL_DH=1 reverts to the nominal table.
+DH_DELTAS = [
+    (+0.0024662, +0.000227, -0.000196, -0.0001885),
+    (-0.0002025, -0.000360, -0.000067, -0.0000175),
+    (+0.0014137, -0.000360, -0.000210, +0.0001710),
+    (-0.0012252, -0.000358, +0.000079, +0.0014573),
+    (-0.0048625, -0.000066, +0.000032, +0.0006912),
+    (-0.0000000, -0.000009, +0.000002, +0.0000052),
+]
+if __import__('os').environ.get('ROS_MCP_NOMINAL_DH') == '1':
+    DH_PARAMS = DH_PARAMS_NOMINAL
+else:
+    DH_PARAMS = [tuple(n + d for n, d in zip(nom, dl)) for nom, dl in zip(DH_PARAMS_NOMINAL, DH_DELTAS)]
 
 
 # --- Gripper width lookup from fmb1_assembly.json ---
