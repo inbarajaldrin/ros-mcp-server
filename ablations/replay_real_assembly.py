@@ -687,6 +687,30 @@ def _seat_quat(obj, base_name='base1'):
     return load_seat_pose_in_base(base_name, obj)[1]
 
 
+CAMERA_TOPIC = os.environ.get('CAMERA_HEALTH_TOPIC', '/camera/camera/color/image_raw')
+CAMERA_MAX_AGE_S = 2.0
+
+
+def camera_frame_age(timeout_s: float = 3.0):
+    """Seconds since the newest colour frame, or None if none arrived within timeout_s.
+    The D415 dropped off USB mid-run on 2026-10-14; the localizer kept publishing empty pose
+    lists and move_to_grasp spent its retries on 'not detected' instead of saying why."""
+    import rclpy
+    from sensor_msgs.msg import Image
+    own = not rclpy.ok()
+    if own:
+        rclpy.init()
+    node = rclpy.create_node('replay_camera_check'); st = {}
+    node.create_subscription(Image, CAMERA_TOPIC, lambda m: st.__setitem__('t', time.time()), 2)
+    end = time.time() + timeout_s
+    while 't' not in st and time.time() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.destroy_node()
+    if own:
+        rclpy.shutdown()
+    return (time.time() - st['t']) if 't' in st else None
+
+
 def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                    log_fh=None, snap_fh=None) -> bool:
     obj = entry['object_name']
@@ -705,6 +729,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
     def execute(step_idx, step, tool_name, kw, tag=""):
         """Run one primitive. Returns its result dict, or None if the argv build failed."""
+        if tool_name == 'move_to_grasp':
+            age = camera_frame_age()
+            if age is None or age > CAMERA_MAX_AGE_S:
+                msg = (f"camera not streaming (last colour frame {'never' if age is None else f'{age:.1f} s ago'})"
+                       " - check the D415 USB link (dmesg), restart realsense2_camera + localizer")
+                say(f"\n!!! {msg}")
+                return {'result': 'failure', 'error': msg}
         try:
             argv, timeout_s = build_argv(tool_name, kw, state,
                                          base_offset_xy=args.base_offset_xy,
