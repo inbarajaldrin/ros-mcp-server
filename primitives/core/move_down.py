@@ -350,6 +350,21 @@ class MoveDown(Node):
         self.current_torque_x = msg.wrench.torque.x
         self.current_torque_y = msg.wrench.torque.y
         self.current_torque_z = msg.wrench.torque.z
+        # 2026-10-14: the UR wrench carries a 4-6 ms glitch every ~102 ms (~11 N, robot side).
+        # A single-sample baseline or contact test can latch it (false stop -> part released
+        # above the table). Keep a short buffer; baseline and contact use medians over it.
+        if not hasattr(self, '_wbuf'):
+            self._wbuf = __import__('collections').deque(maxlen=200)
+        w = msg.wrench
+        self._wbuf.append((w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z))
+
+    def _median_wrench(self, n):
+        """Median of the last n wrench samples (a 2-3 sample glitch cannot move it)."""
+        import numpy as _np
+        buf = list(getattr(self, '_wbuf', []))[-n:]
+        if len(buf) < max(3, n // 3):
+            return None
+        return _np.median(_np.array(buf), axis=0)
 
     def start_force_monitoring(self):
         """Start monitoring force during trajectory execution (non-blocking)"""
@@ -368,14 +383,16 @@ class MoveDown(Node):
             self.baseline_torque_y = None
             self.baseline_torque_z = None
         else:
-            # Real mode: take baseline at start (stationary)
-            time.sleep(0.1)
-            self.baseline_force_x = self.current_force_x
-            self.baseline_force_y = self.current_force_y
-            self.baseline_force_z = self.current_force_z
-            self.baseline_torque_x = self.current_torque_x
-            self.baseline_torque_y = self.current_torque_y
-            self.baseline_torque_z = self.current_torque_z
+            # Real mode: take baseline at start (stationary) — median over ~0.3 s
+            end = time.time() + 0.35
+            while time.time() < end:
+                rclpy.spin_once(self, timeout_sec=0.01)
+            m = self._median_wrench(150)
+            if m is None:
+                m = (self.current_force_x, self.current_force_y, self.current_force_z,
+                     self.current_torque_x, self.current_torque_y, self.current_torque_z)
+            (self.baseline_force_x, self.baseline_force_y, self.baseline_force_z,
+             self.baseline_torque_x, self.baseline_torque_y, self.baseline_torque_z) = (float(v) for v in m)
 
         if self.force_monitor_timer is None:
             self.force_monitor_timer = self.create_timer(FORCE_CHECK_INTERVAL, self.check_force_during_execution)
@@ -448,13 +465,19 @@ class MoveDown(Node):
             z_threshold = Z_FORCE_THRESHOLD
             force_threshold = FORCE_THRESHOLD
 
-        # Calculate forces after baseline removal
-        f_x = self.current_force_x - self.baseline_force_x
-        f_y = self.current_force_y - self.baseline_force_y
-        f_z = self.current_force_z - self.baseline_force_z
-        t_x = self.current_torque_x - self.baseline_torque_x
-        t_y = self.current_torque_y - self.baseline_torque_y
-        t_z = self.current_torque_z - self.baseline_torque_z
+        # Calculate forces after baseline removal (real: median of the last ~30 ms, glitch-proof)
+        cur = (self.current_force_x, self.current_force_y, self.current_force_z,
+               self.current_torque_x, self.current_torque_y, self.current_torque_z)
+        if self.mode != 'sim':
+            m = self._median_wrench(15)
+            if m is not None:
+                cur = tuple(float(v) for v in m)
+        f_x = cur[0] - self.baseline_force_x
+        f_y = cur[1] - self.baseline_force_y
+        f_z = cur[2] - self.baseline_force_z
+        t_x = cur[3] - self.baseline_torque_x
+        t_y = cur[4] - self.baseline_torque_y
+        t_z = cur[5] - self.baseline_torque_z
 
         # Check contact force with directional threshold
         # Sim mode: orientation-aware — monitor the tool-frame axis aligned with world Z
