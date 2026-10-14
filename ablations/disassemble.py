@@ -244,7 +244,12 @@ def main():
     ap.add_argument('--from-staging', action='store_true',
                     help='with --relocate: the part sits in the staging region (not visible from '
                          'home) — plan the spot from home, then pick it over the clear area')
+    ap.add_argument('--to-staging', action='store_true',
+                    help='with --only: take the seated part out with the insert grasp and set it down '
+                         'in the staging region (clear area) for a fresh regrasp, e.g. a tilted seat')
     a = ap.parse_args()
+    if a.to_staging and not a.only:
+        ap.error('--to-staging needs --only PART')
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
     sel = a.relocate or a.only
     parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
@@ -259,7 +264,10 @@ def main():
     extents = [footprint_half_extents(o['object_name']) for o in parts]
     print("[spots] footprints mm: " + ", ".join(f"{o['object_name']} {2000*e[0]:.0f}x{2000*e[1]:.0f}"
                                                 for o, e in zip(parts, extents)))
-    spots, note = depth_free_spots(extents, exclude)
+    if a.to_staging:
+        spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
+    else:
+        spots, note = depth_free_spots(extents, exclude)
     print(f"[spots] {note}: {[(round(1000*x), round(1000*y)) for x, y in (spots or [])]} mm")
     if not spots or len(spots) < len(parts):
         print("not enough free spots seen from here — stopping")
@@ -336,6 +344,8 @@ def main():
             if not ok: return 1
         if place_at(sx, sy, w, home=False) != 0:
             return 1
+    if a.to_staging:                                       # stay over the clear area: the regrasp sees it
+        return 0
     ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
     return 0 if ok else 1
 

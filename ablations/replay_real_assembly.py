@@ -1028,6 +1028,10 @@ def main() -> int:
                    metavar=('QX', 'QY', 'QZ', 'QW'), default=None,
                    help="Optional initial held_quat to seed the chain (e.g. when starting "
                         "mid-sequence with a part already in the gripper).")
+    p.add_argument('--part-at-staging', action='store_true',
+                   help='with --only/--skip-startup, arm over the clear area: the part waits in the '
+                        'staging region (e.g. after disassemble.py --to-staging); after reading the base '
+                        'the arm returns over the clear area instead of home')
     p.add_argument('--skip-startup', action='store_true',
                    help="Skip the move_home + gripper-open startup phase. Use when the "
                         "robot is already in a known clean state.")
@@ -1157,10 +1161,15 @@ def main() -> int:
             above = r_.get('result') == 'success'
             ob = observe_base_pose(bname)
             if above:
-                r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
-                                    label='base-view return home', timeout_s=60, log_fh=log_fh)
+                # --part-at-staging: the part waits in the clear area, which home cannot see —
+                # go back over it (top-down, orientation kept) instead of home.
+                back = (['primitives.core.move_to_clear_area', '--mode', 'real'] if args.part_at_staging
+                        else ['primitives.move_home', '--mode', 'real'])
+                r_ = run_subprocess(['python3', '-u', '-m', *back],
+                                    label='base-view return ' + ('to staging' if args.part_at_staging else 'home'),
+                                    timeout_s=90, log_fh=log_fh)
                 if r_.get('result') == 'failure':
-                    print("\n!!! base-view return home FAILED — stopping"); return 1
+                    print("\n!!! base-view return FAILED — stopping"); return 1
             if ob is None:
                 msg = f"  [base] {bname} not observed -> DEFAULT_BASE_POSITION + per-object offsets"
             else:
