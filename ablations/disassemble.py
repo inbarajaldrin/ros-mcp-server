@@ -109,6 +109,12 @@ def depth_free_spots(extents, exclude_xy):
         S = np.pad(m.astype(np.int32).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
         return S[kx:, ky:] - S[:-kx, ky:] - S[kx:, :-ky] + S[:-kx, :-ky]
     m_ = FINGER_CLEAR / 2
+    r_ = int(np.ceil(m_ / cell))                              # parts already lying there get the
+    hp = np.pad(high, r_)                                      # same margin as placed ones, so every
+    high = np.zeros_like(high)                                 # outline-to-outline gap is FINGER_CLEAR
+    for di in range(2 * r_ + 1):
+        for dj in range(2 * r_ + 1):
+            high |= hp[di:di + nx, dj:dj + ny]
     spots, n_cand = [], 0
     for ex, ey in extents:
         kx, ky = int(2 * (ex + m_) / cell) + 1, int(2 * (ey + m_) / cell) + 1
@@ -195,6 +201,9 @@ def main():
     ap.add_argument('--relocate', default=None, metavar='PART',
                     help='pick PART off the table (move_to_grasp) and set it down at a free, '
                          'properly spaced spot; for parts lying too close to each other')
+    ap.add_argument('--from-staging', action='store_true',
+                    help='with --relocate: the part sits in the staging region (not visible from '
+                         'home) — plan the spot from home, then pick it over the clear area')
     a = ap.parse_args()
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
     sel = a.relocate or a.only
@@ -219,7 +228,8 @@ def main():
         o = parts[0]; (sx, sy) = spots[0]
         name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
         print(f"\n=== relocate {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
-        for argv, label, t in [
+        pick = [(py('primitives.core.move_to_clear_area', '--mode', 'real'), 'over staging', 90)] if a.from_staging else []
+        for argv, label, t in pick + [
             (py('primitives.move_to_grasp', '--object-name', name, '--grasp-id', str(gid), '--mode', 'real',
                 '--pre-grasp-width', f"{w:g}"), 'move_to_grasp', 180),
             (py('primitives.control_gripper', 'close', '--mode', 'real'), 'close', 30),
