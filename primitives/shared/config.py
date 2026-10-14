@@ -6,6 +6,62 @@ TABLE_HEIGHT = TABLE_HEIGHT_WORLD - ROBOT_BASE_Z  # Table surface Z in robot bas
 TABLE_COLLISION_MARGIN_SIDEWAYS = 0.08  # Safety margin for sideways/horizontal EE orientations
 TABLE_COLLISION_MARGIN_FACEDOWN = 0.08  # Safety margin for face_down EE orientation 
 GRIPPER_CENTER_TOOL_OFFSET = np.array([0.0, 0.0, 0.2286])  # 3D offset from EE flange to gripper center in tool frame (meters)
+# --- RG2 fingertip / pad geometry (2026-10-14) -------------------------------------------------
+# GRIPPER_CENTER_TOOL_OFFSET (0.2286) is NOT the pad centre: it sits ~1 mm above the fingertip
+# ends, so a grasp aimed with it holds the part ~14 mm shallow. Measured: closed fingertips touched
+# base1's top (35 mm CAD, on the table) at flange - 230.86 mm. The RG2 4-bar linkage (CAD, R = 55 mm)
+# moves the tips with width: depth(a) = 55 cos(a) + const, rubber gap = 110 sin(a) - 3.96 mm.
+# Pads are 29.8 mm long (CAD), so the pad centre is 14.9 mm above the tips.
+RG2_TIP_CLOSED_M = 0.23086          # flange -> fingertip end, gripper closed (gap ~0)
+RG2_PAD_HALF_M = 0.0149             # fingertip end -> pad centre
+GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above the table
+# Rubber gap when closed on each part (= /gripper_status width readback; logs 2026-10-07..14).
+GRIP_WIDTH_MM = {'u_brown': 21.0, 'u_orange': 21.0, 'line_green': 25.9, 'inverted_u_yellow': 42.0}
+
+
+def rg2_tip_length_m(gap_mm: float) -> float:
+    """Flange -> fingertip end along tool z at rubber gap `gap_mm` (RG2 linkage, anchored closed)."""
+    ca = lambda g: np.cos(np.arcsin(np.clip((g + 3.96) / 110.0, 0.0, 1.0)))
+    return RG2_TIP_CLOSED_M - 0.055 * (ca(0.0) - ca(gap_mm))
+
+
+def pad_center_offset_m(gap_mm: float) -> float:
+    """Flange -> pad centre along tool z at rubber gap `gap_mm`: where a grasp point belongs."""
+    return rg2_tip_length_m(gap_mm) - RG2_PAD_HALF_M
+
+
+def held_tool_offset() -> np.ndarray:
+    """Flange -> held part's grasp point in the tool frame, for every step that predicts where a
+    HELD part is (insert hover, seat prediction, contact candidates, prismatic target).
+    move_to_grasp --pad-center reports the value it executed (grasp_tool_offset_m); the caller
+    passes it on as GRASP_TOOL_OFFSET_M in the subprocess environment (like ROS_MCP_MODE).
+    Unset -> the legacy nominal GRIPPER_CENTER_TOOL_OFFSET."""
+    import os
+    v = os.environ.get('GRASP_TOOL_OFFSET_M')
+    return np.array([0.0, 0.0, float(v)]) if v else GRIPPER_CENTER_TOOL_OFFSET.copy()
+
+
+def grasp_tool_offset_target_m(object_name: str, gap_mm: float) -> float:
+    """Flange -> grasp point a --pad-center grasp aims for: the pad centre on the grasp point,
+    unless the fingertips would then hit base1 or a seated part at the insert (CAD, computed by
+    ablations/grasp_depth.py into eval_resources/fmb1_grasp_depth.json). move_to_grasp then also
+    keeps the tips above the table at the pick."""
+    import json, os
+    pad = pad_center_offset_m(gap_mm)
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                     'ablations', 'eval_resources', 'fmb1_grasp_depth.json')
+    try:
+        return max(pad, float(json.load(open(p))['parts'][object_name]['seat_floor_offset_m']))
+    except Exception:
+        return pad
+
+
+def grip_width_mm(object_name: str, pre_grasp_width_mm: float | None = None) -> float:
+    if object_name in GRIP_WIDTH_MM:
+        return GRIP_WIDTH_MM[object_name]
+    return max(0.0, (pre_grasp_width_mm or 35.0) - 14.0)
+
+
 SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (meters)
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange

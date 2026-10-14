@@ -65,6 +65,9 @@ def run(argv, label, timeout=180):
     res = json.loads(js[-1]) if js else {}
     ok = p.returncode == 0 and res.get('result', 'success') != 'failure'
     print(f"    {'ok' if ok else 'FAILED'} {res.get('error', '') if not ok else ''}", flush=True)
+    for l in out.splitlines():                        # how deep a grasp went (pad centre vs grasp point)
+        if any(k in l for k in ('Pad-centre grasp', 'Raising gripper center', 'Target gripper center')):
+            print('     ' + l.split(']: ')[-1], flush=True)
     if not ok:
         print('\n'.join(out.splitlines()[-15:]))
     return ok, res
@@ -144,8 +147,33 @@ SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged ins
 HOVER_DZ = 0.10
 
 
+GRASP_OFFSETS = REPO / 'ablations/logs/grasp_tool_offsets.json'
+
+
+def record_grasp_offset(name, offset_m):
+    """Remember how deep `name` was last grasped (flange -> grasp point, move_to_grasp's
+    grasp_tool_offset_m). The last grasp before an insert is the insert grasp."""
+    try:
+        d = json.load(open(GRASP_OFFSETS))
+    except Exception:
+        d = {}
+    d[name] = dict(grasp_tool_offset_m=float(offset_m), t=time.strftime('%Y-%m-%d %H:%M:%S'))
+    GRASP_OFFSETS.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(d, open(GRASP_OFFSETS, 'w'), indent=1)
+
+
+def grasp_offset_for(name):
+    """Flange -> grasp point the insert held `name` with: recorded, else the pad-centre model."""
+    try:
+        return float(json.load(open(GRASP_OFFSETS))[name]['grasp_tool_offset_m'])
+    except Exception:
+        from primitives.shared.config import grip_width_mm, grasp_tool_offset_target_m
+        return grasp_tool_offset_target_m(name, grip_width_mm(name))
+
+
 def seat_grasp(name, gid, observed_base, base_name='base1'):
-    """Flange pose the insert holds `name` at when seated (same chain as translate_object)."""
+    """Flange pose the insert holds `name` at when seated (same chain as translate_object,
+    same grasp depth as the insert: grasp_offset_for)."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
     from primitives.shared.config import get_object_base_offset_m
     (bx, by, bz), bq = observed_base
@@ -154,7 +182,8 @@ def seat_grasp(name, gid, observed_base, base_name='base1'):
     held = (R.from_quat(bq) * R.from_quat(seat_q)).as_quat()       # seated orientation in world
     out = predict_tcp_at_seat(base_name=base_name, object_name=name, grasp_id=gid,
                               base_world_xyz=[bx, by, bz + dz], base_world_quat_xyzw=bq,
-                              held_quat_xyzw=held, ee_orientation_xyzw=SEAT_EE_QUAT)
+                              held_quat_xyzw=held, ee_orientation_xyzw=SEAT_EE_QUAT,
+                              flange_offset_m=grasp_offset_for(name))
     return np.array(out['predicted_tcp_at_seat']['xyz_m'])
 
 
@@ -231,7 +260,7 @@ def main():
         pick = [(py('primitives.core.move_to_clear_area', '--mode', 'real'), 'over staging', 90)] if a.from_staging else []
         for argv, label, t in pick + [
             (py('primitives.move_to_grasp', '--object-name', name, '--grasp-id', str(gid), '--mode', 'real',
-                '--pre-grasp-width', f"{w:g}"), 'move_to_grasp', 180),
+                '--pre-grasp-width', f"{w:g}", '--pad-center'), 'move_to_grasp', 180),
             (py('primitives.control_gripper', 'close', '--mode', 'real'), 'close', 30),
             (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift', 90)]:
             ok, _ = run(argv, label, t)

@@ -505,6 +505,16 @@ class AssemblyState:
                     float(q['x']), float(q['y']), float(q['z']), float(q['w'])
                 )
                 return
+        # move_to_grasp --pad-center reports how deep it grasped (flange -> grasp point). Every
+        # later step that predicts the held part (insert hover/seat/contacts) reads it from
+        # GRASP_TOOL_OFFSET_M (config.held_tool_offset); the disassembly reuses the recorded value.
+        if result.get("movement_type") == "move_to_object" and result.get("grasp_tool_offset_m") is None:
+            os.environ.pop('GRASP_TOOL_OFFSET_M', None)      # never carry another grasp's depth
+        if result.get("grasp_tool_offset_m") is not None:
+            os.environ['GRASP_TOOL_OFFSET_M'] = f"{float(result['grasp_tool_offset_m']):.5f}"
+            if result.get("object_name"):
+                from disassemble import record_grasp_offset
+                record_grasp_offset(result["object_name"], result["grasp_tool_offset_m"])
         # move_to_grasp emits current_object_orientation.quat
         coo = result.get("current_object_orientation")
         if isinstance(coo, dict):
@@ -541,7 +551,7 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
         return py + ['primitives.move_to_grasp',
                      '--object-name', kw['object_name'],
                      '--grasp-id', str(gid),
-                     '--mode', 'real'], 60
+                     '--mode', 'real', '--pad-center'], 60
 
     if tool_name == 'move_to_safe_height':
         argv = py + ['primitives.move_to_safe_height', '--mode', 'real']
@@ -653,6 +663,8 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
                   if e['object_name'] == obj), None)
         gid, w = o['grasp_id'], o['gripper_width_mm']
         tcp = seat_grasp(obj, gid, ob)
+        from disassemble import grasp_offset_for
+        os.environ['GRASP_TOOL_OFFSET_M'] = f"{grasp_offset_for(obj):.5f}"   # the insert's grasp depth
         q = [str(v) for v in SEAT_EE_QUAT]
         held = (R_.from_quat(ob[1]) * R_.from_quat(_seat_quat(obj))).as_quat()
         (bx, by, bz), bq = ob

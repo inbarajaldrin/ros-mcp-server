@@ -1,0 +1,46 @@
+{
+ "_doc": "Per-part grasp depth: pad centre on the grasp point, unless the fingers would hit something",
+ "seat_clearance_m": 0.004,
+ "parts": {
+  "u_brown": {
+   "grasp_id": 1,
+   "gap_mm": 21.0,
+   "pad_center_offset_m": 0.21456,
+   "seat_floor_offset_m": 0.21625,
+   "grasp_tool_offset_m": 0.21625,
+   "limited_by": "base1",
+   "surface_below_grasp_point_mm": 17.2,
+   "pad_centre_above_grasp_point_mm": 1.7
+  },
+  "u_orange": {
+   "grasp_id": 1,
+   "gap_mm": 21.0,
+   "pad_center_offset_m": 0.21456,
+   "seat_floor_offset_m": 0.21625,
+   "grasp_tool_offset_m": 0.21625,
+   "limited_by": "base1",
+   "surface_below_grasp_point_mm": 17.2,
+   "pad_centre_above_grasp_point_mm": 1.7
+  },
+  "line_green": {
+   "grasp_id": 1,
+   "gap_mm": 25.9,
+   "pad_center_offset_m": 0.21393,
+   "seat_floor_offset_m": 0.22583,
+   "grasp_tool_offset_m": 0.22583,
+   "limited_by": "base1",
+   "surface_below_grasp_point_mm": 7.0,
+   "pad_centre_above_grasp_point_mm": 11.9
+  },
+  "inverted_u_yellow": {
+   "grasp_id": 2,
+   "gap_mm": 42.0,
+   "pad_center_offset_m": 0.21096,
+   "seat_floor_offset_m": 0.19356,
+   "grasp_tool_offset_m": 0.21096,
+   "limited_by": "none",
+   "surface_below_grasp_point_mm": 36.3,
+   "pad_centre_above_grasp_point_mm": 0.0
+  }
+ }
+}

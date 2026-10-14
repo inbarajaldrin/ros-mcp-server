@@ -48,6 +48,8 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.config import (GRASP_TIP_CLEARANCE_M, grip_width_mm, pad_center_offset_m,
+                                      rg2_tip_length_m, grasp_tool_offset_target_m)
 from queries.get_scene_info import load_grasp_validity_data
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
@@ -337,7 +339,7 @@ def output_result(result):
 
 class DirectObjectMove(Node):
     def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None,
-                 base_name=None, pre_grasp_width=None):
+                 base_name=None, pre_grasp_width=None, pad_center=False):
         super().__init__('direct_object_move')
         # When set (mm): observe and approach with the gripper fully open, and close to this
         # width only right before the step-2 descent. A pre-grasp width set BEFORE the
@@ -411,6 +413,25 @@ class DirectObjectMove(Node):
         # IK targets are converted from gripper center to flange using GRIPPER_CENTER_TOOL_OFFSET.
         # Default 0: gripper center placed at the grasp point.
         self.offset = offset if offset is not None else 0
+
+        # --pad-center (2026-10-14): put the RG2 PAD CENTRE at the grasp point. The nominal
+        # "gripper center" (GRIPPER_CENTER_TOOL_OFFSET, 0.2286) is ~1 mm above the fingertip ends,
+        # so a legacy grasp holds the part ~14 mm shallow. Pad centre and fingertip depth follow the
+        # 4-bar linkage at the width the gripper closes to on this part. Not deeper than the
+        # insert allows (fingertips above base1 / seated parts at the seat, CAD:
+        # ablations/grasp_depth.py). The fingertips stay GRASP_TIP_CLEARANCE_M above the table (a short part lying flat cannot be pad-centred);
+        # the flange->grasp-point distance actually used is reported as grasp_tool_offset_m so the
+        # insert and the disassembly can use the same grasp.
+        self.pad_center = bool(pad_center)
+        self.grasp_gap_mm = None
+        self.grasp_tool_offset_m = None   # flange -> grasp point along tool z, as executed
+        self.grasp_depth_clamped = False
+        if self.pad_center:
+            nominal = float(GRIPPER_CENTER_TOOL_OFFSET[2])
+            self.grasp_gap_mm = grip_width_mm(object_name, pre_grasp_width)
+            self.offset += nominal - grasp_tool_offset_target_m(object_name, self.grasp_gap_mm)
+            self.min_gripper_center_z = (TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M
+                                         + rg2_tip_length_m(self.grasp_gap_mm) - nominal)
         
         # Initialize Quaternion Orientation Controller for gimbal-lock-free gripper control
         # This ensures stable gripper orientation at pitch=180° (face down) for any yaw angle
@@ -1429,11 +1450,14 @@ class DirectObjectMove(Node):
                 target_ee_position[2] -= self.offset
 
             # Enforce minimum gripper center height to prevent table collision
-            if target_ee_position[2] < self.min_gripper_center_z:
+            clamped = target_ee_position[2] < self.min_gripper_center_z
+            if clamped:
                 self.get_logger().info(
                     f"Raising gripper center from {target_ee_position[2]*1000:.1f}mm to "
                     f"{self.min_gripper_center_z*1000:.1f}mm (min clearance for table)")
                 target_ee_position[2] = self.min_gripper_center_z
+            if self.step1_completed:
+                self._record_grasp_depth(object_position[2], target_ee_position[2], clamped)
 
         # Step 1: always add hover height offset
         if not self.step1_completed:
@@ -1493,8 +1517,10 @@ class DirectObjectMove(Node):
                 step3_target_ee[2] -= self.offset
 
             # Enforce minimum gripper center height
-            if step3_target_ee[2] < self.min_gripper_center_z:
+            clamped = step3_target_ee[2] < self.min_gripper_center_z
+            if clamped:
                 step3_target_ee[2] = self.min_gripper_center_z
+            self._record_grasp_depth(grasp_point_position[2], step3_target_ee[2], clamped)
 
             # Store these for step 3 trajectory computation (will recompute trajectory with these targets)
             self.step3_target_position = step3_target_ee
@@ -2212,6 +2238,18 @@ class DirectObjectMove(Node):
             pose = self.final_object_pose
             self.get_logger().info(f"Final object pose: position=({pose.pose.position.x:.6f}, {pose.pose.position.y:.6f}, {pose.pose.position.z:.6f}), quaternion=({pose.pose.orientation.x:.6f}, {pose.pose.orientation.y:.6f}, {pose.pose.orientation.z:.6f}, {pose.pose.orientation.w:.6f})")
 
+    def _record_grasp_depth(self, grasp_point_z, gripper_center_z, clamped):
+        """Flange -> grasp point along tool z for this target (top-down grasp)."""
+        self.grasp_tool_offset_m = float(GRIPPER_CENTER_TOOL_OFFSET[2]) + float(gripper_center_z - grasp_point_z)
+        self.grasp_depth_clamped = bool(clamped)
+        if self.pad_center:
+            pad = pad_center_offset_m(self.grasp_gap_mm)
+            self.get_logger().info(
+                f"Pad-centre grasp: gap {self.grasp_gap_mm:.1f} mm, pad centre {1000*pad:.1f} mm below flange, "
+                f"flange->grasp point {1000*self.grasp_tool_offset_m:.1f} mm"
+                + (f" (CLAMPED: pad centre {1000*(self.grasp_tool_offset_m - pad):.1f} mm above the grasp point, "
+                   f"tips {1000*GRASP_TIP_CLEARANCE_M:.0f} mm above the table)" if clamped else ""))
+
     def output_result_json(self, movement_type="move_to_object"):
         """Output movement result as JSON"""
         if self.movement_completed and not self.error_message and self.final_position is not None and self.final_orientation_quat is not None:
@@ -2236,6 +2274,12 @@ class DirectObjectMove(Node):
                     },
                 }
             }
+            if self.grasp_tool_offset_m is not None:
+                result["grasp_tool_offset_m"] = round(self.grasp_tool_offset_m, 5)
+                result["grasp_depth_clamped"] = self.grasp_depth_clamped
+                result["grasp_pad_center"] = self.pad_center
+                if self.grasp_gap_mm is not None:
+                    result["grasp_gap_mm"] = self.grasp_gap_mm
         else:
             # Failure
             result = {
@@ -2389,6 +2433,10 @@ def main(args=None):
     parser.add_argument('--base-name', type=str, default=None,
                        help='Assembly base the part is headed for. Picks the wrist whose '
                             'downstream reorient keeps the camera away from the table.')
+    parser.add_argument('--pad-center', action='store_true',
+                       help='Place the RG2 pad centre (not the nominal 0.2286 m gripper center, '
+                            'which is at the fingertip ends) at the grasp point; fingertips kept '
+                            'clear of the table. Reports grasp_tool_offset_m.')
     # Parse arguments from sys.argv if args is None
     if args is None:
         args = parser.parse_args()
@@ -2401,7 +2449,7 @@ def main(args=None):
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
                       offset=args.offset, mode=args.mode, base_name=args.base_name,
-                      pre_grasp_width=args.pre_grasp_width)
+                      pre_grasp_width=args.pre_grasp_width, pad_center=args.pad_center)
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling

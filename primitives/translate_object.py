@@ -409,7 +409,7 @@ from primitives.shared.ik import (
 )
 from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 from primitives.shared.config import (
-    TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET,
+    TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset,
     DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION,
 )
 from primitives.shared.collision import (
@@ -852,7 +852,7 @@ class TranslateObject(Node):
             # Hover: same XY as target, Z = base + HOVER_HEIGHT
             hover_gripper_center = ee_target_position.copy()
             hover_gripper_center[2] = base_current_position[2] + HOVER_HEIGHT
-            tool_offset_world = ee_target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+            tool_offset_world = ee_target_rot_matrix @ held_tool_offset()
             target_flange = hover_gripper_center - tool_offset_world
             self.get_logger().info(
                 f"Hover gripper center Z: {hover_gripper_center[2]:.4f}, "
@@ -1116,7 +1116,7 @@ class TranslateObject(Node):
         # Convert gripper center to flange using FK-derived rotation
         T_fk = forward_kinematics(dh_params, self.current_joint_angles)
         R_fk = T_fk[:3, :3]
-        tool_offset_world = R_fk @ GRIPPER_CENTER_TOOL_OFFSET
+        tool_offset_world = R_fk @ held_tool_offset()   # as this part was actually grasped
         hover_flange = hover_gripper_center - tool_offset_world
         self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
 
@@ -1180,7 +1180,7 @@ class TranslateObject(Node):
                                       self.current_ee_pose.pose.orientation.z,
                                       self.current_ee_pose.pose.orientation.w])
             R_ee_topic = R.from_quat(ee_quat_topic).as_matrix()
-            actual_gripper_center = ee_pos_topic + R_ee_topic @ GRIPPER_CENTER_TOOL_OFFSET
+            actual_gripper_center = ee_pos_topic + R_ee_topic @ held_tool_offset()
             gripper_center_error = hover_gripper_center - actual_gripper_center
             pos_error = np.linalg.norm(gripper_center_error)
 

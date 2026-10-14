@@ -1312,6 +1312,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     from compliant_insertion_studio.wrapper.cad_lookup import (
                         predict_tcp_at_seat,
                     )
+                    from primitives.shared.config import held_tool_offset
                     bp = base_world_pose_for_cad
                     # Phase 5 v2 (2026-05-04): cad_lookup now needs held_quat
                     # (object orientation in world) and EE orientation in world
@@ -1348,8 +1349,10 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                         base_world_quat_xyzw=bp[3:],
                         held_quat_xyzw=list(held_quat),
                         ee_orientation_xyzw=ee_quat,
+                        flange_offset_m=float(held_tool_offset()[2]),
                     )
                     predicted_tcp_z_at_seat = pred["predicted_tcp_at_seat"]["xyz_m"][2]
+                    ep.get_logger().info(f"held grasp: flange -> grasp point {1000*held_tool_offset()[2]:.1f} mm")
                     fs = pred.get("fold_symmetry_used", {})
                     ep.get_logger().info(
                         f"Phase 5 v2 CAD-derived predicted_tcp_z_at_seat = "
@@ -1535,6 +1538,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                         from compliant_insertion_studio.wrapper.cad_geometry import (
                             build_contact_candidates, get_seated_so_far,
                         )
+                        from primitives.shared.config import held_tool_offset
                         R_grasp = pred.get("fold_symmetry_used", {}).get(
                             "R_eq_quat_xyzw")
                         if R_grasp is not None:
@@ -1548,6 +1552,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                                 R_grasp_quat_xyzw=R_grasp,
                                 predicted_tcp_z_at_seat=predicted_tcp_z_at_seat,
                                 seated_objects=seated,
+                                flange_offset_world_z=-float(held_tool_offset()[2]),
                             )
                             ep.get_logger().info(
                                 "Contact candidates (CAD-derived): "
