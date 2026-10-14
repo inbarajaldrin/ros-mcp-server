@@ -3,7 +3,8 @@
 #
 #   bash compliant_insertion_studio/scripts/launch_rviz_demo.sh            # background
 #   bash compliant_insertion_studio/scripts/launch_rviz_demo.sh --fg       # foreground
-#   ... --raw            camera panel shows /intel_camera_rgb_raw instead of /annotated_stream
+#   ... --raw            camera panel shows the raw RealSense image (/camera/camera/color/image_raw)
+#   ... --topic T        camera panel shows image topic T
 #   ... --split 0.4      camera gets 40% of the width (default 0.5)
 #   ... --camera-left    camera on the left, robot on the right
 #
@@ -30,7 +31,8 @@ FG=false; TOPIC=/annotated_stream; SPLIT=0.5; SIDE=right
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fg) FG=true; shift ;;
-        --raw) TOPIC=/intel_camera_rgb_raw; shift ;;
+        --raw) TOPIC=/camera/camera/color/image_raw; shift ;;   # realsense2_camera (was /intel_camera_rgb_raw)
+        --topic) TOPIC="$2"; shift 2 ;;
         --split) SPLIT="$2"; shift 2 ;;
         --camera-left) SIDE=left; shift ;;
         -h|--help) sed -n '2,22p' "$0" | sed 's/^# \?//'; exit 0 ;;

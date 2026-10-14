@@ -87,6 +87,16 @@ def measure(obj, observed_base, Pw):
         keep = np.abs(r) < max(0.0015, 2.5 * np.median(np.abs(r)))
         P = P[keep]
     a, b, c = coef
+    # Height profile along the long axis, past both ends (2 mm bins, 90th-percentile height in a
+    # strip on the bar's centreline): shows WHERE the bar lies and which end rides on what — a bar
+    # shifted along its length onto the channel end vs one end raised in place (2026-10-14).
+    ax, cx = (1, 0) if f['long_axis'] == 'y' else (0, 1)
+    strip = Pb[(np.abs(Pb[:, cx]) < 0.006) & (np.abs(Pb[:, ax]) < 0.095)]
+    bins = np.arange(-90, 91, 2)
+    prof = [float(np.percentile(1000 * s[:, 2], 90)) if len(s := strip[np.abs(1000 * strip[:, ax] - b0) < 1.0]) > 5
+            else None for b0 in bins]
+    on = [b0 for b0, z in zip(bins, prof) if z is not None and z > 1000 * f['z'] - 6.0]
+    axial = dict(extent_mm=[int(min(on)), int(max(on))], shift_mm=round((min(on) + max(on)) / 2, 1)) if on else {}
     long_slope, cross_slope = (b, a) if f['long_axis'] == 'y' else (a, b)
     pitch = float(np.degrees(np.arctan(long_slope)))
     roll = float(np.degrees(np.arctan(cross_slope)))
@@ -96,6 +106,7 @@ def measure(obj, observed_base, Pw):
     return {'ok': bool(ok), 'pitch_deg': round(pitch, 2), 'roll_deg': round(roll, 2),
             'height_err_mm': round(h_err, 2), 'end_heights_mm': [round(e, 2) for e in ends],
             'residual_mm': round(float(1000 * np.std(r[keep])), 2), 'n_points': int(len(P)),
+            'axial': axial, 'profile_mm': {'bins': bins.tolist(), 'top_z': [None if z is None else round(z, 1) for z in prof]},
             'limits': {'pitch_deg': PITCH_MAX_DEG, 'height_mm': HEIGHT_MAX_MM}}
 
 

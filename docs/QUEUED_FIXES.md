@@ -220,16 +220,21 @@ were fitted with the old shallow grasp and may already absorb part of it.
 Loop data (seat TCP − prediction, y mm, 2026-10-14 13:01–14:05): u_brown −2.3, +5.0, 0.0, −0.0;
 u_orange −2.3, +0.1, −4.7, ~0. Not a clean constant: a bias plus a few mm of run-to-run scatter.
 
-### 13. line_green reseat must grasp along the tilt (queued 2026-10-14, operator's route)
+### 13. line_green tilt: nudge it along its axis (queued 2026-10-14; method verified on the robot)
 
-The seat check (depth) caught a tilted line_green (cycle 3: pitch −2.45°, one end +4.95 mm).
-The reseat re-grasped it TOP-DOWN with the insert grasp and re-inserted: still −2.07°, end
-+4.23 mm, run stopped (correct fail-closed). Operator: the route is right but the approach is
-wrong. Approach the bar AT ITS MEASURED ANGLE (gripper aligned with the tilted bar, from
-seat_check's plane fit), grasp, `move_to_safe_height` keeping that orientation, then fix the
-orientation (rotate_object to the seat orientation) and retry the insert.
-Where: `ablations/replay_real_assembly.py:seat_check_and_reseat` (the `steps` list) and
-`ablations/seat_check.py` (expose the fitted bar axis/pitch for the approach quaternion).
+Diagnosis (depth profile, `seat_check.py` now records it): a tilted line_green (pitch ~3.5°, one
+end ~5 mm high, centre at seat height) has that end resting on base1's TOP past the end of its
+pocket (pocket floor 10 mm, bar bottom 11.5 mm on the U bottoms, base top 17.5 mm in the base
+frame; the 140 mm bar has almost no axial play). The seat check is user-confirmed as the tell.
+Fix that worked (operator's method, 15:55): gripper CLOSED, approach from safe height, lower
+beside the raised end with the pad centre at the end face (base z 37 mm, tips 22 mm), push along
+the bar toward the slot in ≤5 mm steps, guarded at **5 N** (base1 is glued to the table) — it
+dropped in flat (0.44°) with the push stopping at 5.1 N.
+Did NOT work: top-down reseat, tilted-wrist regrasp (+ prismatic reinsert, or levelled in the air
+and lowered), pressing the high end down, sliding it while gripped.
+To do: automate this nudge in `replay_real_assembly.py:seat_check_and_reseat` (direction from the
+measured high end; re-check depth after each step), replacing the top-down reseat. Root cause to
+chase separately: why the bar lands axially off (insert pose error along base y, see #12).
 
 ---
 
