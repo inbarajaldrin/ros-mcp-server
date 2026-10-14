@@ -217,6 +217,19 @@ stickers or grasp points. Fix later — the assembly works; the compliant search
 Start: re-solve the hand-eye translation with base1 as a fixture (seat TCP vs prediction over
 several parts/yaws), and re-check `DEFAULT_BASE_POSITION` / `PER_OBJECT_BASE_OFFSET_M`, which
 were fitted with the old shallow grasp and may already absorb part of it.
+Loop data (seat TCP − prediction, y mm, 2026-10-14 13:01–14:05): u_brown −2.3, +5.0, 0.0, −0.0;
+u_orange −2.3, +0.1, −4.7, ~0. Not a clean constant: a bias plus a few mm of run-to-run scatter.
+
+### 13. line_green reseat must grasp along the tilt (queued 2026-10-14, operator's route)
+
+The seat check (depth) caught a tilted line_green (cycle 3: pitch −2.45°, one end +4.95 mm).
+The reseat re-grasped it TOP-DOWN with the insert grasp and re-inserted: still −2.07°, end
++4.23 mm, run stopped (correct fail-closed). Operator: the route is right but the approach is
+wrong. Approach the bar AT ITS MEASURED ANGLE (gripper aligned with the tilted bar, from
+seat_check's plane fit), grasp, `move_to_safe_height` keeping that orientation, then fix the
+orientation (rotate_object to the seat orientation) and retry the insert.
+Where: `ablations/replay_real_assembly.py:seat_check_and_reseat` (the `steps` list) and
+`ablations/seat_check.py` (expose the fitted bar axis/pitch for the approach quaternion).
 
 ---
 
