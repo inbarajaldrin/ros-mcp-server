@@ -259,8 +259,11 @@ def main():
         if not ok: return 1
         ok, _ = run(py('primitives.control_gripper', 'open', '--mode', 'real'), 'open', 30)
         if not ok: return 1
-    exclude = [(DEFAULT_BASE_POSITION[0], DEFAULT_BASE_POSITION[1], 0.115 + FINGER_CLEAR),   # base1 half-diagonal
-               (*STAGING_XY, 0.06 + FINGER_CLEAR)]                                          # a part set down there
+    # base1 is 35 mm tall: the depth map marks it occupied and the FINGER_CLEAR/2 dilation keeps
+    # every spot 20 mm off its edges. A circle around its half-diagonal (190 mm with the part) also
+    # swallowed the real space beside its square sides (2026-10-14), so only the staging region is
+    # excluded explicitly (a part may be set down there unseen from home).
+    exclude = [(*STAGING_XY, 0.06 + FINGER_CLEAR)]
     extents = [footprint_half_extents(o['object_name']) for o in parts]
     print("[spots] footprints mm: " + ", ".join(f"{o['object_name']} {2000*e[0]:.0f}x{2000*e[1]:.0f}"
                                                 for o, e in zip(parts, extents)))
