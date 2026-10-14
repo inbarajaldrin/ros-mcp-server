@@ -90,6 +90,9 @@ ZERO_STILL_WINDOW_S = 0.5       # TCP must stay within ZERO_STILL_TOL_M over thi
 ZERO_STILL_TOL_M = 0.0002
 ZERO_STILL_TIMEOUT_S = 5.0
 ZERO_RESIDUAL_ABORT_N = 5.0
+ZERO_GOOD_N = 1.0               # median residual of a good zero is 0.05-0.40 N (2026-10-14, 80 trials)
+ZERO_EFFECT_LATENCY_S = 0.018   # zero_ftsensor takes effect ~18 ms after the call (std 15 ms)
+ZERO_GLITCH_PERIOD_S = 0.102    # robot-side wrench glitch period
 
 # Exit criteria
 Z_TOLERANCE = 0.005             # m — 5mm tolerance (peg may not reach exact target due to tilt/friction)
@@ -316,6 +319,8 @@ class PrismaticPegInsertion(Node):
 
         self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
         self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', self._pose_cb, 10)
+        self._wbuf = __import__('collections').deque(maxlen=600)      # ~1.2 s for the phase-locked zero
+        self._zero_cli = self.create_client(Trigger, '/io_and_status_controller/zero_ftsensor')
         self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench', self._wrench_cb, 10)
 
         self.traj_client = ActionClient(self, FollowJointTrajectory,
@@ -443,6 +448,8 @@ class PrismaticPegInsertion(Node):
 
     def _wrench_cb(self, msg):
         self.wrench = msg.wrench
+        w = msg.wrench
+        self._wbuf.append((time.time(), w.force.x, w.force.y, w.force.z))
 
     # -- Helpers --
 
@@ -491,6 +498,47 @@ class PrismaticPegInsertion(Node):
                     return True
         return False
 
+    def _glitch_mask(self, F):
+        dev = np.linalg.norm(F - np.median(F, axis=0), axis=1)
+        mad = np.median(np.abs(dev - np.median(dev))) + 1e-6
+        return dev > max(2.0, 8.0 * mad)
+
+    def _phase_locked_zero(self):
+        end = time.time() + 0.7
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.002)
+        buf = np.array(self._wbuf)
+        if len(buf) >= 100:
+            g = self._glitch_mask(buf[:, 1:4])
+            onsets = buf[np.where(g & ~np.r_[False, g[:-1]])[0], 0]
+            if len(onsets) >= 2:
+                d = np.diff(onsets); d = d[(d > 0.06) & (d < 0.15)]
+                period = float(np.median(d)) if len(d) else ZERO_GLITCH_PERIOD_S
+                target = onsets[-1] + period / 2.0
+                while target - ZERO_EFFECT_LATENCY_S < time.time() + 0.003:
+                    target += period
+                while time.time() < target - ZERO_EFFECT_LATENCY_S:
+                    rclpy.spin_once(self, timeout_sec=0.001)
+        self.get_logger().info("Zeroing force sensor (phase-locked)...")
+        if not self._zero_cli.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error("[ZERO] zero_ftsensor service unavailable")
+            return False
+        fut = self._zero_cli.call_async(Trigger.Request())
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not fut.done():
+            rclpy.spin_once(self, timeout_sec=0.01)
+        return fut.done() and bool(getattr(fut.result(), "success", False))
+
+    def _median_residual(self, wait_s=0.15, window_s=0.3):
+        t0 = time.time() + wait_s; end = t0 + window_s
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.002)
+        buf = np.array([r for r in self._wbuf if r[0] >= t0])
+        if len(buf) < 20:
+            return None
+        good = buf[~self._glitch_mask(buf[:, 1:4]), 1:4]
+        return float(np.max(np.abs(np.median(good, axis=0))))
+
     def zero_force_sensor(self):
         # 2026-10-07: same guard as compliant_insert (2026-08-16): a zero taken while the arm
         # is still moving leaves a phantom load that force mode "relieves" by driving the TCP
@@ -498,35 +546,27 @@ class PrismaticPegInsertion(Node):
         if not self._wait_until_still():
             self.get_logger().warn(
                 f"[ZERO] arm not still within {ZERO_STILL_TIMEOUT_S:.0f}s — zeroing anyway, residual check follows")
-        self.get_logger().info("Zeroing force sensor...")
-        result = subprocess.run(
-            ['ros2', 'service', 'call', '/io_and_status_controller/zero_ftsensor', 'std_srvs/srv/Trigger'],
-            capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return False
-        def _residual():
-            samples = []
-            end = time.time() + 0.3
-            while time.time() < end:
-                rclpy.spin_once(self, timeout_sec=0.01)
-                if self.wrench is not None:
-                    f = self.wrench.force
-                    samples.append((f.x, f.y, f.z))
-            return np.max(np.abs(np.median(np.array(samples), axis=0))) if samples else None
-
-        time.sleep(0.3)
-        residual = _residual()
-        if residual is not None and residual > ZERO_RESIDUAL_ABORT_N:
-            # The zero can land after the first read (2026-10-08, u_orange) — re-read once.
-            time.sleep(0.5)
-            residual = _residual()
+        # 2026-10-14: phase-locked against the robot-side wrench glitch (one 4-6 ms burst every
+        # ~102 ms; a zero that lands on one bakes ~11 N in) and verified with a glitch-proof
+        # median — same method and numbers as compliant_insert.py (80 trials: 1.25% first-try
+        # miss, residual 0.05-0.40 N when good). Native service client: the ros2 CLI took 1.5-2 s
+        # with random latency, which makes timing the zero impossible.
+        residual = None
+        for attempt in (1, 2):
+            if not self._phase_locked_zero():
+                return False
+            residual = self._median_residual()
+            if residual is None or residual <= ZERO_GOOD_N:
+                break
+            self.get_logger().warn(f"[ZERO] median residual {residual:.2f} N > {ZERO_GOOD_N} N after attempt "
+                                   f"{attempt}" + (" — zeroing again" if attempt == 1 else ""))
         if residual is None:
             self.get_logger().error("[ZERO] no wrench sample after zero")
             return False
         if residual > ZERO_RESIDUAL_ABORT_N:
             self.get_logger().error(
-                f"[ZERO] post-zero residual {residual:.2f} N > {ZERO_RESIDUAL_ABORT_N} N — "
-                f"zero captured a transient; refusing force mode this attempt")
+                f"[ZERO] post-zero residual {residual:.2f} N > {ZERO_RESIDUAL_ABORT_N} N after 2 zeros — "
+                f"a real load, refusing force mode this attempt")
             return False
         self.get_logger().info(f"[ZERO] ok, post-zero residual {residual:.2f} N")
         return True
