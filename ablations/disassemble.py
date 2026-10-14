@@ -33,8 +33,22 @@ X_CAM = np.eye(4)   # localizer's calibrated camera mount (config/robot_config.y
 X_CAM[:3, :3] = R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957]).as_matrix()
 X_CAM[:3, 3] = [-0.01446, -0.04424, 0.07317]
 STAGING_XY = (-0.320, -0.500)
-SPOT_SIZE = 0.10                 # free square per part (m)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
+FINGER_CLEAR = 0.04              # clear gap between part outlines: room for the opened fingers
+ANN = "/home/aldrin/Documents/aruco-grasp-annotator/data/aruco/{}_aruco.json"
+
+
+def footprint_half_extents(name, base_name='base1'):
+    """World xy half-extents (ex, ey) of the part as disassembly sets it down: its largest face
+    (so a u part that tips over still fits), long side along the seated long axis (it is
+    carried and lowered without reorienting). A fixed 100 mm square put line_green (140 mm)
+    against u_brown and the fingers reaching for u_brown struck it: protective stop 2026-10-14."""
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    dim = json.load(open(ANN.format(name)))['cad_object_info']['dimensions']
+    h = np.array([dim['length'], dim['width'], dim['height']]) / 2
+    ext = np.abs(R.from_quat(load_seat_pose_in_base(base_name, name)[1]).as_matrix()) @ h
+    a, b = sorted(h, reverse=True)[:2]
+    return (a, b) if ext[0] >= ext[1] else (b, a)
 
 
 def env():
@@ -60,8 +74,10 @@ def py(*a):
     return [sys.executable, '-u', '-m', *a]
 
 
-def depth_free_spots(n_needed, exclude_xy):
-    """Free table spots from one aligned-depth frame taken where the arm is (home)."""
+def depth_free_spots(extents, exclude_xy):
+    """Free table spots, one per part (half-extents ex, ey), from one aligned-depth frame at
+    home. A spot is a clear rectangle of the part plus FINGER_CLEAR/2 on every side; each chosen
+    spot is then marked occupied with the same margin, so outlines end FINGER_CLEAR apart."""
     import rclpy
     from sensor_msgs.msg import Image, CameraInfo
     from geometry_msgs.msg import PoseStamped
@@ -89,28 +105,33 @@ def depth_free_spots(n_needed, exclude_xy):
     seen = np.zeros((nx, ny), bool); high = np.zeros((nx, ny), bool)
     ix = ((Pw[:, 0] - x0) / cell).astype(int); iy = ((Pw[:, 1] - y0) / cell).astype(int)
     seen[ix, iy] = True; high[ix[Pw[:, 2] > table_z + TABLE_TOL], iy[Pw[:, 2] > table_z + TABLE_TOL]] = True
-    k = int(SPOT_SIZE / cell) + 2                              # spot + clearance, in cells
-    def boxsum(m):                                             # sum over every k x k window (summed-area table)
+    def boxsum(m, kx, ky):                                     # sum over every kx x ky window
         S = np.pad(m.astype(np.int32).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
-        return S[k:, k:] - S[:-k, k:] - S[k:, :-k] + S[:-k, :-k]
-    ok = (boxsum(seen) > 0.9 * k * k) & (boxsum(high) == 0)
-    cands = []
-    for i, j in zip(*np.nonzero(ok)):
-                cx, cy = x0 + (i + k / 2) * cell, y0 + (j + k / 2) * cell
-                r = np.hypot(cx, cy)
-                if not (0.30 < r < 0.68):
-                    continue
-                if any(np.hypot(cx - ex, cy - ey) < er for ex, ey, er in exclude_xy):
-                    continue
-                cands.append((cx, cy))
-    spots = []
-    for c in sorted(cands, key=lambda c: np.hypot(c[0] - 0.05, c[1] + 0.40)):   # prefer near the home view centre
-        if all(np.hypot(c[0] - s[0], c[1] - s[1]) > SPOT_SIZE + 0.01 for s in spots):
-            spots.append(c)
-        if len(spots) == n_needed:
+        return S[kx:, ky:] - S[:-kx, ky:] - S[kx:, :-ky] + S[:-kx, :-ky]
+    m_ = FINGER_CLEAR / 2
+    spots, n_cand = [], 0
+    for ex, ey in extents:
+        kx, ky = int(2 * (ex + m_) / cell) + 1, int(2 * (ey + m_) / cell) + 1
+        ok = (boxsum(seen, kx, ky) > 0.9 * kx * ky) & (boxsum(high, kx, ky) == 0)
+        cands = []
+        for i, j in zip(*np.nonzero(ok)):
+            cx, cy = x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell
+            if not (0.30 < np.hypot(cx, cy) < 0.68):
+                continue
+            if any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy):
+                continue
+            cands.append((cx, cy))
+        n_cand += len(cands)
+        if not cands:
             break
+        c = min(cands, key=lambda c: np.hypot(c[0] - 0.05, c[1] + 0.40))   # nearest the home view centre
+        spots.append((c[0], c[1], ex, ey))
+        i0, i1 = int((c[0] - ex - m_ - x0) / cell), int((c[0] + ex + m_ - x0) / cell) + 1
+        j0, j1 = int((c[1] - ey - m_ - y0) / cell), int((c[1] + ey + m_ - y0) / cell) + 1
+        high[max(i0, 0):i1, max(j0, 0):j1] = True               # occupied, with its margin
+    spots = [(x, y) for x, y, _, _ in spots]
     depth_free_spots.last = (Tc, K, table_z)
-    return spots, f"table z {1000*table_z:.1f} mm, {len(cands)} candidate cells"
+    return spots, f"table z {1000*table_z:.1f} mm, {n_cand} candidate cells"
 
 
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
@@ -143,26 +164,69 @@ def observe_base(base_name='base1'):
     return observe_base_pose(base_name)
 
 
+def place_at(sx, sy, w, home=True):
+    """Carry the held part at the current height (orientation kept) above (sx, sy), lower it
+    onto the table (glitch-proof contact), release, lift; optionally go home."""
+    import rclpy
+    from geometry_msgs.msg import PoseStamped
+    rclpy.init(); nn = rclpy.create_node('dis_tcp'); tp = {}
+    nn.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: tp.__setitem__('p', m), 10)
+    end = time.time() + 3
+    while 'p' not in tp and time.time() < end: rclpy.spin_once(nn, timeout_sec=0.05)
+    z = tp['p'].pose.position.z; nn.destroy_node(); rclpy.shutdown()
+    steps = [
+        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
+            '--keep-orientation'), 'carry to spot', 90),
+        (py('primitives.core.move_down', '--mode', 'real'), 'lower to table (contact)', 120),
+        (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
+        (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
+    ] + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
+    for argv, label, t in steps:
+        ok, _ = run(argv, label, t)
+        if not ok: return 1
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--assembly-json', required=True)
     ap.add_argument('--dry-run', action='store_true', help='plan spots and print steps; no motion')
     ap.add_argument('--only', default=None)
+    ap.add_argument('--relocate', default=None, metavar='PART',
+                    help='pick PART off the table (move_to_grasp) and set it down at a free, '
+                         'properly spaced spot; for parts lying too close to each other')
     a = ap.parse_args()
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
-    parts = [o for o in sorted(order, key=lambda o: -o['position']) if not a.only or o['object_name'] == a.only]
+    sel = a.relocate or a.only
+    parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
     from primitives.shared.config import DEFAULT_BASE_POSITION
     if not a.dry_run:
         ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
         if not ok: return 1
         ok, _ = run(py('primitives.control_gripper', 'open', '--mode', 'real'), 'open', 30)
         if not ok: return 1
-    exclude = [(DEFAULT_BASE_POSITION[0], DEFAULT_BASE_POSITION[1], 0.15), (*STAGING_XY, 0.15)]
-    spots, note = depth_free_spots(len(parts), exclude)
+    exclude = [(DEFAULT_BASE_POSITION[0], DEFAULT_BASE_POSITION[1], 0.115 + FINGER_CLEAR),   # base1 half-diagonal
+               (*STAGING_XY, 0.06 + FINGER_CLEAR)]                                          # a part set down there
+    extents = [footprint_half_extents(o['object_name']) for o in parts]
+    print("[spots] footprints mm: " + ", ".join(f"{o['object_name']} {2000*e[0]:.0f}x{2000*e[1]:.0f}"
+                                                for o, e in zip(parts, extents)))
+    spots, note = depth_free_spots(extents, exclude)
     print(f"[spots] {note}: {[(round(1000*x), round(1000*y)) for x, y in (spots or [])]} mm")
     if not spots or len(spots) < len(parts):
         print("not enough free spots seen from here — stopping")
         if not a.dry_run: return 1
+    if a.relocate and not a.dry_run:
+        o = parts[0]; (sx, sy) = spots[0]
+        name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
+        print(f"\n=== relocate {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
+        for argv, label, t in [
+            (py('primitives.move_to_grasp', '--object-name', name, '--grasp-id', str(gid), '--mode', 'real',
+                '--pre-grasp-width', f"{w:g}"), 'move_to_grasp', 180),
+            (py('primitives.control_gripper', 'close', '--mode', 'real'), 'close', 30),
+            (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift', 90)]:
+            ok, _ = run(argv, label, t)
+            if not ok: return 1
+        return place_at(sx, sy, w)
     ob = observe_base() if not a.dry_run else None
     if not a.dry_run and ob is None:
         print("base1 not observed — stopping"); return 1
@@ -187,9 +251,9 @@ def main():
             img = CvBridge().imgmsg_to_cv2(im['c'], 'bgr8'); nn.destroy_node(); rclpy.shutdown()
             Tc, K, tz = depth_free_spots.last; Ti = np.linalg.inv(Tc)
             for idx, (sx, sy) in enumerate(spots):
-                h = SPOT_SIZE / 2
+                hx, hy = extents[idx][0] + FINGER_CLEAR / 2, extents[idx][1] + FINGER_CLEAR / 2
                 pts = []
-                for dx, dy in [(-h, -h), (h, -h), (h, h), (-h, h)]:
+                for dx, dy in [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]:
                     pc = Ti[:3, :3] @ np.array([sx + dx, sy + dy, tz]) + Ti[:3, 3]
                     pts.append([K[0, 0] * pc[0] / pc[2] + K[0, 2], K[1, 1] * pc[1] / pc[2] + K[1, 2]])
                 cv2.polylines(img, [np.int32(pts)], True, (0, 255, 0), 3)
@@ -220,24 +284,8 @@ def main():
         for argv, label, t in steps:
             ok, _ = run(argv, label, t)
             if not ok: return 1
-        # carry at the current height, orientation kept, to above the spot
-        import rclpy
-        from geometry_msgs.msg import PoseStamped
-        rclpy.init(); nn = rclpy.create_node('dis_tcp'); tp = {}
-        nn.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: tp.__setitem__('p', m), 10)
-        end = time.time() + 3
-        while 'p' not in tp and time.time() < end: rclpy.spin_once(nn, timeout_sec=0.05)
-        z = tp['p'].pose.position.z; nn.destroy_node(); rclpy.shutdown()
-        steps = [
-            (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
-                '--keep-orientation'), 'carry to spot', 90),
-            (py('primitives.core.move_down', '--mode', 'real'), 'lower to table (contact)', 120),
-            (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
-            (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
-        ]
-        for argv, label, t in steps:
-            ok, _ = run(argv, label, t)
-            if not ok: return 1
+        if place_at(sx, sy, w, home=False) != 0:
+            return 1
     ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
     return 0 if ok else 1
 

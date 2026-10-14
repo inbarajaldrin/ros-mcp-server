@@ -425,8 +425,22 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
     )
     _ACTIVE_PROC = proc
     captured: list[str] = []
+    # Watchdog: the deadline used to be checked only when the child printed a line, so a
+    # silent hang (move_to_grasp waiting on a trajectory a protective stop aborted) blocked
+    # the run for 27 min (2026-10-14). SIGTERM the group at the deadline; readline then ends.
+    import threading
+    timed_out = threading.Event()
+
+    def _expire():
+        timed_out.set()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            proc.kill()
+    watchdog = threading.Timer(timeout_s, _expire)
+    watchdog.daemon = True
+    watchdog.start()
     try:
-        deadline = time.time() + timeout_s
         for line in iter(proc.stdout.readline, ''):
             print(line, end='', flush=True)
             captured.append(line)
@@ -435,19 +449,15 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
                 log_fh.flush()
             if _INTERRUPTED:
                 break
-            if time.time() > deadline:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except Exception:
-                    proc.kill()
-                _ACTIVE_PROC = None
-                msg = f"!!! subprocess timeout after {timeout_s}s — killed pg\n"
-                print(msg, end='', flush=True)
-                if log_fh is not None:
-                    log_fh.write(msg)
-                return {"result": "failure",
-                        "error": f"subprocess timeout after {timeout_s}s",
-                        "label": label}
+        if timed_out.is_set():
+            _ACTIVE_PROC = None
+            msg = f"!!! subprocess timeout after {timeout_s}s — killed pg\n"
+            print(msg, end='', flush=True)
+            if log_fh is not None:
+                log_fh.write(msg)
+            return {"result": "failure",
+                    "error": f"subprocess timeout after {timeout_s}s",
+                    "label": label}
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         try:
@@ -455,6 +465,7 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
         except Exception:
             proc.kill()
     finally:
+        watchdog.cancel()
         _ACTIVE_PROC = None
     text = ''.join(captured)
     rj = extract_result_json(text)
