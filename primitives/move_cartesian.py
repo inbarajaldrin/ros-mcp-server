@@ -10,8 +10,9 @@ swung the arm on 2026-10-07. Orientation: top-down at --yaw-deg, or the current 
 with --keep-orientation. Refuses (no motion) when the IK path ends > 2 mm off target, any
 joint would move more than --max-joint-step rad, or the flange would pass within
 --min-radius of the base axis. Never cancels a running trajectory (that is a hard stop) —
-except with --max-force: a sustained wrench change above it (median of 15 samples, so the
-robot-side 4-6 ms glitch cannot trip it) stops the move. Pair it with --min-duration so that
+except with --max-force: a sustained wrench change above it (median of 51 samples, ~100 ms:
+the robot-side glitch is usually 4-6 ms but runs up to 28 ms, which dragged a 15-sample
+median 20 N and stopped a descent at rest, 2026-10-14) stops the move. Pair it with --min-duration so that
 stop happens at low speed (descents onto parts).
 """
 import argparse
@@ -49,7 +50,7 @@ class Mover(Node):
         super().__init__('move_cartesian')
         self.q = None
         self.create_subscription(JointState, '/joint_states', self._cb, 10)
-        self.F = deque(maxlen=15)
+        self.F = deque(maxlen=51)
         self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench',
                                  lambda m: self.F.append((m.wrench.force.x, m.wrench.force.y, m.wrench.force.z)), 50)
         self.ac = ActionClient(self, FollowJointTrajectory, ACTION)

@@ -55,6 +55,7 @@ SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from des
 # Monitors all 6 axes: Fx, Fy, Fz, Tx, Ty, Tz
 # Z force uses directional threshold (negative = upward resistance)
 FORCE_THRESHOLD = 20.0  # Stop when force/torque changes by this amount from baseline (Newtons)
+CONTACT_MEDIAN_N = 51      # wrench samples (~100 ms at 500 Hz) in the contact median
 Z_FORCE_THRESHOLD = -5.0  # Z force threshold in N (negative = upward force/resistance)
 
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
@@ -465,11 +466,13 @@ class MoveDown(Node):
             z_threshold = Z_FORCE_THRESHOLD
             force_threshold = FORCE_THRESHOLD
 
-        # Calculate forces after baseline removal (real: median of the last ~30 ms, glitch-proof)
+        # Calculate forces after baseline removal (real: median of the last ~100 ms). The robot-side
+        # wrench glitch is usually 2-3 samples but runs up to 14 consecutive samples (28 ms,
+        # measured at rest 2026-10-14) — enough to drag a 15-sample median ~20 N.
         cur = (self.current_force_x, self.current_force_y, self.current_force_z,
                self.current_torque_x, self.current_torque_y, self.current_torque_z)
         if self.mode != 'sim':
-            m = self._median_wrench(15)
+            m = self._median_wrench(CONTACT_MEDIAN_N)
             if m is not None:
                 cur = tuple(float(v) for v in m)
         f_x = cur[0] - self.baseline_force_x
