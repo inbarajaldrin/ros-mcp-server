@@ -292,7 +292,7 @@ def place_at(sx, sy, w, home=True):
     steps = [
         (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
             '--keep-orientation'), 'carry to spot', 90),
-        (py('primitives.core.move_down', '--mode', 'real'), 'lower to table (contact)', 120),
+        (py('primitives.core.move_down', '--mode', 'real', '--to-table'), 'lower to table (contact)', 120),
         (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
         (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
     ] + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])

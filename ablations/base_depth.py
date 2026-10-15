@@ -38,6 +38,12 @@ def measure(marker_ob, base='base1'):
     if cap is None:
         return None, {'error': 'no depth frames'}
     Pw = cap[0]
+    try:                                    # keep the cloud: seated-part geometry is read from it later
+        out = REPO / 'ablations/logs/base_depth'; out.mkdir(parents=True, exist_ok=True)
+        near = (np.abs(Pw[:, 0] - mx) < 0.15) & (np.abs(Pw[:, 1] - my) < 0.15)
+        np.save(out / f"base_{__import__('time').strftime('%Y%m%d_%H%M%S')}.npy", Pw[near].astype(np.float32))
+    except Exception:
+        pass
     table = np.percentile(Pw[:, 2], 30)
     h = 1000 * (Pw[:, 2] - table)
     top = TOP_ABOVE_TABLE_MM[base]; half = (BASE_SIDE_MM[base] / 2 + 15) / 1000

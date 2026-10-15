@@ -1185,7 +1185,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             say(f"  [{step_idx}] insert failed -> recovery {insert_recoveries['n']}/{INSERT_MAX_RECOVERIES}: "
                 f"place at staging, regrasp, reinsert")
             rel = _release_width(step_idx)
-            rec = [('translate_object', dict(action='place_down', object_name=obj, base_name=base_name)),
+            rec = [('move_to_safe_height', {}),        # lift first: the clear-area move is joint-space
+                   ('translate_object', dict(action='place_down', object_name=obj, base_name=base_name)),
                    ('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
                    ('move_to_safe_height', {}),
                    ('move_to_grasp', dict(object_name=obj, grasp_id=state.last_grasp_id or 1)),

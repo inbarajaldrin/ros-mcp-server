@@ -170,7 +170,7 @@ def _subprocess_fast_path():
         if not ok:
             _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
-        ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
+        ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode, '--to-table'], timeout=310)
         _finish(ok, out, "place_down")
 
     if is_compliant_insert:
@@ -427,6 +427,9 @@ OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 HOVER_HEIGHT = 0.15  # Height to hover above base before descending
 MAX_HOVER_YAW_FIX_DEG = 10.0  # larger residuals mean a wrong chain, not a base yaw — leave them
+# Base yaw only (see the hover). Off -> the wrist stays at the deterministic rotate's cardinal yaw;
+# yellow then failed 6/6 (2026-10-15), so it is on.
+HOVER_YAW_FIX = True
 ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
@@ -1122,16 +1125,21 @@ class TranslateObject(Node):
         # (line_green, 2026-10-15: ends ~3 mm sideways, landed on the U parts). Turn the wrist about
         # world z by the part's remaining yaw error, when that is all that is left.
         R_target_ee = R_fk
-        r_fix = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
-        tilt_fix_deg = float(np.degrees(np.linalg.norm(r_fix[:2])))
-        yaw_fix_deg = float(np.degrees(r_fix[2]))
-        if tilt_fix_deg < 2.0 and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
+        # The base's own yaw — the only thing the deterministic rotate leaves out (it snaps to
+        # cardinals as if the base were square to the robot). NOT target-vs-chained: the chain
+        # carries the pick-time camera read and turned U parts 5.6-6.6 deg (operator: the part
+        # read can be wrong, that is why the rotate is deterministic). The jaws square the part
+        # to the wrist, so the base yaw, folded to +-45 deg, is the whole correction.
+        # 2026-10-15: yellow 6/6 failed at cardinal yaw, seated with the ~3 deg base yaw.
+        base_yaw_deg = float(np.degrees(np.arctan2(R_base_current[1, 0], R_base_current[0, 0])))
+        yaw_fix_deg = (base_yaw_deg + 45.0) % 90.0 - 45.0
+        r_chain = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
+        if HOVER_YAW_FIX and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
             R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
-            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z "
-                                   f"(part yaw -> slot yaw; tilt residual {tilt_fix_deg:.2f} deg)")
+            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw; "
+                                   f"chain residual {np.degrees(r_chain[2]):+.2f} deg ignored)")
         else:
-            self.get_logger().info(f"Hover yaw fix: none (yaw residual {yaw_fix_deg:+.2f} deg, "
-                                   f"tilt residual {tilt_fix_deg:.2f} deg)")
+            self.get_logger().info(f"Hover yaw fix: none (base yaw {yaw_fix_deg:+.2f} deg)")
         tool_offset_world = R_target_ee @ held_tool_offset()   # as this part was actually grasped
         hover_flange = hover_gripper_center - tool_offset_world
         self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
