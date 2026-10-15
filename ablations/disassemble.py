@@ -215,6 +215,7 @@ def depth_free_spots(extents, exclude_xy):
                 return [(float(cxs[t]), float(cys[t]), ex, ey)] + rest
         return None
 
+    depth_free_spots.debug = dict(high=high, seen=seen, static=static, kk=kk, x0=x0, y0=y0, cell=cell)
     spots = place(0, high) or []
     print(f"[spots] search: {stats['nodes']} nodes, deepest part {stats['deepest'] + (1 if spots else 0)}"
           f"/{len(extents)}", flush=True)
@@ -391,6 +392,12 @@ def main():
         spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
     else:
         spots, note = depth_free_spots(extents, exclude)
+        if not spots or len(spots) < len(parts):
+            # Fresh frames once: the same table planned fine standalone but failed right after the
+            # home/open moves (2026-10-15) — a capture taken before the scene settled.
+            print(f"[spots] {note}: no full plan — re-capturing once", flush=True)
+            time.sleep(2.0)
+            spots, note = depth_free_spots(extents, exclude)
     print(f"[spots] {note}: {[(round(1000*x), round(1000*y)) for x, y in (spots or [])]} mm")
     if not spots or len(spots) < len(parts):
         print("not enough free spots seen from here — stopping")
