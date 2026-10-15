@@ -125,12 +125,19 @@ def check(obj, observed_base, move=True, out_dir=None):
         if p.returncode != 0:
             return {'ok': False, 'error': 'view move failed: ' + (p.stdout + p.stderr).strip().splitlines()[-1][:200]}
         time.sleep(1.0)                                        # settle before the depth frames
+        # Same view as the base read: re-fit the base outline so the part is measured against
+        # where the base is NOW (the arm's 7th-axis slider creeps under the insert's push).
+        from base_depth import measure as base_from_depth
+        ob_d, info = base_from_depth(observed_base)
+        if ob_d is not None:
+            observed_base = ob_d
     cap = capture_world()
     if cap is None:
         return {'ok': False, 'error': 'no depth frames'}
     Pw, d, color, nf = cap
     res = measure(obj, observed_base, Pw)
     res['n_frames'] = nf
+    res['observed_base'] = observed_base
     if out_dir:
         import cv2
         out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +145,7 @@ def check(obj, observed_base, move=True, out_dir=None):
         np.save(out_dir / f'seatcheck_{obj}_{ts}_depth.npy', d.astype(np.float32))
         if color is not None:
             cv2.imwrite(str(out_dir / f'seatcheck_{obj}_{ts}_color.png'), color)
-        json.dump(dict(res, observed_base=observed_base), open(out_dir / f'seatcheck_{obj}_{ts}.json', 'w'), indent=1)
+        json.dump(res, open(out_dir / f'seatcheck_{obj}_{ts}.json', 'w'), indent=1)
     return res
 
 

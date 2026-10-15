@@ -350,9 +350,18 @@ def main():
         for o, s in zip(parts, spots):
             print(f"  {o['object_name']}: grasp {o['grasp_id']} width {o['gripper_width_mm']} -> spot {np.round(s, 3).tolist()}")
         return 0
-    for o, (sx, sy) in zip(parts, spots):
+    for i, (o, (sx, sy)) in enumerate(zip(parts, spots)):
         name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
         print(f"\n=== {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
+        if i > 0:
+            # The arm rides a 7th-axis slider: each pull-out can creep the carriage, so the base
+            # moves in the robot's frame. Read it again before every seat grasp (see
+            # replay_real_assembly.reread_base).
+            prev, ob = ob, observe_base()
+            if ob is None:
+                print("base1 not observed — stopping"); return 1
+            print(f"[base] moved ({1000*(ob[0][0]-prev[0][0]):+.1f}, {1000*(ob[0][1]-prev[0][1]):+.1f}) mm "
+                  f"since the last read", flush=True)
         tcp = seat_grasp(name, gid, ob)
         print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
         q = [str(v) for v in SEAT_EE_QUAT]

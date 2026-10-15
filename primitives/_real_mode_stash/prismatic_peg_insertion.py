@@ -124,6 +124,7 @@ EXIT_GEOMETRIC_VEL_WINDOW    = 1.5     # seconds for dz/dt estimation
 # old 25mm let line_green declare success at 8.95mm pos_dev (clearly tilted
 # on the rim, not seated). 5mm forces a real seat or triggers retry.
 POSITION_DEVIATION_XY = 0.005   # m - max XY drift from target at verify
+SEATED_XY_ACCEPT_M = 0.015      # m - at seat depth, an xy offset up to this is a found slot, not an exit
 ORIENTATION_DEVIATION = 3.0     # degrees - max orientation change at verify
 
 # Retry
@@ -1195,6 +1196,16 @@ class PrismaticPegInsertion(Node):
             within, pos_dev, ori_dev = self._check_deviation(initial_ori)
             self.get_logger().info(f"[VERIFY] result={result}, pos_dev={pos_dev*1000:.1f}mm, ori_dev={ori_dev:.2f}deg")
 
+            # Seated = at seat depth and still (SUCCESS-GEO). A part that missed its slot rests on
+            # the base top, above that depth, so an xy offset here is the compliance having slid it
+            # to where the slot really is — not an exit. 2026-10-15: yellow seated 6.6 mm from the
+            # aim, the old 5 mm rule called it a failure, retracted 10 mm WITH the part gripped
+            # (pulling the seated parts with it) and pushed it in again at 5 N sideways.
+            if result == 'success' and not within and pos_dev <= SEATED_XY_ACCEPT_M \
+                    and ori_dev <= ORIENTATION_DEVIATION:
+                self.get_logger().warn(f"[VERIFY] seated {pos_dev*1000:.1f} mm from the aim (compliance found "
+                                       f"the slot) -> accepted, no retract")
+                within = True
             if result == 'success' and within:
                 self.get_logger().info(f"[SUCCESS] Insertion complete on attempt {attempt}")
                 self._tele_phase = "DONE"

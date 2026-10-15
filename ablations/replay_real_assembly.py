@@ -358,6 +358,41 @@ def observe_base_pose(base_name: str, timeout_s: float = 15.0):
     return tuple(float(v) for v in P), tuple(float(v) for v in q)
 
 
+
+def reread_base(bname, prev, log_fh=None):
+    """Re-read the base from straight above (flange at base_depth.VIEW_FLANGE_Z, top-down,
+    gripper empty), depth outline first, marker read as fallback; returns the new pose or `prev`.
+    Called between parts, where the arm is already at safe height over the base after the last
+    release: it is the same vertical exit, just higher (not from home: there the base top sits at
+    the D415's minimum depth range and the fit got 0 points, 2026-10-15).
+
+    The UR5e rides a Vention 7th-axis slider: an insert, a nudge or a pull-out pushes the arm and
+    the carriage creeps — the base then sits mm away IN THE ROBOT'S FRAME although it never moved
+    on the table (2026-10-15: +1.9 mm over one assembly, +3.6 mm over one disassembly, +8 mm in an
+    hour). So every part aims at a base read taken after the previous part's last push."""
+    from base_depth import VIEW_FLANGE_Z as _VZ, measure as _base_from_depth
+    from primitives.shared.config import DEFAULT_BASE_POSITION as _DBP
+    cx, cy = (prev[0][0], prev[0][1]) if prev is not None else (_DBP[0], _DBP[1])
+    r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                         f"{cx:.4f}", f"{cy:.4f}", f"{_VZ:.2f}"],
+                        label='base re-read move', timeout_s=60, log_fh=log_fh)
+    if r_.get('result') != 'success':
+        return prev
+    ob = observe_base_pose(bname)
+    if ob is None:
+        return prev
+    time.sleep(1.0)                                            # settle before the depth frames
+    ob_d, info = _base_from_depth(ob, bname)
+    ob = ob_d if ob_d is not None else ob
+    msg = (f"  [base] re-read ({'depth' if ob_d is not None else 'marker'}): "
+           f"({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}) mm, yaw {np.degrees(2*np.arctan2(ob[1][2], ob[1][3])):.2f} deg")
+    if prev is not None:
+        msg += f"; moved ({1000*(ob[0][0]-prev[0][0]):+.1f}, {1000*(ob[0][1]-prev[0][1]):+.1f}) mm since the last read"
+    print(msg, flush=True)
+    if log_fh: log_fh.write(msg + "\n")
+    return ob
+
+
 def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0):
     """Build the tool sequence from where the part is actually lying.
 
@@ -536,6 +571,40 @@ class AssemblyState:
 # Tool → subprocess argv
 # ---------------------------------------------------------------------------
 
+# line_green drops between the seated U parts, so its slot is where THEY seated, not where the
+# base read puts them: their force search finds the real seats (seat TCP - CAD-predicted TCP).
+# 2026-10-15: both U parts seated -5.5 mm in y and every line_green insert drifted -5 mm in y
+# into its 5 mm search limit; with the U parts near y=0 it went straight in. Aim line_green at
+# the base shifted by the U parts' mean seat offset (this run's inserts only).
+FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
+MAX_FOLLOW_MM = 8.0
+REPLAY_T0 = float(os.environ.get('FOLLOW_SINCE_EPOCH', time.time()))   # override: resume line_green alone
+
+
+def follow_seated_offset(obj: str) -> Tuple[float, float]:
+    """World xy (m) to add to `obj`'s insert target: the mean seat offset of the parts it sits
+    between, from their insert logs written by this replay. (0, 0) when they are not all there."""
+    parts = FOLLOWS_SEATED.get(obj)
+    if not parts:
+        return 0.0, 0.0
+    try:
+        from fmb1_loop import insert_summary
+        last = {}
+        for r in insert_summary(REPLAY_T0):
+            if r.get('outcome') == 'success' and r.get('seat_minus_pred_mm'):
+                last[r['object']] = r['seat_minus_pred_mm']
+        if not all(p in last for p in parts):
+            print(f"  [follow] {obj}: seat offsets of {parts} not all logged in this run -> aim at the base")
+            return 0.0, 0.0
+        d = np.clip(np.mean([last[p][:2] for p in parts], axis=0), -MAX_FOLLOW_MM, MAX_FOLLOW_MM)
+        print(f"  [follow] {obj}: aim shifted by ({d[0]:+.1f}, {d[1]:+.1f}) mm world — mean seat offset of "
+              + ", ".join(f"{p} ({last[p][0]:+.1f}, {last[p][1]:+.1f})" for p in parts), flush=True)
+        return float(d[0]) / 1000, float(d[1]) / 1000
+    except Exception as e:
+        print(f"  [follow] {obj}: {e} -> aim at the base")
+        return 0.0, 0.0
+
+
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                base_offset_xy: Optional[Tuple[float, float]] = None,
                observed_base=None) -> Tuple[list[str], int]:
@@ -590,6 +659,8 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                 from primitives.shared.config import get_object_base_offset_m
                 (ox, oy, oz), oq = observed_base
                 dz = float(get_object_base_offset_m(kw['object_name'])[2])
+                fx, fy = follow_seated_offset(kw['object_name'])
+                ox, oy = ox + fx, oy + fy
                 argv += ['--final-base-pos', f"{ox:.6f}", f"{oy:.6f}", f"{oz + dz:.6f}",
                          '--final-base-orientation', *[f"{v:.6f}" for v in oq]]
                 argv = [a for a in argv if a != '--use-default-base-position']
@@ -645,38 +716,43 @@ RESEAT_MAX = 1
 # has almost no axial play). Operator's fix, verified 2026-10-14: gripper closed, from safe height,
 # lower beside the high end, push ALONG the bar toward the slot in small steps at <= 5 N (base1 is
 # glued to the table), re-check depth after each step. Regrasps and pressing did not work.
-NUDGE_STEPS_MM = (3, 8, 13, 18)      # finger face past the end's estimated position, per step
-NUDGE_MAX_FORCE_N = 5.0
+NUDGE_MAX_FORCE_N = 4.0              # push until the bar is blocked (seated or stuck): operator's rule,
+                                     # replaces fixed step distances that had to guess the end (2026-10-15)
+NUDGE_PUSH_PAST_MM = 15.0            # travel cap (operator): finger face at most this far past the estimated end
+NUDGE_TRIES = 3
 NUDGE_PAD_Z_BASE_M = 0.037           # pad centre height (base frame): tips 22 mm, base top 17.5 mm
-NUDGE_AXIAL_BIAS_MM = 7.0            # depth reads a flat, centred bar ~+7 mm along base y (2026-10-14)
+NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real one (edge smear on
+                                   # the D415). Not a base-read error: with the depth base and 0 here,
+                                   # step 1 missed the bar entirely (operator, 2026-10-15)
 
 
 def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
-    """Push a tilted bar's raised end along its axis into its slot (operator's method). The high
-    end and its position come from the depth seat check `res`; every approach starts at safe
-    height; each <= 5 mm step is force-guarded and followed by a depth re-check."""
+    """Push a tilted bar's raised end along its axis into its slot (operator's method): closed
+    fingers lowered beside the high end from safe height, then ONE guarded push toward the slot
+    that stops at NUDGE_MAX_FORCE_N — the bar slides while it is free and the force rises once it
+    is blocked (seated against the pocket end, or stuck). Depth re-check after every try; the next
+    try starts from the new measurement. The base is re-fitted by every check (7th-axis creep)."""
     from seat_check import check
     from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
-    ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
-    if not ends or not ext:
-        say(f"  [nudge] {obj}: no end heights / axial extent -> cannot nudge"); return False
-    sgn = 1.0 if ends[1] > ends[0] else -1.0                       # +1: the +y (base) end is high
-    end_mm = (ext[1] if sgn > 0 else ext[0]) - NUDGE_AXIAL_BIAS_MM
-    (bx, by, bz), bq = ob
-    Rb = R_.from_quat(bq).as_matrix()
-    world = lambda yb: np.array([bx, by, bz]) + Rb @ np.array([0.0, yb, NUDGE_PAD_Z_BASE_M])
+    base = [ob]
+    def world(yb):
+        (bx, by, bz), bq = base[0]
+        return np.array([bx, by, bz]) + R_.from_quat(bq).as_matrix() @ np.array([0.0, yb, NUDGE_PAD_Z_BASE_M])
     fz = lambda p: p[2] + RG2_TIP_CLOSED_M - RG2_PAD_HALF_M          # flange z, closed, top-down
     half = 10.1                                                      # closed finger block half-width (mm)
-    start = world((end_mm + sgn * (half + 10.0)) / 1000.0)
     q = ['0.0', '1.0', '0.0', '0.0']
     X = lambda p, z: [f"{p[0]:.4f}", f"{p[1]:.4f}", f"{z:.4f}"]
-    def go(argv, label, t=60):
-        r = run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
-        return r
-    say(f"  [nudge] {obj}: {'+y' if sgn > 0 else '-y'} end high, est. at {end_mm:+.0f} mm (base) -> nudge toward the slot")
-    for k, past in enumerate(NUDGE_STEPS_MM, 1):
-        face = end_mm - sgn * past
-        push = world((face + sgn * half) / 1000.0)
+    go = lambda argv, label, t=60: run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
+    for k in range(1, NUDGE_TRIES + 1):
+        ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
+        if not ends or not ext:
+            say(f"  [nudge] {obj}: no end heights / axial extent -> cannot nudge"); return False
+        sgn = 1.0 if ends[1] > ends[0] else -1.0                     # +1: the +y (base) end is high
+        end_mm = (ext[1] if sgn > 0 else ext[0]) - sgn * NUDGE_AXIAL_BIAS_MM
+        start = world((end_mm + sgn * (half + 10.0)) / 1000.0)
+        push = world((end_mm - sgn * NUDGE_PUSH_PAST_MM + sgn * half) / 1000.0)
+        say(f"  [nudge] try {k}: {'+y' if sgn > 0 else '-y'} end high, est. at {end_mm:+.0f} mm (base) "
+            f"-> push toward the slot until {NUDGE_MAX_FORCE_N:g} N (cap {NUDGE_PUSH_PAST_MM:g} mm past)")
         for argv, label in [
                 (['primitives.control_gripper', 'close', '--mode', 'real'], 'nudge close'),
                 (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height'),
@@ -690,17 +766,18 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
                 say(f"\n!!! {label} failed: {r.get('error', '')}"); return False
         time.sleep(1.5)                                              # settle before the force baseline
         r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(push, fz(push)), '--quat', *q,
-                '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '6'],
-               f'nudge step {k} (face {past} mm past the end)')
-        say(f"  [nudge] step {k}: {'stopped on contact ' + str(r.get('error')) if r.get('contact') else 'full travel'}")
+                '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '10'],
+               f'nudge push {k} (until {NUDGE_MAX_FORCE_N:g} N)')
+        say(f"  [nudge] push {k}: {'stopped at ' + str(r.get('error')) if r.get('contact') else 'reached the travel cap'}")
         for argv, label in [
                 (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, fz(start)), '--quat', *q,
                   '--min-z', '0.15'], 'nudge back off'),
                 (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height')]:
             if go(argv, label).get('result') == 'failure':
                 say(f"\n!!! {label} failed"); return False
-        res = check(obj, ob, move=True, out_dir=out_dir)
-        say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ != 'profile_mm'})}")
+        res = check(obj, base[0], move=True, out_dir=out_dir)
+        base[0] = res.get('observed_base') or base[0]
+        say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ not in ('profile_mm', 'observed_base')})}")
         if res.get('ok'):
             return True
     return False
@@ -717,6 +794,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
     out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
     for attempt in range(RESEAT_MAX + 1):
         res = check(obj, ob, move=True, out_dir=out_dir)
+        ob = res.get('observed_base') or ob                    # re-fitted from the check's own view
         say(f"  [seat-check] {obj}: {json.dumps(res)}")
         if res.get('ok'):
             return True
@@ -1211,10 +1289,10 @@ def main() -> int:
                 print(msg)
                 if log_fh: log_fh.write(msg + "\n")
 
-        # Base pose for the inserts, observed once while the arm is still (startup view).
+        # Base pose for the inserts: read here (startup view), re-read between parts (reread_base).
         args.observed_base = None
+        bname = 'base1'
         if getattr(args, 'base_from_camera', False) and not args.dry_run:
-            bname = 'base1'
             for e_ in entries:
                 for s_ in e_.get('tool_sequence', []) or []:
                     try:
@@ -1281,9 +1359,11 @@ def main() -> int:
             # detected (out of view)". Safe height already happened (end of the previous
             # sequence), so a straight move_home here is within the CLAUDE.md rule.
             if not first_object and not args.dry_run:
-                hdr = f"\n  BETWEEN PARTS: move_home before {obj} (camera view of the table)\n"
+                hdr = f"\n  BETWEEN PARTS: re-read the base, then move_home before {obj} (camera view of the table)\n"
                 print(hdr, end='')
                 if log_fh: log_fh.write(hdr)
+                if getattr(args, 'observed_base', None) is not None:
+                    args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
                                    label=f'between-parts move_home ({obj})', timeout_s=60,
                                    log_fh=log_fh)
