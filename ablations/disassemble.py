@@ -333,6 +333,9 @@ def main():
                     help='the gripper holds PART (e.g. a run stopped mid-insert): set it down in the '
                          'staging region and stay above it; then replay --only PART --skip-startup '
                          '--part-at-staging regrasps and inserts it')
+    ap.add_argument('--here', action='store_true',
+                    help='with --place-held: set it down straight below the gripper (e.g. back on the '
+                         'table spot it was just picked from) instead of in the staging region, then home')
     ap.add_argument('--pick-view-dy', type=float, default=0.0,
                     help='with --relocate: shift the arm this far in world y from home (top-down, same '
                          'height) before the pick, for a part home sees badly (fingers hide the bottom '
@@ -354,6 +357,18 @@ def main():
             ap.error(f'unknown part {a.place_held}')
         if gripper_holding() is False:
             print(f"the gripper reports nothing held — not placing {a.place_held}"); return 1
+        if a.here:
+            import rclpy
+            from geometry_msgs.msg import PoseStamped
+            rclpy.init(); nn = rclpy.create_node('dis_here'); tp = {}
+            nn.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: tp.__setitem__('p', m), 10)
+            end = time.time() + 3
+            while 'p' not in tp and time.time() < end: rclpy.spin_once(nn, timeout_sec=0.05)
+            nn.destroy_node(); rclpy.shutdown()
+            if 'p' not in tp:
+                print("no TCP pose — not placing"); return 1
+            p_ = tp['p'].pose.position
+            return place_at(p_.x, p_.y, GRIP_WIDTH_MM[a.place_held], home=True)
         return place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False)
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
     sel = a.relocate or a.only

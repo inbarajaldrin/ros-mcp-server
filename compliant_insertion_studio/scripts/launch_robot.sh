@@ -53,7 +53,9 @@ if [[ -z "$MODE" ]]; then
 fi
 
 # --- safety: refuse to launch if a bringup is already running ---
-if pgrep -f "ros2.*launch.*ur" >/dev/null 2>&1; then
+# Match the UR bringups themselves: "ros2.*launch.*ur" also matched the RealSense launch
+# (auto_expos-ur-e_priority) and refused to restart the driver (2026-10-15).
+if pgrep -f "ros2.*launch.*(ur5e_with_rg2|ur_robot_driver|ur_control\.launch)" >/dev/null 2>&1; then
     echo "ERROR: a UR bringup is already running. Run './close_robot.sh' first." >&2
     pgrep -af "ros2.*launch.*ur" | head -3
     exit 2
