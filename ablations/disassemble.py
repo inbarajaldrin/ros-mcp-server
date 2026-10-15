@@ -224,6 +224,7 @@ def depth_free_spots(extents, exclude_xy):
     return spots, f"table z {1000*table_z:.1f} mm, {n_cand} candidate cells"
 
 
+SEAT_OFFSET_MAX_M = 0.012                  # a recorded seat offset larger than this is not trusted
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
@@ -262,7 +263,11 @@ def grasp_offset_for(name):
 
 def seat_grasp(name, gid, observed_base, base_name='base1'):
     """Flange pose the insert holds `name` at when seated (same chain as translate_object,
-    same grasp depth as the insert: grasp_offset_for)."""
+    same grasp depth as the insert: grasp_offset_for), shifted in xy by where the insert's force
+    search actually seated it (seated_offsets.json: seat TCP - predicted TCP). Without it the
+    disassembly grasped blind at the CAD seat and every real seat offset (U parts 5-6 mm in y,
+    yellow 6 mm) became a grasp offset; the assembly reads the part's markers and is accurate
+    (operator, 2026-10-15)."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
     from primitives.shared.config import get_object_base_offset_m
     (bx, by, bz), bq = observed_base
@@ -273,7 +278,17 @@ def seat_grasp(name, gid, observed_base, base_name='base1'):
                               base_world_xyz=[bx, by, bz + dz], base_world_quat_xyzw=bq,
                               held_quat_xyzw=held, ee_orientation_xyzw=SEAT_EE_QUAT,
                               flange_offset_m=grasp_offset_for(name))
-    return np.array(out['predicted_tcp_at_seat']['xyz_m'])
+    tcp = np.array(out['predicted_tcp_at_seat']['xyz_m'])
+    try:
+        d = json.load(open(REPO / 'ablations/logs/seated_offsets.json')).get(name)
+        if d and d.get('seat_minus_pred_mm'):
+            dx, dy = (float(v) / 1000 for v in d['seat_minus_pred_mm'][:2])
+            if max(abs(dx), abs(dy)) <= SEAT_OFFSET_MAX_M:
+                tcp[:2] += (dx, dy)
+                print(f"    [seat-grasp] {name}: + recorded seat offset ({1000*dx:+.1f}, {1000*dy:+.1f}) mm", flush=True)
+    except Exception:
+        pass
+    return tcp
 
 
 def observe_base(base_name='base1'):
