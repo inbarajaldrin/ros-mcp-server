@@ -125,6 +125,7 @@ EXIT_GEOMETRIC_VEL_WINDOW    = 1.5     # seconds for dz/dt estimation
 # on the rim, not seated). 5mm forces a real seat or triggers retry.
 POSITION_DEVIATION_XY = 0.005   # m - max XY drift from target at verify
 SEATED_XY_ACCEPT_M = 0.015      # m - at seat depth, an xy offset up to this is a found slot, not an exit
+DRIFT_EXEMPT_DROP_M = 0.005     # m - this far below the first [CONTACT] z: in the slot, drift allowed
 ORIENTATION_DEVIATION = 3.0     # degrees - max orientation change at verify
 
 # Retry
@@ -845,6 +846,7 @@ class PrismaticPegInsertion(Node):
         torque_history = []
         # Rolling Z history for geometric exit's dz/dt estimation
         z_history: list = []
+        z_contact = None               # z at this attempt's first [CONTACT]: where the part met something
 
         def avg_torques(now):
             """Compute rolling average Tx, Ty over EXIT_TORQUE_WINDOW."""
@@ -904,6 +906,8 @@ class PrismaticPegInsertion(Node):
 
             if disturbed and not is_tilted:
                 is_tilted = True
+                if z_contact is None:
+                    z_contact = z
                 tilt_recovery_start = None
                 stuck_check_z = z
                 stuck_check_time = now
@@ -963,7 +967,12 @@ class PrismaticPegInsertion(Node):
             if elapsed >= SETTLING_TIME + 2.0:
                 xy_dev = np.sqrt((self.ee_pose.position.x - self.target_xyz[0])**2
                                  + (self.ee_pose.position.y - self.target_xyz[1])**2)
-                if xy_dev > retry_xy_tol:
+                # Once the part has dropped below its first-contact height it is IN the slot and
+                # sideways motion is the compliance following it — 2026-10-15 line_green dropped
+                # into the U channel on attempt 3 and this check pulled it straight out. Drift is
+                # only an exit while the part still rides on top of something.
+                in_slot = z_contact is not None and (z_contact - z) > DRIFT_EXEMPT_DROP_M
+                if xy_dev > (SEATED_XY_ACCEPT_M if in_slot else retry_xy_tol):
                     self.get_logger().warn(
                         f"[XY_DRIFT] {xy_dev*1000:.1f}mm > tol {retry_xy_tol*1000:.1f}mm "
                         f"(attempt={attempt}) -> aborting"
