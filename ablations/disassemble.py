@@ -64,6 +64,10 @@ def run(argv, label, timeout=180):
     js = [l for l in out.splitlines() if l.startswith('{"result"')]
     res = json.loads(js[-1]) if js else {}
     ok = p.returncode == 0 and res.get('result', 'success') != 'failure'
+    from replay_real_assembly import robot_safety_status
+    st = robot_safety_status()
+    if st is not None and st not in ('NORMAL', 'REDUCED'):            # never command a stopped robot
+        ok, res = False, dict(res, result='failure', error=f'robot {st}')
     print(f"    {'ok' if ok else 'FAILED'} {res.get('error', '') if not ok else ''}", flush=True)
     for l in out.splitlines():                        # how deep a grasp went (pad centre vs grasp point)
         if any(k in l for k in ('Pad-centre grasp', 'Raising gripper center', 'Target gripper center')):
@@ -75,6 +79,20 @@ def run(argv, label, timeout=180):
 
 def py(*a):
     return [sys.executable, '-u', '-m', *a]
+
+
+def gripper_holding(timeout=4.0):
+    """True/False from the RG2's own grip-detected flag (/gripper_status 'Grasp:True'), None if
+    no status arrived."""
+    import rclpy
+    from std_msgs.msg import String
+    rclpy.init(); n = rclpy.create_node('dis_grip'); st = {}
+    n.create_subscription(String, '/gripper_status', lambda m: st.__setitem__('s', m.data), 5)
+    end = time.time() + timeout
+    while 's' not in st and time.time() < end:
+        rclpy.spin_once(n, timeout_sec=0.05)
+    n.destroy_node(); rclpy.shutdown()
+    return None if 's' not in st else ('Grasp:True' in st['s'])
 
 
 def depth_free_spots(extents, exclude_xy):
@@ -376,14 +394,39 @@ def main():
             (py('primitives.move_to_safe_height', '--mode', 'real'), 'pull out to safe height', 90),
         ]
         for argv, label, t in steps:
-            ok, _ = run(argv, label, t)
+            ok, res = run(argv, label, t)
             if not ok: return 1
+            # The grip must hold through the pull-out: 2026-10-15 line_green came out of the jaws
+            # on the way up, fell beside base1, and every later step reported ok (the gripper
+            # carried nothing to its spot); the next pick then put an open finger on the base.
+            if label in ('close', 'pull out to safe height'):
+                width = res.get('final_width_mm')
+                from primitives.shared.config import GRIP_WIDTH_MM
+                want = GRIP_WIDTH_MM.get(name)
+                held = gripper_holding()
+                if held is False or (label == 'close' and width is not None and want is not None
+                                     and width < want - 6.0):
+                    print(f"\n!!! {name}: not held after '{label}' (grip flag {held}, width {width} mm, "
+                          f"part {want} mm) — stopping", flush=True)
+                    return 1
         if place_at(sx, sy, w, home=False) != 0:
             return 1
     if a.to_staging:                                       # stay over the clear area: the regrasp sees it
         return 0
     ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
-    return 0 if ok else 1
+    if not ok:
+        return 1
+    # Where did the parts actually land? The spots were planned clear, but a part that slips or
+    # tips lands elsewhere (2026-10-15: line_green 7 mm from base1). Check from home, fail closed.
+    from spacing_check import check as spacing, observe_parts, PARTS
+    seen = observe_parts(PARTS)
+    ok_sp, rep = spacing(seen, ob)
+    rep['unseen'] = [n for n in PARTS if n not in seen]
+    print(f"[spacing] {json.dumps(rep)}", flush=True)
+    if not ok_sp:
+        print("\n!!! parts too close for the open gripper after disassembly — stopping")
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

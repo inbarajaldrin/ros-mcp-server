@@ -83,6 +83,21 @@ _STOP_AFTER_FIRED = False
 # handler can kill it (its whole process group) when the operator hits Ctrl-C.
 _ACTIVE_PROC: Optional[subprocess.Popen] = None
 _INTERRUPTED = False
+_SAFETY_STOP: Optional[str] = None     # set when the robot leaves NORMAL safety: the run halts, no cleanup
+
+
+def robot_safety_status(host: str = '192.168.1.111', timeout: float = 1.5) -> Optional[str]:
+    """'NORMAL', 'PROTECTIVE_STOP', ... from the UR dashboard server (port 29999), None if unreachable.
+    Independent of ROS, so it works while the driver or a primitive is wedged."""
+    import socket
+    try:
+        with socket.create_connection((host, 29999), timeout=timeout) as s_:
+            s_.settimeout(timeout)
+            s_.recv(1024)                                      # banner
+            s_.sendall(b'safetystatus\n')
+            return s_.recv(1024).decode(errors='replace').strip().split(':')[-1].strip()
+    except Exception:
+        return None
 
 
 def _sigint_handler(signum, frame):
@@ -477,6 +492,24 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
     watchdog = threading.Timer(timeout_s, _expire)
     watchdog.daemon = True
     watchdog.start()
+    # Safety watcher: a protective stop aborts the trajectory but the primitive waits on it, so
+    # the run used to sit out the 60 s watchdog and then command more motions on a stopped robot
+    # (2026-10-15: line_green pick with an open finger on base1). Poll the dashboard at 1 Hz and
+    # interrupt the step the moment the robot leaves NORMAL.
+    done_ev = threading.Event()
+
+    def _watch_safety():
+        global _SAFETY_STOP
+        while not done_ev.wait(1.0):
+            st = robot_safety_status()
+            if st is not None and st not in ('NORMAL', 'REDUCED'):
+                _SAFETY_STOP = st
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                except Exception:
+                    pass
+                return
+    threading.Thread(target=_watch_safety, daemon=True).start()
     try:
         for line in iter(proc.stdout.readline, ''):
             print(line, end='', flush=True)
@@ -503,7 +536,14 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
             proc.kill()
     finally:
         watchdog.cancel()
+        done_ev.set()
         _ACTIVE_PROC = None
+    if _SAFETY_STOP:
+        msg = f"!!! robot safety status {_SAFETY_STOP} during '{label}' — step interrupted, run halts\n"
+        print(msg, end='', flush=True)
+        if log_fh is not None:
+            log_fh.write(msg)
+        return {"result": "failure", "error": f"robot {_SAFETY_STOP}", "label": label}
     text = ''.join(captured)
     rj = extract_result_json(text)
     if rj is None:
@@ -1110,7 +1150,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 return True
 
         if (result.get('result') == 'failure' and tool_name == 'translate_object'
-                and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES):
+                and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES
+                and not _SAFETY_STOP):
             # A missed insert means a bad grasp (the insert itself searches ~5 mm). Set the
             # part down at the staging area and take a fresh grasp from close above, then
             # insert again — the operator's recovery that seated yellow on 2026-10-14.
@@ -1372,6 +1413,21 @@ def main() -> int:
                        f"-> inserts aim at it (per-object z offsets kept)")
             print(msg)
             if log_fh: log_fh.write(msg + "\n")
+            # Spacing pre-check before any pick: every table part must stand clear of base1 and of
+            # the other parts by an open finger's reach (spacing_check.py). Home sees the table;
+            # with --part-at-staging the part waits in the clear area and home is not where we are.
+            if ob is not None and not args.part_at_staging:
+                from spacing_check import check as _spacing, observe_parts as _obs_parts, PARTS as _PARTS
+                seen = _obs_parts(_PARTS)
+                ok_sp, rep = _spacing(seen, args.observed_base or ob)
+                rep['unseen'] = [n for n in _PARTS if n not in seen]
+                msg = f"  [spacing] {json.dumps(rep)}"
+                print(msg, flush=True)
+                if log_fh: log_fh.write(msg + "\n")
+                if not ok_sp:
+                    print("\n!!! parts too close for the open gripper — stopping before any pick "
+                          "(move the part named above, or relocate it with disassemble.py --relocate)")
+                    return 1
 
         completed: list[str] = []
         failed: Optional[str] = None
@@ -1426,7 +1482,12 @@ def main() -> int:
         # --dry-run AND when --stop-before / --stop-after fired (pause means
         # the robot stays at the halted pose for operator inspection or
         # follow-on motion).
-        if not args.dry_run and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED:
+        if _SAFETY_STOP:
+            msg = (f"\n  CLEANUP SKIPPED: robot is in {_SAFETY_STOP}. Clear it (dashboard 'close safety popup',"
+                   f" 'unlock protective stop'), run stop_run.sh, then lift with move_to_safe_height.\n")
+            print(msg, end='')
+            if log_fh: log_fh.write(msg)
+        elif not args.dry_run and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED:
             header = f"\n{'='*72}\n  CLEANUP: move_to_safe_height -> move_home\n{'='*72}\n"
             print(header, end='')
             if log_fh: log_fh.write(header)
