@@ -159,28 +159,50 @@ def depth_free_spots(extents, exclude_xy):
     for di in range(2 * r_ + 1):
         for dj in range(2 * r_ + 1):
             high |= hp[di:di + nx, dj:dj + ny]
-    spots, n_cand = [], 0
+    # Static validity per part (ring, staging exclusion, inside the home view): independent of
+    # where the other parts go, so computed once. Then a bounded backtracking search: greedy
+    # nearest-to-centre placement fitted only 3 of 4 parts once the view limits tightened
+    # (2026-10-15); trying a few spread-out candidates per part fits all four.
+    static, kk = [], []
     for ex, ey in extents:
         kx, ky = int(2 * (ex + m_) / cell) + 1, int(2 * (ey + m_) / cell) + 1
-        ok = (boxsum(seen, kx, ky) > 0.9 * kx * ky) & (boxsum(high, kx, ky) == 0)
-        cands = []
-        for i, j in zip(*np.nonzero(ok)):
+        ok_s = boxsum(seen, kx, ky) > 0.9 * kx * ky
+        for i, j in zip(*np.nonzero(ok_s)):
             cx, cy = x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell
-            if not (0.30 < np.hypot(cx, cy) < 0.68):
-                continue
-            if any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy):
-                continue
-            if not in_view(cx, cy, ex, ey):
-                continue
-            cands.append((cx, cy))
-        n_cand += len(cands)
-        if not cands:
-            break
-        c = min(cands, key=lambda c: np.hypot(c[0] - 0.05, c[1] + 0.40))   # nearest the home view centre
-        spots.append((c[0], c[1], ex, ey))
-        i0, i1 = int((c[0] - ex - m_ - x0) / cell), int((c[0] + ex + m_ - x0) / cell) + 1
-        j0, j1 = int((c[1] - ey - m_ - y0) / cell), int((c[1] + ey + m_ - y0) / cell) + 1
-        high[max(i0, 0):i1, max(j0, 0):j1] = True               # occupied, with its margin
+            if (not (0.30 < np.hypot(cx, cy) < 0.68)
+                    or any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy)
+                    or not in_view(cx, cy, ex, ey)):
+                ok_s[i, j] = False
+        static.append(ok_s); kk.append((kx, ky))
+    n_cand = int(sum(m.sum() for m in static))
+    budget = [SPOT_SEARCH_NODES]
+
+    def mark(occ, cx, cy, ex, ey):
+        occ = occ.copy()
+        i0, i1 = int((cx - ex - m_ - x0) / cell), int((cx + ex + m_ - x0) / cell) + 1
+        j0, j1 = int((cy - ey - m_ - y0) / cell), int((cy + ey + m_ - y0) / cell) + 1
+        occ[max(i0, 0):i1, max(j0, 0):j1] = True               # occupied, with its margin
+        return occ
+
+    def place(k, occ):
+        if k == len(extents):
+            return []
+        budget[0] -= 1
+        if budget[0] < 0:
+            return None
+        (ex, ey), (kx, ky) = extents[k], kk[k]
+        ok = static[k] & (boxsum(occ, kx, ky) == 0)
+        cands = sorted(((x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell) for i, j in zip(*np.nonzero(ok))),
+                       key=lambda c: np.hypot(c[0] - 0.05, c[1] + 0.40))   # nearest the home view centre
+        if len(cands) > SPOT_TRIES:                             # spread the tries over the free area
+            cands = [cands[int(t)] for t in np.linspace(0, len(cands) - 1, SPOT_TRIES)]
+        for cx, cy in cands:
+            rest = place(k + 1, mark(occ, cx, cy, ex, ey))
+            if rest is not None:
+                return [(cx, cy, ex, ey)] + rest
+        return None
+
+    spots = place(0, high) or []
     spots = [(x, y) for x, y, _, _ in spots]
     depth_free_spots.last = (Tc, K, table_z)
     return spots, f"table z {1000*table_z:.1f} mm, {n_cand} candidate cells"
@@ -189,8 +211,10 @@ def depth_free_spots(extents, exclude_xy):
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
-VIEW_MARGIN_PX = 60                        # free spots stay this far inside the home image
-FINGER_BAND_PX = 160                       # ...and above this bottom band: move_to_grasp opens to the
+SPOT_TRIES = 12                            # candidates tried per part in the spot search
+SPOT_SEARCH_NODES = 3000                   # search budget (each node: one boxsum over the grid)
+VIEW_MARGIN_PX = 40                        # free spots stay this far inside the home image
+FINGER_BAND_PX = 100                       # ...and above this bottom band: move_to_grasp opens to the
                                            # pre-grasp width first and the fingertips hide it (yellow
                                            # at the bottom edge went undetected, 2026-10-15)
 
