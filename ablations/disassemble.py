@@ -226,9 +226,9 @@ def depth_free_spots(extents, exclude_xy):
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
-SPOT_TRIES = 12                            # candidates tried per part in the spot search
-SPOT_SEARCH_NODES = 400                    # search budget (each node: one boxsum over the grid)
-SPOT_SEARCH_S = 20.0                       # and a wall-clock cap: a 3000-node python search ran 7+ min
+SPOT_TRIES = 24                            # candidates tried per part in the spot search
+SPOT_SEARCH_NODES = 2000                    # search budget (each node: one boxsum over the grid)
+SPOT_SEARCH_S = 60.0                       # and a wall-clock cap: a 3000-node python search ran 7+ min
 VIEW_MARGIN_PX = 40                        # free spots stay this far inside the home image
 FINGER_BAND_PX = 100                       # ...and above this bottom band: move_to_grasp opens to the
                                            # pre-grasp width first and the fingertips hide it (yellow
