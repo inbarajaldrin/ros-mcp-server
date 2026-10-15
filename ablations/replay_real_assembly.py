@@ -1221,16 +1221,27 @@ def main() -> int:
                         bname = parse_tool_call(s_)[1].get('base_name') or bname
                     except Exception:
                         pass
-            # Read the base from straight above (flange 0.34 m, top-down), where the parts are
-            # read during grasps — not from home, where the view is far and oblique (base1 read
-            # 3-4 mm and ~2 deg off there, 2026-10-14). Then back home so the picks start with
-            # every table part in view. Skipped (home-view read) if the move is refused.
+            # Read the base from straight above, then back home so the picks start with every
+            # table part in view. Skipped (home-view read) if the move is refused.
+            # x, y and yaw come from the DEPTH outline of the base's top face (base_depth.py):
+            # the marker read moved 55-61 mm in x between views and runs while the parts seated
+            # at ~61, and line_green, aimed 6.4 mm short, could not reach its slot (2026-10-15).
+            # Flange 0.56 m: the D415 returns no depth closer than ~0.45 m.
             from primitives.shared.config import DEFAULT_BASE_POSITION as _DBP
+            from base_depth import VIEW_FLANGE_Z as _VZ, measure as _base_from_depth
             r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                 f"{_DBP[0]:.4f}", f"{_DBP[1]:.4f}", "0.34"],
+                                 f"{_DBP[0]:.4f}", f"{_DBP[1]:.4f}", f"{_VZ:.2f}"],
                                 label='base-view move', timeout_s=60, log_fh=log_fh)
             above = r_.get('result') == 'success'
             ob = observe_base_pose(bname)
+            if above and ob is not None:
+                time.sleep(1.0)                                # settle before the depth frames
+                ob_d, info_d = _base_from_depth(ob, bname)
+                msg = f"  [base] depth outline: {json.dumps(info_d)}"
+                print(msg)
+                if log_fh: log_fh.write(msg + "\n")
+                if ob_d is not None:
+                    ob = ob_d
             if above:
                 # --part-at-staging: the part waits in the clear area, which home cannot see —
                 # go back over it (top-down, orientation kept) instead of home.
@@ -1246,7 +1257,8 @@ def main() -> int:
             else:
                 args.observed_base = ob
                 msg = (f"  [base] {bname} observed at ({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}, "
-                       f"{1000*ob[0][2]:.1f}) mm -> inserts aim at it (per-object z offsets kept)")
+                       f"{1000*ob[0][2]:.1f}) mm, yaw {np.degrees(2*np.arctan2(ob[1][2], ob[1][3])):.2f} deg "
+                       f"-> inserts aim at it (per-object z offsets kept)")
             print(msg)
             if log_fh: log_fh.write(msg + "\n")
 

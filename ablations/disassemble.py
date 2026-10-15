@@ -122,7 +122,20 @@ def depth_free_spots(extents, exclude_xy):
         S = np.pad(m.astype(np.int32).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
         return S[kx:, ky:] - S[:-kx, ky:] - S[kx:, :-ky] + S[:-kx, :-ky]
     m_ = FINGER_CLEAR / 2
-    r_ = int(np.ceil(m_ / cell))                              # parts already lying there get the
+    W, H = st['i'].width, st['i'].height
+    def in_view(cx, cy, ex, ey):
+        # The whole outline (plus its margin) must project inside the home image, VIEW_MARGIN_PX
+        # off every edge. A spot running off the top edge left u_brown's marker at the frame
+        # edge; the home pose put its grasp point 70 mm off and the descent landed on the part
+        # (protective stop, 2026-10-14).
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                pc = Tc[:3, :3].T @ (np.array([cx + sx * (ex + m_), cy + sy * (ey + m_), table_z]) - Tc[:3, 3])
+                u, v = (K @ (pc / pc[2]))[:2]
+                if not (VIEW_MARGIN_PX <= u <= W - VIEW_MARGIN_PX and VIEW_MARGIN_PX <= v <= H - VIEW_MARGIN_PX):
+                    return False
+        return True
+    r_ = int(np.ceil(m_ / cell))                            # parts already lying there get the
     hp = np.pad(high, r_)                                      # same margin as placed ones, so every
     high = np.zeros_like(high)                                 # outline-to-outline gap is FINGER_CLEAR
     for di in range(2 * r_ + 1):
@@ -138,6 +151,8 @@ def depth_free_spots(extents, exclude_xy):
             if not (0.30 < np.hypot(cx, cy) < 0.68):
                 continue
             if any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy):
+                continue
+            if not in_view(cx, cy, ex, ey):
                 continue
             cands.append((cx, cy))
         n_cand += len(cands)
@@ -156,6 +171,7 @@ def depth_free_spots(extents, exclude_xy):
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
+VIEW_MARGIN_PX = 30                        # free spots stay this far inside the home image
 
 
 GRASP_OFFSETS = REPO / 'ablations/logs/grasp_tool_offsets.json'
@@ -199,15 +215,23 @@ def seat_grasp(name, gid, observed_base, base_name='base1'):
 
 
 def observe_base(base_name='base1'):
-    """Read the base from straight above (as the replay's startup), then stay there."""
+    """Read the base from straight above (as the replay's startup), then stay there: x, y and
+    yaw from the depth outline of its top face (base_depth.py), the marker read as fallback."""
     from primitives.shared.config import DEFAULT_BASE_POSITION as DBP
     sys.path.insert(0, str(REPO / 'ablations'))
     from replay_real_assembly import observe_base_pose
-    ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}", "0.34",
-                   '--quat', *map(str, SEAT_EE_QUAT)), 'base view', 60)
+    from base_depth import VIEW_FLANGE_Z, measure
+    ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",
+                   f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view', 60)
     if not ok:
         return None
-    return observe_base_pose(base_name)
+    ob = observe_base_pose(base_name)
+    if ob is None:
+        return None
+    time.sleep(1.0)                                            # settle before the depth frames
+    ob_d, info = measure(ob, base_name)                        # x, y, yaw from the depth outline
+    print(f"[base] depth outline: {json.dumps(info)}", flush=True)
+    return ob_d if ob_d is not None else ob
 
 
 def place_at(sx, sy, w, home=True):

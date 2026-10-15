@@ -426,6 +426,7 @@ BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 HOVER_HEIGHT = 0.15  # Height to hover above base before descending
+MAX_HOVER_YAW_FIX_DEG = 10.0  # larger residuals mean a wrong chain, not a base yaw — leave them
 ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
@@ -1116,7 +1117,22 @@ class TranslateObject(Node):
         # Convert gripper center to flange using FK-derived rotation
         T_fk = forward_kinematics(dh_params, self.current_joint_angles)
         R_fk = T_fk[:3, :3]
-        tool_offset_world = R_fk @ held_tool_offset()   # as this part was actually grasped
+        # Residual yaw: rotate_object snaps the wrist to cardinal orientations in the assembly
+        # frame and never adds the observed base yaw, so the part went down ~2.5 deg off its slot
+        # (line_green, 2026-10-15: ends ~3 mm sideways, landed on the U parts). Turn the wrist about
+        # world z by the part's remaining yaw error, when that is all that is left.
+        R_target_ee = R_fk
+        r_fix = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
+        tilt_fix_deg = float(np.degrees(np.linalg.norm(r_fix[:2])))
+        yaw_fix_deg = float(np.degrees(r_fix[2]))
+        if tilt_fix_deg < 2.0 and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
+            R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
+            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z "
+                                   f"(part yaw -> slot yaw; tilt residual {tilt_fix_deg:.2f} deg)")
+        else:
+            self.get_logger().info(f"Hover yaw fix: none (yaw residual {yaw_fix_deg:+.2f} deg, "
+                                   f"tilt residual {tilt_fix_deg:.2f} deg)")
+        tool_offset_world = R_target_ee @ held_tool_offset()   # as this part was actually grasped
         hover_flange = hover_gripper_center - tool_offset_world
         self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
 
@@ -1128,6 +1144,7 @@ class TranslateObject(Node):
             target_z=hover_flange[2],
             num_waypoints=num_waypoints,
             target_pos=hover_flange.tolist(),
+            target_orientation=None if R_target_ee is R_fk else R_target_ee,
         )
         if waypoints is None:
             self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
