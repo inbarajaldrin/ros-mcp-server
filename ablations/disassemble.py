@@ -34,7 +34,7 @@ X_CAM[:3, :3] = R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957]).as_matrix()
 X_CAM[:3, 3] = [-0.01446, -0.04424, 0.07317]
 STAGING_XY = (-0.320, -0.500)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
-FINGER_CLEAR = 0.04              # clear gap between part outlines: room for the opened fingers
+FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the opened fingers (spacing_check needs 25 mm)
 ANN = "/home/aldrin/Documents/aruco-grasp-annotator/data/aruco/{}_aruco.json"
 
 
@@ -130,6 +130,8 @@ def depth_free_spots(extents, exclude_xy):
     v = d > 0.1
     Pc = np.stack([(uu - K[0, 2]) / K[0, 0] * d, (vv - K[1, 2]) / K[1, 1] * d, d], -1)[v]
     Pw = Pc @ Tc[:3, :3].T + Tc[:3, 3]
+    Pw = Pw[np.hypot(Pw[:, 0], Pw[:, 1]) < 0.72]               # reachable ring only: far floor/walls made
+                                                               # the grid huge and each search step ~0.4 s
     table_z = np.percentile(Pw[:, 2], 30)                      # most of the view is bare table
     cell = 0.01; x0, y0 = Pw[:, 0].min(), Pw[:, 1].min()
     nx, ny = int((Pw[:, 0].max() - x0) / cell) + 1, int((Pw[:, 1].max() - y0) / cell) + 1
@@ -175,7 +177,17 @@ def depth_free_spots(extents, exclude_xy):
                 ok_s[i, j] = False
         static.append(ok_s); kk.append((kx, ky))
     n_cand = int(sum(m.sum() for m in static))
-    budget = [SPOT_SEARCH_NODES]
+    # Candidate cells per part, ordered once: FARTHEST from the home view centre first (inside the
+    # view limits) — packing into the edges leaves the middle free; nearest-first put the first
+    # part in the middle and the four never fitted on an empty table (2026-10-15).
+    order = []
+    for k, (kx, ky) in enumerate(kk):
+        ii, jj = np.nonzero(static[k])
+        cx = x0 + (ii + kx / 2) * cell; cy = y0 + (jj + ky / 2) * cell
+        o = np.argsort(-np.hypot(cx - 0.05, cy + 0.40))
+        order.append((ii[o], jj[o], cx[o], cy[o]))
+    budget, t_end = [SPOT_SEARCH_NODES], time.time() + SPOT_SEARCH_S
+    stats = {'nodes': 0, 'deepest': 0}
 
     def mark(occ, cx, cy, ex, ey):
         occ = occ.copy()
@@ -187,22 +199,25 @@ def depth_free_spots(extents, exclude_xy):
     def place(k, occ):
         if k == len(extents):
             return []
+        stats['nodes'] += 1; stats['deepest'] = max(stats['deepest'], k)
         budget[0] -= 1
-        if budget[0] < 0:
+        if budget[0] < 0 or time.time() > t_end:
             return None
         (ex, ey), (kx, ky) = extents[k], kk[k]
-        ok = static[k] & (boxsum(occ, kx, ky) == 0)
-        cands = sorted(((x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell) for i, j in zip(*np.nonzero(ok))),
-                       key=lambda c: np.hypot(c[0] - 0.05, c[1] + 0.40))   # nearest the home view centre
-        if len(cands) > SPOT_TRIES:                             # spread the tries over the free area
-            cands = [cands[int(t)] for t in np.linspace(0, len(cands) - 1, SPOT_TRIES)]
-        for cx, cy in cands:
-            rest = place(k + 1, mark(occ, cx, cy, ex, ey))
+        ii, jj, cxs, cys = order[k]
+        free = boxsum(occ, kx, ky)[ii, jj] == 0                 # vectorised over the static candidates
+        idx = np.nonzero(free)[0]
+        if len(idx) > SPOT_TRIES:                               # spread the tries over the free area
+            idx = idx[np.linspace(0, len(idx) - 1, SPOT_TRIES).astype(int)]
+        for t in idx:
+            rest = place(k + 1, mark(occ, cxs[t], cys[t], ex, ey))
             if rest is not None:
-                return [(cx, cy, ex, ey)] + rest
+                return [(float(cxs[t]), float(cys[t]), ex, ey)] + rest
         return None
 
     spots = place(0, high) or []
+    print(f"[spots] search: {stats['nodes']} nodes, deepest part {stats['deepest'] + (1 if spots else 0)}"
+          f"/{len(extents)}", flush=True)
     spots = [(x, y) for x, y, _, _ in spots]
     depth_free_spots.last = (Tc, K, table_z)
     return spots, f"table z {1000*table_z:.1f} mm, {n_cand} candidate cells"
@@ -212,7 +227,8 @@ SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged ins
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
 SPOT_TRIES = 12                            # candidates tried per part in the spot search
-SPOT_SEARCH_NODES = 3000                   # search budget (each node: one boxsum over the grid)
+SPOT_SEARCH_NODES = 400                    # search budget (each node: one boxsum over the grid)
+SPOT_SEARCH_S = 20.0                       # and a wall-clock cap: a 3000-node python search ran 7+ min
 VIEW_MARGIN_PX = 40                        # free spots stay this far inside the home image
 FINGER_BAND_PX = 100                       # ...and above this bottom band: move_to_grasp opens to the
                                            # pre-grasp width first and the fingertips hide it (yellow
