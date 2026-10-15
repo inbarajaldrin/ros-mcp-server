@@ -622,25 +622,50 @@ class AssemblyState:
 FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
 MAX_FOLLOW_MM = 8.0
 MAX_FOLLOW_YAW_DEG = 5.0
-REPLAY_T0 = float(os.environ.get('FOLLOW_SINCE_EPOCH', time.time()))   # override: resume line_green alone
+SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: seat - predicted TCP, mm}
+# Written after every successful insert, entry removed when disassemble.py pulls the part out:
+# it describes the parts seated NOW, whichever process seated them (a line_green-only retry
+# finds the U parts' offsets without any time window).
+
+
+def record_seat_offset(obj: str, since: float) -> None:
+    """Store `obj`'s seat offset from the insert log written since `since` (if the log has one)."""
+    try:
+        from fmb1_loop import insert_summary
+        rows = [r for r in insert_summary(since) if r.get('object') == obj and r.get('outcome') == 'success'
+                and r.get('seat_minus_pred_mm')]
+        if not rows:
+            return
+        d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
+        d[obj] = dict(seat_minus_pred_mm=rows[-1]['seat_minus_pred_mm'], t=time.strftime('%Y-%m-%d %H:%M:%S'))
+        json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
+    except Exception as e:
+        print(f"  [seated-offsets] {obj}: not recorded ({e})")
+
+
+def forget_seat_offset(obj: str) -> None:
+    try:
+        d = json.load(open(SEATED_OFFSETS))
+        if d.pop(obj, None) is not None:
+            json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
+    except Exception:
+        pass
 
 
 def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
     """(dx, dy) world metres to add to `obj`'s insert base position and a yaw (rad) to turn its
     base frame by about the base origin, from the seat offsets of the parts it sits between
-    (their insert logs written by this replay). Zeros when they are not all there."""
+    (SEATED_OFFSETS). Zeros when they are not all there."""
     parts = FOLLOWS_SEATED.get(obj)
     if not parts:
         return 0.0, 0.0, 0.0
     try:
-        from fmb1_loop import insert_summary
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        last = {}
-        for r in insert_summary(REPLAY_T0):
-            if r.get('outcome') == 'success' and r.get('seat_minus_pred_mm'):
-                last[r['object']] = r['seat_minus_pred_mm']
+        d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
+        last = {k: v['seat_minus_pred_mm'] for k, v in d.items()}
         if not all(p in last for p in parts):
-            print(f"  [follow] {obj}: seat offsets of {parts} not all logged in this run -> aim at the base")
+            print(f"  [follow] {obj}: seat offsets of {parts} not all recorded ({SEATED_OFFSETS.name}) "
+                  f"-> aim at the base")
             return 0.0, 0.0, 0.0
         Rb = R_.from_quat(base_quat).as_matrix()[:2, :2]
         (pa, pb) = parts
@@ -1086,6 +1111,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             print(f"  [{step_idx}] [DRY] {' '.join(argv)}")
             continue
 
+        t_step = time.time()                       # insert logs written from here belong to this step
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
@@ -1182,6 +1208,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             print(f"\n!!! STEP FAILED: {step}")
             print(json.dumps(result, indent=2))
             return False
+        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
+            record_seat_offset(obj, t_step)
 
         # Tiny pause between primitives to let TF + topics settle (matches
         # run_assembly_step's settle-window discipline).
@@ -1261,6 +1289,8 @@ def main() -> int:
     p.add_argument('--log-dir', type=str, default=str(LOG_ROOT),
                    help="Directory for the per-run log file. Default: ablations/logs/.")
     args = p.parse_args()
+    if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
+        os.nice(5 - os.nice(0))
 
     # Install SIGINT handler so Ctrl-C kills the active subprocess tree
     # immediately instead of letting it run to completion (which previously

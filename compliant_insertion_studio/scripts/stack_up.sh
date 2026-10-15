@@ -134,6 +134,14 @@ else
         || die "localizer did not start (see /tmp/aruco_logs/)" 5
     ok "localizer up"
 fi
+# The UR driver's control loop has no RT scheduling on this PC (no FIFO); with the localizer
+# (~165% CPU), the depth node and RViz loaded, it stalled and the robot dropped the external-
+# control program mid-run (2026-10-15, load 10.7 on 6 cores). Lower the camera stack's priority
+# (raising niceness needs no root) so the driver wins the CPU.
+for pid in $(pgrep -f "lib/aruco_camera_localizer/localize") $(pgrep -f "${RS}_camera_node"); do
+    renice -n 10 -p "$pid" >/dev/null 2>&1
+done
+ok "camera stack at nice 10 (driver keeps priority)"
 
 # ---------------------------------------------------------------- 4. grasp points
 step 4/5 "Grasp-points publisher (from THIS tree)"

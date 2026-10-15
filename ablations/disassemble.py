@@ -289,6 +289,10 @@ def main():
     ap.add_argument('--grasp-id', default=None,
                     help="with --relocate: grasp point to pick with, or 'auto' — the first one (centre "
                          "first) whose open fingers clear base1 and the other parts (spacing_check)")
+    ap.add_argument('--place-held', default=None, metavar='PART',
+                    help='the gripper holds PART (e.g. a run stopped mid-insert): set it down in the '
+                         'staging region and stay above it; then replay --only PART --skip-startup '
+                         '--part-at-staging regrasps and inserts it')
     ap.add_argument('--pick-view-dy', type=float, default=0.0,
                     help='with --relocate: shift the arm this far in world y from home (top-down, same '
                          'height) before the pick, for a part home sees badly (fingers hide the bottom '
@@ -300,8 +304,17 @@ def main():
                     help='with --only: take the seated part out with the insert grasp and set it down '
                          'in the staging region (clear area) for a fresh regrasp, e.g. a tilted seat')
     a = ap.parse_args()
+    if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
+        os.nice(5 - os.nice(0))
     if a.to_staging and not a.only:
         ap.error('--to-staging needs --only PART')
+    if a.place_held:
+        from primitives.shared.config import GRIP_WIDTH_MM
+        if a.place_held not in GRIP_WIDTH_MM:
+            ap.error(f'unknown part {a.place_held}')
+        if gripper_holding() is False:
+            print(f"the gripper reports nothing held — not placing {a.place_held}"); return 1
+        return place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False)
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
     sel = a.relocate or a.only
     parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
@@ -439,6 +452,8 @@ def main():
                     print(f"\n!!! {name}: not held after '{label}' (grip flag {held}, width {width} mm, "
                           f"part {want} mm) — stopping", flush=True)
                     return 1
+        from replay_real_assembly import forget_seat_offset
+        forget_seat_offset(name)                            # out of the base: its seat offset is gone
         if place_at(sx, sy, w, home=False) != 0:
             return 1
     if a.to_staging:                                       # stay over the clear area: the regrasp sees it

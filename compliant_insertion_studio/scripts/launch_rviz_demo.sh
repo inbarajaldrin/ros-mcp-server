@@ -88,4 +88,5 @@ nohup rviz2 -d "$CFG" >"$LOG" 2>&1 &
 PID=$!
 sleep 4
 kill -0 "$PID" 2>/dev/null || { tail -15 "$LOG" >&2; die "rviz2 exited during startup (log: $LOG)" 4; }
+renice -n 10 -p "$PID" >/dev/null 2>&1   # rendering must not starve the UR driver (stack_up.sh)
 ok "RViz up (pid $PID, log $LOG)"

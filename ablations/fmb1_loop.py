@@ -13,6 +13,7 @@ recoveries used and seat-check results.
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 import time
@@ -68,6 +69,8 @@ def main():
     ap.add_argument('--start-with', choices=['disassemble', 'assemble'], default='disassemble',
                     help='disassemble when the parts are seated now; assemble when they lie on the table')
     a = ap.parse_args()
+    if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
+        os.nice(5 - os.nice(0))
     OUT.parent.mkdir(parents=True, exist_ok=True)
     py = [sys.executable, '-u']
     for c in range(1, a.cycles + 1):
