@@ -105,6 +105,43 @@ def observe_parts(names, timeout_s=8.0):
 
 
 PARTS = ('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')
+GRASPS = Path.home() / 'Documents/aruco-grasp-annotator/data/grasp_points/{}_grasp_points.json'
+FINGER_T_M, FINGER_W_M = 0.0134, 0.0242          # RG2 finger block: thickness (closing axis) x width
+FINGER_GAP_MIN_MM = 5.0
+
+
+def finger_outlines(name, pose, gid, open_mm):
+    """The two open-finger blocks' xy outlines for grasp `gid` of `name` at `pose`: centred
+    open/2 + T/2 either side of the grasp point along the part's closing axis (object x)."""
+    g = next(g for g in json.load(open(str(GRASPS).format(name)))['grasp_points'] if g['id'] == gid)
+    (p, q) = pose
+    Rq = R.from_quat(q)
+    c = Rq.apply([g['position'][k] for k in 'xyz'])[:2] + np.asarray(p)[:2]
+    ax = Rq.apply([1.0, 0.0, 0.0])[:2]
+    if np.linalg.norm(ax) < 0.5:          # object x near vertical (bar on its side): the fingers
+        ax = Rq.apply([0.0, 0.0, 1.0])[:2]  # close across the horizontal cross-section axis instead
+    ax /= np.linalg.norm(ax)
+    pe = np.array([-ax[1], ax[0]])
+    out = []
+    for s in (-1, 1):
+        m = c + s * ax * (open_mm / 2000 + FINGER_T_M / 2)
+        out.append(np.array([m + u * ax * FINGER_T_M / 2 + v * pe * FINGER_W_M / 2
+                             for u, v in ((-1, -1), (1, -1), (1, 1), (-1, 1))]))
+    return out
+
+
+def clear_grasp(name, pose, base_pose, others, open_mm, base='base1'):
+    """First grasp id of `name` (centre first) whose open fingers stand FINGER_GAP_MIN_MM clear of
+    the base and of the other parts' outlines; (gid, report). gid None if none is clear."""
+    obst = [('base1', base_outline(base_pose, base))] + [(n, outline(n, p)) for n, p in others.items() if n != name]
+    rep = {}
+    ids = sorted(g['id'] for g in json.load(open(str(GRASPS).format(name)))['grasp_points'])
+    for gid in ids:
+        g = min(gap_mm(f, o) for f in finger_outlines(name, pose, gid, open_mm) for _, o in obst)
+        rep[gid] = round(g, 1)
+        if g >= FINGER_GAP_MIN_MM:
+            return gid, rep
+    return None, rep
 
 
 def main():

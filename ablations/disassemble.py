@@ -150,7 +150,7 @@ def depth_free_spots(extents, exclude_xy):
             for sy in (-1, 1):
                 pc = Tc[:3, :3].T @ (np.array([cx + sx * (ex + m_), cy + sy * (ey + m_), table_z]) - Tc[:3, 3])
                 u, v = (K @ (pc / pc[2]))[:2]
-                if not (VIEW_MARGIN_PX <= u <= W - VIEW_MARGIN_PX and VIEW_MARGIN_PX <= v <= H - VIEW_MARGIN_PX):
+                if not (VIEW_MARGIN_PX <= u <= W - VIEW_MARGIN_PX and VIEW_MARGIN_PX <= v <= H - FINGER_BAND_PX):
                     return False
         return True
     r_ = int(np.ceil(m_ / cell))                            # parts already lying there get the
@@ -189,7 +189,10 @@ def depth_free_spots(extents, exclude_xy):
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 N_DEPTH = 10                               # depth frames per free-spot map (median)
-VIEW_MARGIN_PX = 30                        # free spots stay this far inside the home image
+VIEW_MARGIN_PX = 60                        # free spots stay this far inside the home image
+FINGER_BAND_PX = 160                       # ...and above this bottom band: move_to_grasp opens to the
+                                           # pre-grasp width first and the fingertips hide it (yellow
+                                           # at the bottom edge went undetected, 2026-10-15)
 
 
 GRASP_OFFSETS = REPO / 'ablations/logs/grasp_tool_offsets.json'
@@ -283,6 +286,13 @@ def main():
     ap.add_argument('--relocate', default=None, metavar='PART',
                     help='pick PART off the table (move_to_grasp) and set it down at a free, '
                          'properly spaced spot; for parts lying too close to each other')
+    ap.add_argument('--grasp-id', default=None,
+                    help="with --relocate: grasp point to pick with, or 'auto' — the first one (centre "
+                         "first) whose open fingers clear base1 and the other parts (spacing_check)")
+    ap.add_argument('--pick-view-dy', type=float, default=0.0,
+                    help='with --relocate: shift the arm this far in world y from home (top-down, same '
+                         'height) before the pick, for a part home sees badly (fingers hide the bottom '
+                         'of the image); the spot is still planned from home')
     ap.add_argument('--from-staging', action='store_true',
                     help='with --relocate: the part sits in the staging region (not visible from '
                          'home) — plan the spot from home, then pick it over the clear area')
@@ -320,8 +330,28 @@ def main():
     if a.relocate and not a.dry_run:
         o = parts[0]; (sx, sy) = spots[0]
         name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
-        print(f"\n=== relocate {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
+        if a.grasp_id == 'auto':
+            # A part lying against base1 or a neighbour: grasp where both open fingers have room
+            # (2026-10-15: line_green 7 mm from base1 — its centre grasp put a finger on the base).
+            from spacing_check import clear_grasp, observe_parts, PARTS
+            from replay_real_assembly import observe_base_pose
+            seen = observe_parts(PARTS)
+            ob_ = observe_base_pose('base1')
+            if name not in seen or ob_ is None:
+                print(f"{name} or base1 not seen — stopping"); return 1
+            gid, rep = clear_grasp(name, seen[name], ob_, seen, w)
+            print(f"[grasp] {name}: finger clearance per grasp id (mm) {rep} -> {gid}", flush=True)
+            if gid is None:
+                print(f"no grasp point of {name} leaves the open fingers room — stopping"); return 1
+        elif a.grasp_id is not None:
+            gid = int(a.grasp_id)
+        print(f"\n=== relocate {name} (grasp {gid}) -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
         pick = [(py('primitives.core.move_to_clear_area', '--mode', 'real'), 'over staging', 90)] if a.from_staging else []
+        if a.pick_view_dy:
+            from primitives.shared.config import HOME_POSE as _H
+            pick.append((py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{_H[0]:.4f}",
+                            f"{_H[1] + a.pick_view_dy:.4f}", f"{_H[2]:.4f}", '--keep-orientation'),
+                         'shift the view', 60))
         for argv, label, t in pick + [
             (py('primitives.move_to_grasp', '--object-name', name, '--grasp-id', str(gid), '--mode', 'real',
                 '--pre-grasp-width', f"{w:g}", '--pad-center'), 'move_to_grasp', 180),
