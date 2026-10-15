@@ -84,6 +84,7 @@ _STOP_AFTER_FIRED = False
 _ACTIVE_PROC: Optional[subprocess.Popen] = None
 _INTERRUPTED = False
 _SAFETY_STOP: Optional[str] = None     # set when the robot leaves NORMAL safety: the run halts, no cleanup
+_HOLDING_SEATED = False                # the gripper is closed on a part that is seated: never lift
 
 
 def robot_safety_status(host: str = '192.168.1.111', timeout: float = 1.5) -> Optional[str]:
@@ -500,8 +501,12 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
 
     def _watch_safety():
         global _SAFETY_STOP
+        misses = 0
         while not done_ev.wait(1.0):
             st = robot_safety_status()
+            misses = misses + 1 if st is None else 0
+            if misses >= 3:                    # robot unreachable 3 s: the link dropped (2026-10-15:
+                st = 'UNREACHABLE'             # the wired link went down 7 s mid-release, twice)
             if st is not None and st not in ('NORMAL', 'REDUCED'):
                 _SAFETY_STOP = st
                 try:
@@ -1025,6 +1030,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
     # descent (--pre-grasp-width) instead of the gripper closing to it before the approach.
     grasp_width = {'mm': None}
     insert_recoveries = {'n': 0}
+    seated_now = False                 # last step was a successful insert (the part is seated)
 
     def _release_width(idx):
         """Width of the recorded release right after step idx (the gripper command that follows)."""
@@ -1205,12 +1211,28 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 result = r_
                 say(f"  [{step_idx}] recovery insert succeeded")
 
+        if (result.get('result') == 'failure' and tool_name == 'control_gripper' and seated_now
+                and not _SAFETY_STOP and not args.dry_run):
+            # The release after an insert: the part is seated and still gripped. Retry it — and
+            # if it will not open, never lift (the cleanup's safe-height move would pull the
+            # seated part out; 2026-10-15 only a dropped robot program stopped it doing so).
+            for k_ in range(2):
+                time.sleep(2.0)
+                say(f"  [{step_idx}] release failed ({result.get('error', '')[:80]}) -> retry {k_ + 1}/2")
+                result = execute(step_idx, step, tool_name, kw, tag=f"retry{k_ + 1}") or result
+                if result.get('result') != 'failure':
+                    break
+            if result.get('result') == 'failure':
+                global _HOLDING_SEATED
+                _HOLDING_SEATED = True
         if result.get('result') == 'failure':
             print(f"\n!!! STEP FAILED: {step}")
             print(json.dumps(result, indent=2))
             return False
+        seated_now = False
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
             record_seat_offset(obj, t_step)
+            seated_now = True
 
         # Tiny pause between primitives to let TF + topics settle (matches
         # run_assembly_step's settle-window discipline).
@@ -1513,7 +1535,13 @@ def main() -> int:
         # --dry-run AND when --stop-before / --stop-after fired (pause means
         # the robot stays at the halted pose for operator inspection or
         # follow-on motion).
-        if _SAFETY_STOP:
+        if _HOLDING_SEATED:
+            msg = ("\n  CLEANUP SKIPPED: the gripper is closed on a SEATED part and would not open — no lift "
+                   "(it would pull the part out). Open it by hand or: python3 -u -m primitives.control_gripper "
+                   "open --mode real; then move_to_safe_height.\n")
+            print(msg, end='')
+            if log_fh: log_fh.write(msg)
+        elif _SAFETY_STOP:
             msg = (f"\n  CLEANUP SKIPPED: robot is in {_SAFETY_STOP}. Clear it (dashboard 'close safety popup',"
                    f" 'unlock protective stop'), run stop_run.sh, then lift with move_to_safe_height.\n")
             print(msg, end='')
