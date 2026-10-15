@@ -50,7 +50,7 @@ else
 fi
 
 # ------------------------------------------------------- 2. camera
-step 2/4 "Camera (aruco localizer)"
+step 2/4 "Camera (aruco localizer + RealSense node)"
 A=aruco_camera
 if pgrep -f "${A}_localizer" >/dev/null 2>&1; then
     # SIGINT so rclpy runs its shutdown hooks and releases the device cleanly.
@@ -61,6 +61,18 @@ if pgrep -f "${A}_localizer" >/dev/null 2>&1; then
         || ok "stopped"
 else
     ok "not running"
+fi
+# The RealSense node the localizer reads from (stack_up starts it separately). SIGINT so the
+# driver releases the D415; a device left claimed fails the next start.
+RS=realsense2
+if pgrep -f "${RS}_camera" >/dev/null 2>&1; then
+    pkill -SIGINT -f "${RS}_camera"
+    for _ in $(seq 1 8); do sleep 1; pgrep -f "${RS}_camera" >/dev/null 2>&1 || break; done
+    pgrep -f "${RS}_camera" >/dev/null 2>&1 \
+        && { pkill -SIGTERM -f "${RS}_camera"; sleep 2; warn "RealSense node needed SIGTERM"; } \
+        || ok "RealSense node stopped"
+else
+    ok "RealSense node not running"
 fi
 
 # ------------------------------------------------------- 3. gripper bridge
@@ -116,11 +128,17 @@ else
     ok "RG2 helper nodes not running"
 fi
 
+# Demo RViz (launch_rviz_demo.sh). SIGTERM only: it owns an X11 window.
+RV=rviz2
+if pgrep -f "${RV} -d" >/dev/null 2>&1; then
+    pkill -SIGTERM -f "${RV} -d"; sleep 2; ok "RViz stopped"
+fi
+
 ros2 daemon stop >/dev/null 2>&1
 
 # ------------------------------------------------------- report
 echo
-LEFT="$(pgrep -af "ur_ros2_control|[u]r5e_with_rg2|[a]ruco_camera_localizer|[g]rasp_points_publisher|[s]ocat.*ttyUR|${RG}${RJ}|${RG}${RB}" 2>/dev/null | grep -v "bash -c" || true)"
+LEFT="$(pgrep -af "ur_ros2_control|[u]r5e_with_rg2|[a]ruco_camera_localizer|[g]rasp_points_publisher|[r]ealsense2_camera|[r]viz2 -d|[s]ocat.*ttyUR|${RG}${RJ}|${RG}${RB}" 2>/dev/null | grep -v "bash -c" || true)"
 if [ -z "$LEFT" ]; then
     echo "════════════════════════════════════════════════════════════"
     echo "  STACK DOWN. Nothing left running."

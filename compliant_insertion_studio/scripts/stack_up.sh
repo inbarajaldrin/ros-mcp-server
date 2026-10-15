@@ -103,17 +103,36 @@ case "$GS" in
 esac
 
 # ---------------------------------------------------------------- 3. camera
-step 3/5 "Camera (aruco localizer)"
-if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$"; then
-    ok "camera already publishing"
+step 3/5 "Camera (RealSense node + aruco localizer)"
+# The RealSense node owns the D415 and publishes colour + depth aligned to colour (the seat
+# check and the disassembly's free-spot map need depth); the localizer reads its colour topic
+# instead of opening the device itself (2026-10-14).
+RS=realsense2; IMG=/camera/camera/color/image_raw
+if timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$"; then
+    ok "RealSense node already publishing"
 else
-    bash "$REPO/compliant_insertion_studio/scripts/launch_camera.sh" --background >/dev/null 2>&1
+    nohup bash -c "source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash; \
+        exec ros2 launch ${RS}_camera rs_launch.py rgb_camera.color_profile:=1280,720,15 \
+        depth_module.depth_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=false \
+        enable_infra2:=false rgb_camera.auto_exposure_priority:=false" >/tmp/realsense.log 2>&1 &
+    for _ in $(seq 1 30); do
+        sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" && break
+    done
+    timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" \
+        || die "RealSense node did not start (see /tmp/realsense.log)" 5
+    ok "RealSense node up (colour + aligned depth)"
+fi
+if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$"; then
+    ok "localizer already publishing"
+else
+    bash "$REPO/compliant_insertion_studio/scripts/launch_camera.sh" --background --headless \
+        --image-topic "$IMG" >/dev/null 2>&1
     for _ in $(seq 1 20); do
         sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$" && break
     done
     timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$" \
-        || die "camera did not start (see /tmp/aruco_logs/)" 5
-    ok "camera up"
+        || die "localizer did not start (see /tmp/aruco_logs/)" 5
+    ok "localizer up"
 fi
 
 # ---------------------------------------------------------------- 4. grasp points
