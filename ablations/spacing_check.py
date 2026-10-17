@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 MIN_GAP_MM = 25.0
 CLUSTER_MM = 10.0            # pose samples within this belong to the same reading
+AMBIG_MM = 25.0              # two readings further apart than this: ask depth which one is real
 MESH = Path.home() / 'Documents/aruco-grasp-annotator/data/models/{}.obj'
 BASE_SIDE_M = {'base1': 0.161}
 
@@ -94,7 +95,7 @@ def observe_parts(names, timeout_s=8.0):
     from replay_real_assembly import observe_object_orientation
     out = {}
     for n in names:
-        obs = observe_object_orientation(n, timeout_s, n_samples=9)
+        obs = observe_object_orientation(n, timeout_s, n_samples=12)
         S = obs.get('samples') or []
         if obs.get('error') or not S:
             continue
@@ -103,14 +104,57 @@ def observe_parts(names, timeout_s=8.0):
         # the mix put it on base1 — a false 'too close'. Keep the largest cluster of samples within
         # CLUSTER_MM of each other.
         XY = np.array([s['xyz'][:2] for s in S])
-        groups = [np.nonzero(np.linalg.norm(XY - XY[i], axis=1) < CLUSTER_MM / 1000)[0] for i in range(len(XY))]
-        best = max(groups, key=len)
-        S = [S[i] for i in best]
-        P = np.median(np.array([s['xyz'] for s in S]), axis=0)
-        Q = np.array([s['quat_xyzw'] for s in S]); Q *= np.sign(Q @ Q[0])[:, None]
-        q = Q.mean(axis=0); q /= np.linalg.norm(q)
-        out[n] = (tuple(P), tuple(q))
+        groups, left = [], set(range(len(XY)))
+        while left:                                     # greedy clusters of mutually-near samples
+            i = min(left)
+            g = [j for j in left if np.linalg.norm(XY[j] - XY[i]) < CLUSTER_MM / 1000]
+            groups.append(g); left -= set(g)
+        cands = []
+        for g in sorted(groups, key=len, reverse=True):
+            if len(g) < 2:
+                continue
+            P = np.median(np.array([S[j]['xyz'] for j in g]), axis=0)
+            Q = np.array([S[j]['quat_xyzw'] for j in g]); Q *= np.sign(Q @ Q[0])[:, None]
+            q = Q.mean(axis=0); q /= np.linalg.norm(q)
+            cands.append((tuple(P), tuple(q)))
+        if not cands:
+            continue
+        if len(cands) > 1 and np.linalg.norm(np.subtract(cands[0][0][:2], cands[1][0][:2])) > AMBIG_MM / 1000:
+            cands = [_depth_pick(n, cands)]             # readings disagree: let depth say which is real
+        out[n] = cands[0]
     return out
+
+
+_DEPTH = {}
+
+
+def _depth_pick(name, cands):
+    """Of several candidate poses (marker readings that disagree), the one whose CAD outline has
+    the most depth points standing above the table — a misread outline lands on bare table or on
+    base1, not on the part. Depth is captured once per process from the current (home) view."""
+    try:
+        if 'Pw' not in _DEPTH:
+            from seat_check import capture_world
+            cap = capture_world(n=5)
+            _DEPTH['Pw'] = cap[0] if cap else None
+        Pw = _DEPTH['Pw']
+        if Pw is None:
+            return cands[0]
+        table = np.percentile(Pw[:, 2], 30)
+        high = Pw[(Pw[:, 2] > table + 0.008) & (Pw[:, 2] < table + 0.12)][:, :2]
+        scores = []
+        for c in cands:
+            poly = outline(name, c)
+            inside = _inside(high, poly).mean() if len(high) else 0.0
+            area = ConvexHull(poly).volume
+            scores.append(_inside(high, poly).sum() / max(area, 1e-6))
+        k = int(np.argmax(scores))
+        print(f"[spacing] {name}: marker readings disagree {[tuple(np.round(1000*np.array(c[0][:2]))) for c in cands]} "
+              f"-> depth picks {tuple(np.round(1000*np.array(cands[k][0][:2])))}", flush=True)
+        return cands[k]
+    except Exception as e:
+        print(f"[spacing] {name}: depth disambiguation failed ({e}) — using the largest cluster")
+        return cands[0]
 
 
 PARTS = ('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')
