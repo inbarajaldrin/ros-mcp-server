@@ -888,6 +888,46 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
     return False
 
 
+EDGE_OFFSET_MM = 8.0                 # tap/press point off the bar's centreline (26 mm bar, 20 mm block)
+EDGE_TAP_N = 3.0                     # measuring tap: a 3 N centre tap did not move the wedged bar
+EDGE_PRESS_N = 5.0                   # operator's limit for pressing parts in the base
+EDGE_DIFF_MIN_MM = 0.8               # edges closer than this: no roll to fix -> do not guess
+
+
+def _level_but_high(res) -> bool:
+    """Depth says: level along the bar, centred along its axis, but the whole top is high —
+    the bar is cocked across its width (roll), which depth cannot measure (16 mm strip; it reads
+    -4 deg on every seat, seated or not: 54/54 checks, 2026-10-17)."""
+    if 'pitch_deg' not in res or res.get('ok'):
+        return False
+    shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))
+    return (abs(res['pitch_deg']) <= res.get('limits', {}).get('pitch_deg', 1.5) and shift < NUDGE_SHIFT_MM
+            and res.get('height_err_mm', 0.0) > res.get('limits', {}).get('height_mm', 2.5))
+
+
+def press_high_edge(obj, ob, say, out_dir) -> bool:
+    """Rare roll wedge (operator, 2026-10-17: a bar cocked across its width sat 3.6 mm high by touch;
+    a 5 N press on its high edge, off-centre at the grasp point, seated it). Find the high edge
+    MECHANICALLY — tap both edges at 3 N — press only that edge at <= 5 N, re-check. No guessing:
+    if the edges read the same there is no roll and it stops."""
+    from tap_check import tap_once
+    from seat_check import check
+    taps = {s: tap_once(obj, ob, offset_x_mm=s * EDGE_OFFSET_MM, force=EDGE_TAP_N, say=say) for s in (-1, 1)}
+    if not all(t['contact'] and t['err_mm'] is not None for t in taps.values()):
+        say(f"  [edge] {obj}: an edge tap found no contact {taps} -> not pressing"); return False
+    hi = max(taps, key=lambda s: taps[s]['err_mm'])
+    diff = taps[hi]['err_mm'] - taps[-hi]['err_mm']
+    if diff < EDGE_DIFF_MIN_MM:
+        say(f"  [edge] {obj}: edges level ({taps[-1]['err_mm']:+.1f} / {taps[1]['err_mm']:+.1f} mm) — "
+            f"not a roll, not pressing"); return False
+    say(f"  [edge] {obj}: {'+x' if hi > 0 else '-x'} edge high by {diff:.1f} mm -> press it at {EDGE_PRESS_N:g} N")
+    tap_once(obj, ob, offset_x_mm=hi * EDGE_OFFSET_MM, force=EDGE_PRESS_N, press_mm=4.0, say=say)
+    res = check(obj, ob, move=True, out_dir=out_dir)
+    say(f"  [seat-check] {obj} after the edge press: "
+        f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
+    return bool(res.get('ok'))
+
+
 def seat_check_and_reseat(obj, state, args, say) -> bool:
     """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
     grasp (the pose the insert released it from), and insert it again. Fails closed."""
@@ -914,7 +954,18 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             # (pitch only 1.2 deg) went to the top-down reseat, which cannot move it, and failed.
             ok = nudge_into_slot(obj, ob, res, say, out_dir)
             if not ok:
-                say(f"\n!!! {obj} still tilted after the nudge")
+                res2 = check(obj, ob, move=True, out_dir=out_dir)
+                if _level_but_high(res2):                      # nudged level but still high: a roll
+                    say(f"  [seat-check] {obj}: level but {res2['height_err_mm']:+.1f} mm high after the nudge -> edge taps")
+                    ok = press_high_edge(obj, ob, say, out_dir)
+                if not ok:
+                    say(f"\n!!! {obj} still not seated after the nudge")
+            return ok
+        if _level_but_high(res):
+            say(f"  [seat-check] {obj}: level and centred but {res['height_err_mm']:+.1f} mm high -> edge taps")
+            ok = press_high_edge(obj, ob, say, out_dir)
+            if not ok:
+                say(f"\n!!! {obj} still not seated after the edge press")
             return ok
         if attempt == RESEAT_MAX:
             say(f"\n!!! {obj} still not flat after {RESEAT_MAX} reseat(s)"); return False
