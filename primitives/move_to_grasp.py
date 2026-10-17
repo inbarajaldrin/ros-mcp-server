@@ -50,6 +50,7 @@ from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 BELOW_TABLE_REJECT_M = 0.010   # an object pose centre this far below the table is a misread
 STEP2_JUMP_MAX_M = 0.020       # step-2 target this far (xy) from the step-1 hover: re-hover, never descend
+MISREAD_WAIT_ATTEMPTS = 40     # detection attempts (0.5 s each) while only below-table misreads arrive
 from primitives.shared.config import (GRASP_TIP_CLEARANCE_M, grip_width_mm, pad_center_offset_m,
                                       rg2_tip_length_m, grasp_tool_offset_target_m)
 from queries.get_scene_info import load_grasp_validity_data
@@ -1152,8 +1153,14 @@ class DirectObjectMove(Node):
                             if marker.ns == self.object_name
                         ]
                         msg = f"Grasp point {self.grasp_id} not found for object '{self.object_name}'. Available grasp IDs: {sorted(available_ids)}"
-                if self.grasp_wait_attempts < self.max_grasp_wait_attempts:
-                    self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{self.max_grasp_wait_attempts}), retrying...")
+                # The part IS seen, only as below-table misreads: those come in streaks of a few
+                # seconds (yellow, 2026-10-17: ~4 s right after a closed-finger nudge, then 157/157
+                # good readings at the same spot) — wait them out longer before giving up.
+                budget = self.max_grasp_wait_attempts
+                if self._gp_below_table or getattr(self, '_below_table_rejects', 0):
+                    budget = MISREAD_WAIT_ATTEMPTS
+                if self.grasp_wait_attempts < budget:
+                    self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{budget}), retrying...")
                     return
                 self.error_message = msg
                 self.get_logger().error(self.error_message + " Cannot proceed in grasp point mode. Exiting.")
