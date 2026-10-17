@@ -691,9 +691,16 @@ def record_seat_offset(obj: str, since: float) -> None:
                 and r.get('seat_minus_pred_mm')]
         if not rows:
             return
+        # Total offset vs the UNbiased prediction = measured (vs the biased aim) + the bias applied.
+        bx, by = _APPLIED_BIAS.get(obj, (0.0, 0.0))
+        m = list(rows[-1]['seat_minus_pred_mm'])
+        tot = [round(m[0] + 1000 * bx, 2), round(m[1] + 1000 * by, 2)] + m[2:]
         d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
-        d[obj] = dict(seat_minus_pred_mm=rows[-1]['seat_minus_pred_mm'], t=time.strftime('%Y-%m-%d %H:%M:%S'))
+        d[obj] = dict(seat_minus_pred_mm=tot, t=time.strftime('%Y-%m-%d %H:%M:%S'))
         json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
+        h = json.load(open(SEAT_HISTORY)) if SEAT_HISTORY.exists() else {}
+        h.setdefault(obj, []).append(tot[:2]); h[obj] = h[obj][-20:]
+        json.dump(h, open(SEAT_HISTORY, 'w'), indent=1)
     except Exception as e:
         print(f"  [seated-offsets] {obj}: not recorded ({e})")
 
@@ -705,6 +712,31 @@ def forget_seat_offset(obj: str) -> None:
             json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
     except Exception:
         pass
+
+
+SEAT_HISTORY = REPO_ROOT / 'ablations/logs/seat_offset_history.json'   # {part: [[dx, dy] mm, ...]}
+AIM_BIAS_PARTS = ('u_brown', 'u_orange', 'inverted_u_yellow')   # line_green follows the U parts instead
+AIM_BIAS_N = 5                   # median of the last N seat offsets of the part
+AIM_BIAS_MIN = 3                 # ...once there are at least this many
+AIM_BIAS_MAX_MM = 8.0
+_APPLIED_BIAS = {}               # part -> (dx, dy) m applied to this run's insert aim
+
+
+def aim_bias(obj: str):
+    """(dx, dy) world metres to add to `obj`'s insert aim: the median of where its last inserts
+    actually seated relative to the prediction (2026-10-17: u_orange seated -4..-7 mm in y on every
+    run and today -9.5 mm, beyond the 8 mm spiral, twice). The prior refined from contact data —
+    the spiral then searches around where the part really goes."""
+    if obj not in AIM_BIAS_PARTS:
+        return 0.0, 0.0
+    try:
+        h = json.load(open(SEAT_HISTORY)).get(obj, [])
+    except Exception:
+        h = []
+    if len(h) < AIM_BIAS_MIN:
+        return 0.0, 0.0
+    m = np.clip(np.median(np.array(h[-AIM_BIAS_N:]), axis=0), -AIM_BIAS_MAX_MM, AIM_BIAS_MAX_MM)
+    return float(m[0]) / 1000, float(m[1]) / 1000
 
 
 def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
@@ -795,6 +827,11 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                 dz = float(get_object_base_offset_m(kw['object_name'])[2])
                 fx, fy, fyaw = follow_seated_offset(kw['object_name'], oq)
                 ox, oy = ox + fx, oy + fy
+                bx_, by_ = aim_bias(kw['object_name'])
+                if bx_ or by_:
+                    _APPLIED_BIAS[kw['object_name']] = (bx_, by_)
+                    ox, oy = ox + bx_, oy + by_
+                    print(f"  [aim] {kw['object_name']}: + seat-history bias ({1000*bx_:+.1f}, {1000*by_:+.1f}) mm", flush=True)
                 if fyaw:                       # turn the base frame about its origin (line_green sits there)
                     oq = tuple((R_.from_euler('z', fyaw) * R_.from_quat(oq)).as_quat())
                 argv += ['--final-base-pos', f"{ox:.6f}", f"{oy:.6f}", f"{oz + dz:.6f}",
