@@ -379,6 +379,7 @@ ASSEMBLY_STATE = REPO_ROOT / 'ablations/logs/assembly_state.json'   # {part: {ve
 # Parts a later part hides from the camera once seated (operator, 2026-10-17: after yellow, line_green
 # is not visible — accept it from the ledger if it was verified before yellow covered it).
 OCCLUDED_BY = {'line_green': ('inverted_u_yellow',)}
+VERIFY_READS = 3                 # verify_assembly readings per part; majority decides
 
 
 def _ledger():
@@ -401,9 +402,24 @@ def verify_seated(objs, say) -> bool:
     u_brown went unnoticed for a whole assembly."""
     led = _ledger(); ok_all = True
     for o in reversed(list(objs)):        # covering parts first: their ledger time must be newer
-        r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
-                            '--base-name', 'base1', '--mode', 'real', '--xy-only'],
-                           label=f'verify_assembly {o}', timeout_s=40)
+        # Up to VERIFY_READS readings; a part fails only when most of them fail — one misread of a
+        # half-hidden marker stopped a run on a seated u_orange (2026-10-17), while a part that is
+        # really off (u_brown on the table, 279 mm) fails every reading.
+        reads = []
+        for k_ in range(VERIFY_READS):
+            r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
+                                '--base-name', 'base1', '--mode', 'real', '--xy-only'],
+                               label=f'verify_assembly {o} ({k_ + 1})', timeout_s=40)
+            reads.append(r)
+            if r.get('result') == 'success' and k_ == 0:
+                break                                       # a clean first reading is enough
+            if sum(x.get('result') == 'success' for x in reads) * 2 > VERIFY_READS:
+                break
+            if sum(x.get('result') != 'success' for x in reads) * 2 > VERIFY_READS:
+                break
+        good = [x for x in reads if x.get('result') == 'success']
+        r = good[0] if len(good) * 2 > len(reads) or (len(reads) == 1 and good) else \
+            next((x for x in reads if x.get('result') != 'success'), reads[-1])
         if r.get('result') == 'success':
             led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")

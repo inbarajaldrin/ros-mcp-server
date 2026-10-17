@@ -378,6 +378,11 @@ class VerifyAssembly(Node):
             fallback_rpy_deg = (object_relative_rpy_deg - target_rpy_deg + 180) % 360 - 180
             orientation_error_rpy_deg = best_match_error_rpy_deg if best_match_error_rpy_deg is not None else fallback_rpy_deg
 
+        if XY_ONLY:
+            # Planar check: a seated part's roll/pitch are fixed by its pocket, and a half-hidden
+            # marker misreads them (u_orange seated to 0.2 mm, one reading roll 7.8 / pitch 7.2 deg,
+            # the next four 0 / 0 — 2026-10-17). Judge yaw; height is the insert's seat check.
+            orientation_error_deg = abs(float(orientation_error_rpy_deg[2]))
         # Check if within tolerance
         position_ok = bool(position_error <= POSITION_TOLERANCE)
         orientation_ok = bool(orientation_error_deg <= ORIENTATION_TOLERANCE_DEG)
