@@ -379,7 +379,8 @@ ASSEMBLY_STATE = REPO_ROOT / 'ablations/logs/assembly_state.json'   # {part: {ve
 # Parts a later part hides from the camera once seated (operator, 2026-10-17: after yellow, line_green
 # is not visible — accept it from the ledger if it was verified before yellow covered it).
 OCCLUDED_BY = {'line_green': ('inverted_u_yellow',)}
-VERIFY_READS = 3                 # verify_assembly readings per part; majority decides
+VERIFY_READS = 3                 # verify_assembly readings per part; majority (of detections) decides
+VERIFY_MAX_READS = 8             # "not detected" reads extend the window up to this many
 
 
 def _ledger():
@@ -395,6 +396,10 @@ def forget_verified(obj: str) -> None:
         json.dump(d, open(ASSEMBLY_STATE, 'w'), indent=1)
 
 
+def _not_detected(r) -> bool:
+    return r.get('detected') is False or 'not detected' in str(r.get('error', ''))
+
+
 def verify_seated(objs, say) -> bool:
     """queries/verify_assembly (--xy-only) for each seated part, from the base view (arm above the
     base). Updates the ledger. A part not detected passes only when the ledger has it verified AND
@@ -405,21 +410,32 @@ def verify_seated(objs, say) -> bool:
         # Up to VERIFY_READS readings; a part fails only when most of them fail — one misread of a
         # half-hidden marker stopped a run on a seated u_orange (2026-10-17), while a part that is
         # really off (u_brown on the table, 279 mm) fails every reading.
+        # Only readings that DETECTED the part vote: "not detected" is no evidence either way — the
+        # localizer drops whole frames for a second or two (2026-10-17: a seated u_brown, clearly in
+        # view, missed by two reads 1.5 s apart, and the run stopped). Those just extend the window,
+        # up to VERIFY_MAX_READS; never detected in the window still fails closed.
         reads = []
-        for k_ in range(VERIFY_READS):
+        for k_ in range(VERIFY_MAX_READS):
             r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
                                 '--base-name', 'base1', '--mode', 'real', '--xy-only'],
                                label=f'verify_assembly {o} ({k_ + 1})', timeout_s=40)
             reads.append(r)
-            if r.get('result') == 'success' and k_ == 0:
-                break                                       # a clean first reading is enough
-            if sum(x.get('result') == 'success' for x in reads) * 2 > VERIFY_READS:
+            det = [x for x in reads if not _not_detected(x)]
+            if len(det) == 1 and det[0] is r and r.get('result') == 'success':
+                break                                       # a clean first detection is enough
+            if sum(x.get('result') == 'success' for x in det) * 2 > VERIFY_READS:
                 break
-            if sum(x.get('result') != 'success' for x in reads) * 2 > VERIFY_READS:
+            if sum(x.get('result') != 'success' for x in det) * 2 > VERIFY_READS:
                 break
-        good = [x for x in reads if x.get('result') == 'success']
-        r = good[0] if len(good) * 2 > len(reads) or (len(reads) == 1 and good) else \
-            next((x for x in reads if x.get('result') != 'success'), reads[-1])
+            if _not_detected(r):
+                time.sleep(1.0)
+        det = [x for x in reads if not _not_detected(x)]
+        good = [x for x in det if x.get('result') == 'success']
+        if not det:
+            r = reads[-1]
+        else:
+            r = good[0] if len(good) * 2 > len(det) or (det[0].get('result') == 'success' and len(det) == 1) \
+                else next(x for x in det if x.get('result') != 'success')
         if r.get('result') == 'success':
             led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
