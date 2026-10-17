@@ -375,6 +375,56 @@ def observe_base_pose(base_name: str, timeout_s: float = 15.0):
 
 
 
+ASSEMBLY_STATE = REPO_ROOT / 'ablations/logs/assembly_state.json'   # {part: {verified, t, how}}
+# Parts a later part hides from the camera once seated (operator, 2026-10-17: after yellow, line_green
+# is not visible — accept it from the ledger if it was verified before yellow covered it).
+OCCLUDED_BY = {'line_green': ('inverted_u_yellow',)}
+
+
+def _ledger():
+    try:
+        return json.load(open(ASSEMBLY_STATE))
+    except Exception:
+        return {}
+
+
+def forget_verified(obj: str) -> None:
+    d = _ledger()
+    if d.pop(obj, None) is not None:
+        json.dump(d, open(ASSEMBLY_STATE, 'w'), indent=1)
+
+
+def verify_seated(objs, say) -> bool:
+    """queries/verify_assembly (--xy-only) for each seated part, from the base view (arm above the
+    base). Updates the ledger. A part not detected passes only when the ledger has it verified AND
+    its occluder is seated (verified) after it. Fails closed — 2026-10-17 an empty-gripper 'seat' of
+    u_brown went unnoticed for a whole assembly."""
+    led = _ledger(); ok_all = True
+    for o in reversed(list(objs)):        # covering parts first: their ledger time must be newer
+        r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
+                            '--base-name', 'base1', '--mode', 'real', '--xy-only'],
+                           label=f'verify_assembly {o}', timeout_s=40)
+        if r.get('result') == 'success':
+            led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
+            say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
+            continue
+        if r.get('detected') is False or 'not detected' in str(r.get('error', '')):
+            prev = led.get(o) or {}
+            occ = [c for c in OCCLUDED_BY.get(o, ()) if (led.get(c) or {}).get('verified')
+                   and (led.get(c) or {}).get('t', 0) > prev.get('t', 0)]
+            if prev.get('verified') and occ:
+                say(f"  [verify] {o}: not visible (under {occ[0]}) — verified before it was covered -> OK")
+                continue
+            say(f"\n!!! [verify] {o}: not detected and not verified earlier — cannot confirm it is seated")
+        else:
+            say(f"\n!!! [verify] {o}: NOT in its assembly pose — xy error "
+                f"{1000 * float(r.get('position_error_judged_m') or 0):.1f} mm, orientation {r.get('orientation_error_deg')}")
+        led.setdefault(o, {})['verified'] = False
+        ok_all = False
+    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+    return ok_all
+
+
 def reread_base(bname, prev, log_fh=None):
     """Re-read the base from straight above (flange at base_depth.VIEW_FLANGE_Z, top-down,
     gripper empty), depth outline first, marker read as fallback; returns the new pose or `prev`.
@@ -1585,6 +1635,11 @@ def main() -> int:
                 if log_fh: log_fh.write(hdr)
                 if getattr(args, 'observed_base', None) is not None:
                     args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
+                    # Arm is above the base: confirm every part seated so far really is.
+                    seated_so_far = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
+                    if seated_so_far and not verify_seated(seated_so_far, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n"))):
+                        failed = seated_so_far[-1]
+                        break
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
                                    label=f'between-parts move_home ({obj})', timeout_s=60,
                                    log_fh=log_fh)
@@ -1614,6 +1669,16 @@ def main() -> int:
         # --dry-run AND when --stop-before / --stop-after fired (pause means
         # the robot stays at the halted pose for operator inspection or
         # follow-on motion).
+        # Final check of the whole assembly from the base view (the between-parts checks covered
+        # the earlier parts; this one adds the last part and re-checks the rest).
+        if (not failed and completed and not args.dry_run and not _SAFETY_STOP
+                and getattr(args, 'observed_base', None) is not None):
+            args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
+            seated_all = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
+            if not verify_seated(seated_all, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n"))):
+                failed = seated_all[-1]
+                completed = [c for c in completed if c != failed]
+
         if _HOLDING_SEATED:
             msg = ("\n  CLEANUP SKIPPED: the gripper is closed on a SEATED part and would not open — no lift "
                    "(it would pull the part out). Open it by hand or: python3 -u -m primitives.control_gripper "

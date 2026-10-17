@@ -81,18 +81,12 @@ def py(*a):
     return [sys.executable, '-u', '-m', *a]
 
 
-def gripper_holding(timeout=4.0):
-    """True/False from the RG2's own grip-detected flag (/gripper_status 'Grasp:True'), None if
-    no status arrived."""
-    import rclpy
-    from std_msgs.msg import String
-    rclpy.init(); n = rclpy.create_node('dis_grip'); st = {}
-    n.create_subscription(String, '/gripper_status', lambda m: st.__setitem__('s', m.data), 5)
-    end = time.time() + timeout
-    while 's' not in st and time.time() < end:
-        rclpy.spin_once(n, timeout_sec=0.05)
-    n.destroy_node(); rclpy.shutdown()
-    return None if 's' not in st else ('Grasp:True' in st['s'])
+def verify_held(name):
+    """The project's grasp check — queries/verify_grasp.py --width-only, the same one rotate_object
+    runs after every pick (a part held = closed width near the part's grip width, not ~0.6 mm)."""
+    ok, res = run(['python3', '-u', 'queries/verify_grasp.py', '--object-name', name, '--mode', 'real',
+                   '--width-only'], f'verify_grasp {name}', 30)
+    return ok
 
 
 def depth_free_spots(extents, exclude_xy):
@@ -371,8 +365,8 @@ def main():
         from primitives.shared.config import GRIP_WIDTH_MM
         if a.place_held not in GRIP_WIDTH_MM:
             ap.error(f'unknown part {a.place_held}')
-        if gripper_holding() is False:
-            print(f"the gripper reports nothing held — not placing {a.place_held}"); return 1
+        if not verify_held(a.place_held):
+            print(f"verify_grasp: {a.place_held} not held — not placing it"); return 1
         if a.here:
             import rclpy
             from geometry_msgs.msg import PoseStamped
@@ -519,18 +513,12 @@ def main():
             # The grip must hold through the pull-out: 2026-10-15 line_green came out of the jaws
             # on the way up, fell beside base1, and every later step reported ok (the gripper
             # carried nothing to its spot); the next pick then put an open finger on the base.
-            if label in ('close', 'pull out to safe height'):
-                width = res.get('final_width_mm')
-                from primitives.shared.config import GRIP_WIDTH_MM
-                want = GRIP_WIDTH_MM.get(name)
-                held = gripper_holding()
-                if held is False or (label == 'close' and width is not None and want is not None
-                                     and width < want - 6.0):
-                    print(f"\n!!! {name}: not held after '{label}' (grip flag {held}, width {width} mm, "
-                          f"part {want} mm) — stopping", flush=True)
-                    return 1
-        from replay_real_assembly import forget_seat_offset
+            if label in ('close', 'pull out to safe height') and not verify_held(name):
+                print(f"\n!!! {name}: not held after '{label}' (verify_grasp) — stopping", flush=True)
+                return 1
+        from replay_real_assembly import forget_seat_offset, forget_verified
         forget_seat_offset(name)                            # out of the base: its seat offset is gone
+        forget_verified(name)                               # ...and so is its verified-seated record
         if place_at(sx, sy, w, home=False) != 0:
             return 1
     if a.to_staging:                                       # stay over the clear area: the regrasp sees it

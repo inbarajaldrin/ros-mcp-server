@@ -38,6 +38,7 @@ EE_TOPIC = "/tcp_pose_broadcaster/pose"
 
 # Tolerance thresholds
 POSITION_TOLERANCE = 0.01  # 1cm tolerance for position
+XY_ONLY = False            # --xy-only: position judged in the base plane (real-mode marker z is unreliable)
 ORIENTATION_TOLERANCE_DEG = 5.0  # 5 degrees tolerance for orientation
 
 
@@ -283,9 +284,9 @@ class VerifyAssembly(Node):
         # Check if object exists
         original_object_name = object_name
         if object_name not in self.current_poses:
-            error_msg = f"{object_name} not found in JSON"
+            error_msg = f"{object_name} not detected"            # not seen by the camera (was: "not found in JSON")
             self.get_logger().error(f"Object {object_name} not found in poses")
-            return False, {"error": error_msg}
+            return False, {"error": error_msg, "detected": False}
 
         # Check if base exists
         if base_name not in self.current_poses:
@@ -323,6 +324,10 @@ class VerifyAssembly(Node):
         # Calculate position error (vector and magnitude)
         position_error_vector = object_relative_position - target_position_relative
         position_error = np.linalg.norm(position_error_vector)
+        if XY_ONLY:
+            # Real mode: the marker-derived z of a seated part is off by tens of mm (line_green read
+            # 29 mm low while seated, 2026-10-17); judge position in the base plane, keep orientation.
+            position_error = np.linalg.norm(position_error_vector[:2])
 
         # Check if this is a peg with free rotation axis
         peg_free_axis = self.get_peg_free_axis(original_object_name)
@@ -381,15 +386,17 @@ class VerifyAssembly(Node):
         # Prepare error data for JSON output
         error_data = {
             "position_error_m": {
-                "x": round(float(position_error_vector[0]), 2),
-                "y": round(float(position_error_vector[1]), 2),
-                "z": round(float(position_error_vector[2]), 2)
+                "x": round(float(position_error_vector[0]), 4),
+                "y": round(float(position_error_vector[1]), 4),
+                "z": round(float(position_error_vector[2]), 4)
             },
             "orientation_error_deg": {
                 "roll": round(float(orientation_error_rpy_deg[0]), 2),
                 "pitch": round(float(orientation_error_rpy_deg[1]), 2),
                 "yaw": round(float(orientation_error_rpy_deg[2]), 2)
             },
+            "position_error_judged_m": round(float(position_error), 4),
+            "xy_only": XY_ONLY,
             "within_tolerance": within_tolerance
         }
 
@@ -462,8 +469,12 @@ def main(args=None):
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: sim (reads from /objects_poses_sim) or real (reads from /objects_poses_real)')
     parser.add_argument('--check-all', action='store_true', help='Check if all objects in the assembly are assembled')
+    parser.add_argument('--xy-only', action='store_true',
+                        help='judge position in the base plane only (real mode: marker z of seated parts is unreliable)')
     parser.add_argument('--pretty', action='store_true', help='Pretty print output for terminal readability')
     args = parser.parse_args()
+    global XY_ONLY
+    XY_ONLY = bool(args.xy_only)
 
     # Validate arguments
     if args.mode == 'real' and args.check_all:
