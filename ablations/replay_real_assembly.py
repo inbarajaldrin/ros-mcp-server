@@ -806,6 +806,8 @@ NUDGE_MAX_FORCE_N = 4.0              # push until the bar is blocked (seated or 
                                      # replaces fixed step distances that had to guess the end (2026-10-15)
 NUDGE_PUSH_PAST_MM = 15.0            # travel cap (operator): finger face at most this far past the estimated end
 NUDGE_TRIES = 3
+NUDGE_SHIFT_MM = 3.0                 # axial shift that means an end rides past its pocket
+NUDGE_END_DIFF_MM = 2.5              # one end this much higher than the other: nudge, not reseat
 NUDGE_START_GAPS_MM = (10.0, 20.0, 30.0)   # finger block this far past the depth end; next on contact
 NUDGE_PAD_Z_BASE_M = 0.037           # pad centre height (base frame): tips 22 mm, base top 17.5 mm
 NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real one (edge smear on
@@ -903,8 +905,13 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             return True
         if 'pitch_deg' not in res:
             say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
-        if abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5):
-            # tilted = an end on base1's top past the pocket end; a regrasp holds it at its tilt
+        shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))
+        ends = res.get('end_heights_mm') or [0.0, 0.0]
+        if (abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5)
+                or shift >= NUDGE_SHIFT_MM or abs(ends[1] - ends[0]) >= NUDGE_END_DIFF_MM):
+            # tilted, or shifted along its axis = an end on base1's top past the pocket end; a
+            # regrasp holds it where it is. 2026-10-15: a bar 4-7 mm high and +5 mm along its axis
+            # (pitch only 1.2 deg) went to the top-down reseat, which cannot move it, and failed.
             ok = nudge_into_slot(obj, ob, res, say, out_dir)
             if not ok:
                 say(f"\n!!! {obj} still tilted after the nudge")
@@ -1306,6 +1313,9 @@ def main() -> int:
                    help='with --only/--skip-startup, arm over the clear area: the part waits in the '
                         'staging region (e.g. after disassemble.py --to-staging); after reading the base '
                         'the arm returns over the clear area instead of home')
+    p.add_argument('--seat-check-only', default=None, metavar='PART',
+                   help='PART is already seated: read the base, run the depth seat check and fix it '
+                        '(nudge / reseat) as after an insert, then stop. No pick, no insert.')
     p.add_argument('--skip-startup', action='store_true',
                    help="Skip the move_home + gripper-open startup phase. Use when the "
                         "robot is already in a known clean state.")
@@ -1324,6 +1334,24 @@ def main() -> int:
 
     if args.base_offset_xy is not None:
         args.base_offset_xy = tuple(args.base_offset_xy)
+
+    if args.seat_check_only:
+        # Arm empty, at home or safe height: re-read the base, then the same check-and-fix the
+        # replay runs after an insert (the seat check flies to its own view).
+        from disassemble import observe_base
+        ob = observe_base('base1')
+        if ob is None:
+            print("base1 not observed — stopping"); return 1
+        args.observed_base = ob
+        def say(m):
+            print(m, flush=True)
+        ok = seat_check_and_reseat(args.seat_check_only, AssemblyState(), args, say)
+        run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
+                       label='seat-check-only safe height', timeout_s=60)
+        run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                       label='seat-check-only home', timeout_s=60)
+        print(f"\n  seat-check-only {args.seat_check_only}: {'OK' if ok else 'NOT FIXED'}")
+        return 0 if ok else 1
 
     json_path = Path(args.assembly_json)
     if not json_path.exists():
