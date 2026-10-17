@@ -35,6 +35,8 @@ from std_msgs.msg import Float32, Float64
 # Gripper specifications
 GRIPPER_HALF_OPEN_WIDTH_MM = 35.0
 GRIPPER_MAX_WIDTH_MM = 100.0
+EMPTY_GRIP_MARGIN_MM = 6.0   # closed this far past the part's grip width = nothing in the jaws
+EMPTY_GRIP_MIN_MM = 3.0      # parts with no known grip width: below this = empty (RG2 closed ~0.6 mm)
 GRIPPER_WIDTH_MATCH_TOLERANCE_MM = 2.0  # If width is within this of approach width, gripper hasn't closed
 
 
@@ -432,9 +434,19 @@ class VerifyGrasp(Node):
 
         self.get_logger().info(f"Gripper width: {self.gripper_width:.2f}mm")
 
-        if self.gripper_width <= 0:
+        # The RG2 fully closed reads ~0.6 mm, so "width <= 0" never fired: an empty gripper passed and
+        # the insert then "seated" an empty gripper on touchdown (u_brown, 2026-10-17 — the part never
+        # left the table). Compare with the part's own grip width: closing well past it = nothing held.
+        try:
+            from primitives.shared.config import GRIP_WIDTH_MM
+            expected = GRIP_WIDTH_MM.get(self.object_name)
+        except Exception:
+            expected = None
+        floor = (expected - EMPTY_GRIP_MARGIN_MM) if expected else EMPTY_GRIP_MIN_MM
+        if self.gripper_width <= floor:
             result['result'] = 'failure'
-            result['error'] = f"Gripper fully closed (width: {self.gripper_width:.2f}mm) - nothing grasped"
+            result['error'] = (f"Gripper closed to {self.gripper_width:.2f}mm, below {floor:.1f}mm "
+                               f"(part {expected} mm) - nothing grasped")
             self.get_logger().error(result['error'])
             return False, result
 
