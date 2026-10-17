@@ -48,6 +48,7 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+BELOW_TABLE_REJECT_M = 0.010   # an object pose centre this far below the table is a misread
 from primitives.shared.config import (GRASP_TIP_CLEARANCE_M, grip_width_mm, pad_center_offset_m,
                                       rg2_tip_length_m, grasp_tool_offset_target_m)
 from queries.get_scene_info import load_grasp_validity_data
@@ -700,6 +701,18 @@ class DirectObjectMove(Node):
                 target_transform = transform
                 break
         
+        if (target_transform is not None and self.mode == 'real'
+                and target_transform.transform.translation.z < TABLE_HEIGHT - BELOW_TABLE_REJECT_M):
+            # Physically impossible: the part's centre below the table. The localizer sometimes
+            # reads yellow off a half-hidden second marker at z -116..-136 mm (table -82; the
+            # right reading is -45), 90 mm away in xy — step 1 chose its wrist yaw from one such
+            # reading and the fingers met the part (2026-10-17). Skip it; keep the last good pose.
+            self._below_table_rejects = getattr(self, '_below_table_rejects', 0) + 1
+            if self._below_table_rejects in (1, 10, 100):
+                self.get_logger().warn(
+                    f"Rejected {self._below_table_rejects} pose reading(s) of {self.object_name} below the table "
+                    f"(z={1000 * target_transform.transform.translation.z:.0f} mm)")
+            return
         if target_transform is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:

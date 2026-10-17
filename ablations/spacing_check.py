@@ -103,6 +103,10 @@ def observe_parts(names, timeout_s=8.0):
         # yellow read at (293, -503) and (202, -517) in the same second, 2026-10-17); a median of
         # the mix put it on base1 — a false 'too close'. Keep the largest cluster of samples within
         # CLUSTER_MM of each other.
+        from primitives.shared.config import TABLE_HEIGHT
+        S = [x for x in S if x['xyz'][2] >= TABLE_HEIGHT - 0.010]   # below the table = a misread (move_to_grasp)
+        if not S:
+            continue
         XY = np.array([s['xyz'][:2] for s in S])
         groups, left = [], set(range(len(XY)))
         while left:                                     # greedy clusters of mutually-near samples
