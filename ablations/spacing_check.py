@@ -25,6 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 MIN_GAP_MM = 25.0
+CLUSTER_MM = 10.0            # pose samples within this belong to the same reading
 MESH = Path.home() / 'Documents/aruco-grasp-annotator/data/models/{}.obj'
 BASE_SIDE_M = {'base1': 0.161}
 
@@ -93,10 +94,18 @@ def observe_parts(names, timeout_s=8.0):
     from replay_real_assembly import observe_object_orientation
     out = {}
     for n in names:
-        obs = observe_object_orientation(n, timeout_s, n_samples=5)
+        obs = observe_object_orientation(n, timeout_s, n_samples=9)
         S = obs.get('samples') or []
         if obs.get('error') or not S:
             continue
+        # The localizer can alternate between two poses for one part (a half-hidden second marker:
+        # yellow read at (293, -503) and (202, -517) in the same second, 2026-10-17); a median of
+        # the mix put it on base1 — a false 'too close'. Keep the largest cluster of samples within
+        # CLUSTER_MM of each other.
+        XY = np.array([s['xyz'][:2] for s in S])
+        groups = [np.nonzero(np.linalg.norm(XY - XY[i], axis=1) < CLUSTER_MM / 1000)[0] for i in range(len(XY))]
+        best = max(groups, key=len)
+        S = [S[i] for i in best]
         P = np.median(np.array([s['xyz'] for s in S]), axis=0)
         Q = np.array([s['quat_xyzw'] for s in S]); Q *= np.sign(Q @ Q[0])[:, None]
         q = Q.mean(axis=0); q /= np.linalg.norm(q)
