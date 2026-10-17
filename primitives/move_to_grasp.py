@@ -49,6 +49,7 @@ from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_can
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 BELOW_TABLE_REJECT_M = 0.010   # an object pose centre this far below the table is a misread
+STEP2_JUMP_MAX_M = 0.020       # step-2 target this far (xy) from the step-1 hover: re-hover, never descend
 from primitives.shared.config import (GRASP_TIP_CLEARANCE_M, grip_width_mm, pad_center_offset_m,
                                       rg2_tip_length_m, grasp_tool_offset_target_m)
 from queries.get_scene_info import load_grasp_validity_data
@@ -532,6 +533,9 @@ class DirectObjectMove(Node):
         # Recent positions of the target grasp point, for a median step-2 target
         # (see grasp_point_position below). ~1.4 s at the publisher's 5 Hz.
         self._gp_hist = deque(maxlen=7)
+        self._hover_xy = None   # step-1 target xy, to catch a step-2 target that jumped
+        self._rehovers = 0
+        self._gp_below_table = 0
         gripper_topic = '/gripper_width_sim' if self.mode == 'sim' else '/gripper_width_offset'
         gripper_msg_type = Float64 if self.mode == 'sim' else Float32
         self.gripper_width_sub = self.create_subscription(
@@ -765,7 +769,19 @@ class DirectObjectMove(Node):
                 marker.ns == self.object_name):
                 target_marker = marker
                 break
-        
+
+        if (target_marker is not None and self.mode == 'real'
+                and target_marker.pose.position.z < TABLE_HEIGHT - BELOW_TABLE_REJECT_M):
+            # Same misread as in tf_message_callback, carried through by the grasp-point
+            # publisher: yellow's grasp point at z -133 mm sent step 1 to hover 76 mm off the
+            # part with the wrong wrist yaw, and step 2 came down on it at -87 N (2026-10-17).
+            self._gp_below_table += 1
+            if self._gp_below_table in (1, 10, 100):
+                self.get_logger().warn(
+                    f"Rejected {self._gp_below_table} grasp point reading(s) of {self.object_name} below "
+                    f"the table (z={1000 * target_marker.pose.position.z:.0f} mm)")
+            target_marker = None
+
         if target_marker is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
@@ -1477,7 +1493,28 @@ class DirectObjectMove(Node):
             target_ee_position[2] += self.hover_height_offset  # Move to hover height
 
         self.get_logger().info(f"Target gripper center: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
-        
+
+        # Step 2 descends from the hover in a straight line with the wrist yaw chosen at step 1.
+        # If its target is far from the hover, the hover (and yaw) came from a different reading
+        # than the descent: hover again over the new reading (once), never descend (2026-10-17).
+        if not self.step1_completed:
+            self._hover_xy = np.array(target_ee_position[:2], dtype=float)
+        elif (self.mode == 'real' and not self.step2_completed and self._hover_xy is not None
+              and np.linalg.norm(target_ee_position[:2] - self._hover_xy) > STEP2_JUMP_MAX_M):
+            jump_mm = 1000 * np.linalg.norm(target_ee_position[:2] - self._hover_xy)
+            if self._rehovers < 1:
+                self._rehovers += 1
+                self.get_logger().warn(
+                    f"Step 2 target is {jump_mm:.0f} mm (xy) from the step-1 hover - the readings "
+                    f"disagree. Not descending: hovering again over the latest reading.")
+                self.step1_completed = False
+                return
+            self.error_message = (f"Step 2 target is {jump_mm:.0f} mm (xy) from the hover after a "
+                                  f"re-hover - object pose unstable. Not descending.")
+            self.get_logger().error(self.error_message)
+            self.should_exit = True
+            return
+
         # Step 3: Attempt final fine positioning if step 2 is done and step 3 not yet attempted (real mode only)
         if self.step2_completed and not self.step3_attempted and self.grasp_id is not None and self.mode == 'real':
             self.step3_attempted = True
