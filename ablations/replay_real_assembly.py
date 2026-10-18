@@ -400,53 +400,78 @@ def _not_detected(r) -> bool:
     return r.get('detected') is False or 'not detected' in str(r.get('error', ''))
 
 
-def verify_seated(objs, say) -> bool:
+def _read_part(o):
+    """Up to VERIFY_MAX_READS verify_assembly readings of `o`; returns the deciding one.
+    A part fails only when most of its detections fail — one misread of a half-hidden marker
+    stopped a run on a seated u_orange (2026-10-17), while a part that is really off (u_brown on
+    the table, 279 mm) fails every reading. Only readings that DETECTED the part vote: "not
+    detected" is no evidence either way — the localizer drops whole frames for a second or two
+    (2026-10-17: a seated u_brown, clearly in view, missed by two reads 1.5 s apart, and the run
+    stopped). Those just extend the window; never detected in the window -> a not-detected result."""
+    reads = []
+    for k_ in range(VERIFY_MAX_READS):
+        r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
+                            '--base-name', 'base1', '--mode', 'real', '--xy-only'],
+                           label=f'verify_assembly {o} ({k_ + 1})', timeout_s=40)
+        reads.append(r)
+        det = [x for x in reads if not _not_detected(x)]
+        if len(det) == 1 and det[0] is r and r.get('result') == 'success':
+            break                                       # a clean first detection is enough
+        if sum(x.get('result') == 'success' for x in det) * 2 > VERIFY_READS:
+            break
+        if sum(x.get('result') != 'success' for x in det) * 2 > VERIFY_READS:
+            break
+        if _not_detected(r):
+            time.sleep(1.0)
+    det = [x for x in reads if not _not_detected(x)]
+    good = [x for x in det if x.get('result') == 'success']
+    if not det:
+        return reads[-1]
+    return good[0] if len(good) * 2 > len(det) or (det[0].get('result') == 'success' and len(det) == 1) \
+        else next(x for x in det if x.get('result') != 'success')
+
+
+def _home_view(log_fh=None):
+    """Second camera view for verify_seated: move_home (gripper empty, arm already above safe height
+    over the base — the same move the between-parts step and the cleanup make next)."""
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                       label='verify second view: move_home', timeout_s=60, log_fh=log_fh)
+    if r.get('result') != 'failure':
+        time.sleep(1.5)                   # let the localizer catch up after the move
+        return True
+    return False
+
+
+def verify_seated(objs, say, second_view=None) -> bool:
     """queries/verify_assembly (--xy-only) for each seated part, from the base view (arm above the
     base). Updates the ledger. A part not detected passes only when the ledger has it verified AND
     its occluder is seated (verified) after it. Fails closed — 2026-10-17 an empty-gripper 'seat' of
-    u_brown went unnoticed for a whole assembly."""
-    led = _ledger(); ok_all = True
+    u_brown went unnoticed for a whole assembly.
+
+    second_view: callable that moves the camera to another view (move_home) and returns True on
+    success. Used once, for a part never detected from above the base and not legitimately covered:
+    seated u_brown lies on its side right under the camera there, markers edge-on — 2026-10-18 it was
+    missed by all 8 reads from above and seen 30/30 from home, and a good cycle stopped."""
+    led = _ledger(); ok_all = True; moved = False
     for o in reversed(list(objs)):        # covering parts first: their ledger time must be newer
-        # Up to VERIFY_READS readings; a part fails only when most of them fail — one misread of a
-        # half-hidden marker stopped a run on a seated u_orange (2026-10-17), while a part that is
-        # really off (u_brown on the table, 279 mm) fails every reading.
-        # Only readings that DETECTED the part vote: "not detected" is no evidence either way — the
-        # localizer drops whole frames for a second or two (2026-10-17: a seated u_brown, clearly in
-        # view, missed by two reads 1.5 s apart, and the run stopped). Those just extend the window,
-        # up to VERIFY_MAX_READS; never detected in the window still fails closed.
-        reads = []
-        for k_ in range(VERIFY_MAX_READS):
-            r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
-                                '--base-name', 'base1', '--mode', 'real', '--xy-only'],
-                               label=f'verify_assembly {o} ({k_ + 1})', timeout_s=40)
-            reads.append(r)
-            det = [x for x in reads if not _not_detected(x)]
-            if len(det) == 1 and det[0] is r and r.get('result') == 'success':
-                break                                       # a clean first detection is enough
-            if sum(x.get('result') == 'success' for x in det) * 2 > VERIFY_READS:
-                break
-            if sum(x.get('result') != 'success' for x in det) * 2 > VERIFY_READS:
-                break
-            if _not_detected(r):
-                time.sleep(1.0)
-        det = [x for x in reads if not _not_detected(x)]
-        good = [x for x in det if x.get('result') == 'success']
-        if not det:
-            r = reads[-1]
-        else:
-            r = good[0] if len(good) * 2 > len(det) or (det[0].get('result') == 'success' and len(det) == 1) \
-                else next(x for x in det if x.get('result') != 'success')
-        if r.get('result') == 'success':
-            led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
-            say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
-            continue
-        if r.get('detected') is False or 'not detected' in str(r.get('error', '')):
+        r = _read_part(o)
+        if _not_detected(r) and r.get('result') != 'success':
             prev = led.get(o) or {}
             occ = [c for c in OCCLUDED_BY.get(o, ()) if (led.get(c) or {}).get('verified')
                    and (led.get(c) or {}).get('t', 0) > prev.get('t', 0)]
             if prev.get('verified') and occ:
                 say(f"  [verify] {o}: not visible (under {occ[0]}) — verified before it was covered -> OK")
                 continue
+            if second_view is not None and not moved:
+                say(f"  [verify] {o}: not detected from above the base — second look from home")
+                moved = True
+                if second_view():
+                    r = _read_part(o)
+        if r.get('result') == 'success':
+            led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
+            say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
+            continue
+        if _not_detected(r):
             say(f"\n!!! [verify] {o}: not detected and not verified earlier — cannot confirm it is seated")
         else:
             say(f"\n!!! [verify] {o}: NOT in its assembly pose — xy error "
@@ -1706,7 +1731,8 @@ def main() -> int:
                     args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
                     # Arm is above the base: confirm every part seated so far really is.
                     seated_so_far = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
-                    if seated_so_far and not verify_seated(seated_so_far, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n"))):
+                    if seated_so_far and not verify_seated(seated_so_far, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
+                                                                second_view=lambda: _home_view(log_fh)):
                         failed = seated_so_far[-1]
                         break
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
@@ -1744,7 +1770,8 @@ def main() -> int:
                 and getattr(args, 'observed_base', None) is not None):
             args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
             seated_all = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
-            if not verify_seated(seated_all, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n"))):
+            if not verify_seated(seated_all, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
+                                 second_view=lambda: _home_view(log_fh)):
                 failed = seated_all[-1]
                 completed = [c for c in completed if c != failed]
 
