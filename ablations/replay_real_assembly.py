@@ -431,6 +431,24 @@ def _read_part(o):
         else next(x for x in det if x.get('result') != 'success')
 
 
+def _staging_view(log_fh=None):
+    """Camera over the staging region (staging_layout.STAGING_VIEW, top-down, empty gripper at safe
+    height or above): where the generated-layout disassembly puts parts — home sees x <= ~0.42 only."""
+    from staging_layout import STAGING_VIEW, TOP_DOWN_Q
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                        *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q)],
+                       label='staging view', timeout_s=90, log_fh=log_fh)
+    if r.get('result') != 'failure':
+        time.sleep(1.5)                   # let the localizer catch up after the move
+        return True
+    return False
+
+
+def _seen_here(obj, timeout_s=5.0) -> bool:
+    obs = observe_object_orientation(obj, timeout_s, n_samples=2)
+    return bool(obs.get('samples')) and not obs.get('error')
+
+
 def _home_view(log_fh=None):
     """Second camera view for verify_seated: move_home (gripper empty, arm already above safe height
     over the base — the same move the between-parts step and the cleanup make next)."""
@@ -1623,6 +1641,7 @@ def main() -> int:
         if getattr(args, 'derive_sequence', False) and not args.dry_run:
             names = [e.get('object_name') for e in entries]
             skip = set(names[:names.index(args.start_from)]) if getattr(args, 'start_from', None) in names else set()
+            unseen_home = []
             for entry in entries:
                 obj = entry.get('object_name')
                 if (args.only and obj != args.only) or obj in skip:
@@ -1634,10 +1653,23 @@ def main() -> int:
                         bn = parse_tool_call(s_)[1].get('base_name') or bn
                     except Exception:
                         pass
-                entry['tool_sequence'], note = derive_sequence_for(obj, seq, bn)
+                entry['tool_sequence'], note = derive_sequence_for(obj, seq, bn, timeout_s=10.0)
+                if note.startswith('observe failed'):
+                    unseen_home.append((entry, seq, bn))          # not where we usually keep it
+                    continue
                 msg = f"  [derive-sequence] {obj}: {note}"
                 print(msg)
                 if log_fh: log_fh.write(msg + "\n")
+            # Parts home cannot see: the generated-layout disassembly puts them in the staging region
+            # (staging_layout.py). Plan those from the staging view, then back home.
+            if unseen_home and _staging_view(log_fh):
+                for entry, seq, bn in unseen_home:
+                    entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0)
+                    msg = f"  [derive-sequence] {entry['object_name']} (staging view): {note}"
+                    print(msg)
+                    if log_fh: log_fh.write(msg + "\n")
+                run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                               label='back home after the staging view', timeout_s=60, log_fh=log_fh)
 
         # Base pose for the inserts: read here (startup view), re-read between parts (reread_base).
         args.observed_base = None
@@ -1742,6 +1774,16 @@ def main() -> int:
                     failed = obj
                     break
             first_object = False
+            # Not where we usually keep it (home view)? Look over the staging region and pick from
+            # there (operator 2026-10-19: move over the staging region as part of the assembly).
+            if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
+                    and not _seen_here(obj)):
+                msg = f"  [view] {obj}: not seen from home -> staging view"
+                print(msg, flush=True)
+                if log_fh: log_fh.write(msg + "\n")
+                if not _staging_view(log_fh):
+                    failed = obj
+                    break
             ok = replay_object(entry, state, args, log_fh=log_fh, snap_fh=snap_fh)
             # Post-insert seat check (opt-in): the sequence ends at the post-release
             # safe-height pose, which is where the correct-seat references were recorded.

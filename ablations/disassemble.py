@@ -305,9 +305,11 @@ def observe_base(base_name='base1'):
     return ob_d if ob_d is not None else ob
 
 
-def place_at(sx, sy, w, home=True):
-    """Carry the held part at the current height (orientation kept) above (sx, sy), lower it
-    onto the table (glitch-proof contact), release, lift; optionally go home."""
+def place_at(sx, sy, w, home=True, turn=None):
+    """Carry the held part at the current height (orientation kept, or turned `turn` rad about
+    vertical from the seated top-down grasp) above (sx, sy), lower it onto the table (glitch-proof
+    contact), release, lift; optionally go home."""
+    from primitives.shared.config import SAFE_HEIGHT
     import rclpy
     from geometry_msgs.msg import PoseStamped
     rclpy.init(); nn = rclpy.create_node('dis_tcp'); tp = {}
@@ -315,17 +317,91 @@ def place_at(sx, sy, w, home=True):
     end = time.time() + 3
     while 'p' not in tp and time.time() < end: rclpy.spin_once(nn, timeout_sec=0.05)
     z = tp['p'].pose.position.z; nn.destroy_node(); rclpy.shutdown()
-    steps = [
+    # A wrist turn is made in place first, then the carry keeps it: turn + carry in one move went
+    # over move_cartesian's 1.5 rad joint-step limit (u_brown, -78 deg, 2026-10-19).
+    p0 = tp['p'].pose.position
+    turn_step = ([] if turn is None else [
+        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{p0.x:.4f}", f"{p0.y:.4f}", f"{z:.4f}",
+            '--quat', *[f"{v:.6f}" for v in (R.from_euler('z', turn) * R.from_quat(SEAT_EE_QUAT)).as_quat()]),
+         f'turn the wrist {np.degrees(turn):+.0f} deg in place', 90)])
+    steps = turn_step + [
         (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
             '--keep-orientation'), 'carry to spot', 90),
         (py('primitives.core.move_down', '--mode', 'real', '--to-table'), 'lower to table (contact)', 120),
         (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
         (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
-    ] + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
+    ] + ([] if turn is None else [            # turn back in place: the next move then stays under 1.5 rad
+        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{SAFE_HEIGHT:.4f}",
+            '--quat', *map(str, SEAT_EE_QUAT)), 'turn the wrist back in place', 90)]) \
+      + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
     for argv, label, t in steps:
         ok, _ = run(argv, label, t)
         if not ok: return 1
     return 0
+
+
+def plan_staging_layout(names, a):
+    """--layout staging: base yaw from home (parts are set down at base yaw + wrist turn), then look
+    over the staging region (depth: is it clear?) and draw a layout there. (layout|None, message)."""
+    from staging_layout import draw, look
+    from replay_real_assembly import observe_base_pose
+    ob_ = observe_base_pose('base1')
+    base_yaw = float(R.from_quat(ob_[1]).as_euler('xyz')[2]) if ob_ else 0.0
+    tz, raised = look(say=lambda m: print(m, flush=True))
+    if tz is None:
+        return None, "staging region not observed — stopping"
+    L = draw(names, a.cycle, a.all_flat, a.seed, raised, base_yaw=base_yaw)
+    if L is None:
+        return None, (f"no layout fits the staging region ({len(raised)} raised depth points there) — "
+                      f"stopping; clear the region or run --layout spots")
+    L['table_z'], L['base_yaw'] = tz, base_yaw
+    from staging_layout import OUT
+    json.dump(L, open(OUT, 'w'), indent=1)                 # a stopped run can be finished from it
+    lines =[f"[layout] seed {L['seed']}, cycle {a.cycle}: upright {L['upright'] or 'none (all flat)'}"]
+    for p in L['parts']:
+        lines.append(f"  {p['name']:18s} {'tip' if p.get('tip') else ('flat' if p['flat'] else 'UPRIGHT'):7s} "
+                     f"set down ({1000*p['place_xy'][0]:.0f}, {1000*p['place_xy'][1]:.0f}) mm, wrist "
+                     f"{np.degrees(p['wrist_turn']):+.0f} deg")
+    return L, "\n".join(lines)
+
+
+def finish_staging_layout(layout, ob):
+    """Look over the staging region: every part seen, tipped ones flat, spacing ok (fail closed).
+    A part that did not tip stays upright (the assembly does it in one pass) — reported, not fatal.
+    Records the layout + what was observed; ends at home."""
+    from staging_layout import STAGING_VIEW, TOP_DOWN_Q, OUT
+    from spacing_check import check as spacing, observe_parts, PARTS
+    from tip_part import is_flat
+    ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
+                   '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
+    if not ok:
+        return 1
+    time.sleep(1.5)
+    seen = observe_parts(PARTS)
+    bad = []
+    for p in layout['parts']:
+        n = p['name']
+        if n not in seen:
+            bad.append(f"{n} not seen from the staging view"); continue
+        flat = is_flat(seen[n][1])
+        p['observed'] = dict(xyz=list(map(float, seen[n][0])), quat=list(map(float, seen[n][1])), flat=flat)
+        if p.get('tip') and not flat:
+            print(f"  [layout] {n}: did NOT tip — stays upright (stroke stopped: "
+                  f"{(p.get('tip_result') or {}).get('stopped')})", flush=True)
+        print(f"  [layout] {n}: {'flat' if flat else 'upright'} at ({1000*seen[n][0][0]:.0f}, "
+              f"{1000*seen[n][0][1]:.0f}) mm", flush=True)
+    ok_sp, rep = spacing(seen, ob)
+    rep['unseen'] = [n for n in PARTS if n not in seen]
+    print(f"[spacing] {json.dumps(rep)}", flush=True)
+    layout['spacing_ok'] = bool(ok_sp)
+    json.dump(layout, open(OUT, 'w'), indent=1)
+    with open(OUT.with_name('staging_layouts.jsonl'), 'a') as f:
+        f.write(json.dumps(dict(t=time.time(), **layout)) + '\n')
+    if bad or not ok_sp:
+        print("\n!!! staging layout check failed: " + "; ".join(bad + ([] if ok_sp else ['parts too close'])))
+        return 1
+    ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
+    return 0 if ok else 1
 
 
 def main():
@@ -356,6 +432,13 @@ def main():
     ap.add_argument('--to-staging', action='store_true',
                     help='with --only: take the seated part out with the insert grasp and set it down '
                          'in the staging region (clear area) for a fresh regrasp, e.g. a tilted seat')
+    ap.add_argument('--layout', choices=('spots', 'staging'), default='spots',
+                    help="spots: free spots seen from home, parts upright (as before). staging: the "
+                         "operator's generator idea (staging_layout.py) — parts set down in the staging "
+                         "region at drawn yaws and tipped flat, one tippable part left upright per cycle")
+    ap.add_argument('--cycle', type=int, default=0, help='with --layout staging: picks the upright part')
+    ap.add_argument('--all-flat', action='store_true', help='with --layout staging: tip all three')
+    ap.add_argument('--seed', type=int, default=None, help='with --layout staging: layout draw seed')
     a = ap.parse_args()
     if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
         os.nice(5 - os.nice(0))
@@ -397,8 +480,15 @@ def main():
     extents = [footprint_half_extents(o['object_name']) for o in parts]
     print("[spots] footprints mm: " + ", ".join(f"{o['object_name']} {2000*e[0]:.0f}x{2000*e[1]:.0f}"
                                                 for o, e in zip(parts, extents)))
+    layout = None
     if a.to_staging:
         spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
+    elif a.layout == 'staging' and not a.dry_run and not a.relocate:
+        layout, msg = plan_staging_layout([o['object_name'] for o in parts], a)
+        print(msg, flush=True)
+        if layout is None:
+            return 1
+        spots, note = [tuple(p['flange_xy']) for p in layout['parts']], f"staging layout seed {layout['seed']}"
     else:
         spots, note = depth_free_spots(extents, exclude)
         if not spots or len(spots) < len(parts):
@@ -519,10 +609,20 @@ def main():
         from replay_real_assembly import forget_seat_offset, forget_verified
         forget_seat_offset(name)                            # out of the base: its seat offset is gone
         forget_verified(name)                               # ...and so is its verified-seated record
-        if place_at(sx, sy, w, home=False) != 0:
+        lp = layout['parts'][i] if layout else None
+        if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None) != 0:
             return 1
+        if lp and lp.get('tip'):
+            from tip_part import tip
+            r_ = tip(lp, layout['table_z'], say=lambda m: print(m, flush=True))
+            lp['tip_result'] = r_
+            if not r_['ok']:
+                print(f"\n!!! {name}: tip failed ({r_['error']}) — stopping", flush=True)
+                return 1
     if a.to_staging:                                       # stay over the clear area: the regrasp sees it
         return 0
+    if layout:
+        return finish_staging_layout(layout, ob)
     ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
     if not ok:
         return 1
