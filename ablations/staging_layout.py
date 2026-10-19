@@ -38,7 +38,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 REGION = {'x': (0.19, 0.51), 'y': (-0.54, -0.22)}   # UR base frame (see docstring)
-STAGING_VIEW = (0.35, -0.38, 0.56)                   # flange, top-down: the whole region in view
+STAGING_VIEW = (0.35, -0.33, 0.62)                   # flange, top-down: the whole region in view AND above
+                                                     # the image's bottom 160 px, where the fingers hide the
+                                                     # table (from (0.35,-0.38,0.56) line_green at y -0.29 went
+                                                     # unseen, 2026-10-19): region rows 55..536 of 720
 TOP_DOWN_Q = (0.0, 1.0, 0.0, 0.0)
 CLEARANCE_M = 0.025                                  # generator's clearance between parts
 SWEEP_CLEARANCE_M = 0.010                            # finger start zone: its lowering is guarded (stops on touch)

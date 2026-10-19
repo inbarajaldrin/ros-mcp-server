@@ -380,6 +380,13 @@ def finish_staging_layout(layout, ob):
         return 1
     time.sleep(1.5)
     seen = observe_parts(PARTS)
+    missing = [p['name'] for p in layout['parts'] if p['name'] not in seen]
+    if missing:                                            # second look: home sees x <= ~0.42
+        print(f"  [layout] not seen from the staging view: {missing} -> second look from home", flush=True)
+        ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home (second look)', 60)
+        if ok:
+            time.sleep(1.5)
+            seen.update(observe_parts(missing))
     bad = []
     for p in layout['parts']:
         n = p['name']
