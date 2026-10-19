@@ -26,6 +26,7 @@ assembly runs both the 1-pass and the 2-pass path; --all-flat tips all three. Th
 opening direction and the face down are not independent; both are covered over the draws.
 """
 import argparse
+import functools
 import json
 import math
 import sys
@@ -65,6 +66,7 @@ STAND = {'u_brown': dict(L=0.070, T=0.021, H=0.070, strike_x=0.0245),
 GRASP_ID = {'u_brown': 1, 'u_orange': 1, 'line_green': 1, 'inverted_u_yellow': 2}   # fmb1_assembly.json
 
 
+@functools.lru_cache(maxsize=None)
 def grasp_offset(name):
     """(along the part's x, along its y) from the part's centre to its grasp point, standing as seated
     — the gripper holds the U parts by a LEG (+25.5 mm): place_xy is the part's centre, the flange
@@ -131,10 +133,30 @@ def part_plan(name, flat, place_xy, yaw, sign):
                 land_xy=land.tolist(), strike_x=g['strike_x'], final=final, sweep=sweep)
 
 
-def draw(order, cycle=0, all_flat=False, seed=None, occupied=None, base_yaw=0.0, attempts=4000):
-    """One admitted layout for `order` (disassembly order), or None. occupied: (N, 2) robot-xy points
-    raised above the table in the staging view (nothing may sit in a part's sweep or final outline)."""
+def min_gap(L):
+    """Closest pair of reserved landings in a layout (m)."""
+    F = [np.asarray(p['final']) for p in L['parts']]
+    return min((_sep_axis_gap(F[i], F[j]) for i in range(len(F)) for j in range(i + 1, len(F))), default=1.0)
+
+
+def draw(order, cycle=0, all_flat=False, seed=None, occupied=None, base_yaw=0.0, attempts=4000, best_of=30):
+    """The most spread-out of `best_of` admitted random layouts for `order` (disassembly order), or None.
+    Each draw follows the generator's rules (random position, yaw, flip; >= 25 mm); the first admitted
+    draw sat at a median 32 mm closest pair, and a part sliding or falling on ate that (2026-10-19) —
+    the region is only ~24 % used, so keep the draw whose closest pair is farthest apart.
+    occupied: (N, 2) robot-xy points raised above the table in the staging view."""
     seed = int(time.time()) if seed is None else seed
+    best = None
+    for k in range(best_of):
+        L = _draw_one(order, cycle, all_flat, seed * 1000 + k, occupied, base_yaw, attempts)
+        if L is not None and (best is None or min_gap(L) > min_gap(best)):
+            best = L
+    if best is not None:
+        best['seed'], best['min_gap_mm'] = seed, round(1000 * min_gap(best), 1)
+    return best
+
+
+def _draw_one(order, cycle, all_flat, seed, occupied, base_yaw, attempts):
     rng = np.random.default_rng(seed)
     upright = None if all_flat else TIPPABLE[cycle % len(TIPPABLE)]
     occ = np.zeros((0, 2)) if occupied is None else np.asarray(occupied)

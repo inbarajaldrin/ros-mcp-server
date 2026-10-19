@@ -342,6 +342,38 @@ def place_at(sx, sy, w, home=True, turn=None):
     return 0
 
 
+def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
+    """Where to set `name` down in the staging region, carried as it lies now (stance kept): the
+    translation of its CAD outline that is farthest from base1 and every other part (>= 25 mm), with
+    the open fingers clear too. Returns the flange target (x, y) and that gap in mm, or (None, None, 0).
+    The flange carries the part: flange target = its grasp point now + the translation."""
+    from scipy.spatial.transform import Rotation as Rr
+    from spacing_check import outline, finger_outlines, base_outline, gap_mm, GRASPS, FINGER_GAP_MIN_MM
+    from staging_layout import REGION, CLEARANCE_M
+    P = np.asarray(outline(name, seen[name]))[:, :2]
+    F = finger_outlines(name, seen[name], gid, open_mm)
+    g = next(g for g in json.load(open(str(GRASPS).format(name)))['grasp_points'] if g['id'] == gid)
+    (p, q) = seen[name]
+    grip = Rr.from_quat(q).apply([g['position'][k] for k in 'xyz'])[:2] + np.asarray(p)[:2]
+    obst = [base_outline(base_pose)] + [np.asarray(outline(n, seen[n]))[:, :2] for n in seen if n != name]
+    c0 = (P.min(0) + P.max(0)) / 2
+    best = (None, None, 0.0)
+    for cx in np.arange(REGION['x'][0], REGION['x'][1] + 1e-9, step):
+        for cy in np.arange(REGION['y'][0], REGION['y'][1] + 1e-9, step):
+            t = np.array([cx, cy]) - c0
+            P2 = P + t
+            if (P2[:, 0].min() < REGION['x'][0] or P2[:, 0].max() > REGION['x'][1]
+                    or P2[:, 1].min() < REGION['y'][0] or P2[:, 1].max() > REGION['y'][1]):
+                continue
+            gap = min(gap_mm(P2, o) for o in obst)
+            if gap < 1000 * CLEARANCE_M or gap <= best[2]:
+                continue
+            if min(gap_mm(f + t, o) for f in F for o in obst) < FINGER_GAP_MIN_MM:
+                continue
+            best = (float(grip[0] + t[0]), float(grip[1] + t[1]), float(gap))
+    return best
+
+
 def plan_staging_layout(names, a):
     """--layout staging: base yaw from home (parts are set down at base yaw + wrist turn), then look
     over the staging region (depth: is it clear?) and draw a layout there. (layout|None, message)."""
@@ -412,11 +444,11 @@ def finish_staging_layout(layout, ob):
             want = np.array(p.get('land_xy') or p['place_xy'])
             return float(np.linalg.norm(np.array(seen[n][0][:2]) - want))
         mover = max(names, key=strayed)
-        if seen[mover][0][0] <= 0.40:                        # --relocate picks it from the home view
+        if True:                                             # set down again inside the staging region
             print(f"  [layout] {sorted(names)} too close: relocating {mover} (strayed "
                   f"{1000*strayed(mover):.0f} mm from its plan)", flush=True)
             ok_r, _ = run([sys.executable, '-u', str(REPO / 'ablations/disassemble.py'), '--assembly-json', 'x',
-                           '--relocate', mover, '--grasp-id', 'auto'], f'relocate {mover}', 900)
+                           '--relocate', mover, '--grasp-id', 'auto', '--spot-staging'], f'relocate {mover}', 900)
             if ok_r:
                 run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                        '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
@@ -466,6 +498,10 @@ def main():
                     help='with --relocate: shift the arm this far in world y from home (top-down, same '
                          'height) before the pick, for a part home sees badly (fingers hide the bottom '
                          'of the image); the spot is still planned from home')
+    ap.add_argument('--spot-staging', action='store_true',
+                    help='with --relocate PART --grasp-id auto: look from the staging view and set PART down '
+                         'in the staging region where its outline is farthest from every other part, stance '
+                         'kept (staging_layout.py); for a staging layout part that fell or slid too close')
     ap.add_argument('--from-staging', action='store_true',
                     help='with --relocate: the part sits in the staging region (not visible from '
                          'home) — plan the spot from home, then pick it over the clear area')
@@ -527,7 +563,9 @@ def main():
     print("[spots] footprints mm: " + ", ".join(f"{o['object_name']} {2000*e[0]:.0f}x{2000*e[1]:.0f}"
                                                 for o, e in zip(parts, extents)))
     layout = None
-    if a.to_staging:
+    if a.relocate and a.spot_staging:
+        spots, note = [(0.0, 0.0)], "staging region (spot decided after looking from the staging view)"
+    elif a.to_staging:
         spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
     elif a.layout == 'staging' and a.resume_held:
         from staging_layout import OUT
@@ -561,6 +599,12 @@ def main():
             # (2026-10-15: line_green 7 mm from base1 — its centre grasp put a finger on the base).
             from spacing_check import clear_grasp, observe_parts, PARTS
             from replay_real_assembly import observe_base_pose
+            if a.spot_staging:                              # the part is in the staging region
+                from staging_layout import STAGING_VIEW, TOP_DOWN_Q
+                ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz',
+                               *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
+                if not ok: return 1
+                time.sleep(1.5)
             seen = observe_parts(PARTS)
             ob_ = observe_base_pose('base1')
             if name not in seen or ob_ is None:
@@ -571,6 +615,12 @@ def main():
                 print(f"no grasp point of {name} leaves the open fingers room — stopping"); return 1
             from spacing_check import grasp_width_mm
             w = grasp_width_mm(name, gid) or w             # the opening THIS grasp needs (not grasp 1's)
+            if a.spot_staging:
+                sx, sy, gap = staging_spot(name, seen, ob_, gid, w)
+                if sx is None:
+                    print(f"no spot in the staging region keeps {name} 25 mm from the others — stopping"); return 1
+                print(f"[spot] {name}: staging region, flange -> ({1000*sx:.0f}, {1000*sy:.0f}) mm, "
+                      f"{gap:.0f} mm from the nearest part", flush=True)
         elif a.grasp_id is not None:
             gid = int(a.grasp_id)
         print(f"\n=== relocate {name} (grasp {gid}) -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
