@@ -396,8 +396,18 @@ def forget_verified(obj: str) -> None:
         json.dump(d, open(ASSEMBLY_STATE, 'w'), indent=1)
 
 
+VERIFY_TILT_MAX_DEG = 5.0        # a seated part cannot be tilted: a reading this tilted is a bad pose estimate
+
+
 def _not_detected(r) -> bool:
-    return r.get('detected') is False or 'not detected' in str(r.get('error', ''))
+    """No usable reading: not detected, OR a pose estimate tilted > VERIFY_TILT_MAX_DEG — seated u_brown
+    seen edge-on from the base view reads roll -9.5 / pitch 10.4 deg and 8-10 mm xy, while home reads it at
+    ~2 mm (2026-10-19: a good seat, Delta +0.21 mm, failed the check at 10.2 mm). Such readings do not
+    vote; with none usable, verify_seated takes the second look from home."""
+    if r.get('detected') is False or 'not detected' in str(r.get('error', '')):
+        return True
+    o = r.get('orientation_error_deg') or {}
+    return max(abs(float(o.get('roll') or 0)), abs(float(o.get('pitch') or 0))) > VERIFY_TILT_MAX_DEG
 
 
 def _read_part(o):
@@ -473,7 +483,7 @@ def verify_seated(objs, say, second_view=None) -> bool:
     led = _ledger(); ok_all = True; moved = False
     for o in reversed(list(objs)):        # covering parts first: their ledger time must be newer
         r = _read_part(o)
-        if _not_detected(r) and r.get('result') != 'success':
+        if _not_detected(r):
             prev = led.get(o) or {}
             occ = [c for c in OCCLUDED_BY.get(o, ()) if (led.get(c) or {}).get('verified')
                    and (led.get(c) or {}).get('t', 0) > prev.get('t', 0)]
@@ -485,12 +495,13 @@ def verify_seated(objs, say, second_view=None) -> bool:
                 moved = True
                 if second_view():
                     r = _read_part(o)
-        if r.get('result') == 'success':
+        if r.get('result') == 'success' and not _not_detected(r):
             led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
             continue
         if _not_detected(r):
-            say(f"\n!!! [verify] {o}: not detected and not verified earlier — cannot confirm it is seated")
+            say(f"\n!!! [verify] {o}: not detected (or only tilted, unusable pose estimates) and not verified "
+                f"earlier — cannot confirm it is seated")
         else:
             say(f"\n!!! [verify] {o}: NOT in its assembly pose — xy error "
                 f"{1000 * float(r.get('position_error_judged_m') or 0):.1f} mm, orientation {r.get('orientation_error_deg')}")
