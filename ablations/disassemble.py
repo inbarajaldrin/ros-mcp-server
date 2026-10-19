@@ -384,7 +384,7 @@ def finish_staging_layout(layout, ob):
         if n not in seen:
             bad.append(f"{n} not seen from the staging view"); continue
         flat = is_flat(seen[n][1])
-        p['observed'] = dict(xyz=list(map(float, seen[n][0])), quat=list(map(float, seen[n][1])), flat=flat)
+        p['observed'] = dict(xyz=list(map(float, seen[n][0])), quat=list(map(float, seen[n][1])), flat=bool(flat))
         if p.get('tip') and not flat:
             print(f"  [layout] {n}: did NOT tip — stays upright (stroke stopped: "
                   f"{(p.get('tip_result') or {}).get('stopped')})", flush=True)
@@ -394,9 +394,10 @@ def finish_staging_layout(layout, ob):
     rep['unseen'] = [n for n in PARTS if n not in seen]
     print(f"[spacing] {json.dumps(rep)}", flush=True)
     layout['spacing_ok'] = bool(ok_sp)
-    json.dump(layout, open(OUT, 'w'), indent=1)
+    plain = lambda o: o.item() if hasattr(o, 'item') else (o.tolist() if hasattr(o, 'tolist') else str(o))
+    json.dump(layout, open(OUT, 'w'), indent=1, default=plain)        # numpy bools/floats in the record
     with open(OUT.with_name('staging_layouts.jsonl'), 'a') as f:
-        f.write(json.dumps(dict(t=time.time(), **layout)) + '\n')
+        f.write(json.dumps(dict(t=time.time(), **layout), default=plain) + '\n')
     if bad or not ok_sp:
         print("\n!!! staging layout check failed: " + "; ".join(bad + ([] if ok_sp else ['parts too close'])))
         return 1
