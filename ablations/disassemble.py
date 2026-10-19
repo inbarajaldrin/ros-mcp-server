@@ -402,6 +402,36 @@ def finish_staging_layout(layout, ob):
     ok_sp, rep = spacing(seen, ob)
     rep['unseen'] = [n for n in PARTS if n not in seen]
     print(f"[spacing] {json.dumps(rep)}", flush=True)
+    if not ok_sp and not bad and rep.get('too_close'):
+        # A part fell or slid on after release/tip (u_brown set down upright ended flat 90 mm away, 16 mm
+        # from yellow, 2026-10-19): move the part that strayed farthest from its plan with --relocate
+        # (clearest grasp at its own opening, free spot seen from home), then check again. Once.
+        names = {x for pair in rep['too_close'] for x in pair[:2] if x != 'base1'}
+        def strayed(n):
+            p = next(q for q in layout['parts'] if q['name'] == n)
+            want = np.array(p.get('land_xy') or p['place_xy'])
+            return float(np.linalg.norm(np.array(seen[n][0][:2]) - want))
+        mover = max(names, key=strayed)
+        if seen[mover][0][0] <= 0.40:                        # --relocate picks it from the home view
+            print(f"  [layout] {sorted(names)} too close: relocating {mover} (strayed "
+                  f"{1000*strayed(mover):.0f} mm from its plan)", flush=True)
+            ok_r, _ = run([sys.executable, '-u', str(REPO / 'ablations/disassemble.py'), '--assembly-json', 'x',
+                           '--relocate', mover, '--grasp-id', 'auto'], f'relocate {mover}', 900)
+            if ok_r:
+                run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
+                       '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
+                time.sleep(1.5)
+                seen = observe_parts(PARTS)
+                miss = [n for n in PARTS if n not in seen]
+                if miss:
+                    run(py('primitives.move_home', '--mode', 'real'), 'home (second look)', 60)
+                    time.sleep(1.5)
+                    seen.update(observe_parts(miss))
+                ok_sp, rep = spacing(seen, ob)
+                rep['unseen'] = [n for n in PARTS if n not in seen]
+                bad = [f"{n} not seen" for n in rep['unseen']]
+                layout['relocated'] = mover
+                print(f"[spacing] after relocating {mover}: {json.dumps(rep)}", flush=True)
     layout['spacing_ok'] = bool(ok_sp)
     plain = lambda o: o.item() if hasattr(o, 'item') else (o.tolist() if hasattr(o, 'tolist') else str(o))
     json.dump(layout, open(OUT, 'w'), indent=1, default=plain)        # numpy bools/floats in the record
