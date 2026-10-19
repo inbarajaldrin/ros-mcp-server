@@ -69,7 +69,11 @@ def main():
     ap.add_argument('--keep-orientation', action='store_true', help='keep the current flange orientation')
     ap.add_argument('--quat', type=float, nargs=4, default=None, help='flange orientation qx qy qz qw')
     ap.add_argument('--min-z', type=float, default=SAFE_HEIGHT - 0.10, help='refuse targets below this flange z')
-    ap.add_argument('--max-joint-step', type=float, default=1.5)
+    ap.add_argument('--max-joint-step', type=float, default=1.5,
+                    help='refuse if any of the five arm joints (shoulder..wrist_2) would move more than this (rad)')
+    ap.add_argument('--max-wrist3-step', type=float, default=3.2,
+                    help='the same cap for wrist_3 alone: it only spins the tool about its axis, so a turn up to '
+                         '~180 deg is harmless (an 89 deg wrist turn hit the 1.5 rad arm cap, 2026-10-19)')
     ap.add_argument('--min-radius', type=float, default=0.25)
     ap.add_argument('--max-force', type=float, default=None, help='stop on a sustained |dF| above this (N)')
     ap.add_argument('--min-duration', type=float, default=0.0, help='slow the move to at least this (s)')
@@ -109,9 +113,12 @@ def main():
         Tend = forward_kinematics(dh_params, wps[-1])
         if np.linalg.norm(Tend[:3, 3] - target) > 0.002:
             out["error"] = f"IK end error {1000*np.linalg.norm(Tend[:3, 3]-target):.1f} mm"; result(out); return 1
-        step = float(np.max(np.abs(np.array(wps[-1]) - q0)))
-        if step > a.max_joint_step:
-            out["error"] = f"joint step {step:.2f} rad > {a.max_joint_step}"; result(out); return 1
+        dq = np.abs(np.array(wps[-1]) - q0)
+        if float(np.max(dq[:5])) > a.max_joint_step:                      # arm swing: the 2026-10-07 lesson
+            out["error"] = f"joint step {float(np.max(dq[:5])):.2f} rad > {a.max_joint_step}"; result(out); return 1
+        if float(dq[5]) > a.max_wrist3_step:
+            out["error"] = f"wrist_3 step {float(dq[5]):.2f} rad > {a.max_wrist3_step}"; result(out); return 1
+        step = float(np.max(dq))                                           # the duration still follows the largest joint
         dur = max(compute_duration(joint_distance=step, cartesian_distance=dist, profile='s_curve'), a.min_duration)
         F0 = None
         if a.max_force is not None:

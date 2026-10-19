@@ -1206,6 +1206,35 @@ def camera_frame_age(timeout_s: float = 3.0):
     return (time.time() - st['t']) if 't' in st else None
 
 
+ROTATE_SKIP_DEG = 5.0
+
+
+def already_at_target(obj, held_quat, base_name) -> bool:
+    """True when the held part's chained orientation is within ROTATE_SKIP_DEG of a fold-symmetry
+    equivalent of its assembly target (what rotate_object would compute and then not move)."""
+    if held_quat is None:
+        return False
+    try:
+        from scipy.spatial.transform import Rotation as _R
+        from primitives.shared.config import DEFAULT_BASE_ORIENTATION
+        from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+        from utils.data_path_finder import (find_assembly_json_by_base_name, get_assembly_data_dir,
+                                            get_symmetry_dir)
+        from compliant_insertion_studio.planning.sequence_planner import quat_to_matrix
+        jf = find_assembly_json_by_base_name(base_name or 'base1', str(get_assembly_data_dir()))
+        target = next(c for c in json.load(open(jf))['components'] if c['name'] == obj)['rotation']['quaternion']
+        R_target = quat_to_matrix(DEFAULT_BASE_ORIENTATION) @ quat_to_matrix([target[k] for k in 'xyzw'])
+        R_held = _R.from_quat(held_quat).as_matrix()
+        fold = load_symmetry_data(obj, str(get_symmetry_dir()))
+        for R_eq in equivalent_orientations(R_target, fold):
+            ang = np.degrees(_R.from_matrix(R_held.T @ np.asarray(R_eq)).magnitude())
+            if ang < ROTATE_SKIP_DEG:
+                return True
+    except Exception as e:
+        print(f"  [rotate-skip] check failed ({e}) -> rotating as recorded")
+    return False
+
+
 def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                    log_fh=None, snap_fh=None) -> bool:
     obj = entry['object_name']
@@ -1243,6 +1272,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
             argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
+        if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
+            # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation, and
+            # rotate_object then ran a 2.5 s "trajectory" of 0.01 rad plus its startup (every
+            # 2-pass part, 2026-10-19). Nothing to do: pass the chained orientation through.
+            say(f"  [{step_idx}] rotate_object skipped: {obj} already at its target orientation (fold-equivalent, "
+                f"< {ROTATE_SKIP_DEG:g} deg)")
+            return {'result': 'success', 'skipped': True,
+                    'final_object_orientation': {'quat': dict(zip('xyzw', state.held_quat))}}
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
         result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
@@ -1744,9 +1781,32 @@ def main() -> int:
                 print(msg, flush=True)
                 if log_fh: log_fh.write(msg + "\n")
                 if not ok_sp:
-                    print("\n!!! parts too close for the open gripper — stopping before any pick "
-                          "(move the part named above, or relocate it with disassemble.py --relocate)")
-                    return 1
+                    # A part too close is moved, not a reason to stop (operator 2026-10-19): the
+                    # disassembly's --relocate (clearest grasp at its own opening; a spot in the staging
+                    # region when the part is there, else a free spot seen from home), then re-check once.
+                    pair = (rep.get('too_close') or [[None, None]])[0]
+                    cands = [x for x in pair[:2] if x and x != 'base1' and x in seen]
+                    in_staging = [x for x in cands if seen[x][0][0] >= 0.19 and seen[x][0][1] <= -0.22]
+                    mover = (in_staging or cands or [None])[0]
+                    if mover is None:
+                        print("\n!!! parts too close for the open gripper and none of the pair can be moved — stopping")
+                        return 1
+                    msg = f"  [spacing] {pair[0]} / {pair[1]} too close -> relocating {mover}"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
+                    r_ = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', 'x',
+                                         '--relocate', mover, '--grasp-id', 'auto'] + (['--spot-staging'] if in_staging else []),
+                                        label=f'relocate {mover}', timeout_s=900, log_fh=log_fh)
+                    if r_.get('result') == 'failure':
+                        print(f"\n!!! relocating {mover} failed — stopping"); return 1
+                    seen = _obs_parts(_PARTS)
+                    ok_sp, rep = _spacing(seen, args.observed_base or ob)
+                    rep['unseen'] = [n for n in _PARTS if n not in seen]
+                    msg = f"  [spacing] after relocating {mover}: {json.dumps(rep)}"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
+                    if not ok_sp:
+                        print("\n!!! parts still too close after one relocation — stopping"); return 1
 
         completed: list[str] = []
         failed: Optional[str] = None

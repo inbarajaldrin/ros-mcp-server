@@ -347,8 +347,10 @@ def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
     p0 = tp['p'].pose.position
     def turned(t):
         return [f"{v:.6f}" for v in (R.from_euler('z', t) * R.from_quat(SEAT_EE_QUAT)).as_quat()]
-    # Even a pure 89 deg turn in place is 1.56 rad > 1.5 (yellow, 2026-10-19): over 60 deg, in two halves.
-    stages = [] if turn is None else ([turn / 2, turn] if abs(turn) > np.radians(60) else [turn])
+    # One turn in place (move_cartesian caps wrist_3 separately since 2026-10-19; before, an 89 deg turn
+    # hit the 1.5 rad arm cap and went in two halves). No turn back after the release: the next move
+    # that needs yaw 0 (the next part's hover above its seat) turns while it travels at safe height.
+    stages = [] if turn is None else [turn]
     turn_step = [(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{p0.x:.4f}", f"{p0.y:.4f}", f"{z:.4f}",
                      '--quat', *turned(t)), f'turn the wrist {np.degrees(t):+.0f} deg in place', 90) for t in stages]
     steps = turn_step + [
@@ -365,10 +367,7 @@ def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
          f'land (slow, until {LAND_FORCE_N:g} N)', 120)]) + [
         (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
         (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
-    ] + [(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{SAFE_HEIGHT:.4f}",
-             '--quat', *turned(t)), f'turn the wrist back to {np.degrees(t):+.0f} deg in place', 90)
-         for t in stages[:-1][::-1] + [0.0] if turn is not None] \
-      + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
+    ] + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
     for argv, label, t in steps:
         ok, res = run(argv, label, t)
         if not ok and label.startswith('land') and res.get('contact') and res.get('error', '').startswith('contact'):
@@ -435,6 +434,18 @@ def plan_staging_layout(names, a):
     return L, "\n".join(lines)
 
 
+def observe_patiently(names, max_s):
+    """observe_parts for `names`, repeated until each is seen or max_s is up (a localizer that is
+    silent or misreading for seconds is not a missing part)."""
+    from spacing_check import observe_parts
+    out, end = {}, time.time() + max_s
+    want = list(names)
+    while want and time.time() < end:
+        out.update(observe_parts(want))
+        want = [n for n in want if n not in out]
+    return out
+
+
 def finish_staging_layout(layout, ob):
     """Look over the staging region: every part seen, tipped ones flat, spacing ok (fail closed).
     A part that did not tip stays upright (the assembly does it in one pass) — reported, not fatal.
@@ -449,12 +460,27 @@ def finish_staging_layout(layout, ob):
     time.sleep(1.5)
     seen = observe_parts(PARTS)
     missing = [p['name'] for p in layout['parts'] if p['name'] not in seen]
-    if missing:                                            # second look: home sees x <= ~0.42
-        print(f"  [layout] not seen from the staging view: {missing} -> second look from home", flush=True)
+    if missing:
+        # Yellow reads below the table for 8-15 s after arm motion (rejected as a misread -> "not
+        # seen"): wait that out, as the pick does, before moving anywhere.
+        print(f"  [layout] not seen from the staging view: {missing} -> waiting out a misread streak", flush=True)
+        seen.update(observe_patiently(missing, 30.0))
+        missing = [n for n in missing if n not in seen]
+    for n in list(missing):                                # we set it down: look straight above that spot
+        p = next(q for q in layout['parts'] if q['name'] == n)
+        fx, fy = p['flange_xy']
+        print(f"  [layout] {n} still not seen -> looking from above its spot ({1000*fx:.0f}, {1000*fy:.0f}) mm", flush=True)
+        ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{fx:.4f}", f"{fy:.4f}",
+                       f"{STAGING_VIEW[2]:.4f}", '--quat', *map(str, TOP_DOWN_Q)), f'look above {n}', 90)
+        if ok:
+            seen.update(observe_patiently([n], 20.0))
+            if n in seen:
+                missing.remove(n)
+    if missing:                                            # last: home sees x <= ~0.42
+        print(f"  [layout] still not seen: {missing} -> look from home", flush=True)
         ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home (second look)', 60)
         if ok:
-            time.sleep(1.5)
-            seen.update(observe_parts(missing))
+            seen.update(observe_patiently(missing, 20.0))
     bad = []
     for p in layout['parts']:
         n = p['name']
