@@ -173,6 +173,45 @@ What changed 10-15 → 10-18, and why (each fixed a stop seen on the cell):
 - **Cell:** enp1s0 is static (DHCP cycling dropped the arm link); after a link event restart the driver
   with `close_robot.sh` + `stack_up.sh`.
 
+**2026-10-19 — generated start layouts (operator: "tip the parts flat, leave one tippable upright").**
+The disassembly used to leave every part standing as seated, so every assembly was the easy 1-pass
+case. `--layout staging` (fmb1_loop / disassemble) follows the IDEA of the operator's sim task
+`fmb1_assemble_ur5e_rg2_flat_gen` (dual-a4500 `pa-footprint/plan-anything/data/tasks/...`; not its numbers —
+the sim robot sits at table height): parts flat on a large face, yaw/flip free, in the staging
+rectangle, ≥ 25 mm apart; one tippable part per cycle stays upright (u_brown → u_orange → yellow), or
+`--all-flat`.
+
+- **Staging rectangle** (sim → base_link → UR base): x 0.19…0.51, y −0.54…−0.22 — the sim's "reorient"
+  rectangle lands on our clear area (−0.32, −0.50), which confirms the mapping. Clear (depth), reachable
+  top-down (IK), seen from `STAGING_VIEW` (0.35, −0.38, 0.56) — **not from home** (home sees x ≤ ~0.42).
+  The disassembly looks there first (depth: nothing raised may sit in a part's footprint or tip sweep).
+- **Tip** (`ablations/tip_part.py`, operator's method): closed fingertips strike the part's TOP at an angle,
+  ≤ 5 N, like the line_green nudge — lowered beside the part (guarded), one diagonal stroke meeting the near
+  face ~16 mm below the top, ending 45 mm above the table (never touches the fallen part). U parts are struck
+  on a leg (they stand open-top), yellow on its solid top centre. `--observe` tips a part where it stands.
+- **Bugs found on the arm, fixed:** the gripper holds the U parts by a LEG, 25.5 mm off centre — plan by
+  the part's centre, send the flange to centre + grasp offset (aiming by the flange put the strike past the
+  part); a stroke starting above the top only clipped yellow's edge (5.9 N, no tip); wrist turn + carry in
+  one move, and even a pure 89° turn in place, exceed move_cartesian's 1.5 rad joint step — turns over 60°
+  go in two halves, in place, and back the same way; the stroke's wrist turn is ≤ 45°.
+- **Assembly:** parts not seen from home are planned (`--derive-sequence`) and picked from the staging view.
+  Flat U parts / yellow take the 2-pass path (place in the clear area, regrasp, insert).
+- **Results 10-19 — NOT yet 3 clean staging cycles in a row.** Every staging ASSEMBLY passed 4/4 hands-off
+  (8 of 8; flat u_orange/u_brown/yellow on the 2-pass path, parts out of the home view picked from the
+  staging view). Disassembly stops, each fixed and committed: the 89° wrist turn (`8ac1c91`, finished with
+  `--resume-held`), a JSON record bug (`d049d96`), a tipped yellow sliding 13 mm on (`0a35c74`, landing
+  margins), line_green hidden by the fingers in the staging view (`9dd51f5`, view moved). Best run: 2 clean
+  cycles in a row (`ablations/logs/fmb1_loop.jsonl`, 10-19 13:43–14:25), then the third disassembly's check
+  stopped: **u_brown, set down UPRIGHT, was found lying flat 90 mm from its spot, 16 mm from yellow** — it
+  fell after release; cause not found (no failed step; the disassembly log does not keep move_down output).
+- **Do not auto-relocate a flat part next to another.** A try (`disassemble.py --relocate u_brown --grasp-id
+  auto`, reverted) came down onto a part → PROTECTIVE_STOP (recovered with `recover_pstop.sh`, nothing
+  damaged). Suspect: `spacing_check.clear_grasp` finger outlines assume the seated stance, not a flat part —
+  unverified. And `move_to_grasp`'s force baseline was re-taken mid-contact (~10 N), so its contact stop
+  never fired. Both open.
+- Verify from the base view: seated u_brown reads tilted ~10° (edge-on markers) → a reading tilted > 5° is
+  unusable; the second look from home decides (`1fe84d2`).
+
 ---
 
 ## How to localize yourself in the repo (5 minutes)
@@ -248,7 +287,14 @@ Everything below is a script; nothing needs inline python. All of it from the re
 # The loop: disassemble -> assemble, N times; fails closed at the first problem
 python3 -u ablations/fmb1_loop.py --cycles 3 --start-with disassemble   # parts seated now
 python3 -u ablations/fmb1_loop.py --cycles 3 --start-with assemble      # parts on the table
+python3 -u ablations/fmb1_loop.py --cycles 3 --layout staging [--all-flat]   # generated layouts, tipped flat
 #   per-cycle record: ablations/logs/fmb1_loop.jsonl; logs: ablations/logs/loop_<ts>_*.log
+#   staging layouts: ablations/logs/staging_layout.json (last) + staging_layouts.jsonl (all)
+
+# Staging layout pieces (all from the repo root)
+python3 -u ablations/staging_layout.py --look [--cycle N] [--seed S]   # look over the region + draw one (no part motion)
+python3 -u ablations/tip_part.py PART --observe                       # tip a standing part where it is
+python3 -u ablations/disassemble.py --assembly-json x --layout staging --resume-held PART   # finish a stopped one
 
 # One part (the assembly JSON every replay takes)
 J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
