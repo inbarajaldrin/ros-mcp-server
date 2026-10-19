@@ -606,7 +606,7 @@ class DirectObjectMove(Node):
         # Ticked every timer period (0.5 s). 2026-10-07: 3 (= 1 s) gave up on a part sitting
         # in plain view at the clear area — the localizer runs at ~2.5-3 Hz, so 1 s right
         # after the arm stops is only 2-3 frames. 10 = 5 s.
-        self.max_grasp_wait_attempts = 10
+        self.max_grasp_wait_attempts = 40   # 20 s: the localizer re-acquires a part 8-15 s after an arm move (yellow from the staging view, 2026-10-19)
 
         # Step 2 upward search when object not detected
         self.upward_search_in_progress = False  # Flag to track if we're doing upward search
