@@ -305,11 +305,36 @@ def observe_base(base_name='base1'):
     return ob_d if ob_d is not None else ob
 
 
-def place_at(sx, sy, w, home=True, turn=None):
+LAND_SLOW_ABOVE_M = 0.015        # last stretch before the expected touch: slow, guarded
+LAND_SPEED_M_S = 0.004           # ~ the nudge's speed, where a 4 N guard stopped at 4.0-4.1 N
+LAND_FORCE_N = 5.0               # operator's limit for forces on parts
+
+
+def contact_flange_z(name, gid, quat_xyzw, grasp_tool_offset_m):
+    """Flange z at which the held part's lowest point touches the table, carried in the stance
+    `quat_xyzw` (CAD mesh + the grasp point, both in the object frame)."""
+    from grasp_depth import load_mesh
+    from spacing_check import GRASPS
+    from primitives.shared.config import TABLE_HEIGHT
+    V, _ = load_mesh(name)
+    g = next(g for g in json.load(open(str(GRASPS).format(name)))['grasp_points'] if g['id'] == gid)
+    Rq = R.from_quat(quat_xyzw)
+    below = Rq.apply([g['position'][k] for k in 'xyz'])[2] - Rq.apply(V)[:, 2].min()
+    return TABLE_HEIGHT + below + grasp_tool_offset_m
+
+
+def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
     """Carry the held part at the current height (orientation kept, or turned `turn` rad about
-    vertical from the seated top-down grasp) above (sx, sy), lower it onto the table (glitch-proof
-    contact), release, lift; optionally go home."""
-    from primitives.shared.config import SAFE_HEIGHT
+    vertical from the seated top-down grasp) above (sx, sy), lower it onto the table, release,
+    lift; optionally go home.
+
+    contact_z (flange z where the part should touch, contact_flange_z): the descent then has two
+    stages — move_down (its own guard) to LAND_SLOW_ABOVE_M above it, then a slow guarded
+    move_cartesian to the to-table floor that stops at LAND_FORCE_N. move_down alone landed parts
+    at 17-44 N (its 100 ms wrench median lags while the s-curve descent keeps going; measured
+    2026-10-19) — hard enough to bounce an upright part over (u_brown fell after release)."""
+    from primitives.shared.config import SAFE_HEIGHT, TABLE_HEIGHT, RG2_TIP_CLOSED_M
+    PLACE_TIP_CLEARANCE_M = 0.001          # move_down --to-table's floor: closed tips 1 mm above the table
     import rclpy
     from geometry_msgs.msg import PoseStamped
     rclpy.init(); nn = rclpy.create_node('dis_tcp'); tp = {}
@@ -329,7 +354,15 @@ def place_at(sx, sy, w, home=True, turn=None):
     steps = turn_step + [
         (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
             '--keep-orientation'), 'carry to spot', 90),
-        (py('primitives.core.move_down', '--mode', 'real', '--to-table'), 'lower to table (contact)', 120),
+    ] + ([(py('primitives.core.move_down', '--mode', 'real', '--to-table'), 'lower to table (contact)', 120)]
+         if contact_z is None else [
+        (py('primitives.core.move_down', '--mode', 'real', '--to-table', '--height', f"{contact_z + LAND_SLOW_ABOVE_M:.4f}"),
+         f'lower to {1000*LAND_SLOW_ABOVE_M:.0f} mm above the touch', 120),
+        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}",
+            f"{TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M:.4f}", '--keep-orientation',
+            '--min-z', '0.15', '--max-force', f"{LAND_FORCE_N:g}",
+            '--min-duration', f"{(contact_z + LAND_SLOW_ABOVE_M - (TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M)) / LAND_SPEED_M_S:.1f}"),
+         f'land (slow, until {LAND_FORCE_N:g} N)', 120)]) + [
         (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
         (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
     ] + [(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{SAFE_HEIGHT:.4f}",
@@ -337,7 +370,10 @@ def place_at(sx, sy, w, home=True, turn=None):
          for t in stages[:-1][::-1] + [0.0] if turn is not None] \
       + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
     for argv, label, t in steps:
-        ok, _ = run(argv, label, t)
+        ok, res = run(argv, label, t)
+        if not ok and label.startswith('land') and res.get('contact') and res.get('error', '').startswith('contact'):
+            print(f"    touched down: {res.get('error')}", flush=True)
+            ok = True
         if not ok: return 1
     return 0
 
@@ -630,14 +666,21 @@ def main():
             pick.append((py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{_H[0]:.4f}",
                             f"{_H[1] + a.pick_view_dy:.4f}", f"{_H[2]:.4f}", '--keep-orientation'),
                          'shift the view', 60))
+        depth, quat = None, None
         for argv, label, t in pick + [
             (py('primitives.move_to_grasp', '--object-name', name, '--grasp-id', str(gid), '--mode', 'real',
                 '--pre-grasp-width', f"{w:g}", '--pad-center'), 'move_to_grasp', 180),
             (py('primitives.control_gripper', 'close', '--mode', 'real'), 'close', 30),
             (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift', 90)]:
-            ok, _ = run(argv, label, t)
+            ok, res = run(argv, label, t)
             if not ok: return 1
-        return place_at(sx, sy, w)
+            if label == 'move_to_grasp':
+                depth = res.get('grasp_tool_offset_m')
+                quat = (res.get('current_object_orientation') or {}).get('quat')
+        cz = None
+        if depth and quat:
+            cz = contact_flange_z(name, gid, [quat[k] for k in 'xyzw'] if isinstance(quat, dict) else quat, float(depth))
+        return place_at(sx, sy, w, contact_z=cz)
     ob = observe_base() if not a.dry_run and not a.resume_held else None
     if not a.dry_run and not a.resume_held and ob is None:
         print("base1 not observed — stopping"); return 1
@@ -724,7 +767,9 @@ def main():
         forget_seat_offset(name)                            # out of the base: its seat offset is gone
         forget_verified(name)                               # ...and so is its verified-seated record
         lp = layout['parts'][i] if layout else None
-        if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None) != 0:
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        cz = contact_flange_z(name, gid, load_seat_pose_in_base('base1', name)[1], grasp_offset_for(name))
+        if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None, contact_z=cz) != 0:
             return 1
         if lp and lp.get('tip'):
             from tip_part import tip
