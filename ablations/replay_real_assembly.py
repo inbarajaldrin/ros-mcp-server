@@ -1273,13 +1273,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
         if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
-            # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation, and
-            # rotate_object then ran a 2.5 s "trajectory" of 0.01 rad plus its startup (every
-            # 2-pass part, 2026-10-19). Nothing to do: pass the chained orientation through.
-            say(f"  [{step_idx}] rotate_object skipped: {obj} already at its target orientation (fold-equivalent, "
-                f"< {ROTATE_SKIP_DEG:g} deg)")
-            return {'result': 'success', 'skipped': True,
-                    'final_object_orientation': {'quat': dict(zip('xyzw', state.held_quat))}}
+            # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation and
+            # rotate_object moves 0.01 rad. It is NOT skippable, though (tried 2026-10-19: two rim
+            # stalls in a row, 51 mm off): its OUTPUT quaternion is the snapped fold branch the
+            # insert's CAD chain (predict_tcp_at_seat -> grasp offset direction) was validated with;
+            # the camera's raw quaternion is the other fold branch of this symmetric part and
+            # mirrors the leg grasp. Run it; only note the wasted step.
+            say(f"  [{step_idx}] rotate_object: {obj} already at a fold-equivalent of its target "
+                f"(< {ROTATE_SKIP_DEG:g} deg) - running it for its snapped orientation")
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
         result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
