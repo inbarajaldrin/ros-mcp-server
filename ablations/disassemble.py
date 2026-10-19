@@ -320,19 +320,21 @@ def place_at(sx, sy, w, home=True, turn=None):
     # A wrist turn is made in place first, then the carry keeps it: turn + carry in one move went
     # over move_cartesian's 1.5 rad joint-step limit (u_brown, -78 deg, 2026-10-19).
     p0 = tp['p'].pose.position
-    turn_step = ([] if turn is None else [
-        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{p0.x:.4f}", f"{p0.y:.4f}", f"{z:.4f}",
-            '--quat', *[f"{v:.6f}" for v in (R.from_euler('z', turn) * R.from_quat(SEAT_EE_QUAT)).as_quat()]),
-         f'turn the wrist {np.degrees(turn):+.0f} deg in place', 90)])
+    def turned(t):
+        return [f"{v:.6f}" for v in (R.from_euler('z', t) * R.from_quat(SEAT_EE_QUAT)).as_quat()]
+    # Even a pure 89 deg turn in place is 1.56 rad > 1.5 (yellow, 2026-10-19): over 60 deg, in two halves.
+    stages = [] if turn is None else ([turn / 2, turn] if abs(turn) > np.radians(60) else [turn])
+    turn_step = [(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{p0.x:.4f}", f"{p0.y:.4f}", f"{z:.4f}",
+                     '--quat', *turned(t)), f'turn the wrist {np.degrees(t):+.0f} deg in place', 90) for t in stages]
     steps = turn_step + [
         (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{z:.4f}",
             '--keep-orientation'), 'carry to spot', 90),
         (py('primitives.core.move_down', '--mode', 'real', '--to-table'), 'lower to table (contact)', 120),
         (py('primitives.control_gripper', f"{w + 6:g}", '--mode', 'real'), 'release', 30),
         (py('primitives.move_to_safe_height', '--mode', 'real'), 'lift clear', 90),
-    ] + ([] if turn is None else [            # turn back in place: the next move then stays under 1.5 rad
-        (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{SAFE_HEIGHT:.4f}",
-            '--quat', *map(str, SEAT_EE_QUAT)), 'turn the wrist back in place', 90)]) \
+    ] + [(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{sx:.4f}", f"{sy:.4f}", f"{SAFE_HEIGHT:.4f}",
+             '--quat', *turned(t)), f'turn the wrist back to {np.degrees(t):+.0f} deg in place', 90)
+         for t in stages[:-1][::-1] + [0.0] if turn is not None] \
       + ([(py('primitives.move_home', '--mode', 'real'), 'home', 60)] if home else [])
     for argv, label, t in steps:
         ok, _ = run(argv, label, t)
@@ -440,6 +442,10 @@ def main():
     ap.add_argument('--cycle', type=int, default=0, help='with --layout staging: picks the upright part')
     ap.add_argument('--all-flat', action='store_true', help='with --layout staging: tip all three')
     ap.add_argument('--seed', type=int, default=None, help='with --layout staging: layout draw seed')
+    ap.add_argument('--resume-held', default=None, metavar='PART',
+                    help='with --layout staging: a run stopped while carrying PART (pulled out, at safe '
+                         'height): place it as the saved layout (staging_layout.json) says, then take the '
+                         'remaining parts out as planned')
     a = ap.parse_args()
     if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
         os.nice(5 - os.nice(0))
@@ -468,7 +474,9 @@ def main():
     sel = a.relocate or a.only
     parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
     from primitives.shared.config import DEFAULT_BASE_POSITION
-    if not a.dry_run:
+    if a.resume_held and not verify_held(a.resume_held):
+        print(f"verify_grasp: {a.resume_held} not held — not resuming"); return 1
+    if not a.dry_run and not a.resume_held:                # (opening would drop the held part)
         ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
         if not ok: return 1
         ok, _ = run(py('primitives.control_gripper', 'open', '--mode', 'real'), 'open', 30)
@@ -484,6 +492,12 @@ def main():
     layout = None
     if a.to_staging:
         spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
+    elif a.layout == 'staging' and a.resume_held:
+        from staging_layout import OUT
+        layout = json.load(open(OUT))
+        if [p['name'] for p in layout['parts']] != [o['object_name'] for o in parts]:
+            print(f"saved layout parts {[p['name'] for p in layout['parts']]} do not match — stopping"); return 1
+        spots, note = [tuple(p['flange_xy']) for p in layout['parts']], f"saved staging layout seed {layout['seed']}"
     elif a.layout == 'staging' and not a.dry_run and not a.relocate:
         layout, msg = plan_staging_layout([o['object_name'] for o in parts], a)
         print(msg, flush=True)
@@ -535,8 +549,8 @@ def main():
             ok, _ = run(argv, label, t)
             if not ok: return 1
         return place_at(sx, sy, w)
-    ob = observe_base() if not a.dry_run else None
-    if not a.dry_run and ob is None:
+    ob = observe_base() if not a.dry_run and not a.resume_held else None
+    if not a.dry_run and not a.resume_held and ob is None:
         print("base1 not observed — stopping"); return 1
     if a.dry_run:
         sys.path.insert(0, str(REPO / 'ablations'))
@@ -573,10 +587,19 @@ def main():
         for o, s in zip(parts, spots):
             print(f"  {o['object_name']}: grasp {o['grasp_id']} width {o['gripper_width_mm']} -> spot {np.round(s, 3).tolist()}")
         return 0
+    start = [o['object_name'] for o in parts].index(a.resume_held) if a.resume_held else 0
     for i, (o, (sx, sy)) in enumerate(zip(parts, spots)):
         name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
-        print(f"\n=== {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")
-        if i > 0:
+        if i < start:
+            continue                                         # out already (resumed run)
+        print(f"\n=== {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm" + (' (held: resume)' if i == start and a.resume_held else ''))
+        if i == start and a.resume_held:
+            pass                                             # carried already: straight to placing
+        elif ob is None:
+            ob = observe_base()
+            if ob is None:
+                print("base1 not observed — stopping"); return 1
+        elif i > 0:
             # The arm rides a 7th-axis slider: each pull-out can creep the carriage, so the base
             # moves in the robot's frame. Read it again before every seat grasp (see
             # replay_real_assembly.reread_base).
@@ -585,10 +608,11 @@ def main():
                 print("base1 not observed — stopping"); return 1
             print(f"[base] moved ({1000*(ob[0][0]-prev[0][0]):+.1f}, {1000*(ob[0][1]-prev[0][1]):+.1f}) mm "
                   f"since the last read", flush=True)
-        tcp = seat_grasp(name, gid, ob)
-        print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
+        tcp = seat_grasp(name, gid, ob) if not (i == start and a.resume_held) else None
+        if tcp is not None:
+            print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
         q = [str(v) for v in SEAT_EE_QUAT]
-        steps = [
+        steps = [] if tcp is None else [
             (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
                 f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q), 'hover above the seated grasp', 60),
             (py('primitives.control_gripper', f"{w:g}", '--mode', 'real'), 'open to release width', 30),
@@ -623,6 +647,8 @@ def main():
     if a.to_staging:                                       # stay over the clear area: the regrasp sees it
         return 0
     if layout:
+        if ob is None:
+            ob = observe_base()
         return finish_staging_layout(layout, ob)
     ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
     if not ok:
