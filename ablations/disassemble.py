@@ -539,6 +539,8 @@ def main():
             print(f"[grasp] {name}: finger clearance per grasp id (mm) {rep} -> {gid}", flush=True)
             if gid is None:
                 print(f"no grasp point of {name} leaves the open fingers room — stopping"); return 1
+            from spacing_check import grasp_width_mm
+            w = grasp_width_mm(name, gid) or w             # the opening THIS grasp needs (not grasp 1's)
         elif a.grasp_id is not None:
             gid = int(a.grasp_id)
         print(f"\n=== relocate {name} (grasp {gid}) -> ({1000*sx:.0f}, {1000*sy:.0f}) mm")

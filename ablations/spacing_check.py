@@ -187,18 +187,33 @@ def finger_outlines(name, pose, gid, open_mm):
     return out
 
 
-def clear_grasp(name, pose, base_pose, others, open_mm, base='base1'):
-    """First grasp id of `name` (centre first) whose open fingers stand FINGER_GAP_MIN_MM clear of
-    the base and of the other parts' outlines; (gid, report). gid None if none is clear."""
+def grasp_width_mm(name, gid):
+    """Opening grasp `gid` needs, closing along the part's x axis — move_to_grasp turns the wrist to
+    the part's own yaw, so the fingers close along object x (2026-10-19, every logged pick). From the
+    annotator's grasp_validity; None if the grasp is not valid along x. u_brown: 1 and 3 (legs) 35 mm,
+    2 (the 70 mm bridge) 84 mm."""
+    g = next(g for g in json.load(open(str(GRASPS).format(name)))['grasp_points'] if g['id'] == gid)
+    return (g.get('grasp_validity') or {}).get('x_axis_gripper_width_mm')
+
+
+def clear_grasp(name, pose, base_pose, others, open_mm=None, base='base1'):
+    """The grasp id of `name` whose open fingers stand farthest clear of the base and the other
+    parts' outlines (>= FINGER_GAP_MIN_MM), each at the opening THAT grasp needs (grasp_width_mm);
+    (gid, report). gid None if none is clear. 2026-10-19: every grasp was scored at the first grasp's
+    35 mm, so u_brown's bridge grasp (needs 84 mm) looked clear and the 35 mm-open fingers came down
+    on the part (protective stop). open_mm: fallback for grasps without validity data."""
     obst = [('base1', base_outline(base_pose, base))] + [(n, outline(n, p)) for n, p in others.items() if n != name]
-    rep = {}
+    rep, best = {}, None
     ids = sorted(g['id'] for g in json.load(open(str(GRASPS).format(name)))['grasp_points'])
     for gid in ids:
-        g = min(gap_mm(f, o) for f in finger_outlines(name, pose, gid, open_mm) for _, o in obst)
+        w = grasp_width_mm(name, gid) or open_mm
+        if w is None:
+            rep[gid] = 'not valid along x'; continue
+        g = min(gap_mm(f, o) for f in finger_outlines(name, pose, gid, w) for _, o in obst)
         rep[gid] = round(g, 1)
-        if g >= FINGER_GAP_MIN_MM:
-            return gid, rep
-    return None, rep
+        if g >= FINGER_GAP_MIN_MM and (best is None or g > rep[best]):
+            best = gid
+    return best, rep
 
 
 def main():
