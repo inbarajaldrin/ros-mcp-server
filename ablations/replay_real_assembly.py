@@ -454,9 +454,38 @@ def _staging_view(log_fh=None):
     return False
 
 
+LAST_SEEN_XY = {}                 # part -> (x, y) from its latest observation (derive step, view checks)
+PART_VIEW_Z = 0.52                # flange height for a look straight above one part (RGB only; depth not needed)
+
+
 def _seen_here(obj, timeout_s=5.0) -> bool:
     obs = observe_object_orientation(obj, timeout_s, n_samples=2)
-    return bool(obs.get('samples')) and not obs.get('error')
+    ok = bool(obs.get('samples')) and not obs.get('error')
+    if ok:
+        LAST_SEEN_XY[obj] = tuple(obs['samples'][-1]['xyz'][:2])
+    return ok
+
+
+def _part_view(obj, log_fh=None) -> bool:
+    """Camera straight above `obj`'s last-seen position (centred, closer) — the staging view at 0.62 m
+    sees the whole region but detected a standing yellow only intermittently (2026-10-19: seen by the
+    derive step, then not for 20 s at the pick). Confirms the part is seen (20 s) before returning
+    True; falls back to the staging view, then fails."""
+    xy = LAST_SEEN_XY.get(obj)
+    if xy is not None:
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                            f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{PART_VIEW_Z:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                           label=f'view above {obj}', timeout_s=90, log_fh=log_fh)
+        if r.get('result') != 'failure':
+            time.sleep(1.5)
+            if _seen_here(obj, 20.0):
+                return True
+            msg = f"  [view] {obj}: not seen from above its last position {tuple(round(v, 3) for v in xy)} -> staging view"
+            print(msg, flush=True)
+            if log_fh: log_fh.write(msg + "\n")
+    if _staging_view(log_fh) and _seen_here(obj, 20.0):
+        return True
+    return False
 
 
 def _home_view(log_fh=None):
@@ -555,6 +584,7 @@ def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: flo
     obs = observe_object_orientation(obj, timeout_s)
     if obs.get('error') or not obs.get('samples'):
         return recorded, f"observe failed ({obs.get('error', 'no samples')}) -> recorded sequence"
+    LAST_SEEN_XY[obj] = tuple(obs['samples'][-1]['xyz'][:2])
     try:
         from scipy.spatial.transform import Rotation as _R
         from primitives.shared.config import DEFAULT_BASE_ORIENTATION
@@ -1850,10 +1880,13 @@ def main() -> int:
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
                     and not _seen_here(obj)):
-                msg = f"  [view] {obj}: not seen from home -> staging view"
+                msg = f"  [view] {obj}: not seen from home -> look above it"
                 print(msg, flush=True)
                 if log_fh: log_fh.write(msg + "\n")
-                if not _staging_view(log_fh):
+                if not _part_view(obj, log_fh):
+                    msg = f"\n!!! {obj}: not seen from above its last position nor from the staging view"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
                     failed = obj
                     break
             ok = replay_object(entry, state, args, log_fh=log_fh, snap_fh=snap_fh)
