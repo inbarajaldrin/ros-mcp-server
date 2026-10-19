@@ -130,6 +130,14 @@ ORIENTATION_DEVIATION = 3.0     # degrees - max orientation change at verify
 
 # Retry
 MAX_RETRIES = 3
+# Retry aim (2026-10-19): a stall above the seat with the part slid off the aim is an xy error, not a
+# compliance problem — the pockets are sub-mm (CAD: yellow x +-0.6 / y +-0.5 mm; feet round
+# line_green +-1 mm), so the same descent at the same xy ends the same way (3 attempts, 5.0 mm each,
+# yellow stuck 32 mm up). Attempt 2 aims where the part slid to (aim + measured deviation), attempt 3
+# the mirror; the shift is only taken between these bounds. Rz/tilt searches do not help here.
+RETRY_SHIFT_MIN_M = 0.0015      # below: the stall is not an xy miss (noise / a seated part), no shift
+RETRY_SHIFT_MAX_M = 0.010       # above: more than the aim or grasp can be off (half a part thickness) -> no shift
+STAGE_MATCH_TOL_M = 0.008       # a stall within this of a CAD contact height is reported as that stage
 DEFAULT_TIMEOUT = 60.0
 
 # ============================================================================
@@ -1123,6 +1131,9 @@ class PrismaticPegInsertion(Node):
         target_x, target_y, target_z = target_result
         self.target_xyz = np.array([target_x, target_y, target_z])
         self.target_z = target_z
+        self.aim_xyz = self.target_xyz.copy()           # the CAD aim; retries shift target_xyz from it
+        self.last_dev_vec, self.last_stall_z = None, None
+        self.contact_candidates = self._cad_contact_candidates()
 
         initial_joints = self.current_joints.copy()
         initial_pos = self.get_ee_position().copy()
@@ -1237,6 +1248,16 @@ class PrismaticPegInsertion(Node):
                 self.retract_upward(retry_z)
                 rclpy.spin_once(self, timeout_sec=0.5)
 
+                # Where did it stall, and where does the next attempt aim (2026-10-19)
+                stage = self._stage_at(self.last_stall_z)
+                shift, why = self._retry_shift(attempt + 1)
+                self.target_xyz = np.array([self.aim_xyz[0] + shift[0], self.aim_xyz[1] + shift[1], self.aim_xyz[2]])
+                self.get_logger().warn(
+                    f"[RETRY {attempt + 1}] stalled at Z={self.last_stall_z if self.last_stall_z is not None else float('nan'):.4f}"
+                    f" = {stage}; aim shift {why}")
+                self._tele_event = f"retry_{attempt + 1}_shift_{1000*shift[0]:+.1f}_{1000*shift[1]:+.1f}mm_stage_{stage}"
+                self._tele_log_row()
+
                 # Restore orientation via trajectory
                 rclpy.spin_once(self, timeout_sec=0.1)
                 retry_target = np.array([self.target_xyz[0], self.target_xyz[1], retry_z])
@@ -1264,6 +1285,47 @@ class PrismaticPegInsertion(Node):
         self.send_trajectory([initial_joints], 3.0)
         return False
 
+    def _cad_contact_candidates(self):
+        """{SEAT, BASE_RIM, OBJ:<seated part>} -> TCP z (m), the same chain the compliant path uses
+        (compliant_insertion_studio.wrapper.cad_geometry). Tells which stage a stall is at:
+        yellow clears line_green first (feet astride it), then the pocket rim. Best effort."""
+        try:
+            from compliant_insertion_studio.wrapper.cad_geometry import build_contact_candidates, get_seated_so_far
+            base_pos = np.array(self.final_base_pos) if self.final_base_pos else None
+            if base_pos is None or self.object_orientation is None:
+                return None
+            c = build_contact_candidates(
+                target_object=self.object_name, target_grasp_id=int(self.grasp_id), base_name=self.base_name,
+                base_world_z=float(base_pos[2]), R_grasp_quat_xyzw=list(self.object_orientation),
+                predicted_tcp_z_at_seat=float(self.target_z),
+                seated_objects=get_seated_so_far(self.base_name, self.object_name),
+                flange_offset_world_z=-float(held_tool_offset()[2]))
+            self.get_logger().info("Contact candidates (CAD-derived): " + ", ".join(f"{k}={1000*v:.1f}mm" for k, v in c.items()))
+            return c
+        except Exception as e:
+            self.get_logger().warn(f"contact candidates unavailable ({e})")
+            return None
+
+    def _stage_at(self, z):
+        """Which CAD contact height a stall z matches ('SEAT' / 'BASE_RIM' / 'OBJ:line_green' ...), or None."""
+        if not self.contact_candidates or z is None:
+            return None
+        k, v = min(self.contact_candidates.items(), key=lambda kv: abs(kv[1] - z))
+        return f"{k} ({1000*(z - v):+.1f} mm)" if abs(v - z) <= STAGE_MATCH_TOL_M else f"between contacts ({1000*(z - self.target_z):+.1f} mm above the seat)"
+
+    def _retry_shift(self, attempt):
+        """xy shift of the aim for `attempt` from the last stall's measured slide (see RETRY_SHIFT_*)."""
+        d = self.last_dev_vec
+        if d is None:
+            return np.zeros(2), "no deviation measured"
+        n = float(np.linalg.norm(d))
+        if n < RETRY_SHIFT_MIN_M:
+            return np.zeros(2), f"slide {1000*n:.1f} mm < {1000*RETRY_SHIFT_MIN_M:.1f}: not an xy miss"
+        if n > RETRY_SHIFT_MAX_M:
+            return np.zeros(2), f"slide {1000*n:.1f} mm > {1000*RETRY_SHIFT_MAX_M:.0f}: beyond what aim/grasp can be off"
+        sign = 1.0 if attempt == 2 else -1.0
+        return sign * d, f"{'where the part slid to' if sign > 0 else 'the mirror of the slide'} ({1000*sign*d[0]:+.1f}, {1000*sign*d[1]:+.1f}) mm"
+
     def _check_deviation(self, initial_ori_quat):
         """Check XY position and orientation deviation. Returns (within_limits, pos_dev_m, ori_dev_deg)."""
         rclpy.spin_once(self, timeout_sec=0.1)
@@ -1272,7 +1334,9 @@ class PrismaticPegInsertion(Node):
         if current_pos is None or current_ori is None:
             return True, 0.0, 0.0
 
-        pos_dev = np.linalg.norm(current_pos[:2] - self.target_xyz[:2])
+        self.last_dev_vec = np.asarray(current_pos[:2]) - np.asarray(self.target_xyz[:2])
+        self.last_stall_z = float(current_pos[2])
+        pos_dev = np.linalg.norm(self.last_dev_vec)
         ori_dev = np.degrees((R.from_quat(initial_ori_quat).inv() * R.from_quat(current_ori)).magnitude())
         within = pos_dev <= POSITION_DEVIATION_XY and ori_dev <= ORIENTATION_DEVIATION
         return within, pos_dev, ori_dev

@@ -265,6 +265,7 @@ P=grasp_points; pkill -SIGTERM -f "${P}_publisher"
 | predicate + director specs | `compliant_insertion_studio/analysis/CONTROL_LAW.md`, `SEARCH_CONTROL_LAW.md` |
 | per-object grasp id / width | `ablations/eval_resources/fmb1_assembly.json` |
 | queued fixes | `docs/QUEUED_FIXES.md` |
+| **debugging one part** (per-part iteration, no tipping, where the data is) | `compliant_insertion_studio/docs/DEBUG_LOOP.md` |
 
 RG2 firmware quirks (no precise positioning mode; `/gripper_width` vs `/gripper_width_offset`
 differ by 9.2 mm; safety-circuit latch needs a Compute Box power-cycle) — `SETUP.md` §6–7.
@@ -291,6 +292,15 @@ Sim/real parity: `primitives/shared/config.py` reads `ROS_MCP_MODE` at import, i
 subprocess. Real path unchanged when unset.
 
 ---
+
+## 5a. Debugging a part: iterate per part, not per cycle
+
+When one part misbehaves, do not iterate through `fmb1_loop.py --layout staging` (generated layouts
++ tipping are the evaluation, and add minutes and failure modes per try). Pull just that part
+(`disassemble.py --only PART --to-staging`), run just that part
+(`replay_real_assembly.py --only PART --skip-startup [--part-at-staging]`), read the raw CSVs and the
+CAD contact candidates before changing code, then put it back in the loop. The full procedure and
+where each piece of data lives: `compliant_insertion_studio/docs/DEBUG_LOOP.md`.
 
 ## 6. Conventions
 
