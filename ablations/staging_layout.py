@@ -42,6 +42,8 @@ STAGING_VIEW = (0.35, -0.38, 0.56)                   # flange, top-down: the who
 TOP_DOWN_Q = (0.0, 1.0, 0.0, 0.0)
 CLEARANCE_M = 0.025                                  # generator's clearance between parts
 SWEEP_CLEARANCE_M = 0.010                            # finger start zone: its lowering is guarded (stops on touch)
+LAND_OVERSHOOT_M = 0.020                             # a tipped part slides on: yellow landed 13 mm past plan
+LAND_SIDE_M = 0.010                                  # ... and a little sideways (2026-10-19, 10 mm from u_brown)
 TIPPABLE = ('u_brown', 'u_orange', 'inverted_u_yellow')
 STRIKE_BACK_M = 0.045                                # behind the near face: finger start zone
 WRIST_TURN_MAX = math.radians(90)                    # from the seated yaw (worn camera cable)
@@ -118,8 +120,9 @@ def part_plan(name, flat, place_xy, yaw, sign):
         return dict(name=name, flat=False, tip=False, place_xy=c.tolist(), flange_xy=flange, yaw=yaw,
                     final=final, sweep=final)
     d = sign * n                                           # tip direction: the top falls this way
-    final = rect(c, u, g['L'] / 2, -g['T'] / 2, g['H'] - g['T'] / 2, v=d)
-    sweep = rect(c, u, g['L'] / 2, -(g['T'] / 2 + STRIKE_BACK_M), g['H'] - g['T'] / 2, v=d)
+    # The landing is not exact: reserve room for the part sliding on and turning a little.
+    final = rect(c, u, g['L'] / 2 + LAND_SIDE_M, -g['T'] / 2, g['H'] - g['T'] / 2 + LAND_OVERSHOOT_M, v=d)
+    sweep = rect(c, u, g['L'] / 2 + LAND_SIDE_M, -(g['T'] / 2 + STRIKE_BACK_M), g['H'] - g['T'] / 2 + LAND_OVERSHOOT_M, v=d)
     land = c + d * (g['H'] / 2 - g['T'] / 2)
     return dict(name=name, flat=True, tip=True, place_xy=c.tolist(), flange_xy=flange, yaw=yaw, tip_dir=d.tolist(),
                 land_xy=land.tolist(), strike_x=g['strike_x'], final=final, sweep=sweep)
