@@ -27,7 +27,16 @@ for p in $ABOVE; do
   echo "=== $PART is under $p: pull $p to a free spot first" >> "$OUT"
   python3 -u ablations/disassemble.py --assembly-json x --only "$p" >> "$OUT" 2>&1 || { echo "PULL FAILED $p (clearing above $PART)" >> "$OUT"; exit 1; }
 done
+BAGS=${PART_LOOP_BAGS:-$HOME/Documents/fmb1_frames/part_loop}   # one diagnostic bag per iteration (2026-10-20)
+mkdir -p "$BAGS"
+REC=""
+stop_rec() { [ -n "$REC" ] && kill -INT "$REC" 2>/dev/null && for i in $(seq 20); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done; [ -n "$REC" ] && kill -0 "$REC" 2>/dev/null && kill -TERM "$REC"; REC=""; }
+trap 'stop_rec' EXIT INT TERM
 for k in $(seq 1 "$N"); do
+  B="$BAGS/${PART}_$(date +%Y%m%d_%H%M%S)_it$k"
+  DIAG=1 bash compliant_insertion_studio/scripts/record_demo_bag.sh "$B" > "$B.log" 2>&1 &
+  REC=$!
+  echo "=== $PART iteration $k/$N: recording $B" >> "$OUT"
   {
     echo "=== $PART iteration $k/$N: pull"
     python3 -u ablations/disassemble.py --assembly-json x --only "$PART" --to-staging || { echo "PULL FAILED $PART ($k)"; exit 1; }
@@ -37,5 +46,6 @@ for k in $(seq 1 "$N"); do
     python3 ablations/insert_ease.py --part "$PART" --last 1 2>/dev/null | tail -2
     grep -oE "\[held-yaw\] $PART: held part reads [-+0-9.]+ deg|\[verify\] $PART: OK \(marker xy [0-9.]+ mm, yaw err [-0-9.]+ deg\)" "$OUT" | tail -2
   } >> "$OUT" 2>&1 || exit 1
+  stop_rec
 done
 echo "LOOP DONE $PART $N" >> "$OUT"

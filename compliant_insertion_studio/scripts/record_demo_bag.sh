@@ -10,6 +10,12 @@ OUT=$1
 FREE_GB=$(df --output=avail -BG "$(dirname "$OUT")" | tail -1 | tr -dc 0-9)
 [ "$FREE_GB" -ge 10 ] || { echo "refusing: only ${FREE_GB} GB free"; exit 1; }
 source /opt/ros/humble/setup.bash
+# DIAG=1 (per-part diagnosis, 2026-10-20): + aligned depth (compressed) and both camera_infos, the raw pre-snap
+# poses, gripper width, wrench, joint states - enough to replay a pick from the images and refit markers offline.
+EXTRA=()
+[ -n "$DIAG" ] && EXTRA=(/camera/camera/aligned_depth_to_color/image_raw/compressed
+  /camera/camera/aligned_depth_to_color/camera_info /camera/camera/color/camera_info
+  /objects_poses_real_raw /gripper_width /force_torque_sensor_broadcaster/wrench /joint_states)
 exec nice -n 19 ros2 bag record -s mcap -o "$OUT" \
   /camera/camera/color/image_raw/compressed /objects_poses_real /grasp_points_real \
-  /tcp_pose_broadcaster/pose /camera_pose
+  /tcp_pose_broadcaster/pose /camera_pose "${EXTRA[@]}"
