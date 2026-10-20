@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 16:45",
+ "updated": "2026-10-20 17:15",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -69,7 +69,7 @@
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
      "status": "active",
-     "note": "cycle 1 running (base where it is); then operator moves the base ~3 cm, cycle 2; turns ~5 deg, cycle 3"
+     "note": "cycle 1: disassembly OK (4 pulled to the staging region), reassembly running"
     }
    ]
   },
@@ -113,10 +113,16 @@
      "note": "startup, between parts, before insert; 1.2 mm rms live"
     },
     {
-     "id": "SIGMA",
-     "title": "VisionPose with sigma (per-marker + ICP fusion)",
+     "id": "DEPTHLAT",
+     "title": "Depth timing: how long after the arm stops is depth reliable",
      "status": "next",
-     "note": ""
+     "note": "measure depth latency/settle per frame through arm stops (stamp vs TCP, CAD-fit pose vs time); gives the estimator its stationary_since gate instead of fixed sleeps"
+    },
+    {
+     "id": "SIGMA",
+     "title": "Fused estimator INSIDE aruco_camera_localizer -> VisionPose",
+     "status": "next",
+     "note": "operator 10-14: all visible markers (per-marker/sticker calibration) + depth CAD fit + UR5e TF in the localizer itself, not side scripts; publishes T + sigma + stamp + stationary_since + source (seams 10-19); the base for pose6d. Also root-causes the sticky detection sets at 0.56 m"
     }
    ]
   }
