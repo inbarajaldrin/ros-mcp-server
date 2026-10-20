@@ -640,7 +640,9 @@ FOLLOW_READ_S = 10.0
 
 
 HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
-HELD_READ_S = 10.0
+HELD_READ_S = 6.0             # one bounded read; the U parts and yellow are never seen while held (2026-10-20:
+                              # 0x at the regrasp +20 mm, at 0.30 m, at seat +45 mm) - the tool camera cannot see
+                              # their markers in the grasp; line_green reads fine at safe height
 HELD_READ_ABOVE_SEAT_M = 0.045   # flange above the predicted seat for the pre-insert read (U rim contact is +31 mm)
 HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
@@ -1748,7 +1750,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         t_step = time.time()                       # insert logs written from here belong to this step
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not _SAFETY_STOP:
-            held_yaw_calibration(obj, state, say, log_fh, getattr(args, 'observed_base', None))
+            held_yaw_calibration(obj, state, say, log_fh)      # one read where the arm is; no extra moves
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
@@ -1786,10 +1788,6 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                         say(f"  [{step_idx}] re-pick grip {got:.1f} mm, still not {want:.1f} -> stopping")
                         result = dict(result, result='failure', error='wrong grasp twice')
 
-        if (tool_name == 'control_gripper' and str(kw.get('command')) == 'close' and not _SAFETY_STOP
-                and result.get('result') != 'failure' and _prev_tool(step_idx) == 'move_to_grasp'
-                and not args.dry_run and state.held_quat is not None):
-            held_yaw_calibration(obj, state, say, log_fh, None, lift_m=0.020)
         # Staging regrasp: move_to_grasp has just turned top-down over the clear area
         # and observed the part before descending. If the face it landed on cannot be
         # inserted in one pass, run another place-down pass from here — the part is in
