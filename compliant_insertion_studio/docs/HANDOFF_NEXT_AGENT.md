@@ -196,21 +196,50 @@ rectangle, ≥ 25 mm apart; one tippable part per cycle stays upright (u_brown �
   go in two halves, in place, and back the same way; the stroke's wrist turn is ≤ 45°.
 - **Assembly:** parts not seen from home are planned (`--derive-sequence`) and picked from the staging view.
   Flat U parts / yellow take the 2-pass path (place in the clear area, regrasp, insert).
-- **Results 10-19 — NOT yet 3 clean staging cycles in a row.** Every staging ASSEMBLY passed 4/4 hands-off
-  (8 of 8; flat u_orange/u_brown/yellow on the 2-pass path, parts out of the home view picked from the
-  staging view). Disassembly stops, each fixed and committed: the 89° wrist turn (`8ac1c91`, finished with
-  `--resume-held`), a JSON record bug (`d049d96`), a tipped yellow sliding 13 mm on (`0a35c74`, landing
-  margins), line_green hidden by the fingers in the staging view (`9dd51f5`, view moved). Best run: 2 clean
-  cycles in a row (`ablations/logs/fmb1_loop.jsonl`, 10-19 13:43–14:25), then the third disassembly's check
-  stopped: **u_brown, set down UPRIGHT, was found lying flat 90 mm from its spot, 16 mm from yellow** — it
-  fell after release; cause not found (no failed step; the disassembly log does not keep move_down output).
-- **Do not auto-relocate a flat part next to another.** A try (`disassemble.py --relocate u_brown --grasp-id
-  auto`, reverted) came down onto a part → PROTECTIVE_STOP (recovered with `recover_pstop.sh`, nothing
-  damaged). Suspect: `spacing_check.clear_grasp` finger outlines assume the seated stance, not a flat part —
-  unverified. And `move_to_grasp`'s force baseline was re-taken mid-contact (~10 N), so its contact stop
-  never fired. Both open.
+- **Results 10-19 — NOT yet 3 clean staging cycles in a row** (a fresh 3-cycle staging run started 17:40 with
+  everything below in; its outcome is in `ablations/logs/fmb1_loop.jsonl`). Every staging ASSEMBLY that ran
+  to its end passed 4/4 hands-off (flat u_orange/u_brown/yellow on the 2-pass path, parts out of the home view
+  picked from above their last-seen position). Best run before the afternoon's fixes: 2 clean cycles in a row
+  (13:43–14:25). Each stop since, its cause and fix (all committed):
+  - the 89° wrist turn over `move_cartesian`'s 1.5 rad cap (`8ac1c91` two halves; then `e14e4d8`: wrist_3
+    gets its own 3.2 rad cap, one turn per part, no turn-back — the next part's hover turns at safe height);
+  - a tipped yellow sliding 13 mm on → `0a35c74` landing margins, `68f9dcb` the draw keeps the most
+    spread-out of 30 (closest pair median 32 → 55 mm; the region is ~24 % used);
+  - **set-downs landed at 17–44 N** (move_down's 100 ms median lags the s-curve descent; measured) — an upright
+    u_brown fell and lay 16 mm from yellow. `a02c4da`: move_down to 15 mm above the CAD touch height, then a
+    4 mm/s guarded move; every landing since stopped at 5.0–5.1 N;
+  - **`--relocate` scored every grasp at grasp 1's 35 mm opening**; u_brown's 84 mm bridge grasp looked clear and
+    the 35 mm-open fingers came down on it → PROTECTIVE_STOP. `c4ef229`: each grasp at its own
+    `grasp_validity` width, clearest wins; `801ecd9`/`68f9dcb`: a part too close is relocated inside the staging
+    region (`--spot-staging`, farthest spot ≥ 25 mm, stance kept) and the check re-run once;
+  - the staging view at 0.62 m sees a standing yellow only intermittently → `d0e9d98` pre-pick view straight
+    above the part's last-seen position (0.52 m), seen for 20 s before the pick; `636cca1` the pick's own
+    "not detected" wait 5 → 20 s; the layout check waits out a misread streak (30 s), looks above the spot, then home;
+  - the assembly's startup spacing check now relocates a too-close part instead of stopping (`e14e4d8`);
+  - **a flat yellow with its bridge grasp 5 mm from base1's edge** (base read scatters ~8 mm) → the descent hit the
+    base → PROTECTIVE_STOP. `95b2343`: before every pick the recorded grasp's open-finger outlines are checked
+    (≥ 15 mm from base1 / other parts) and the part relocated first if not. Open: `move_to_grasp`'s descent guard
+    did not fire (its baseline is re-taken after a 0.5 s grace, and the F/T glitch makes a tighter threshold false-stop).
+- **Do not skip the pass-2 `rotate_object`** (tried `rotate_object skipped` when the chained orientation was
+  already fold-equivalent to the target: two rim stalls, insert aimed at TCP x +94 instead of +42 = 51 mm = 2 ×
+  the leg-grasp offset). The camera's raw quaternion and rotate_object's output are the two fold branches of
+  one orientation; `predict_tcp_at_seat` rotates the (asymmetric) grasp offset by the branch it gets, and the
+  chain was validated with rotate_object's. Reverted in `77c8bc9`; the 0.01 rad step stays (~10 s per 2-pass part).
+- **Prismatic insert retries re-aim from data, bounded by CAD** (`b3c60fa`, the insert code opened by the
+  operator for this). The ladder used to retract 1 cm and descend at the same xy (3 identical 5.0 mm stalls on
+  yellow). Now it logs which CAD contact the stall matched (`Contact candidates (CAD-derived): SEAT / BASE_RIM /
+  OBJ:line_green …` via `cad_geometry`, the compliant path's chain; yellow: rim = seat + 25.5 mm, line_green's
+  top = seat + 45.5) and attempt 2 aims where the part slid to, attempt 3 the mirror, for slides of 1.5–10 mm.
+  Pockets are sub-mm (CAD: yellow x ±0.6 / y ±0.5; feet astride line_green ±1 mm) — no yaw/tilt search. Verified
+  on the arm: line_green "stalled +37.4 mm above the seat, slide 1.1 mm → not an xy miss" (seated on attempt 2);
+  yellow seated on attempt 1 (compliance slid it 5.0 mm). Yellow's earlier 3× stall was a grasp offset: the
+  regrasp recovery seated it at 0.8 mm.
 - Verify from the base view: seated u_brown reads tilted ~10° (edge-on markers) → a reading tilted > 5° is
   unusable; the second look from home decides (`1fe84d2`).
+- **Iterate per part, not per cycle, when fixing something** (operator): `docs/DEBUG_LOOP.md`, CLAUDE.md §5a.
+- Seat-offset history (`ablations/logs/seat_offset_history.json`): every part seats 5–8 mm in −y from the CAD
+  prediction (yellow −5…−9, U parts −2…−10); the aim bias absorbs the median, the compliance finds the rest.
+  The constant −y bias is the queued calibration item, not a ladder problem.
 
 ---
 
