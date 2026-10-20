@@ -90,6 +90,38 @@ def check(parts, base_pose, base='base1', min_gap_mm=MIN_GAP_MM):
     return not bad, rep
 
 
+def mean_quat_fold_aware(name, quats):
+    """Mean orientation of samples that may sit on different FOLD branches of one physical pose (the
+    localizer snaps each frame to a canonical branch; a flat U alternates). Each sample is first moved
+    to the fold-equivalent closest to the first one, then sign-aligned and averaged. Averaging the raw
+    quaternions across branches gave a tilted, non-physical orientation: the pick's opening chooser then
+    saw almost no top face and reported 32 mm of finger clearance where there was none (u_brown flat,
+    fingers closed across both legs at 69 mm, 2026-10-19 20:53)."""
+    from scipy.spatial.transform import Rotation as R
+    from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+    from utils.data_path_finder import get_symmetry_dir
+    try:
+        fold = load_symmetry_data(name, str(get_symmetry_dir()))
+    except Exception:
+        fold = None
+    Q = []
+    ref = None
+    for q in quats:
+        q = np.asarray(q, dtype=float); q /= np.linalg.norm(q)
+        if ref is None:
+            ref = q; Q.append(q); continue
+        best = q
+        if fold is not None:
+            try:
+                cands = [R.from_matrix(m).as_quat() for m in equivalent_orientations(R.from_quat(q).as_matrix(), fold)]
+                best = max(cands, key=lambda c: abs(float(np.dot(c, ref))))
+            except Exception:
+                best = q
+        Q.append(best)
+    Q = np.array(Q); Q *= np.sign(Q @ Q[0])[:, None]
+    m = Q.mean(axis=0); return m / np.linalg.norm(m)
+
+
 def observe_parts(names, timeout_s=8.0):
     """{name: ((x, y, z), quat)} for the parts the camera sees now (median of samples)."""
     from replay_real_assembly import observe_object_orientation
@@ -118,8 +150,7 @@ def observe_parts(names, timeout_s=8.0):
             if len(g) < 2:
                 continue
             P = np.median(np.array([S[j]['xyz'] for j in g]), axis=0)
-            Q = np.array([S[j]['quat_xyzw'] for j in g]); Q *= np.sign(Q @ Q[0])[:, None]
-            q = Q.mean(axis=0); q /= np.linalg.norm(q)
+            q = mean_quat_fold_aware(n, [S[j]['quat_xyzw'] for j in g])
             cands.append((tuple(P), tuple(q)))
         if not cands:
             continue
