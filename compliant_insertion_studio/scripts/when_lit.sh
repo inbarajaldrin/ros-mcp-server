@@ -1,13 +1,13 @@
 #!/bin/bash
-# Wait for the workspace light (colour frame mean > 80 and base1 + all 4 parts detected, held for ~60 s),
-# then run the given command. The loop runs only when the light is on (operator, 2026-10-19); with the
+# Wait for the workspace light (colour frame mean > 80 for ~60 s), then run the given command. Light is
+# judged from the camera stream alone (operator, 2026-10-20) - a detection count only says what is in view. The loop runs only when the light is on (operator, 2026-10-19); with the
 # light off the localizer sees nothing and every verify fails closed.
 #
 #   bash compliant_insertion_studio/scripts/when_lit.sh 'bash ablations/part_loop.sh u_brown 3'
 #   bash compliant_insertion_studio/scripts/when_lit.sh 'python3 -u ablations/fmb1_loop.py --cycles 3 --layout spots'
 REPO=$(cd "$(dirname "$0")/../.." && pwd); cd "$REPO"
 source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
-CMD=${1:?command to run once lit}; NEED=${WHEN_LIT_PARTS:-3}   # base1 + 3 parts: a part at the table edge is not in the home view (2026-10-20: yellow at (283,-337) kept it at 4/5 for an hour with the light on)
+CMD=${1:?command to run once lit}; NEED=${WHEN_LIT_PARTS:-0}   # optional: also require this many parts detected (default: brightness only)
 probe() { timeout 20 python3 - <<'EOF'
 import rclpy, numpy as np, time
 from sensor_msgs.msg import Image
