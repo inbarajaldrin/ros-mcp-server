@@ -7,7 +7,7 @@
 #   bash compliant_insertion_studio/scripts/when_lit.sh 'python3 -u ablations/fmb1_loop.py --cycles 3 --layout spots'
 REPO=$(cd "$(dirname "$0")/../.." && pwd); cd "$REPO"
 source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
-CMD=${1:?command to run once lit}; NEED=${WHEN_LIT_PARTS:-5}
+CMD=${1:?command to run once lit}; NEED=${WHEN_LIT_PARTS:-3}   # base1 + 3 parts: a part at the table edge is not in the home view (2026-10-20: yellow at (283,-337) kept it at 4/5 for an hour with the light on)
 probe() { timeout 20 python3 - <<'EOF'
 import rclpy, numpy as np, time
 from sensor_msgs.msg import Image
