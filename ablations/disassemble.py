@@ -602,6 +602,9 @@ def main():
     ap.add_argument('--from-staging', action='store_true',
                     help='with --relocate: the part sits in the staging region (not visible from '
                          'home) — plan the spot from home, then pick it over the clear area')
+    ap.add_argument('--to-free-spot', action='store_true',
+                    help='with --only: set the pulled part down at a free spot in the staging region chosen from the '
+                         'staging view (clear of base1 and every part seen), not at the fixed clear area')
     ap.add_argument('--to-staging', action='store_true',
                     help='with --only: take the seated part out with the insert grasp and set it down '
                          'in the staging region (clear area) for a fresh regrasp, e.g. a tilted seat')
@@ -806,6 +809,32 @@ def main():
                 print("base1 not observed — stopping"); return 1
             print(f"[base] moved ({1000*(ob[0][0]-prev[0][0]):+.1f}, {1000*(ob[0][1]-prev[0][1]):+.1f}) mm "
                   f"since the last read", flush=True)
+        if a.to_free_spot and not (i == start and a.resume_held):
+            # Where it goes: a free spot in the staging region for the part in its seated stance (carried as
+            # held), clear of base1 and every part seen there - the fixed clear area was used blind and a
+            # pulled u_orange landed against yellow and tipped (2026-10-20).
+            from staging_layout import STAGING_VIEW, TOP_DOWN_Q
+            from spacing_check import observe_parts, PARTS
+            from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+            ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
+                           '--quat', *map(str, TOP_DOWN_Q)), 'staging view (choose a free spot)', 90)
+            if not ok: return 1
+            time.sleep(1.5)
+            seen = observe_parts([n for n in PARTS if n != name])
+            sp_, sq_ = load_seat_pose_in_base('base1', name)
+            Rb_ = R.from_quat(ob[1])
+            seen[name] = (tuple(np.array(ob[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
+            fx, fy, gap = staging_spot(name, seen, ob, gid, w)
+            if fx is None:
+                print(f"no free spot in the staging region for {name} - stopping"); return 1
+            # staging_spot returns the GRASP POINT's target; the seat grasp carries the flange at the seat-grasp
+            # TCP, which sits at that grasp point in x/y (top-down), so the flange target is the same x/y.
+            sx, sy = fx, fy
+            print(f"[spot] {name}: free spot in the staging region -> flange ({1000*sx:.0f}, {1000*sy:.0f}) mm, "
+                  f"{gap:.0f} mm from the nearest part; seen there: {sorted(n for n in seen if n != name)}", flush=True)
+            ob = observe_base()                      # back over the base for the seat grasp (and a fresh read)
+            if ob is None:
+                print("base1 not observed — stopping"); return 1
         tcp = seat_grasp(name, gid, ob) if not (i == start and a.resume_held) else None
         if tcp is not None:
             print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
