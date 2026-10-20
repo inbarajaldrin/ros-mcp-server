@@ -1642,8 +1642,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 and result.get('result') != 'failure' and result.get('final_width_mm') is not None
                 and _prev_tool(step_idx) == 'move_to_grasp' and not grip_redone.get(step_idx)):
             try:
-                from spacing_check import grasp_width_mm
-                want = grasp_width_mm(obj, state.last_grasp_id or 1)
+                from primitives.shared.config import grip_width_mm     # closed width on the part (u_brown 21, yellow 42)
+                want = float(grip_width_mm(obj))
             except Exception:
                 want = None
             got = float(result['final_width_mm'])
