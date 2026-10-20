@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Base pose from depth by fitting the CAD model to the point cloud (2026-10-20, operator: "if the depth is
+used to localize an object with cad and pointcloud you will get much better pose").
+
+The model is the base mesh plus every part seated so far at its CAD seat pose (more surfaces than the top
+square the outline fit uses: slot walls, pockets, the seated parts). Depth points near the base (above the
+table) are matched to their nearest model point (data -> model, so a partial view still fits) and the base
+pose is solved in x, y, yaw (+ a z offset that absorbs depth bias; roll/pitch stay flat on the table) by
+trimmed iterative closest point, coarse (15 mm gate) then fine (4 mm gate).
+
+    python3 -u ablations/base_icp.py --base base3 --seated line_brown line_red fork_orange fork_yellow \
+        --views top tilt+x tilt-x tilt+y        # moves the arm (camera views of the base), prints the spread
+    python3 -u ablations/base_icp.py --base base3 --no-move                    # fit from where the arm is
+"""
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation as R
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
+
+
+def model_points(base, seated, step=0.0015):
+    from grasp_depth import load_mesh, surface_points
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    V, F = load_mesh(base); P = [surface_points(V, F, step)]
+    for p in seated:
+        V, F = load_mesh(p); sp, sq = load_seat_pose_in_base(base, p)
+        P.append(surface_points(V, F, step) @ R.from_quat(sq).as_matrix().T + sp)
+    M = np.vstack(P)
+    return M[M[:, 2] > M[:, 2].min() + 0.003]          # drop the base's bottom face (never seen)
+
+
+def fit(base, seated, Pw, init_ob, table_z=None):
+    """Returns (((x, y, z), quat), info)."""
+    M = model_points(base, seated); tree = cKDTree(M)
+    (bx, by, bz), bq = init_ob
+    yaw = float(R.from_quat(bq).as_euler('xyz')[2]); t = np.array([bx, by]); dz = 0.0
+    if table_z is None:
+        table_z = float(np.percentile(Pw[:, 2], 30))
+    near = (np.hypot(Pw[:, 0] - bx, Pw[:, 1] - by) < 0.13) & (Pw[:, 2] > table_z + 0.004) & (Pw[:, 2] < table_z + 0.12)
+    D = Pw[near]
+    if len(D) > 60000:
+        D = D[np.random.default_rng(0).choice(len(D), 60000, replace=False)]
+    info = {'n_data': int(len(D))}
+    for gate, iters in ((0.015, 15), (0.004, 25)):
+        for _ in range(iters):
+            c, s = np.cos(yaw), np.sin(yaw)
+            Rz = np.array([[c, -s], [s, c]])
+            Db = np.c_[(D[:, :2] - t) @ Rz, D[:, 2] - bz - dz]            # data in the base frame
+            d, idx = tree.query(Db, distance_upper_bound=gate)
+            ok = np.isfinite(d)
+            if ok.sum() < 500:
+                return None, dict(info, error=f'only {int(ok.sum())} matches at {1000*gate:.0f} mm')
+            A = D[ok, :2]; B = M[idx[ok], :2]                              # world xy  <->  model xy (base frame)
+            # solve world = R(yaw) * model + t  (2D Kabsch)
+            ca, cb = A.mean(0), B.mean(0)
+            H = (B - cb).T @ (A - ca)
+            U, S_, Vt = np.linalg.svd(H)
+            Rn = Vt.T @ U.T
+            if np.linalg.det(Rn) < 0:
+                Vt[1] *= -1; Rn = Vt.T @ U.T
+            yaw = float(np.arctan2(Rn[1, 0], Rn[0, 0])); t = ca - Rn @ cb
+            dz = float(np.median(D[ok, 2] - bz - M[idx[ok], 2]))
+    c, s = np.cos(yaw), np.sin(yaw)
+    Db = np.c_[(D[:, :2] - t) @ np.array([[c, -s], [s, c]]), D[:, 2] - bz - dz]
+    d, _ = tree.query(Db, distance_upper_bound=0.004)
+    ok = np.isfinite(d)
+    info.update(inliers=int(ok.sum()), inlier_frac=round(float(ok.mean()), 3), rms_mm=round(1000 * float(np.sqrt(np.mean(d[ok] ** 2))), 2),
+                dz_mm=round(1000 * dz, 2), xy_mm=[round(1000 * t[0], 1), round(1000 * t[1], 1)], yaw_deg=round(np.degrees(yaw), 2))
+    return ((float(t[0]), float(t[1]), float(bz)), R.from_euler('z', yaw).as_quat()), info
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--base', required=True)
+    ap.add_argument('--seated', nargs='*', default=[])
+    ap.add_argument('--views', nargs='*', default=['top'])
+    ap.add_argument('--no-move', action='store_true')
+    a = ap.parse_args()
+    from seat_check import capture_world, X_CAM
+    from replay_real_assembly import observe_base_pose
+    from base_depth import measure as outline, VIEW_FLANGE_Z
+    from tilted_seat_view import aimed_flange
+    ob0 = observe_base_pose(a.base)
+    if ob0 is None:
+        sys.exit(f'{a.base} not observed')
+    rows = []
+    for v in (['here'] if a.no_move else a.views):
+        if v != 'here':
+            (bx, by, bz), bq = ob0
+            if v == 'top':
+                pf, qf = [bx, by, VIEW_FLANGE_Z], [0, 1, 0, 0]
+            else:
+                d = np.zeros(3); d['xy'.index(v[-1])] = 1.0 if v[-2] == '+' else -1.0
+                pf, qf, _ = aimed_flange(np.array([bx, by, bz + 0.0175]), d, 25.0, 0.55, X_CAM, 0.0)
+            r = subprocess.run(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                *[f"{x:.4f}" for x in pf], '--quat', *[f"{x:.6f}" for x in qf], '--min-z', '0.15'],
+                               cwd=str(REPO), capture_output=True, text=True, timeout=90)
+            if r.returncode != 0:
+                print(f"{v}: move refused"); continue
+            time.sleep(1.5)
+        ob = observe_base_pose(a.base, timeout_s=6.0) or ob0
+        cap = capture_world(n=12)
+        if cap is None:
+            print(f"{v}: no depth"); continue
+        pose, info = fit(a.base, a.seated, cap[0], ob)
+        od, oinfo = outline(ob, a.base)
+        mk = (1000 * ob[0][0], 1000 * ob[0][1], float(R.from_quat(ob[1]).as_euler('xyz', degrees=True)[2]))
+        ol = tuple(oinfo.get('centre_mm', [np.nan, np.nan])) + (oinfo.get('yaw_deg', np.nan),)
+        rows.append(dict(view=v, icp=info, marker=[round(x, 2) for x in mk], outline=ol))
+        print(json.dumps(rows[-1]), flush=True)
+    if len(rows) >= 2:
+        for k in ('icp', 'marker', 'outline'):
+            P = np.array([(r['icp']['xy_mm'] + [r['icp']['yaw_deg']]) if k == 'icp' else list(r[k]) for r in rows
+                          if (k != 'icp' or 'xy_mm' in r['icp'])], dtype=float)
+            if len(P) >= 2:
+                print(f"{k:8s} across views: xy spread max {np.max(np.hypot(*(P[:, :2] - np.median(P[:, :2], 0)).T)):.1f} mm, "
+                      f"yaw range {np.ptp(P[:, 2]):.2f} deg  (median {np.round(np.median(P, 0), 1).tolist()})")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
