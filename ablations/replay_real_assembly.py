@@ -645,7 +645,7 @@ HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
 
 
-def held_yaw_calibration(obj, state, say, log_fh=None):
+def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None):
     """Before the insert, with the part held at safe height: read the held part's yaw with the camera
     and turn the wrist in place by the difference to the orientation the chain assumes
     (state.held_quat), so the part - not just the flange - faces its slot. Nothing measured the part's
@@ -657,6 +657,19 @@ def held_yaw_calibration(obj, state, say, log_fh=None):
         return
     from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
     from utils.data_path_finder import get_symmetry_dir
+    if observed_base is not None:
+        # Read above the base, not above the clear area: held u_brown was seen 0x in 10 s over the taped
+        # clear area and 8x in 5 s above the base (2026-10-19 21:40). The insert hovers there next anyway.
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        (bx, by, bz), bq = observed_base
+        sp, _ = load_seat_pose_in_base('base1', obj)
+        w = np.array([bx, by, bz]) + R_.from_quat(bq).apply(sp)
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                            f"{w[0]:.4f}", f"{w[1]:.4f}", f"{FOLLOW_READ_Z:.2f}", '--keep-orientation'],
+                           label=f'held-yaw: carry {obj} above its seat for the read', timeout_s=90, log_fh=log_fh)
+        if r.get('result') != 'success':
+            return
+        time.sleep(1.0)
     # a held part is detected at only ~1-2 Hz (u_brown: 8 samples in 5 s, 2026-10-19 21:35) and the
     # localizer pauses after the lift: wait up to HELD_READ_S for HELD_READ_MIN samples, fold-aware mean
     obs = observe_object_orientation(obj, HELD_READ_S, n_samples=HELD_READ_MIN)
@@ -1715,7 +1728,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         t_step = time.time()                       # insert logs written from here belong to this step
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not _SAFETY_STOP:
-            held_yaw_calibration(obj, state, say, log_fh)
+            held_yaw_calibration(obj, state, say, log_fh, getattr(args, 'observed_base', None))
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
