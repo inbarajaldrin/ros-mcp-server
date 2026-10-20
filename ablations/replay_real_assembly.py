@@ -669,6 +669,79 @@ PRE_INSERT_MAX_MM, PRE_INSERT_MAX_DEG = 15.0, 3.0    # larger: a misread, keep t
 
 
 def pre_insert_base_read(obj, state, args, say, log_fh=None):
+    """Base read before the insert with the part in hand (PRE_INSERT_READ: 'shifted' default, 'hover' the old
+    read from the insert hover, 'off')."""
+    mode = os.environ.get('PRE_INSERT_READ', 'shifted')
+    if mode == 'off':
+        return
+    if mode == 'hover':
+        return _pre_insert_base_read_hover(obj, state, args, say, log_fh)
+    return _pre_insert_base_read_shifted(obj, state, args, say, log_fh)
+
+
+def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
+    """Operator 2026-10-20: "reading a pose before insertion to correct can be done even with a part in hand if
+    you rotate the wrist". The held part is rigid with the camera, so it always fills the same image region;
+    held_clear_read picks a top-down view at the standard height (flange yaw 0/+-90, shifted <= 0.3 m) that
+    puts the whole base in the rest of the image. Read markers + depth outline there, go back to the exact
+    start pose (the held-orientation chain the insert uses stays valid), then apply the read."""
+    ob = getattr(args, 'observed_base', None)
+    if ob is None or state.held_quat is None:
+        return
+    try:
+        from held_clear_read import held_in_flange, score_views, camera_K, COVER_OK
+        from base_depth import VIEW_FLANGE_Z, measure as _depth
+        from primitives.shared.config import held_tool_offset
+        bname = args_base_name(args)
+        snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
+        if not tcp.get('xyz'):
+            return
+        K = camera_K()
+        Tfo = held_in_flange(obj, state.last_grasp_id or 1, state.held_quat, tcp['xyz'], tcp['quat_xyzw'],
+                             float(np.asarray(held_tool_offset())[2]))
+        views = [v for v in score_views(obj, bname, ob, Tfo, tcp['quat_xyzw'], K, VIEW_FLANGE_Z)
+                 if v['covered'] <= COVER_OK and v['outside'] <= 0.01]
+    except Exception as e:
+        say(f"  [base@insert] {obj}: no clear view computed ({e}) - keeping the previous read"); return
+    if not views:
+        say(f"  [base@insert] {obj}: no view of the base clear of the held part - keeping the previous read"); return
+    v = views[0]
+    say(f"  [base@insert] {obj}: view with the part in hand: wrist {v['turn']:+.0f} deg, shift {v['shift_mm']} mm "
+        f"(base covered {v['covered']:.0%})")
+    back = ['primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{x:.4f}" for x in tcp['xyz']],
+            '--quat', *[f"{x:.6f}" for x in tcp['quat_xyzw']], '--min-z', '0.15']
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                        *[f"{x:.4f}" for x in v['flange_xyz']], '--quat', *[f"{x:.6f}" for x in v['flange_quat']],
+                        '--min-z', '0.15'], label=f'base@insert: clear view ({obj})', timeout_s=90, log_fh=log_fh)
+    nb = None
+    if r.get('result') == 'success':
+        time.sleep(1.5)
+        nb = observe_base_pose(bname, timeout_s=6.0)
+        if nb is not None and os.environ.get('BASE_FROM', 'marker') == 'depth':
+            nd, info = _depth(nb, bname)
+            say(f"  [base@insert] {obj}: depth outline {json.dumps(info)}")
+            nb = nd or nb
+    r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back ({obj})', timeout_s=90, log_fh=log_fh)
+    if r2.get('result') != 'success':                       # once more before failing closed
+        r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back, retry ({obj})', timeout_s=90, log_fh=log_fh)
+    if r2.get('result') != 'success':
+        say(f"\n!!! base@insert: could not return to the start pose ({r2.get('error')})")
+        raise RuntimeError('pre-insert view: no return')
+    if nb is None:
+        say(f"  [base@insert] {obj}: base not read from the clear view - keeping the previous read"); return
+    (x0, y0, _), q0 = ob; (x1, y1, _), q1 = nb
+    dmm = 1000 * float(np.hypot(x1 - x0, y1 - y0))
+    ddeg = float(np.degrees(abs((R_.from_quat(q1) * R_.from_quat(q0).inv()).as_euler('xyz')[2])))
+    if dmm > PRE_INSERT_MAX_MM or ddeg > PRE_INSERT_MAX_DEG:
+        say(f"  [base@insert] {obj}: read moved {dmm:.1f} mm / {ddeg:.2f} deg - treated as a misread, kept the previous"); return
+    if dmm < PRE_INSERT_MIN_MM and ddeg < PRE_INSERT_MIN_DEG:
+        say(f"  [base@insert] {obj}: base unchanged ({dmm:.1f} mm, {ddeg:.2f} deg)"); return
+    args.observed_base = nb
+    say(f"  [base@insert] {obj}: base moved {dmm:.1f} mm / {ddeg:.2f} deg -> the insert aims at the clear-view read "
+        f"({1000*x1:.1f}, {1000*y1:.1f}) mm")
+
+
+def _pre_insert_base_read_hover(obj, state, args, say, log_fh=None):
     """Re-read the base from the insert hover, seconds before contact (operator 2026-10-20: the base is not
     fixed and moves during a part's sequence; the read from before the pick is minutes old and from 0.56 m).
     Close and straight above is the best view (2026-10-20 surveys). Updates args.observed_base, which the
