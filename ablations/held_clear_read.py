@@ -81,7 +81,10 @@ def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
     h = BASE_SIDE_M[base_name] / 2
     top_z = bz + _load_base_top_z_local(base_name)
     sq = R.from_quat(bq).apply(np.array([[-h, -h, 0], [h, -h, 0], [h, h, 0], [-h, h, 0]])) + [bx, by, top_z]
-    yaw0 = R.from_quat(tcp_q).as_euler('xyz')[2]
+    # current wrist yaw relative to top-down (0,1,0,0), from the flange x axis: euler 'xyz' of a top-down
+    # flange flips by 180 deg (2026-10-20: asked for a 3.6 rad wrist_3 turn, refused)
+    xf = R.from_quat(tcp_q).apply([1.0, 0.0, 0.0]); xd = R.from_quat([0, 1, 0, 0]).apply([1.0, 0.0, 0.0])
+    yaw0 = float(np.arctan2(xf[1], xf[0]) - np.arctan2(xd[1], xd[0]))
     s = 4
     W, H = IMG_W // s, IMG_H // s
     grid = np.arange(-OFFSET_MAX_M, OFFSET_MAX_M + 1e-9, OFFSET_STEP_M)
