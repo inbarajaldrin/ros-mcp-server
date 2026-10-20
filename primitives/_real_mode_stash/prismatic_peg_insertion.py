@@ -1194,6 +1194,8 @@ class PrismaticPegInsertion(Node):
                     self.get_logger().info(
                         f"[SUCCESS] Reached target via trajectory (Z={post_z:.4f}, Tx={post_tx:.4f}, Ty={post_ty:.4f})")
                     self.stop_force_mode()
+                    # telemetry only: this exit left a CSV with no meta (line_green, 2026-10-19 20:12)
+                    self._tele_close("success", f"reached_target_via_trajectory z={post_z:.4f} tx={post_tx:.4f} ty={post_ty:.4f}")
                     return True
                 else:
                     self.get_logger().info(
