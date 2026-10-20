@@ -11,6 +11,22 @@ cd "$(dirname "$0")/.."
 source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
 J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
 : > "$OUT"
+# Parts seated ON TOP of PART (later in the assembly order and verified seated in the ledger) are pulled
+# to free table spots first: 2026-10-20 the u_brown pull came down on a seated line_green (6.9 N stop).
+ABOVE=$(python3 - "$PART" <<'PY'
+import json, sys
+order = [o['object_name'] for o in sorted(json.load(open('ablations/eval_resources/fmb1_assembly.json'))['assembly_order'], key=lambda o: o['position'])]
+try: led = json.load(open('ablations/logs/assembly_state.json'))
+except Exception: led = {}
+part = sys.argv[1]
+later = order[order.index(part) + 1:]
+print(' '.join(p for p in reversed(later) if (led.get(p) or {}).get('verified')))
+PY
+)
+for p in $ABOVE; do
+  echo "=== $PART is under $p: pull $p to a free spot first" >> "$OUT"
+  python3 -u ablations/disassemble.py --assembly-json x --only "$p" >> "$OUT" 2>&1 || { echo "PULL FAILED $p (clearing above $PART)" >> "$OUT"; exit 1; }
+done
 for k in $(seq 1 "$N"); do
   {
     echo "=== $PART iteration $k/$N: pull"
