@@ -1,0 +1,118 @@
+{
+ "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
+ "updated": "2026-10-20 15:40",
+ "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
+ "tracks": [
+  {
+   "name": "Milestones",
+   "rungs": [
+    {
+     "id": "M0",
+     "title": "Loop with today's fixes",
+     "status": "done",
+     "note": "3/3 plain-layout cycles (1020b)"
+    },
+    {
+     "id": "M1",
+     "title": "Measure: ease metrics + CAD stages per part",
+     "status": "done",
+     "note": "insert_ease / insert_stages / INSERT_GEOMETRY.md"
+    },
+    {
+     "id": "M2",
+     "title": "Base free + measured errors",
+     "status": "active",
+     "note": "base moved 6.7 cm / 3.5 deg worked; FMB3 seated on an unfixed base; sigmas from data still open"
+    },
+    {
+     "id": "M3a",
+     "title": "Drive-mate action + lab surface",
+     "status": "next",
+     "note": "classical FSM behind /ur5e/drive_mate; Grip adapter; ExecuteMate certifying from vision"
+    },
+    {
+     "id": "M4",
+     "title": "Twin planner transfer",
+     "status": "next",
+     "note": "FMB1 planner on the cell, _correct_seat -> drive-mate"
+    },
+    {
+     "id": "M3b",
+     "title": "RL driver",
+     "status": "next",
+     "note": "admittance servo, Isaac ROS policy behind the same action"
+    }
+   ]
+  },
+  {
+   "name": "Assemblies",
+   "rungs": [
+    {
+     "id": "FMB1",
+     "title": "FMB1 hands-off",
+     "status": "done",
+     "note": "3/3 cycles 10-18, base moved 10-20"
+    },
+    {
+     "id": "FMB3",
+     "title": "FMB3 onboarded + assembled",
+     "status": "done",
+     "note": "4/4 seated 10-20 (lines nudged, forks 0.6 mm from CAD)"
+    },
+    {
+     "id": "FMB2",
+     "title": "FMB2 onboarded",
+     "status": "next",
+     "note": "onboard_check: grasp depth entries missing"
+    },
+    {
+     "id": "LOOP3",
+     "title": "FMB3 disassemble + reassemble loop",
+     "status": "next",
+     "note": "per-part loop like FMB1's"
+    }
+   ]
+  },
+  {
+   "name": "Vision",
+   "rungs": [
+    {
+     "id": "HE1",
+     "title": "Hand-eye refit (markers, top-down)",
+     "status": "done",
+     "note": "10-20: 2.8 -> 1.2 mm spread"
+    },
+    {
+     "id": "HELD",
+     "title": "Base read with the part in hand",
+     "status": "done",
+     "note": "view shifted so the held part clears the base"
+    },
+    {
+     "id": "GLARE",
+     "title": "Seat check out of the glare",
+     "status": "done",
+     "note": "close, tilted 25 deg, vs the base-top plane"
+    },
+    {
+     "id": "ICP",
+     "title": "Base pose from CAD-to-depth fit",
+     "status": "done",
+     "note": "base_icp.py: 1.3-1.5 mm rms per view"
+    },
+    {
+     "id": "HE2",
+     "title": "Hand-eye refit from CAD fits over tilted views",
+     "status": "active",
+     "note": "survey of 11 views done; first joint fit not usable (mount and base pose trade off: D drifted to 2 deg / 10 mm, spread not better) - not applied. Next: per-view CAD fits + stronger prior, more wrist variety"
+    },
+    {
+     "id": "SIGMA",
+     "title": "VisionPose with sigma (per-marker + ICP fusion)",
+     "status": "next",
+     "note": ""
+    }
+   ]
+  }
+ ]
+}
