@@ -652,6 +652,54 @@ HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
 
 
+PRE_INSERT_HOVER_DZ = 0.10      # flange above the predicted seat TCP for the pre-insert base read
+PRE_INSERT_MIN_MM, PRE_INSERT_MIN_DEG = 0.5, 0.2     # smaller changes: keep the previous read
+PRE_INSERT_MAX_MM, PRE_INSERT_MAX_DEG = 15.0, 3.0    # larger: a misread, keep the previous read
+
+
+def pre_insert_base_read(obj, state, args, say, log_fh=None):
+    """Re-read the base from the insert hover, seconds before contact (operator 2026-10-20: the base is not
+    fixed and moves during a part's sequence; the read from before the pick is minutes old and from 0.56 m).
+    Close and straight above is the best view (2026-10-20 surveys). Updates args.observed_base, which the
+    insert's argv is built from. Any failure keeps the previous read."""
+    ob = getattr(args, 'observed_base', None)
+    if ob is None:
+        return
+    try:
+        from disassemble import seat_grasp
+        tcp = seat_grasp(obj, state.last_grasp_id or 1, ob)
+    except Exception as e:
+        say(f"  [base@insert] {obj}: no seat estimate ({e}) - keeping the previous base read"); return
+    snap = snapshot_robot_state(); cur = (snap.get('tcp') or {}).get('xyz')
+    if not cur:
+        return
+    z_h = max(float(cur[2]), float(tcp[2]) + PRE_INSERT_HOVER_DZ)
+    for lab, z in (('across at height', max(float(cur[2]), z_h)), ('down to the hover', z_h)):
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                            f"{tcp[0]:.4f}", f"{tcp[1]:.4f}", f"{z:.4f}", '--keep-orientation'],
+                           label=f'base@insert: {lab} ({obj})', timeout_s=90, log_fh=log_fh)
+        if r.get('result') != 'success':
+            say(f"  [base@insert] {obj}: move failed - keeping the previous base read"); return
+    time.sleep(1.0)
+    nb = observe_base_pose(args_base_name(args), timeout_s=6.0)
+    if nb is None:
+        say(f"  [base@insert] {obj}: base not read from the hover - keeping the previous read"); return
+    (x0, y0, _), q0 = ob; (x1, y1, _), q1 = nb
+    dmm = 1000 * float(np.hypot(x1 - x0, y1 - y0))
+    ddeg = float(np.degrees(abs((R_.from_quat(q1) * R_.from_quat(q0).inv()).as_euler('xyz')[2])))
+    if dmm > PRE_INSERT_MAX_MM or ddeg > PRE_INSERT_MAX_DEG:
+        say(f"  [base@insert] {obj}: read moved {dmm:.1f} mm / {ddeg:.2f} deg - treated as a misread, kept the previous"); return
+    if dmm < PRE_INSERT_MIN_MM and ddeg < PRE_INSERT_MIN_DEG:
+        say(f"  [base@insert] {obj}: base unchanged ({dmm:.1f} mm, {ddeg:.2f} deg)"); return
+    args.observed_base = nb
+    say(f"  [base@insert] {obj}: base moved {dmm:.1f} mm / {ddeg:.2f} deg since the last read -> the insert aims at the fresh read "
+        f"({1000*x1:.1f}, {1000*y1:.1f}) mm")
+
+
+def args_base_name(args):
+    return getattr(args, 'base_name', None) or 'base1'
+
+
 def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None, lift_m=None):
     """Before the insert, with the part held at safe height: read the held part's yaw with the camera
     and turn the wrist in place by the difference to the orientation the chain assumes
@@ -1771,6 +1819,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         t_step = time.time()                       # insert logs written from here belong to this step
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not _SAFETY_STOP:
+            pre_insert_base_read(obj, state, args, say, log_fh)  # fresh base read from the hover (base not fixed)
             held_yaw_calibration(obj, state, say, log_fh)      # one read where the arm is; no extra moves
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
