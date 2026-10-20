@@ -129,3 +129,45 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------------------------------------
+# 6-dof read in the camera frame (2026-10-20): the 4-dof fit above forces the base flat; base3 sits ~0.9 deg
+# pitched in the robot frame (every 6-dof view agrees), and forcing it flat shifted xy by up to 11 mm in
+# tilted views. Fitting all 6 dof in the camera frame and reporting x, y, yaw gave a 1.8 mm median spread
+# over 11 views (top-down at two heights and three wrist yaws, tilted 20/30 deg) - the mount needs no refit.
+# ---------------------------------------------------------------------------------------------------------
+def read_icp(base, ob, seated=(), n_points=8000):
+    """((x, y, z_marker), quat_yaw), info from one still capture where the arm is; z is the marker read's
+    (table-snapped, like every base read). None + info on failure."""
+    from seat_check import X_CAM as X0
+    from handeye_icp_survey import capture, fit6, T
+    c = capture()
+    if c is None:
+        return None, {'error': 'no still depth capture'}
+    d, K, tcp = c
+    d = d.astype(np.float32)[::2, ::2] / 1000.0; K = K.copy(); K[:2] /= 2.0
+    vv, uu = np.nonzero(d > 0.1); z = d[vv, uu]
+    Pc = np.c_[(uu - K[0, 2]) / K[0, 0] * z, (vv - K[1, 2]) / K[1, 1] * z, z]
+    Tw = T(tcp[:3], tcp[3:]) @ X0
+    Pw = Pc @ Tw[:3, :3].T + Tw[:3, 3]
+    (bx, by, bz), bq = ob
+    table = np.percentile(Pw[:, 2], 30)
+    m = (np.hypot(Pw[:, 0] - bx, Pw[:, 1] - by) < 0.13) & (Pw[:, 2] > table + 0.004) & (Pw[:, 2] < table + 0.12)
+    idx = np.nonzero(m)[0]
+    if len(idx) < 2000:
+        return None, {'error': f'only {len(idx)} points near the base'}
+    Pc = Pc[np.random.default_rng(0).choice(idx, min(len(idx), n_points), replace=False)]
+    M = model_points(base, list(seated)); tree = cKDTree(M)
+    Tcb, rms, n = fit6(Pc, M, tree, np.linalg.inv(Tw) @ T([bx, by, bz], bq))
+    if Tcb is None:
+        return None, {'error': f'fit failed ({n} matches)'}
+    Bw = Tw @ Tcb
+    e = R.from_matrix(Bw[:3, :3]).as_euler('xyz', degrees=True)
+    yaw = float(np.degrees(np.arctan2(Bw[1, 0], Bw[0, 0])))
+    info = {'rms_mm': round(rms, 2), 'n': n, 'xy_mm': [round(1000 * Bw[0, 3], 1), round(1000 * Bw[1, 3], 1)],
+            'yaw_deg': round(yaw, 2), 'roll_pitch_deg': [round(e[0], 2), round(e[1], 2)],
+            'z_mm': round(1000 * Bw[2, 3], 1), 'marker_mm': [round(1000 * bx, 1), round(1000 * by, 1)]}
+    if rms > 2.5 or n < 1500:
+        return None, dict(info, error='fit too loose')
+    return ((float(Bw[0, 3]), float(Bw[1, 3]), float(bz)), R.from_euler('z', yaw, degrees=True).as_quat()), info

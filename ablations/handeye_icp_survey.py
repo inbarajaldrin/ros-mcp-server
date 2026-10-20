@@ -194,14 +194,113 @@ def solve(a):
     print(json.dumps({k: res[k] for k in ('cam_offset_position', 'cam_offset_quat', 'D_rot_deg', 'D_trans_mm', 'base')}))
 
 
+def fit6(Pc, M, tree, T0, gates=((0.015, 15), (0.006, 15), (0.003, 20))):
+    """6-dof point-to-point ICP of the model (base frame) to camera-frame points: returns T_cam_base, rms, n."""
+    Tcb = T0.copy()
+    for gate, iters in gates:
+        for _ in range(iters):
+            Tbc = np.linalg.inv(Tcb)
+            Pb = Pc @ Tbc[:3, :3].T + Tbc[:3, 3]
+            d, idx = tree.query(Pb, distance_upper_bound=gate)
+            ok = np.isfinite(d)
+            if ok.sum() < 300:
+                return None, None, int(ok.sum())
+            A = M[idx[ok]]; B = Pc[ok]                      # model (base) -> camera
+            ca, cb = A.mean(0), B.mean(0)
+            U, S_, Vt = np.linalg.svd((A - ca).T @ (B - cb))
+            Rm = Vt.T @ U.T
+            if np.linalg.det(Rm) < 0:
+                Vt[2] *= -1; Rm = Vt.T @ U.T
+            Tcb = np.eye(4); Tcb[:3, :3] = Rm; Tcb[:3, 3] = cb - Rm @ ca
+    Tbc = np.linalg.inv(Tcb); Pb = Pc @ Tbc[:3, :3].T + Tbc[:3, 3]
+    d, _ = tree.query(Pb, distance_upper_bound=0.003); ok = np.isfinite(d)
+    return Tcb, float(1000 * np.sqrt(np.mean(d[ok] ** 2))), int(ok.sum())
+
+
+def solve6(a):
+    """Per view: a 6-dof CAD fit in the CAMERA frame (C_i, independent of the mount). Then the mount
+    correction D (X = X0 * D) minimising the spread of B_i = T_tcp_i X0 D C_i (xy, z, yaw) + their tilt
+    (the base lies flat on the table), with a prior |D| ~ 1 deg / 5 mm. Leave-one-out spread reported."""
+    from seat_check import X_CAM as X0
+    from base_icp import model_points
+    d = Path(a.dir); meta, V = load_views(d)
+    base = meta['base']; seated = meta['seated']
+    M = model_points(base, seated); tree = cKDTree(M)
+    (bx, by, bz), bq = meta['base_marker_start']
+    B0 = T([bx, by, bz], bq)
+    rng = np.random.default_rng(0)
+    Cs, labels, Tt = [], [], []
+    for v in V:
+        Tw = v['Ttcp'] @ X0
+        Pw = v['Pc'] @ Tw[:3, :3].T + Tw[:3, 3]
+        table = np.percentile(Pw[:, 2], 30)
+        m = (np.hypot(Pw[:, 0] - bx, Pw[:, 1] - by) < 0.13) & (Pw[:, 2] > table + 0.004) & (Pw[:, 2] < table + 0.12)
+        idx = np.nonzero(m)[0]
+        Pc = v['Pc'][rng.choice(idx, min(len(idx), 8000), replace=False)]
+        Tcb, rms, n = fit6(Pc, M, tree, np.linalg.inv(Tw) @ B0)
+        if Tcb is None:
+            print(f"  {v['label']}: fit failed ({n} matches)"); continue
+        Bw = v['Ttcp'] @ X0 @ Tcb
+        e = R.from_matrix(Bw[:3, :3]).as_euler('xyz', degrees=True)
+        print(f"  {v['label']:22s} rms {rms:.2f} mm, n {n}: base ({1000*Bw[0,3]:.1f}, {1000*Bw[1,3]:.1f}, {1000*Bw[2,3]:.1f}) "
+              f"rpy ({e[0]:+.2f}, {e[1]:+.2f}, {e[2]:+.2f})", flush=True)
+        Cs.append(Tcb); labels.append(v['label']); Tt.append(v['Ttcp'])
+
+    def bases(x, idx=None):
+        D = T(x[3:], R.from_rotvec(x[:3]).as_quat())
+        return [Tt[i] @ X0 @ D @ Cs[i] for i in (range(len(Cs)) if idx is None else idx)]
+
+    def resid(x, idx=None):
+        Bs = bases(x, idx)
+        P = np.array([B[:3, 3] for B in Bs]); Rm = [R.from_matrix(B[:3, :3]) for B in Bs]
+        yaw = np.unwrap([r.as_euler('xyz')[2] for r in Rm])
+        tilt = np.array([r.as_rotvec()[:2] if abs(r.as_euler('xyz')[0]) < np.pi / 2 else (r * R.from_euler('x', np.pi)).as_rotvec()[:2] for r in Rm]).ravel()
+        return np.concatenate([((P - P.mean(0)) / 0.001).ravel(), (yaw - yaw.mean()) / np.radians(0.2), tilt / np.radians(0.3),
+                               x[:3] / np.radians(1.0), x[3:] / 0.005])
+
+    def spread(x, idx=None):
+        Bs = bases(x, idx); P = np.array([B[:3, 3] for B in Bs])
+        yaw = np.degrees(np.unwrap([R.from_matrix(B[:3, :3]).as_euler('xyz')[2] for B in Bs]))
+        dxy = 1000 * np.hypot(*(P[:, :2] - np.median(P[:, :2], 0)).T)
+        return dxy, np.ptp(yaw), 1000 * np.ptp(P[:, 2])
+
+    x = least_squares(resid, np.zeros(6), x_scale=[0.01] * 3 + [0.005] * 3).x
+    for lab, xx in (('before', np.zeros(6)), ('after', x)):
+        dxy, yr, zr = spread(xx)
+        print(f"{lab:6s}: base xy spread median {np.median(dxy):.1f} max {dxy.max():.1f} mm | yaw range {yr:.2f} deg | z range {zr:.1f} mm")
+    # leave-one-out: fit without view k, predict view k's base vs the others'
+    loo = []
+    for k in range(len(Cs)):
+        rest = [i for i in range(len(Cs)) if i != k]
+        xk = least_squares(lambda q: resid(q, rest), np.zeros(6), x_scale=[0.01] * 3 + [0.005] * 3).x
+        Bk = bases(xk, [k])[0]; Br = bases(xk, rest)
+        P = np.median([B[:3, 3] for B in Br], 0)
+        loo.append(1000 * np.hypot(*(Bk[:2, 3] - P[:2])))
+    loo0 = []
+    for k in range(len(Cs)):
+        rest = [i for i in range(len(Cs)) if i != k]
+        Bk = bases(np.zeros(6), [k])[0]; P = np.median([B[:3, 3] for B in bases(np.zeros(6), rest)], 0)
+        loo0.append(1000 * np.hypot(*(Bk[:2, 3] - P[:2])))
+    print(f"leave-one-out xy error: before median {np.median(loo0):.1f} max {np.max(loo0):.1f} mm -> after median {np.median(loo):.1f} max {np.max(loo):.1f} mm")
+    X = X0 @ T(x[3:], R.from_rotvec(x[:3]).as_quat())
+    res = {'cam_offset_position': np.round(X[:3, 3], 5).tolist(), 'cam_offset_quat': np.round(R.from_matrix(X[:3, :3]).as_quat(), 5).tolist(),
+           'D_rot_deg': np.round(np.degrees(x[:3]), 3).tolist(), 'D_trans_mm': np.round(1000 * x[3:], 2).tolist(),
+           'loo_before_mm': np.round(loo0, 1).tolist(), 'loo_after_mm': np.round(loo, 1).tolist(), 'views': labels}
+    json.dump(res, open(d / 'solve6.json', 'w'), indent=1)
+    print(json.dumps({k: res[k] for k in ('cam_offset_position', 'cam_offset_quat', 'D_rot_deg', 'D_trans_mm')}))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest='cmd', required=True)
     s1 = sp.add_parser('survey'); s1.add_argument('--base', required=True); s1.add_argument('--seated', nargs='*', default=[])
     s2 = sp.add_parser('solve'); s2.add_argument('dir')
+    s3 = sp.add_parser('solve6'); s3.add_argument('dir')
     a = ap.parse_args()
     if a.cmd == 'survey':
         survey(a)
+    elif a.cmd == 'solve6':
+        solve6(a)
     else:
         solve(a)
 
