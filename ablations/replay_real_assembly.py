@@ -645,7 +645,7 @@ HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
 
 
-def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None):
+def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None, lift_m=None):
     """Before the insert, with the part held at safe height: read the held part's yaw with the camera
     and turn the wrist in place by the difference to the orientation the chain assumes
     (state.held_quat), so the part - not just the flange - faces its slot. Nothing measured the part's
@@ -657,9 +657,18 @@ def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None):
         return
     from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
     from utils.data_path_finder import get_symmetry_dir
-    if observed_base is not None:
-        # Read above the base, not above the clear area: held u_brown was seen 0x in 10 s over the taped
-        # clear area and 8x in 5 s above the base (2026-10-19 21:40). The insert hovers there next anyway.
+    if lift_m is not None:
+        # Right after the grasp, lifted a little: the localizer publishes a part only near its rest height
+        # (ray-snap tolerance 50 mm) - held u_brown was seen 8x/5 s at the rim but 0x at 0.30 m above the
+        # base or the clear area (2026-10-20). This is also the one read that measures the grasp error.
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real',
+                            '--lift-by', f"{lift_m:.3f}"], label=f'held-yaw: lift {obj} {1000*lift_m:.0f} mm for the read',
+                           timeout_s=60, log_fh=log_fh)
+        if r.get('result') != 'success':
+            return
+        time.sleep(1.0)
+    elif observed_base is not None:
+        # Pre-insert fallback above the base (works for line_green, whose top marker stays high enough).
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
         (bx, by, bz), bq = observed_base
         sp, _ = load_seat_pose_in_base('base1', obj)
@@ -1766,6 +1775,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                         say(f"  [{step_idx}] re-pick grip {got:.1f} mm, still not {want:.1f} -> stopping")
                         result = dict(result, result='failure', error='wrong grasp twice')
 
+        if (tool_name == 'control_gripper' and str(kw.get('command')) == 'close' and not _SAFETY_STOP
+                and result.get('result') != 'failure' and _prev_tool(step_idx) == 'move_to_grasp'
+                and not args.dry_run and state.held_quat is not None):
+            held_yaw_calibration(obj, state, say, log_fh, None, lift_m=0.020)
         # Staging regrasp: move_to_grasp has just turned top-down over the clear area
         # and observed the part before descending. If the face it landed on cannot be
         # inserted in one pass, run another place-down pass from here — the part is in
