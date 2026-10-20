@@ -7,7 +7,7 @@
   dev (base)    seat TCP - CAD-predicted TCP at seat, mm, rotated into the base frame (the EE yaw
                 at hover = the base yaw the insert aimed with); the sign pattern across runs is the
                 aim bias, the spread is the grasp/read noise
-  lat work      integral of |F_lat| over the contact->seat window, N*s: how much the search pushed
+  lat F*t       integral of |F_lat| over the contact->seat window, N*s (force-time, not work): how much the search pushed
   z stalls      dwells (> STALL_S at one height, > 5 mm above the seat) before the seat: the stages
                 the part hung on
 
@@ -109,7 +109,7 @@ def main():
     by = {}
     for r in recs:
         by.setdefault(r['part'], []).append(r)
-    print(f"{'run':34s} {'out':7s} {'att':>3s} {'c->seat s':>9s} {'dev base x,y mm':>16s} {'lat N*s':>8s} {'stalls':>6s}")
+    print(f"{'run':34s} {'out':7s} {'att':>3s} {'c->seat s':>9s} {'dev base x,y mm':>16s} {'latF*t Ns':>9s} {'stalls':>6s}")
     for part, rs in by.items():
         rs = rs[-a.last:] if a.last else rs
         for r in rs:
@@ -123,7 +123,7 @@ def main():
               f"dev median ({np.median(devs[:, 0]) if len(devs) else float('nan'):+.1f}, {np.median(devs[:, 1]) if len(devs) else float('nan'):+.1f}) mm, "
               f"spread (p10-p90) {np.percentile(devs[:, 0], 90) - np.percentile(devs[:, 0], 10) if len(devs) else float('nan'):.1f}/"
               f"{np.percentile(devs[:, 1], 90) - np.percentile(devs[:, 1], 10) if len(devs) else float('nan'):.1f} mm; "
-              f"lat work median {np.nanmedian([r['lat_work'] for r in ok]) if ok else float('nan'):.1f} N*s\n")
+              f"lat F*t median {np.nanmedian([r['lat_work'] for r in ok]) if ok else float('nan'):.1f} N*s\n")
 
 
 if __name__ == '__main__':
