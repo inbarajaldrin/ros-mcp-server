@@ -15,7 +15,7 @@ source /opt/ros/humble/setup.bash
 EXTRA=()
 [ -n "$DIAG" ] && EXTRA=(/camera/camera/aligned_depth_to_color/image_raw/compressed
   /camera/camera/aligned_depth_to_color/camera_info /camera/camera/color/camera_info
-  /objects_poses_real_raw /gripper_width /force_torque_sensor_broadcaster/wrench /joint_states)
+  /objects_poses_real_raw /gripper_width /gripper_width_offset /force_torque_sensor_broadcaster/wrench /joint_states)
 exec nice -n 19 ros2 bag record -s mcap -o "$OUT" \
   /camera/camera/color/image_raw/compressed /objects_poses_real /grasp_points_real \
   /tcp_pose_broadcaster/pose /camera_pose "${EXTRA[@]}"
