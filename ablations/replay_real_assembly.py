@@ -1651,7 +1651,10 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
                 # taps along the bar to its CAD end face (operator 2026-10-20: a slow push drags the unfixed
                 # base - cycle 1's axial push moved base3 10 mm); start clear of the MEASURED end
                 lax = f_.get('long_axis', 'y')
-                toward = ('-' if shift > 0 else '+') + lax
+                # direction from the HIGH end toward the slot (as nudge_into_slot): the extent midpoint is smeared
+                # by a raised end (cycle 2: -y end 6.7 mm high, extent midpoint +7 -> taps pushed it further -y)
+                ends_ = res.get('end_heights_mm') or [0.0, 0.0]
+                toward = ('+' if ends_[0] > ends_[1] else '-') + lax
                 say(f"  [seat-check] {obj}: shifted {shift:+.0f} mm along its length -> taps toward {toward} to the CAD end face")
                 run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
                                 f'--toward={toward}', '--face-offset-mm', f"{abs(shift) + 3:.0f}", '--taps', '3'],
@@ -2121,12 +2124,20 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                    ('translate_object', dict(action='place_down', object_name=obj, base_name=base_name)),
                    ('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
                    ('move_to_safe_height', {}),
+                   ('reread_base', {}),                # empty gripper: the failed attempts may have pushed the base
                    ('move_to_grasp', dict(object_name=obj, grasp_id=state.last_grasp_id or 1)),
                    ('control_gripper', dict(command='close')),
                    ('move_to_safe_height', dict(object_name=obj)),
                    ('rotate_object', dict(object_name=obj, base_name=base_name)),
                    ('translate_object', dict(kw))]
             for j, (t_, k_) in enumerate(rec, start=1):
+                if t_ == 'reread_base':
+                    # 2026-10-20 cycle 2: fork_yellow's three attempts slid base3 17.5 mm / 4.5 deg and the
+                    # recovery's reinsert aimed at the read from before them. Re-read with the gripper empty.
+                    nb = reread_base(args_base_name(args), getattr(args, 'observed_base', None), log_fh)
+                    if nb is not None:
+                        args.observed_base = nb
+                    continue
                 r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
                 if r_ is None or r_.get('result') == 'failure':
                     result = r_ or {'result': 'failure', 'error': 'recovery build failed'}
