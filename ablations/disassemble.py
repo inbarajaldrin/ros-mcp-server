@@ -63,6 +63,13 @@ def run(argv, label, timeout=180):
     out = p.stdout + p.stderr
     js = [l for l in out.splitlines() if l.startswith('{"result"')]
     res = json.loads(js[-1]) if js else {}
+    # A guarded landing's contact stop is reported as a failure by move_cartesian and accepted by
+    # place_at; a child disassemble.py echoes that JSON (its own run() prints a failing child's tail),
+    # and it was the last JSON the parent saw: a relocation that had worked was judged FAILED and the
+    # layout check was never re-run (2026-10-19 20:30, loop 1019d). Judge a child by its exit code
+    # when its last JSON is such a contact stop.
+    if res.get('contact') and str(res.get('error', '')).startswith('contact') and p.returncode == 0:
+        res = dict(res, result='success')
     ok = p.returncode == 0 and res.get('result', 'success') != 'failure'
     from replay_real_assembly import robot_safety_status
     st = robot_safety_status()
@@ -529,6 +536,7 @@ def finish_staging_layout(layout, ob):
                   f"{1000*strayed(mover):.0f} mm from its plan)", flush=True)
             ok_r, _ = run([sys.executable, '-u', str(REPO / 'ablations/disassemble.py'), '--assembly-json', 'x',
                            '--relocate', mover, '--grasp-id', 'auto', '--spot-staging'], f'relocate {mover}', 900)
+            ok_r = True          # whatever the relocate reported, the re-check below is the truth
             if ok_r:
                 run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                        '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
