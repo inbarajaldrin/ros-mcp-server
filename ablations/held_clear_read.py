@@ -64,6 +64,7 @@ OFFSET_STEP_M = 0.02
 OFFSET_PENALTY = 0.5                    # per metre of offset: prefer the least oblique clear view
 MIN_PART_CLEAR_M = 0.10                 # held part's lowest point at least this above the base top
 COVER_OK = 0.01                         # a view is clear below this covered fraction
+DEPTH_MARGIN = 0.15                     # aligned depth: no data in a band at the image edges (D415 FOV, IR shadow)
 
 
 def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
@@ -114,7 +115,10 @@ def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
                 mb = big.copy(); cv2.fillConvexPoly(mb, (base_uv / s + off).astype(np.int32), 1)
                 area = max(int(mb.sum()), 1)
                 covered = float((mb & mp).sum()) / area
-                outside = 1.0 - float(mb[H:2 * H, W:2 * W].sum()) / area
+                # the base must sit where the aligned depth is valid: not the outer DEPTH_MARGIN of the image
+                # (2026-10-20: a view that put it at the edge got 1656 depth points and no fit)
+                mx, my = int(W * DEPTH_MARGIN), int(H * DEPTH_MARGIN)
+                outside = 1.0 - float(mb[H + my:2 * H - my, W + mx:2 * W - mx].sum()) / area
                 shift = float(np.hypot(dx, dy))
                 out.append(dict(turn=d, shift_mm=[round(1000 * dx), round(1000 * dy)], covered=round(covered, 3),
                                 outside=round(outside, 3), score=round(covered + outside + OFFSET_PENALTY * shift, 4),

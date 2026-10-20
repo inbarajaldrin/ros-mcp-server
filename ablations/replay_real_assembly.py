@@ -674,6 +674,7 @@ def choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
     uses every surface, so a held part or seated parts hiding some of the base do not bias it). 'icp' falls back
     to the outline, then the markers, when the fit is loose. Call with the arm still, at the read's view."""
     mode = os.environ.get('BASE_FROM', 'marker')
+    choose_base_read.source = 'marker'
     if mode == 'icp' and ob_marker is not None:
         try:
             from base_icp import read_icp
@@ -682,8 +683,10 @@ def choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
             oi, info = None, {'error': str(e)}
         say(f"  [{tag}] CAD fit: {json.dumps(info)}")
         if oi is not None:
+            choose_base_read.source = 'icp'
             return oi
     if mode in ('depth', 'icp') and ob_depth is not None:
+        choose_base_read.source = 'depth'
         return ob_depth
     return ob_marker
 
@@ -741,6 +744,11 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
             nd, info = _depth(nb, bname)
             say(f"  [base@insert] {obj}: depth outline {json.dumps(info)}")
             nb = choose_base_read(bname, nb, nd, say, tag=f'base@insert] [{obj}')
+            if choose_base_read.source == 'marker':
+                # 2026-10-20 cycle 1: both depth reads failed at the base's image edge and the oblique marker read
+                # (5.2 mm / 1.5 deg off) was applied - three failed attempts. Keep the last depth read instead.
+                say(f"  [base@insert] {obj}: no depth read from the clear view - keeping the previous read")
+                nb = None
     r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back ({obj})', timeout_s=90, log_fh=log_fh)
     if r2.get('result') != 'success':                       # once more before failing closed
         r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back, retry ({obj})', timeout_s=90, log_fh=log_fh)
