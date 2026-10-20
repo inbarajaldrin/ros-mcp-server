@@ -708,6 +708,15 @@ def main():
             return 1
         spots, note = [tuple(p['flange_xy']) for p in layout['parts']], f"staging layout seed {layout['seed']}"
     else:
+        # Plan from the cell layout's staging view (the whole staging region in view), not from home: from
+        # home only 3 of FMB3's 4 parts fitted (2026-10-20). The replay finds a part home cannot see from the
+        # staging view / above its last position.
+        if not a.dry_run:
+            from primitives.shared.config import STAGING_VIEW as _SV
+            ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in _SV],
+                           '--quat', '0', '1', '0', '0'), 'staging view (plan the spots)', 90)
+            if not ok: return 1
+            time.sleep(1.5)
         spots, note = depth_free_spots(extents, exclude)
         if not spots or len(spots) < len(parts):
             # Fresh frames once: the same table planned fine standalone but failed right after the
@@ -922,6 +931,10 @@ def main():
     # Where did the parts actually land? The spots were planned clear, but a part that slips or
     # tips lands elsewhere (2026-10-15: line_green 7 mm from base1). Check from home, fail closed.
     from spacing_check import check as spacing, observe_parts
+    from primitives.shared.config import STAGING_VIEW as _SV        # every staged part in view (not home)
+    run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in _SV],
+           '--quat', '0', '1', '0', '0'), 'staging view (check the landings)', 90)
+    time.sleep(1.5)
     seen = observe_parts(RUN['parts'])
     ok_sp, rep = spacing(seen, ob, base=RUN['base'])
     rep['unseen'] = [n for n in RUN['parts'] if n not in seen]
