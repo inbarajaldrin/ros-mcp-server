@@ -11,9 +11,9 @@ as well"). Everything comes from CAD in the base frame and the base read:
     centre at the part's top (fingertips 15 mm lower, above the base top - never on it)
   * start: closed finger block `--gap-mm` clear of the face, lowered from safe height, guarded (stops on
     touch; then lifts and starts further out)
-  * push: DISTANCE-capped, `--push-mm` past the CAD face, with --max-force as a stop. Not a push until a
-    force builds up: the base is not fixed, and a sustained push walks the base as far as the seat lets it
-    (operator, 2026-10-20)
+  * taps (default): out to the CAD face (`--push-mm` past it, default 0) at the arm's short-move speed and
+    straight back, --max-force as a stop. Never a sustained push: the base is not fixed, and a slow push
+    dragged base3 4 mm / 1.7 deg (operator, 2026-10-20: "a little tap would have prevented the drag")
   * back off, safe height, re-read the base, depth seat check
 
 --toward: the direction the part is pushed, in the BASE frame (+x / -x / +y / -y). --at-long: where along
@@ -48,10 +48,13 @@ def main():
     ap.add_argument('--push-mm', type=float, default=0.0,
                     help='how far past the CAD face the block goes (0 = to the face: a part with no clearance in its '
                          'seat pushes the BASE with anything more - 1 mm turned base3 1.7 deg, 2026-10-20)')
-    ap.add_argument('--gap-mm', type=float, default=4.0, help='start clearance from the measured face')
+    ap.add_argument('--gap-mm', type=float, default=3.0, help='start clearance from the measured face')
     ap.add_argument('--face-offset-mm', type=float, default=0.0,
                     help='measured shift of the face toward the block (+ = the part sits that much closer)')
     ap.add_argument('--max-force', type=float, default=MAX_FORCE_N)
+    ap.add_argument('--taps', type=int, default=2, help='quick taps (out and straight back) - the default')
+    ap.add_argument('--slow-push', action='store_true',
+                    help='one slow push instead of taps (dragged base3 4 mm / 1.7 deg, 2026-10-20 - avoid)')
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
     if not -2.0 <= a.push_mm <= PUSH_MM_MAX:
@@ -119,9 +122,24 @@ def main():
         print(f"!!! lower failed: {r.get('error')}"); return 1
     time.sleep(1.5)                                          # settle before the force baseline
     p = W(push_b)
-    r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(p, fz(p)), '--quat', *Q,
-            '--min-z', '0.15', '--max-force', f"{a.max_force}", '--min-duration', '4'], f'push {a.push_mm:g} mm past the face')
-    print(f"[nudge] push: {'stopped: ' + str(r.get('error')) if r.get('contact') else 'reached the distance cap'}", flush=True)
+    if a.slow_push:
+        r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(p, fz(p)), '--quat', *Q,
+                '--min-z', '0.15', '--max-force', f"{a.max_force}", '--min-duration', '4'], f'push {a.push_mm:g} mm past the face')
+        print(f"[nudge] push: {'stopped: ' + str(r.get('error')) if r.get('contact') else 'reached the distance cap'}", flush=True)
+    else:
+        # Taps (operator 2026-10-20: "a little tap would have prevented the drag on the base"): out to the
+        # CAD face at the arm's own short-move speed and straight back - contact lasts a fraction of a
+        # second, so the part is knocked off its lip before friction carries the base along.
+        for k in range(1, a.taps + 1):
+            r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(p, fz(p)), '--quat', *Q,
+                    '--min-z', '0.15', '--max-force', f"{a.max_force}"], f'tap {k}')
+            print(f"[nudge] tap {k}: {'stopped: ' + str(r.get('error')) if r.get('contact') else 'reached the face'}"
+                  f" ({r.get('duration_s', r.get('t_after_start_s'))} s)", flush=True)
+            b = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s, fz(s)), '--quat', *Q,
+                    '--min-z', '0.15'], f'tap {k} back')
+            if b.get('result') == 'failure':
+                print(f"!!! tap {k} back failed: {b.get('error')}"); return 1
+            time.sleep(1.5)                                  # settle before the next force baseline
     for argv, label in [(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s, fz(s) + 0.02), '--quat', *Q,
                           '--min-z', '0.15'], 'back off'),
                         (['primitives.move_to_safe_height', '--mode', 'real'], 'safe height')]:
