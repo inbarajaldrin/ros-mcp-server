@@ -35,7 +35,8 @@ sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 TIP_ABOVE_TABLE_M = 0.008       # fingertips over the table during the push (base is 35 mm tall)
 GAP_M = 0.012                   # finger face this far off the base face before the push
-STEP_MAX_MM = 12.0              # one push moves the finger face at most this far past the base face
+STEP_MAX_MM = 50.0              # one push moves the finger face at most this far past the base face
+PUSH_SPEED_M_S = 0.008          # slow enough that the base stops when the fingers stop
 MAX_FORCE_N = 12.0              # guard for the push (the empty base slides at a few N)
 LEVER_MM = 55.0                 # push point off the face middle for a turn
 BLOCK_HALF_PUSH_M = 0.0101      # closed finger block: half of the side that faces the push
@@ -116,8 +117,10 @@ def push(base, ob, face_dir_b, along_mm, step_mm, dry):
     if r.get('result') == 'failure':
         return False
     time.sleep(1.5)                                                     # settle before the force baseline
+    # slow (PUSH_SPEED_M_S): a 3 s push of 5 mm moved the base 10 mm - it slid on after the fingers stopped
+    dur = max(3.0, float(np.linalg.norm(e_w - s2)) / PUSH_SPEED_M_S)
     r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(e_w, fz), '--quat', *Q, '--min-z', '0.13',
-            '--max-force', f"{MAX_FORCE_N}", '--min-duration', '3'], 'push')
+            '--max-force', f"{MAX_FORCE_N}", '--min-duration', f"{dur:.1f}"], 'push')
     go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s2, fz + 0.01), '--quat', *Q, '--min-z', '0.13'], 'back off')
     go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s2, SAFE_HEIGHT + 0.05), '--quat', *Q], 'lift')
     return True
@@ -130,9 +133,9 @@ def main():
     ap.add_argument('--dy', type=float, default=0.0, help='mm, world')
     ap.add_argument('--dyaw', type=float, default=0.0, help='deg')
     ap.add_argument('--to', type=float, nargs=3, default=None, metavar=('X_MM', 'Y_MM', 'YAW_DEG'))
-    ap.add_argument('--tol-mm', type=float, default=4.0)
+    ap.add_argument('--tol-mm', type=float, default=5.0)
     ap.add_argument('--tol-deg', type=float, default=1.0)
-    ap.add_argument('--max-pushes', type=int, default=12)
+    ap.add_argument('--max-pushes', type=int, default=4)
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
     from primitives.shared.config import STAGING_REGION
@@ -154,6 +157,7 @@ def main():
     sx, sy = STAGING_REGION['x'], STAGING_REGION['y']
     if not (1000 * sx[0] + 80 < tgt[0] < 1000 * sx[1] - 80 and 1000 * sy[0] + 80 < tgt[1] < 1000 * sy[1] - 80):
         print("  !!! target outside the staging/assembly area - not moving"); return 1
+    first_dir = None
     for k in range(1, a.max_pushes + 1):
         (x, y, _), q = ob
         yaw = float(R.from_quat(q).as_euler('xyz', degrees=True)[2])
@@ -176,6 +180,13 @@ def main():
             d = np.zeros(2); d[ax] = float(np.sign(e_b[ax]))
             lever = 0.0
             step = float(np.clip(abs(e_b[ax]), 3, STEP_MAX_MM))
+            # operator 2026-10-20: "for a slide in one direction why are we iterating so much when you know how
+            # much to slide it by" - one push of the whole distance; a top-up only from the SAME side; an
+            # overshoot is accepted (pushing back from the other side oscillated +-5 mm for 10 pushes)
+            if first_dir is None:
+                first_dir = d.copy()
+            elif np.dot(d, first_dir) < 0:
+                print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); return 0
         if not push(a.base, ob, d, lever, step, a.dry_run):
             print("  !!! push failed - stopping"); return 1
         if a.dry_run:
