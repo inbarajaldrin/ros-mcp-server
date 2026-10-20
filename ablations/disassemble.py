@@ -336,7 +336,7 @@ def observe_base(base_name='base1'):
     time.sleep(1.0)                                            # settle before the depth frames
     ob_d, info = measure(ob, base_name)                        # x, y, yaw from the depth outline
     print(f"[base] depth outline: {json.dumps(info)}", flush=True)
-    return ob_d if ob_d is not None else ob
+    return ob_d if (ob_d is not None and os.environ.get('BASE_FROM', 'marker') == 'depth') else ob
 
 
 LAND_SLOW_ABOVE_M = 0.015        # last stretch before the expected touch: slow, guarded

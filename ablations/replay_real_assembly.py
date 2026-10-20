@@ -806,7 +806,8 @@ def reread_base(bname, prev, log_fh=None):
         return prev
     time.sleep(1.0)                                            # settle before the depth frames
     ob_d, info = _base_from_depth(ob, bname)
-    ob = ob_d if ob_d is not None else ob
+    if ob_d is not None and os.environ.get('BASE_FROM', 'marker') == 'depth':
+        ob = ob_d                                  # depth outline only on request (BASE_FROM=depth)
     msg = (f"  [base] re-read ({'depth' if ob_d is not None else 'marker'}): "
            f"({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}) mm, yaw {np.degrees(2*np.arctan2(ob[1][2], ob[1][3])):.2f} deg")
     if prev is not None:
@@ -2166,7 +2167,10 @@ def main() -> int:
                 msg = f"  [base] depth outline: {json.dumps(info_d)}"
                 print(msg)
                 if log_fh: log_fh.write(msg + "\n")
-                if ob_d is not None:
+                # 2026-10-20: after the hand-eye refit the markers are the calibrated read (1.2 mm across 24
+                # views); the depth outline sits ~5 mm off in x and the validation insert seated -3.7 mm in x
+                # from it. Markers by default; BASE_FROM=depth restores the outline.
+                if ob_d is not None and os.environ.get('BASE_FROM', 'marker') == 'depth':
                     ob = ob_d
             if above:
                 # --part-at-staging: the part waits in the clear area, which home cannot see —
