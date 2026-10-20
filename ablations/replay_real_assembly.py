@@ -471,22 +471,72 @@ PICK_FINGER_CLEAR_MM = 15.0       # the recorded grasp's open fingers must have 
                                   # base1's edge put a finger on the base -> PROTECTIVE_STOP (2026-10-19)
 
 
+PICK_OPENING_MM = {}              # part -> pre-grasp opening chosen for the stance it lies in (see _pick_room)
+PICK_OPEN_MAX_MM = 100.0
+PICK_SELF_CLEAR_MIN_MM = 8.0      # fingers must clear the part's OWN top material by this; the recorded opening
+                                  # (tuned for the standing part) gave flat yellow 6.7 mm, and with the camera's
+                                  # 2-10 mm pose error a finger came down on the bridge -> PROTECTIVE_STOP, twice
+
+
+def _finger_clearance_mm(obj, pose, gid, open_mm, obstacles):
+    """Smallest distance (mm) from either open-finger footprint (T along the closing axis, W across) to the
+    part's own top-face material (CAD mesh at `pose`) and to each obstacle outline."""
+    from spacing_check import FINGER_T_M, FINGER_W_M, GRASPS, gap_mm, finger_outlines
+    from grasp_depth import load_mesh, surface_points
+    from scipy.spatial.transform import Rotation as _R
+    (p, q) = pose
+    Rq = _R.from_quat(q)
+    V, F = load_mesh(obj)
+    P = Rq.apply(surface_points(V, F)) + np.asarray(p)
+    mat = P[P[:, 2] > P[:, 2].max() - 0.004][:, :2]
+    g = next(g for g in json.load(open(str(GRASPS).format(obj)))['grasp_points'] if g['id'] == gid)
+    c = (Rq.apply([g['position'][k] for k in 'xyz']) + np.asarray(p))[:2]
+    ax = Rq.apply([1.0, 0.0, 0.0])[:2]
+    if np.linalg.norm(ax) < 0.5:
+        ax = Rq.apply([0.0, 0.0, 1.0])[:2]
+    ax = ax / np.linalg.norm(ax); pe = np.array([-ax[1], ax[0]])
+    own = 1e9
+    for sgn in (-1, 1):
+        m = c + sgn * ax * (open_mm / 2000 + FINGER_T_M / 2)
+        d = mat - m; u = d @ ax; v = d @ pe
+        du = np.maximum(np.abs(u) - FINGER_T_M / 2, 0); dv = np.maximum(np.abs(v) - FINGER_W_M / 2, 0)
+        own = min(own, float(np.sqrt(du ** 2 + dv ** 2).min()) * 1000)
+    other = min([min(gap_mm(f, o) for f in finger_outlines(obj, pose, gid, open_mm)) for _, o in obstacles] or [1e9])
+    return own, other
+
+
 def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
-    """True when `obj` can be picked with grasp `gid` where it lies. If the fingers would land within
-    PICK_FINGER_CLEAR_MM of base1 or another part, relocate it first (disassemble --relocate: clearest
-    grasp at its own opening, a spot in the staging region when it is there) and return True on success;
-    False only when the part is not seen or the relocation fails."""
+    """True when `obj` can be picked with grasp `gid` where it lies — choosing the pre-grasp opening for
+    the stance it lies in (PICK_OPENING_MM): the recorded one or wider, whichever keeps the open fingers
+    farthest from the part's own material and from base1 / the other parts. If no opening keeps them
+    PICK_FINGER_CLEAR_MM from a neighbour, relocate the part first (disassemble --relocate) and return True
+    on success; False only when the part is not seen or the relocation fails."""
     try:
-        from spacing_check import observe_parts, PARTS, finger_outlines, base_outline, outline, gap_mm
+        from spacing_check import observe_parts, PARTS, base_outline, outline
         seen = observe_parts(PARTS)
         ob = observe_base_pose('base1')
         if obj not in seen or ob is None:
             return True                                   # cannot judge here; the pick's own checks apply
         obst = [('base1', base_outline(ob))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj]
-        gaps = {n: min(gap_mm(f, o) for f in finger_outlines(obj, seen[obj], gid, width_mm)) for n, o in obst}
-        worst = min(gaps, key=gaps.get)
-        if gaps[worst] >= PICK_FINGER_CLEAR_MM:
+        best = None
+        for open_mm in np.arange(width_mm, PICK_OPEN_MAX_MM + 0.1, 4.0):
+            own, other = _finger_clearance_mm(obj, seen[obj], gid, float(open_mm), obst)
+            score = min(own, other)
+            if best is None or score > best[0] + 0.5:
+                best = (score, float(open_mm), own, other)
+        score, open_mm, own, other = best
+        msg = (f"  [pick] {obj} grasp {gid}: opening {open_mm:g} mm (recorded {width_mm:g}) -> fingers "
+               f"{own:.0f} mm from the part itself, {other:.0f} mm from base1/others")
+        print(msg, flush=True)
+        if log_fh: log_fh.write(msg + "\n")
+        PICK_OPENING_MM[obj] = open_mm
+        if own < PICK_SELF_CLEAR_MIN_MM:
+            msg = f"  [pick] {obj}: only {own:.0f} mm from its own material at any opening - picking anyway (watch the guard)"
+            print(msg, flush=True)
+            if log_fh: log_fh.write(msg + "\n")
+        if other >= PICK_FINGER_CLEAR_MM:
             return True
+        gaps = {'base1/others': other}; worst = 'base1/others'
         msg = (f"  [pick] {obj} grasp {gid}: open fingers {gaps[worst]:.0f} mm from {worst} "
                f"(< {PICK_FINGER_CLEAR_MM:g}) -> relocating it first")
         print(msg, flush=True)
@@ -1338,7 +1388,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'move_to_grasp' and base_name:
             argv += ['--base-name', base_name]
         if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
-            argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
+            # the part's FIRST pick (step 2 of every sequence) uses the stance-chosen opening; regrasps as recorded
+            w_ = PICK_OPENING_MM.get(obj, grasp_width['mm']) if (tag == "" and step_idx == 2) else grasp_width['mm']
+            argv += ['--pre-grasp-width', f"{w_:g}"]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
         if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
             # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation and
@@ -1450,7 +1502,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             if tool_name == 'move_to_grasp' and base_name:
                 argv += ['--base-name', base_name]
             if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
-                argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]
+                argv += ['--pre-grasp-width', f"{grasp_width['mm']:g}"]      # regrasp/recovery: as recorded
             print(f"  [{step_idx}] [DRY] {' '.join(argv)}")
             continue
 
