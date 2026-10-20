@@ -526,8 +526,11 @@ def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
             if best is None or score > best[0] + 0.5:
                 best = (score, float(open_mm), own, other)
         score, open_mm, own, other = best
+        (px_, py_, pz_), pq_ = seen[obj]
+        rpy_ = R_.from_quat(pq_).as_euler('xyz', degrees=True)
         msg = (f"  [pick] {obj} grasp {gid}: opening {open_mm:g} mm (recorded {width_mm:g}) -> fingers "
-               f"{own:.0f} mm from the part itself, {other:.0f} mm from base1/others")
+               f"{own:.0f} mm from the part itself, {other:.0f} mm from base1/others "
+               f"(pose used: ({1000*px_:.0f}, {1000*py_:.0f}, {1000*pz_:.0f}) mm rpy ({rpy_[0]:.0f}, {rpy_[1]:.0f}, {rpy_[2]:.0f}))")
         print(msg, flush=True)
         if log_fh: log_fh.write(msg + "\n")
         PICK_OPENING_MM[obj] = open_mm
