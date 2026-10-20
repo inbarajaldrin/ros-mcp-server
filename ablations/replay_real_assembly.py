@@ -682,8 +682,8 @@ def held_yaw_calibration(obj, state, say, log_fh=None):
                         f"{x:.4f}", f"{y:.4f}", f"{z:.4f}", '--quat', *[f"{v:.6f}" for v in q_new]],
                        label=f'held-yaw: turn the wrist {-err_deg:+.2f} deg in place', timeout_s=60, log_fh=log_fh)
     if r.get('result') == 'success':
-        state.held_quat = tuple(float(v) for v in (turn * Rc).as_quat())
-        say(f"  [held-yaw] {obj}: wrist turned {-err_deg:+.2f} deg; chain orientation updated")
+        # the part now really is where the chain assumed: state.held_quat stays as it is
+        say(f"  [held-yaw] {obj}: wrist turned {-err_deg:+.2f} deg; the held part now matches the chain")
 
 
 def record_follow_reads(obj, say, observed_base=None, log_fh=None):
