@@ -1172,8 +1172,6 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                      '--object-name', kw['object_name'],
                      '--base-name', kw['base_name']]
         argv += state.quat_argv()
-        if observed_base is not None:          # reorient for the base as the camera reads it, not 0 deg
-            argv += ['--base-orientation', *[f"{v:.6f}" for v in observed_base[1]]]
         return argv, 60
 
     if tool_name == 'translate_object':

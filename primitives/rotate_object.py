@@ -1188,12 +1188,8 @@ class ReorientForAssembly(Node):
         # Real mode: always use default [0, 0, 0, 1]
         # Sim mode: read from ROS topic
         if self.mode == 'real':
-            # The camera-read base (2026-10-20): with the 0 deg default every held part arrived at the insert
-            # turned by minus the base's real yaw (1-5 deg on this cell), which the pads then had to absorb.
-            q_base = getattr(self, 'real_base_quat', None) or DEFAULT_BASE_ORIENTATION
-            R_base = self.get_rotation_from_quat(q_base)
-            self.get_logger().info(f"Using {'observed' if getattr(self, 'real_base_quat', None) else 'default'} "
-                                   f"base orientation: {list(q_base)}")
+            R_base = self.get_rotation_from_quat(DEFAULT_BASE_ORIENTATION)
+            self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
         else:
             if base_name not in self.current_poses:
                 self.error_message = f"Base {base_name} not found"
@@ -1875,9 +1871,6 @@ def main(args=None):
     # In real mode, orientations are required; in sim mode, they're optional (read from topic)
     parser.add_argument('--current-object-orientation', type=float, nargs=4, metavar=('X','Y','Z','W'),
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
-    parser.add_argument('--base-orientation', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'), default=None,
-                        help='real mode: the base orientation the camera read (the insert aims with the same one); '
-                             'without it DEFAULT_BASE_ORIENTATION (0 deg) is assumed')
     parser.add_argument('--skip-verify-grasp', action='store_true',
                        help='Skip internal grasp verification (caller already verified)')
     args = parser.parse_args()
@@ -1912,7 +1905,6 @@ def main(args=None):
     try:
         rclpy.init()
         node = ReorientForAssembly(mode=args.mode)
-        node.real_base_quat = list(args.base_orientation) if args.base_orientation else None
         if not node.action_client.wait_for_server(timeout_sec=15):
             raise RuntimeError("Action server not available after 15s")
         _t0 = time.time()
