@@ -15,8 +15,38 @@ GRIPPER_CENTER_TOOL_OFFSET = np.array([0.0, 0.0, 0.2286])  # 3D offset from EE f
 RG2_TIP_CLOSED_M = 0.23086          # flange -> fingertip end, gripper closed (gap ~0)
 RG2_PAD_HALF_M = 0.0149             # fingertip end -> pad centre
 GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above the table
-# Rubber gap when closed on each part (= /gripper_status width readback; logs 2026-10-07..14).
-GRIP_WIDTH_MM = {'u_brown': 21.0, 'u_orange': 21.0, 'line_green': 25.9, 'inverted_u_yellow': 42.0}
+# Rubber gap when closed on each part: the CAD width across the jaws at the part's assembly grasp
+# (aruco-grasp-annotator grasp_validity, which adds its 14 mm grasp clearance - removed here). Checked
+# against the /gripper_status readback on FMB1 (logs 2026-10-07..14): u_brown/u_orange 21.0 (CAD 21.0),
+# line_green 25.9 (25.8), inverted_u_yellow 42.0 (42.7). Any part of fmb1/2/3_assembly.json (2026-10-20).
+_GRASP_POINTS_DIR = '/home/aldrin/Documents/aruco-grasp-annotator/data/grasp_points'
+
+
+def cad_grip_width_mm(object_name: str, grasp_id: int | None = None) -> float:
+    import json
+    gid = grasp_id if grasp_id is not None else get_grasp_id_for_assembly(object_name)
+    d = json.load(open(f"{_GRASP_POINTS_DIR}/{object_name}_grasp_points.json"))
+    g = next(g for g in d['grasp_points'] if g['id'] == int(gid))
+    w = g['grasp_validity'].get('x_axis_gripper_width_mm') or g['grasp_validity'].get('y_axis_gripper_width_mm')
+    return round(float(w) - float(d.get('filter_params', {}).get('grasp_clearance_mm', 14.0)), 1)
+
+
+class _GripWidth(dict):
+    """GRIP_WIDTH_MM[part] -> the CAD closed width at its assembly grasp (computed on first use)."""
+    def __missing__(self, k):
+        v = cad_grip_width_mm(k)
+        self[k] = v
+        return v
+
+    def __contains__(self, k):
+        try:
+            self[k]
+            return True
+        except Exception:
+            return False
+
+
+GRIP_WIDTH_MM = _GripWidth()
 
 
 def rg2_tip_length_m(gap_mm: float) -> float:
@@ -44,22 +74,23 @@ def held_tool_offset() -> np.ndarray:
 def grasp_tool_offset_target_m(object_name: str, gap_mm: float) -> float:
     """Flange -> grasp point a --pad-center grasp aims for: the pad centre on the grasp point,
     unless the fingertips would then hit base1 or a seated part at the insert (CAD, computed by
-    ablations/grasp_depth.py into eval_resources/fmb1_grasp_depth.json). move_to_grasp then also
+    ablations/grasp_depth.py into eval_resources/grasp_depth.json, every assembly). move_to_grasp then also
     keeps the tips above the table at the pick."""
     import json, os
     pad = pad_center_offset_m(gap_mm)
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
-                     'ablations', 'eval_resources', 'fmb1_grasp_depth.json')
+                     'ablations', 'eval_resources', 'grasp_depth.json')
     try:
         return max(pad, float(json.load(open(p))['parts'][object_name]['seat_floor_offset_m']))
     except Exception:
         return pad
 
 
-def grip_width_mm(object_name: str, pre_grasp_width_mm: float | None = None) -> float:
-    if object_name in GRIP_WIDTH_MM:
-        return GRIP_WIDTH_MM[object_name]
-    return max(0.0, (pre_grasp_width_mm or 35.0) - 14.0)
+def grip_width_mm(object_name: str, pre_grasp_width_mm: float | None = None, grasp_id: int | None = None) -> float:
+    try:
+        return cad_grip_width_mm(object_name, grasp_id) if grasp_id is not None else GRIP_WIDTH_MM[object_name]
+    except Exception:
+        return max(0.0, (pre_grasp_width_mm or 35.0) - 14.0)
 
 
 SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (meters)
@@ -315,9 +346,9 @@ else:
 import json as _json
 import os as _os
 
-_ASSEMBLY_JSON_PATHS = [
+_ASSEMBLY_JSON_PATHS = [   # every assembly's parts (names are unique across FMB1/2/3; 2026-10-20)
     _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                  "ablations", "eval_resources", "fmb1_assembly.json"),
+                  "ablations", "eval_resources", f"{_f}_assembly.json") for _f in ("fmb1", "fmb2", "fmb3")
 ]
 _GRASP_WIDTH_CACHE: dict | None = None  # populated on first lookup
 
@@ -363,3 +394,27 @@ def get_grasp_id_for_assembly(object_name: str) -> int | None:
             return int(gid)
     return None
 
+
+
+# Cell layout (2026-10-20): the assembly region, clear area and staging region come from cell_layout.yaml
+# (`active:` there, or FMB_LAYOUT=<name>). FMB_CLEAR_AREA="x,y" still overrides only the clear area.
+import os as _os
+
+
+def _load_cell_layout():
+    import yaml
+    from pathlib import Path
+    d = yaml.safe_load(open(Path(__file__).with_name('cell_layout.yaml')))
+    name = _os.environ.get('FMB_LAYOUT') or d['active']
+    if name not in d['layouts']:
+        raise KeyError(f"cell layout {name!r} not in cell_layout.yaml (have {sorted(d['layouts'])})")
+    return name, d['layouts'][name]
+
+
+CELL_LAYOUT_NAME, CELL_LAYOUT = _load_cell_layout()
+ASSEMBLY_REGION_CENTER = tuple(float(v) for v in CELL_LAYOUT['assembly_region']['center'])
+ASSEMBLY_REGION_HALF = tuple(float(v) for v in CELL_LAYOUT['assembly_region'].get('half', (0.12, 0.12)))
+CLEAR_AREA_XY = tuple(float(v) for v in (_os.environ['FMB_CLEAR_AREA'].split(',') if _os.environ.get('FMB_CLEAR_AREA')
+                                         else CELL_LAYOUT['clear_area']))
+STAGING_REGION = {'x': tuple(CELL_LAYOUT['staging_region']['x']), 'y': tuple(CELL_LAYOUT['staging_region']['y'])}
+STAGING_VIEW = tuple(float(v) for v in CELL_LAYOUT['staging_region']['view'])

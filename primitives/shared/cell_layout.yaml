@@ -1,0 +1,37 @@
+# Where things go on the cell's table: one file for every region the assembly and disassembly use.
+# Robot (UR base) frame, metres; flange positions are top-down (quat 0 1 0 0).
+#
+#   assembly_region  where the run's base sits. The startup base read flies above `center` (at the depth
+#                    view height); the base itself is then measured, never taken from here.
+#   clear_area       the spot a part is set down on and regrasped when it has to be reoriented
+#                    (move_to_clear_area, the place-down pass, disassemble --to-staging).
+#   staging_region   where parts wait outside the assembly (disassemble --to-free-spot, the generated
+#                    layouts, the staging view the assembly looks from for parts home cannot see).
+#
+# Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
+# only the clear area. Add a layout instead of editing one that a past run used.
+
+active: center_2026_10_20
+
+layouts:
+
+  # 2026-10-20 (operator): FMB1's original arrangement, any assembly. The base under home (base3 read at
+  # (-0.005, -0.488) from home), its parts around it, the clear area empty (black tape), base1 and the
+  # FMB1 parts parked in the staging region.
+  center_2026_10_20:
+    assembly_region: {center: [0.000, -0.480], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}
+
+  # FMB1 as run until 2026-10-19 (the 3/3 and M0 loops): same regions, base1 at DEFAULT_BASE_POSITION.
+  fmb1_2026_10_19:
+    assembly_region: {center: [0.058, -0.472], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}
+
+  # Tried 2026-10-20 morning: base3 and its parts in FMB1's clear region, FMB1 in the staging region,
+  # the clear area moved to an empty patch beside it.
+  fmb3_in_clear_region_2026_10_20:
+    assembly_region: {center: [-0.389, -0.471], half: [0.120, 0.120]}
+    clear_area: [-0.300, -0.270]
+    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}

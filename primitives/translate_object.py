@@ -226,7 +226,9 @@ def _subprocess_fast_path():
         # SEARCH spiral can't break the gripper-jaws-on-base-rim standoff for
         # these wide-grasp parts; prismatic's tiered approach handles it.
         # u_brown / u_orange keep the validated compliant_insert path.
-        if args.object_name in ('line_green', 'inverted_u_yellow'):
+        # FMB3 (2026-10-20): the lines are line_green's bar; the forks straddle both lines like yellow over
+        # line_green -> prismatic for both. To be replaced by a CAD-stage rule (no per-part routing).
+        if args.object_name in ('line_green', 'inverted_u_yellow', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow'):
             # Per-object base offset already applied above (one branch handles
             # all objects). Continue with hover + prismatic dispatch.
 

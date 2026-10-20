@@ -28,7 +28,17 @@ MIN_GAP_MM = 25.0
 CLUSTER_MM = 10.0            # pose samples within this belong to the same reading
 AMBIG_MM = 25.0              # two readings further apart than this: ask depth which one is real
 MESH = Path.home() / 'Documents/aruco-grasp-annotator/data/models/{}.obj'
-BASE_SIDE_M = {'base1': 0.161}
+class _BaseSide(dict):
+    """Base side length (m) from the base's CAD mesh (all FMB bases are 161 mm square) - not a per-base table."""
+    def __missing__(self, base):
+        import sys as _s; _s.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from compliant_insertion_studio.wrapper import cad_geometry as _cg
+        V = _cg._load_obj_verts(base)
+        self[base] = float(max(V.max(0)[:2] - V.min(0)[:2]))
+        return self[base]
+
+
+BASE_SIDE_M = _BaseSide()
 
 
 def _mesh_xyz(name):

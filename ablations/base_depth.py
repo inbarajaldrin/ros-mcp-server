@@ -21,8 +21,20 @@ from scipy.spatial.transform import Rotation as R
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
-BASE_SIDE_MM = {'base1': 161.0}
-TOP_ABOVE_TABLE_MM = {'base1': 35.0}
+class _FromCad(dict):
+    """{base: mm} from the base's CAD mesh: side length or height (the top above the table). Not per-base tables."""
+    def __init__(self, what): super().__init__(); self.what = what
+    def __missing__(self, base):
+        sys.path.insert(0, str(REPO))
+        from compliant_insertion_studio.wrapper import cad_geometry as _cg
+        V = _cg._load_obj_verts(base)
+        ext = V.max(0) - V.min(0)
+        self[base] = float(1000 * (max(ext[:2]) if self.what == 'side' else ext[2]))
+        return self[base]
+
+
+BASE_SIDE_MM = _FromCad('side')
+TOP_ABOVE_TABLE_MM = _FromCad('height')
 VIEW_FLANGE_Z = 0.56
 SIZE_TOL_MM = 9.0              # fitted side vs CAD (edge blur makes it read ~+2..5 mm)
 MAX_SHIFT_MM = 15.0            # depth vs marker centre; more means the fit caught something else

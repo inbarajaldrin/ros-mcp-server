@@ -41,7 +41,7 @@ def _load_x_cam():
 
 
 X_CAM = _load_x_cam()
-STAGING_XY = (-0.320, -0.500)
+from primitives.shared.config import CLEAR_AREA_XY as STAGING_XY   # the clear area (FMB_CLEAR_AREA overrides)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
 FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the opened fingers (spacing_check needs 25 mm)
 ANN = "/home/aldrin/Documents/aruco-grasp-annotator/data/aruco/{}_aruco.json"

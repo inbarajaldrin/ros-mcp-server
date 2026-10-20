@@ -411,6 +411,9 @@ def _not_detected(r) -> bool:
     return max(abs(float(o.get('roll') or 0)), abs(float(o.get('pitch') or 0))) > VERIFY_TILT_MAX_DEG
 
 
+RUN_BASE = {'name': 'base1'}      # the base this run assembles on (set in main from the recorded sequence)
+
+
 def _read_part(o):
     """Up to VERIFY_MAX_READS verify_assembly readings of `o`; returns the deciding one.
     A part fails only when most of its detections fail — one misread of a half-hidden marker
@@ -422,7 +425,7 @@ def _read_part(o):
     reads = []
     for k_ in range(VERIFY_MAX_READS):
         r = run_subprocess(['python3', '-u', '-m', 'queries.verify_assembly', '--object-name', o,
-                            '--base-name', 'base1', '--mode', 'real', '--xy-only'],
+                            '--base-name', RUN_BASE['name'], '--mode', 'real', '--xy-only'],
                            label=f'verify_assembly {o} ({k_ + 1})', timeout_s=40)
         reads.append(r)
         det = [x for x in reads if not _not_detected(x)]
@@ -515,10 +518,18 @@ def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
     try:
         from spacing_check import observe_parts, PARTS, base_outline, outline
         seen = observe_parts(PARTS)
-        ob = observe_base_pose('base1')
+        ob = observe_base_pose(RUN_BASE['name'])
         if obj not in seen or ob is None:
             return True                                   # cannot judge here; the pick's own checks apply
-        obst = [('base1', base_outline(ob))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj]
+        obst = [(RUN_BASE['name'], base_outline(ob, RUN_BASE['name']))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj]
+        for other in ('base1', 'base2', 'base3', 'base4'):     # another assembly's base on the table is an obstacle too
+            if other != RUN_BASE['name']:
+                ob_o = observe_base_pose(other, timeout_s=2.0)
+                if ob_o is not None:
+                    try:
+                        obst.append((other, base_outline(ob_o, other)))
+                    except Exception:
+                        pass
         best = None
         for open_mm in np.arange(width_mm, PICK_OPEN_MAX_MM + 0.1, 4.0):
             own, other = _finger_clearance_mm(obj, seen[obj], gid, float(open_mm), obst)
@@ -667,7 +678,7 @@ def pre_insert_base_read(obj, state, args, say, log_fh=None):
         return
     try:
         from disassemble import seat_grasp
-        tcp = seat_grasp(obj, state.last_grasp_id or 1, ob)
+        tcp = seat_grasp(obj, state.last_grasp_id or 1, ob, base_name=args_base_name(args))
     except Exception as e:
         say(f"  [base@insert] {obj}: no seat estimate ({e}) - keeping the previous base read"); return
     snap = snapshot_robot_state(); cur = (snap.get('tcp') or {}).get('xyz')
@@ -799,7 +810,7 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
         (bx, by, bz), bq = observed_base
         Rb = R_.from_quat(bq)
         for p in parts:
-            sp, _ = load_seat_pose_in_base('base1', p)
+            sp, _ = load_seat_pose_in_base(RUN_BASE['name'], p)
             seat_w = np.array([bx, by, bz]) + Rb.apply(sp)
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                                 f"{seat_w[0]:.4f}", f"{seat_w[1]:.4f}", f"{FOLLOW_READ_Z:.2f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
@@ -1177,7 +1188,7 @@ def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
         else:
             da, db = (Rb.T @ np.array(last[p][:2]) for p in parts)           # mm, base frame (inserts)
             src, cap = 'inserts', MAX_FOLLOW_YAW_INSERT_DEG
-        ya = 1000 * load_seat_pose_in_base('base1', pa)[0][1]; yb = 1000 * load_seat_pose_in_base('base1', pb)[0][1]
+        ya = 1000 * load_seat_pose_in_base(RUN_BASE['name'], pa)[0][1]; yb = 1000 * load_seat_pose_in_base(RUN_BASE['name'], pb)[0][1]
         dx_b = float(np.clip((da[0] + db[0]) / 2, -MAX_FOLLOW_MM, MAX_FOLLOW_MM))
         # slot direction from pa to pb: (db_x - da_x, yb - ya) -> angle from base +y
         dyaw = float(np.clip(-np.arctan2(db[0] - da[0], yb - ya), -np.radians(cap), np.radians(cap)))
@@ -1258,7 +1269,7 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                     # Experiment hook (2026-10-20 entry-yaw sweep): turn the insert's base frame by dyaw about the
                     # part's SEAT point, so only the entry yaw changes, not the aim position.
                     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-                    sp, _ = load_seat_pose_in_base('base1', kw['object_name'])
+                    sp, _ = load_seat_pose_in_base(RUN_BASE['name'], kw['object_name'])
                     Rb_ = R_.from_quat(oq); o_ = np.array([ox, oy, oz])
                     seat_w = o_ + Rb_.apply(sp)
                     Rd = R_.from_euler('z', dyaw_exp, degrees=True)
@@ -1507,7 +1518,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
               f"{tcp[2]:.4f}", '--quat', *q, '--min-z', '0.15', '--max-force', '12', '--min-duration', '6'],
              'reseat descend', 60),
             (['primitives.control_gripper', 'close', '--mode', 'real'], 'reseat close', 30),
-            (['primitives.translate_object', '--mode', 'real', '--object-name', obj, '--base-name', 'base1',
+            (['primitives.translate_object', '--mode', 'real', '--object-name', obj, '--base-name', RUN_BASE['name'],
               '--insert', '--insertion-type', 'compliant', '--grasp-id', str(gid),
               '--current-object-orientation', *[f"{v:.6f}" for v in held],
               '--final-base-pos', f"{bx:.6f}", f"{by:.6f}", f"{bz + dz:.6f}",
@@ -2091,6 +2102,8 @@ def main() -> int:
     if not entries:
         print("ERROR: no assembly_order entries in JSON")
         return 2
+    RUN_BASE['name'] = d.get('base_name') or RUN_BASE['name']      # FMB3: base3 (every base1 default reads this)
+    RUN_BASE['parts'] = tuple(e['object_name'] for e in entries)
 
     state = AssemblyState()
     if args.initial_held_quat is not None:
@@ -2197,6 +2210,8 @@ def main() -> int:
                         bname = parse_tool_call(s_)[1].get('base_name') or bname
                     except Exception:
                         pass
+            args.base_name = bname                 # every later base1 default reads this (FMB3: base3)
+            RUN_BASE['name'] = bname
             # Read the base from straight above, then back home so the picks start with every
             # table part in view. Skipped (home-view read) if the move is refused.
             # x, y and yaw come from the DEPTH outline of the base's top face (base_depth.py):
@@ -2205,8 +2220,15 @@ def main() -> int:
             # Flange 0.56 m: the D415 returns no depth closer than ~0.45 m.
             from primitives.shared.config import DEFAULT_BASE_POSITION as _DBP
             from base_depth import VIEW_FLANGE_Z as _VZ, measure as _base_from_depth
+            # over the assembly region of the cell layout (primitives/shared/cell_layout.yaml), wherever
+            # the run's base is: DEFAULT_BASE_POSITION is base1's calibration spot
+            from primitives.shared.config import ASSEMBLY_REGION_CENTER as _ARC, CELL_LAYOUT_NAME as _LN
+            _bx, _by = _ARC
+            msg = f"  [layout] {_LN}: base view over the assembly region ({_bx:.3f}, {_by:.3f})"
+            print(msg, flush=True)
+            if log_fh: log_fh.write(msg + "\n")
             r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                 f"{_DBP[0]:.4f}", f"{_DBP[1]:.4f}", f"{_VZ:.2f}"],
+                                 f"{_bx:.4f}", f"{_by:.4f}", f"{_VZ:.2f}"],
                                 label='base-view move', timeout_s=60, log_fh=log_fh)
             above = r_.get('result') == 'success'
             ob = observe_base_pose(bname)
@@ -2245,8 +2267,9 @@ def main() -> int:
             # with --part-at-staging the part waits in the clear area and home is not where we are.
             if ob is not None and not args.part_at_staging:
                 from spacing_check import check as _spacing, observe_parts as _obs_parts, PARTS as _PARTS
+                _PARTS = RUN_BASE.get('parts') or _PARTS           # this assembly's parts, around its base
                 seen = _obs_parts(_PARTS)
-                ok_sp, rep = _spacing(seen, args.observed_base or ob)
+                ok_sp, rep = _spacing(seen, args.observed_base or ob, base=RUN_BASE['name'])
                 rep['unseen'] = [n for n in _PARTS if n not in seen]
                 msg = f"  [spacing] {json.dumps(rep)}"
                 print(msg, flush=True)
@@ -2256,8 +2279,10 @@ def main() -> int:
                     # disassembly's --relocate (clearest grasp at its own opening; a spot in the staging
                     # region when the part is there, else a free spot seen from home), then re-check once.
                     pair = (rep.get('too_close') or [[None, None]])[0]
-                    cands = [x for x in pair[:2] if x and x != 'base1' and x in seen]
-                    in_staging = [x for x in cands if seen[x][0][0] >= 0.19 and seen[x][0][1] <= -0.22]
+                    cands = [x for x in pair[:2] if x and not x.startswith('base') and x in seen]
+                    from primitives.shared.config import STAGING_REGION as _SR
+                    in_staging = [x for x in cands if _SR['x'][0] <= seen[x][0][0] <= _SR['x'][1]
+                                  and _SR['y'][0] <= seen[x][0][1] <= _SR['y'][1]]
                     mover = (in_staging or cands or [None])[0]
                     if mover is None:
                         print("\n!!! parts too close for the open gripper and none of the pair can be moved — stopping")

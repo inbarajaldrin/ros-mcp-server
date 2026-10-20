@@ -49,7 +49,8 @@ class MoveToClearArea(Node):
         )
 
         # Target gripper center position — converted to flange for IK via: flange = gc - R @ offset
-        self.target_gripper_center_position = [-0.320, -0.5, SAFE_HEIGHT]
+        from primitives.shared.config import CLEAR_AREA_XY
+        self.target_gripper_center_position = [CLEAR_AREA_XY[0], CLEAR_AREA_XY[1], SAFE_HEIGHT]
 
         # Apply target_xy override (before sim collision avoidance logic)
         if target_xy is not None:

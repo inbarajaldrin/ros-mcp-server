@@ -2,15 +2,16 @@
 """Per-part grasp depth: pad centre on the grasp point, unless the fingers would hit something
 when the part is seated (2026-10-14).
 
-    python3 -u ablations/grasp_depth.py [--write]
+    python3 -u ablations/grasp_depth.py [--assembly fmb1|fmb2|fmb3] [--write]
 
 The RG2 pad centre belongs on the grasp point (config.pad_center_offset_m). But a grasp cannot
 change between pick and insert, and at the seat the fingertips must stay above whatever lies
-under them: base1's top, or a part seated earlier. For each part, in assembly order, this puts
+under them: the base's top, or a part seated earlier. For each part, in assembly order, this puts
 the finger tip blocks (RG2 CAD: 11.4 mm thick along the closing axis, 20.2 mm wide) beside the
-grasp point at the seat, finds the highest CAD surface of base1 + the parts already seated under
+grasp point at the seat, finds the highest CAD surface of the base + the parts already seated under
 them, and limits the grasp depth so the tips stay SEAT_CLEARANCE_M above it.
-Writes ablations/eval_resources/fmb1_grasp_depth.json (read by config.grasp_tool_offset_floor_m).
+Updates that assembly's parts in ablations/eval_resources/grasp_depth.json (read by
+config.grasp_tool_offset_floor_m; was fmb1_grasp_depth.json until 2026-10-20).
 Meshes: aruco-grasp-annotator OBJ (cm, object frame). Seat poses: cad_lookup.load_seat_pose_in_base.
 """
 import argparse
@@ -24,7 +25,7 @@ from scipy.spatial.transform import Rotation as R
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 DATA = Path('/home/aldrin/Documents/aruco-grasp-annotator/data')
-OUT = REPO / 'ablations/eval_resources/fmb1_grasp_depth.json'
+OUT = REPO / 'ablations/eval_resources/grasp_depth.json'
 SEAT_CLEARANCE_M = 0.004        # base1 z is snapped to the config table, not measured: keep 4 mm
 TIP_THICK_M = 0.0114 + 0.002        # RG2 tip block along the closing axis (CAD) + margin
 TIP_WIDTH_M = 0.0202 + 0.004        # across (CAD) + margin
@@ -53,9 +54,9 @@ def surface_points(V, F, step=0.0015):
     return np.vstack(pts)
 
 
-def pose(name):
+def pose(name, base='base1'):
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-    p, q = load_seat_pose_in_base('base1', name)
+    p, q = load_seat_pose_in_base(base, name)
     T = np.eye(4); T[:3, :3] = R.from_quat(q).as_matrix(); T[:3, 3] = p
     return T
 
@@ -72,16 +73,20 @@ def grasp(name, gid):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--write', action='store_true')
+    ap.add_argument('--assembly', default='fmb1', help='fmb1 | fmb2 | fmb3 (eval_resources/<name>_assembly.json)')
     a = ap.parse_args()
     from primitives.shared.config import GRIP_WIDTH_MM, rg2_tip_length_m, pad_center_offset_m
-    order = sorted(json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order'],
-                   key=lambda o: o['position'])
+    asm = json.load(open(REPO / f'ablations/eval_resources/{a.assembly}_assembly.json'))
+    base = asm['base_name']
+    order = sorted(asm['assembly_order'], key=lambda o: o['position'])
     world = {}                                                   # name -> surface points, base frame
-    V, F = load_mesh('base1'); world['base1'] = surface_points(V, F)
-    out = {'_doc': __doc__.strip().splitlines()[0], 'seat_clearance_m': SEAT_CLEARANCE_M, 'parts': {}}
+    V, F = load_mesh(base); world[base] = surface_points(V, F)
+    out = json.load(open(OUT)) if OUT.exists() else {}
+    out.update({'_doc': __doc__.strip().splitlines()[0], 'seat_clearance_m': SEAT_CLEARANCE_M})
+    out.setdefault('parts', {})
     for o in order:
         name, gid = o['object_name'], o['grasp_id']
-        T = pose(name)
+        T = pose(name, base)
         p, av, axis = grasp(name, gid)
         gp = T[:3, :3] @ p + T[:3, 3]                           # grasp point at the seat (base frame)
         up = np.array([0.0, 0.0, 1.0])     # every insert is top-down (SEAT_EE_QUAT), whatever the part's own
@@ -101,7 +106,7 @@ def main():
         # tips sit (tip - L) below the grasp point; keep them SEAT_CLEARANCE_M above `top`
         floor = tip - (-top - SEAT_CLEARANCE_M)
         L = max(pad, floor)
-        out['parts'][name] = dict(grasp_id=gid, gap_mm=GRIP_WIDTH_MM[name], pad_center_offset_m=round(pad, 5),
+        out['parts'][name] = dict(base=base, grasp_id=gid, gap_mm=GRIP_WIDTH_MM[name], pad_center_offset_m=round(pad, 5),
                                   seat_floor_offset_m=round(floor, 5), grasp_tool_offset_m=round(L, 5),
                                   limited_by=(whom[0] if L > pad else 'none'),
                                   surface_below_grasp_point_mm=round(-1000 * top, 1),

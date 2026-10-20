@@ -38,8 +38,10 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
-REGION = {'x': (0.19, 0.51), 'y': (-0.54, -0.22)}   # UR base frame (see docstring)
-STAGING_VIEW = (0.35, -0.33, 0.62)                   # flange, top-down: the whole region in view AND above
+# Region and view from primitives/shared/cell_layout.yaml (2026-10-20); FMB1's values were x [0.19, 0.51],
+# y [-0.54, -0.22], view (0.35, -0.33, 0.62).
+from primitives.shared.config import STAGING_REGION as REGION, STAGING_VIEW
+                                                     # STAGING_VIEW, flange top-down: the whole region in view AND above
                                                      # the image's bottom 160 px, where the fingers hide the
                                                      # table (from (0.35,-0.38,0.56) line_green at y -0.29 went
                                                      # unseen, 2026-10-19): region rows 55..536 of 720

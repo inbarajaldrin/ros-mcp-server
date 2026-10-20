@@ -67,7 +67,9 @@ def get_seated_so_far(base_name: str, target_object: str) -> list[str]:
     Returns [] if the file is missing or target isn't in the assembly.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    json_path = repo_root / "ablations" / "eval_resources" / f"{base_name[:3] if base_name.startswith('fmb') else 'fmb1'}_assembly.json"
+    # baseN -> fmbN_assembly.json (2026-10-20: base3 read FMB1's order, so a fork saw no line under it)
+    n = base_name[4:] if base_name.startswith('base') and base_name[4:].isdigit() else '1'
+    json_path = repo_root / "ablations" / "eval_resources" / f"fmb{n}_assembly.json"
     if not json_path.exists():
         json_path = repo_root / "ablations" / "eval_resources" / "fmb1_assembly.json"
     if not json_path.exists():
