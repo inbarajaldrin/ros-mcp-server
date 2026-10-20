@@ -1516,6 +1516,9 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
         args.observed_base = ob
         say(f"  [seat-check] {obj}: {json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
         plan = cross_nudge_plan(res) if 'pitch_deg' in res else None
+        if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
+            plan = None        # shifted along its length: the axial nudge first (line_red 2026-10-20: -16 mm,
+                               # the sideways taps did nothing, the axial push seated it)
         if plan is not None and attempt < RESEAT_MAX:            # nudge, then the next pass re-checks
             # an end riding a channel lip: the depth limits call it ok (line_brown 2026-10-20, the operator
             # saw it unseated) - push that end sideways off the lip, to the CAD face (the base is not fixed)
@@ -2244,8 +2247,17 @@ def main() -> int:
                 print(msg)
                 if log_fh: log_fh.write(msg + "\n")
             # Parts home cannot see: the generated-layout disassembly puts them in the staging region
-            # (staging_layout.py). Plan those from the staging view, then back home.
-            if unseen_home and _staging_view(log_fh):
+            # (staging_layout.py; cell_layout.yaml). Plan those from the staging view, then back home -
+            # or from above the clear area when the part waits there (--part-at-staging; 2026-10-20 the
+            # planner looked at FMB1's parked set for an FMB3 part sitting at the clear area).
+            def _unseen_view():
+                if args.part_at_staging:
+                    r_ = run_subprocess(['python3', '-u', '-m', 'primitives.core.move_to_clear_area', '--mode', 'real'],
+                                        label='view the clear area', timeout_s=90, log_fh=log_fh)
+                    time.sleep(1.5)
+                    return r_.get('result') != 'failure'
+                return _staging_view(log_fh)
+            if unseen_home and _unseen_view():
                 for entry, seq, bn in unseen_home:
                     entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0)
                     msg = f"  [derive-sequence] {entry['object_name']} (staging view): {note}"
@@ -2416,8 +2428,8 @@ def main() -> int:
                 gid_ = next((parse_tool_call(s_)[1].get('grasp_id') for s_ in entry.get('tool_sequence', []) or []
                              if 'move_to_grasp' in s_), None)
                 # the fingers come down at the recorded PRE-GRASP opening (fmb1_assembly.json), not the grip width
-                _ao = json.load(open(REPO_ROOT / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
-                open_mm = next((o_['gripper_width_mm'] for o_ in _ao if o_['object_name'] == obj), None)
+                from primitives.shared.config import get_gripper_width_mm as _ggw   # any assembly (was FMB1's file)
+                open_mm = _ggw(obj, int(gid_)) if gid_ is not None else None
                 if gid_ is not None and open_mm and not _pick_room(obj, int(gid_), float(open_mm), log_fh):
                     failed = obj
                     break

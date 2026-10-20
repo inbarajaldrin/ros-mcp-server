@@ -111,6 +111,15 @@ def measure(obj, observed_base, Pw, base='base1'):
     (bx, by, bz), bq = observed_base
     Tb = np.eye(4); Tb[:3, :3] = R.from_quat(bq).as_matrix(); Tb[:3, 3] = [bx, by, bz]
     Pb = (Pw - Tb[:3, 3]) @ Tb[:3, :3]                         # world -> base frame
+    # heights against the base top's own plane (fitted in the same cloud), not the base read's z: the base
+    # read snaps z to the table, and a view-dependent depth tilt cancels when both come from one frame
+    from compliant_insertion_studio.wrapper.cad_geometry import _load_base_top_z_local
+    bt = _load_base_top_z_local(base)
+    mb = (np.abs(Pb[:, 0]) < 0.078) & (np.abs(Pb[:, 1]) < 0.078) & (np.abs(Pb[:, 2] - bt) < 0.004)
+    if mb.sum() > 2000:
+        Bp = Pb[mb]
+        cb, *_ = np.linalg.lstsq(np.c_[Bp[:, 0], Bp[:, 1], np.ones(len(Bp))], Bp[:, 2], rcond=None)
+        Pb = Pb.copy(); Pb[:, 2] -= (cb[0] * Pb[:, 0] + cb[1] * Pb[:, 1] + cb[2] - bt)
     Pb = Pb - np.array([f['cx'], f['cy'], 0.0])                # ... about the part's own top-face centre
     m = (np.abs(Pb[:, 0]) < f['hx']) & (np.abs(Pb[:, 1]) < f['hy']) & (np.abs(Pb[:, 2] - f['z']) < 0.012)
     P = Pb[m]
@@ -171,17 +180,30 @@ def measure(obj, observed_base, Pw, base='base1'):
             'limits': {'pitch_deg': PITCH_MAX_DEG, 'height_mm': HEIGHT_MAX_MM}}
 
 
-def view_pose(obj, observed_base):
-    from disassemble import SEAT_EE_QUAT
-    (bx, by, _), _ = observed_base
+VIEW_TILT_DEG = 25.0         # 2026-10-20: straight down, the overhead lights reflect off glossy tops (line_red read
+VIEW_DIST_M = 0.47           # 3 mm high where it was seated); tilted 25 deg and close (D415 min ~0.45 m) it read flat
+
+
+def view_pose(obj, observed_base, base='base1'):
+    """Close, tilted view of the part: camera aimed at its CAD top-face centre from VIEW_DIST_M, tilted
+    VIEW_TILT_DEG, from the part's outer side across its long axis (out of the lights' mirror direction)."""
+    from tilted_seat_view import aimed_flange
+    f = TOP_FACE[(obj, base)]
+    (bx, by, bz), bq = observed_base
+    Rb = R.from_quat(bq)
+    tgt = np.array([bx, by, bz]) + Rb.apply([f['cx'], f['cy'], f['z']])
+    cross = 0 if f['long_axis'] == 'y' else 1
+    c = (f['cx'], f['cy'])[cross]
+    d = np.zeros(3); d[cross] = 1.0 if c > 0.005 else -1.0
+    pf, qf, _ = aimed_flange(tgt, Rb.apply(d), VIEW_TILT_DEG, VIEW_DIST_M, X_CAM, float(Rb.as_euler('xyz')[2]))
     return ['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-            f"{bx:.4f}", f"{by:.4f}", f"{VIEW_FLANGE_Z:.4f}", '--quat', *map(str, SEAT_EE_QUAT)]
+            *[f"{v:.4f}" for v in pf], '--quat', *[f"{v:.6f}" for v in qf], '--min-z', '0.15']
 
 
 def check(obj, observed_base, move=True, out_dir=None, base='base1'):
     if move:
         env = os.environ.copy(); env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
-        p = subprocess.run(view_pose(obj, observed_base), capture_output=True, text=True, timeout=60,
+        p = subprocess.run(view_pose(obj, observed_base, base), capture_output=True, text=True, timeout=60,
                            env=env, cwd=str(REPO))
         if p.returncode != 0:
             return {'ok': False, 'error': 'view move failed: ' + (p.stdout + p.stderr).strip().splitlines()[-1][:200]}

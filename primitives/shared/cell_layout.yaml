@@ -5,8 +5,10 @@
 #                    view height); the base itself is then measured, never taken from here.
 #   clear_area       the spot a part is set down on and regrasped when it has to be reoriented
 #                    (move_to_clear_area, the place-down pass, disassemble --to-staging).
-#   staging_region   where parts wait outside the assembly (disassemble --to-free-spot, the generated
-#                    layouts, the staging view the assembly looks from for parts home cannot see).
+#   staging_region   where THIS assembly's parts wait to be assembled (disassemble --to-free-spot, the
+#                    generated layouts, and the view the assembly looks from for parts home cannot see).
+#   parked_region    where another assembly is parked: an obstacle, never scanned for this run's parts
+#                    (optional).
 #
 # Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
 # only the clear area. Add a layout instead of editing one that a past run used.
@@ -18,10 +20,13 @@ layouts:
   # 2026-10-20 (operator): FMB1's original arrangement, any assembly. The base under home (base3 read at
   # (-0.005, -0.488) from home), its parts around it, the clear area empty (black tape), base1 and the
   # FMB1 parts parked in the staging region.
+  # The parts wait AROUND the base (staging = the assembly region and its surroundings, operator 2026-10-20:
+  # "the fmb3 and fmb1 staging is the assembly region"); FMB1's old staging rectangle holds the parked set.
   center_2026_10_20:
     assembly_region: {center: [0.000, -0.480], half: [0.120, 0.120]}
     clear_area: [-0.320, -0.500]
-    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}
+    staging_region: {x: [-0.22, 0.20], y: [-0.70, -0.27], view: [0.000, -0.480, 0.62]}
+    parked_region: {x: [0.19, 0.51], y: [-0.54, -0.22]}
 
   # FMB1 as run until 2026-10-19 (the 3/3 and M0 loops): same regions, base1 at DEFAULT_BASE_POSITION.
   fmb1_2026_10_19:
