@@ -1204,6 +1204,19 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                     print(f"  [aim] {kw['object_name']}: + seat-history bias ({1000*bx_:+.1f}, {1000*by_:+.1f}) mm", flush=True)
                 if fyaw:                       # turn the base frame about its origin (line_green sits there)
                     oq = tuple((R_.from_euler('z', fyaw) * R_.from_quat(oq)).as_quat())
+                dyaw_exp = float(os.environ.get('INSERT_YAW_OFFSET_DEG', '0') or 0)
+                if dyaw_exp:
+                    # Experiment hook (2026-10-20 entry-yaw sweep): turn the insert's base frame by dyaw about the
+                    # part's SEAT point, so only the entry yaw changes, not the aim position.
+                    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+                    sp, _ = load_seat_pose_in_base('base1', kw['object_name'])
+                    Rb_ = R_.from_quat(oq); o_ = np.array([ox, oy, oz])
+                    seat_w = o_ + Rb_.apply(sp)
+                    Rd = R_.from_euler('z', dyaw_exp, degrees=True)
+                    o_new = seat_w + Rd.apply(o_ - seat_w)
+                    ox, oy = float(o_new[0]), float(o_new[1])
+                    oq = tuple((Rd * Rb_).as_quat())
+                    print(f"  [yaw-exp] {kw['object_name']}: insert yaw offset {dyaw_exp:+.2f} deg about the seat point", flush=True)
                 argv += ['--final-base-pos', f"{ox:.6f}", f"{oy:.6f}", f"{oz + dz:.6f}",
                          '--final-base-orientation', *[f"{v:.6f}" for v in oq]]
                 argv = [a for a in argv if a != '--use-default-base-position']
