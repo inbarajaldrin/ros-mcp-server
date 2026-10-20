@@ -110,6 +110,24 @@ def _load_object_local_top_z(object_name: str) -> float:
     return float(_load_obj_verts(object_name)[:, 2].max())
 
 
+def _load_seated_top_above_origin(base_name: str, object_name: str) -> Optional[float]:
+    """Height of the object's highest point above its CAD origin IN ITS SEATED POSE (mesh rotated by
+    the assembly quaternion). The unrotated bbox put the seated U parts' tops 24.5 mm too low
+    (32.0 instead of 56.5 mm above the base): they seat on their side. line_green wedging 4-8 mm
+    into their openings then read "between contacts" (2026-10-19)."""
+    if not (base_name.startswith("base") and base_name[4:].isdigit()):
+        return None
+    candidate = ASSEMBLY_INDEX_DIR / f"fmb_assembly{base_name[4:]}.json"
+    if not candidate.exists():
+        return None
+    comp = next((c for c in json.load(open(candidate))["components"] if c.get("name") == object_name), None)
+    if comp is None:
+        return None
+    q = comp["rotation"]["quaternion"]
+    V = R.from_quat([q[k] for k in "xyzw"]).apply(_load_obj_verts(object_name))
+    return float(V[:, 2].max())
+
+
 def _peg_lower_extent_world_z_at_seat(
     *,
     object_name: str,
@@ -182,7 +200,11 @@ def build_contact_candidates(
         seat_z_above = _load_assembly_seat_z_above_base(base_name, seated_name)
         if seat_z_above is None:
             continue
-        local_top = _load_object_local_top_z(seated_name)
+        local_top = _load_seated_top_above_origin(base_name, seated_name)
+        if local_top is None:
+            local_top = _load_seated_top_above_origin(base_name, seated_name)
+        if local_top is None:
+            local_top = _load_object_local_top_z(seated_name)
         candidates[f"OBJ:{seated_name}"] = expected_contact_tcp_z(
             surface_world_z=base_world_z + seat_z_above + local_top,
             object_name=target_object, grasp_id=target_grasp_id,

@@ -221,6 +221,7 @@ def depth_free_spots(extents, exclude_xy):
 SEAT_OFFSET_MAX_M = 0.012                  # a recorded seat offset larger than this is not trusted
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
+SEAT_READ_S = 10.0          # wait for the seated part's markers from the hover (localizer ~3-4 Hz)
 N_DEPTH = 10                               # depth frames per free-spot map (median)
 SPOT_TRIES = 24                            # candidates tried per part in the spot search
 SPOT_SEARCH_NODES = 2000                    # search budget (each node: one boxsum over the grid)
@@ -255,13 +256,19 @@ def grasp_offset_for(name):
         return grasp_tool_offset_target_m(name, grip_width_mm(name))
 
 
-def seat_grasp(name, gid, observed_base, base_name='base1'):
+SEAT_OBS_MAX_M = 0.020      # a seated part read further than this from its CAD seat is a misread (base reads step ~8 mm, seats sit ~6 mm off)
+
+
+def seat_grasp(name, gid, observed_base, base_name='base1', observed_part=None):
     """Flange pose the insert holds `name` at when seated (same chain as translate_object,
-    same grasp depth as the insert: grasp_offset_for), shifted in xy by where the insert's force
-    search actually seated it (seated_offsets.json: seat TCP - predicted TCP). Without it the
-    disassembly grasped blind at the CAD seat and every real seat offset (U parts 5-6 mm in y,
-    yellow 6 mm) became a grasp offset; the assembly reads the part's markers and is accurate
-    (operator, 2026-10-15)."""
+    same grasp depth as the insert: grasp_offset_for), shifted in xy to where the part really is:
+    its own observed pose when the camera sees it seated (`observed_part`, as observe_base_pose
+    returns), else where the insert's force search seated it (seated_offsets.json: seat TCP -
+    predicted TCP). The recorded offset is relative to the base read the insert aimed with, and
+    the base moves between runs (slider creep; 2026-10-19 yellow's three rim stalls shifted it
+    ~8 mm in x): grasping from a new base read + the old offset put the fingers on yellow's
+    bridge at 12 N. Without either, the disassembly grasped blind at the CAD seat and every real
+    seat offset (U parts 5-6 mm in y, yellow 6 mm) became a grasp offset (operator, 2026-10-15)."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
     from primitives.shared.config import get_object_base_offset_m
     (bx, by, bz), bq = observed_base
@@ -273,6 +280,17 @@ def seat_grasp(name, gid, observed_base, base_name='base1'):
                               held_quat_xyzw=held, ee_orientation_xyzw=SEAT_EE_QUAT,
                               flange_offset_m=grasp_offset_for(name))
     tcp = np.array(out['predicted_tcp_at_seat']['xyz_m'])
+    if observed_part is not None:
+        seat_p, _ = load_seat_pose_in_base(base_name, name)
+        pred_obj = np.array([bx, by, bz]) + R.from_quat(bq).apply(seat_p)
+        d_obs = np.array(observed_part[0][:2]) - pred_obj[:2]
+        if np.abs(d_obs).max() <= SEAT_OBS_MAX_M:
+            tcp[:2] += d_obs
+            print(f"    [seat-grasp] {name}: seen seated ({1000*d_obs[0]:+.1f}, {1000*d_obs[1]:+.1f}) mm "
+                  f"from its CAD seat -> grasp there", flush=True)
+            return tcp
+        print(f"    [seat-grasp] {name}: seen ({1000*d_obs[0]:+.1f}, {1000*d_obs[1]:+.1f}) mm from its CAD "
+              f"seat - too far, ignoring the read", flush=True)
     try:
         d = json.load(open(REPO / 'ablations/logs/seated_offsets.json')).get(name)
         if d and d.get('seat_minus_pred_mm'):
@@ -775,12 +793,26 @@ def main():
         if tcp is not None:
             print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
         q = [str(v) for v in SEAT_EE_QUAT]
+        if tcp is not None:
+            # Hover at the estimate with the gripper open, then read the part itself from there (close
+            # range, straight above: steady detections; from the base view, 0.56 m up, the small seated
+            # markers come and go and the base read itself steps ~8 mm between detection sets,
+            # 2026-10-19) and descend onto where it is seen.
+            ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
+                           f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q), 'hover above the seated grasp', 60)
+            if not ok: return 1
+            time.sleep(1.0)                                   # settle: no samples from a moving arm
+            from replay_real_assembly import observe_base_pose
+            obs_part = observe_base_pose(name, timeout_s=SEAT_READ_S)
+            if obs_part is None:
+                print(f"    [seat-grasp] {name}: not seen from the hover - descending on the estimate", flush=True)
+            else:
+                tcp = seat_grasp(name, gid, ob, observed_part=obs_part)
+                print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm (seen)", flush=True)
         steps = [] if tcp is None else [
-            (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
-                f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q), 'hover above the seated grasp', 60),
             (py('primitives.control_gripper', f"{w:g}", '--mode', 'real'), 'open to release width', 30),
             (py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
-                f"{tcp[2]:.4f}", '--quat', *q, '--min-z', '0.15', '--max-force', '12', '--min-duration', '6'),
+                f"{tcp[2]:.4f}", '--quat', *q, '--min-z', '0.15', '--max-force', f"{LAND_FORCE_N:g}", '--min-duration', '6'),
              'descend onto the seated grasp', 60),
             (py('primitives.control_gripper', 'close', '--mode', 'real'), 'close', 30),
             (py('primitives.move_to_safe_height', '--mode', 'real'), 'pull out to safe height', 90),

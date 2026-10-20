@@ -614,6 +614,9 @@ def verify_seated(objs, say, second_view=None) -> bool:
                     r = _read_part(o)
         if r.get('result') == 'success' and not _not_detected(r):
             led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
+            e_ = r.get('position_error_m')
+            if isinstance(e_, dict) and 'x' in e_ and 'y' in e_:   # base-frame xy error: follow_seated_offset reads it
+                led[o]['rel_err_mm'] = [1000 * float(e_['x']), 1000 * float(e_['y'])]
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
             continue
         if _not_detected(r):
@@ -626,6 +629,31 @@ def verify_seated(objs, say, second_view=None) -> bool:
         ok_all = False
     json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     return ok_all
+
+
+def record_follow_reads(obj, say):
+    """Before `obj`'s pick (arm at home, gripper empty): read the parts it sits between
+    (FOLLOWS_SEATED) with verify_assembly and keep their base-frame xy error in the ledger
+    (`rel_err_mm`) for follow_seated_offset. The home view does not reach the base (2026-10-19: neither
+    base1 nor the U parts in its poses), so this mostly keeps what verify_seated recorded from the base
+    view after the previous part; a part never verified this run has no read and the insert-based
+    fallback is used. forget_verified drops the entry when the part is pulled out."""
+    parts = FOLLOWS_SEATED.get(obj)
+    if not parts:
+        return
+    led = _ledger()
+    for p in parts:
+        r = _read_part(p)
+        e = r.get('position_error_m') if r.get('result') == 'success' and not _not_detected(r) else None
+        if isinstance(e, dict) and 'x' in e and 'y' in e:
+            led.setdefault(p, {})['rel_err_mm'] = [1000 * float(e['x']), 1000 * float(e['y'])]
+            say(f"  [follow] {p}: seen ({1000*float(e['x']):+.1f}, {1000*float(e['y']):+.1f}) mm from its CAD seat (base frame)")
+        elif isinstance((led.get(p) or {}).get('rel_err_mm'), list):
+            say(f"  [follow] {p}: not read from here; keeping the base-view read "
+                f"({led[p]['rel_err_mm'][0]:+.1f}, {led[p]['rel_err_mm'][1]:+.1f}) mm")
+        else:
+            say(f"  [follow] {p}: not read from here -> {obj} follows the insert-based offsets")
+    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
 
 
 def reread_base(bname, prev, log_fh=None):
@@ -880,7 +908,13 @@ class AssemblyState:
 # ALONG the bar (y) is its own pocket's, not the U parts'.
 FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
 MAX_FOLLOW_MM = 8.0
-MAX_FOLLOW_YAW_DEG = 5.0
+MAX_FOLLOW_YAW_DEG = 2.0          # from the camera's read of the two seated parts (base frame)
+MAX_FOLLOW_YAW_INSERT_DEG = 1.5   # fallback, from the U parts' insert seat offsets: those mix the part's
+# position with how it sat in the fingers. 2026-10-19 cycle 3: inserts said u_brown x -5.5 / u_orange
+# +2.1 mm -> -4.5 deg, the camera said -2.0 / +0.9 -> -1.7 deg; line_green (CAD: +-1.1 mm in each U
+# opening) wedged 4-8 mm into the openings on all 6 attempts. In 11 earlier runs today it was turned
+# -3.2..+0.7 deg and always ended within 0.9 deg of the base (the openings turn it back on attempt 1,
+# Rz free) - so the real slot turn is small and a wrong large turn is what fails.
 SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: seat - predicted TCP, mm}
 # Written after every successful insert, entry removed when disassemble.py pulls the part out:
 # it describes the parts seated NOW, whichever process seated them (a line_green-only retry
@@ -960,15 +994,21 @@ def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
             return 0.0, 0.0, 0.0
         Rb = R_.from_quat(base_quat).as_matrix()[:2, :2]
         (pa, pb) = parts
-        da, db = (Rb.T @ np.array(last[p][:2]) for p in parts)          # mm, base frame
+        led = _ledger()
+        cam = {p: (led.get(p) or {}).get('rel_err_mm') for p in parts}
+        if all(isinstance(v, list) and len(v) == 2 for v in cam.values()):
+            da, db = (np.array(cam[p], dtype=float) for p in parts)           # mm, base frame (camera)
+            src, cap = 'camera', MAX_FOLLOW_YAW_DEG
+        else:
+            da, db = (Rb.T @ np.array(last[p][:2]) for p in parts)           # mm, base frame (inserts)
+            src, cap = 'inserts', MAX_FOLLOW_YAW_INSERT_DEG
         ya = 1000 * load_seat_pose_in_base('base1', pa)[0][1]; yb = 1000 * load_seat_pose_in_base('base1', pb)[0][1]
         dx_b = float(np.clip((da[0] + db[0]) / 2, -MAX_FOLLOW_MM, MAX_FOLLOW_MM))
         # slot direction from pa to pb: (db_x - da_x, yb - ya) -> angle from base +y
-        dyaw = float(np.clip(-np.arctan2(db[0] - da[0], yb - ya), -np.radians(MAX_FOLLOW_YAW_DEG),
-                             np.radians(MAX_FOLLOW_YAW_DEG)))
+        dyaw = float(np.clip(-np.arctan2(db[0] - da[0], yb - ya), -np.radians(cap), np.radians(cap)))
         dw = Rb @ np.array([dx_b, 0.0])
-        print(f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame) — "
-              + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))), flush=True)
+        print(f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame, from the {src}"
+              f", cap {cap:g} deg) — " + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))), flush=True)
         return float(dw[0]) / 1000, float(dw[1]) / 1000, dyaw
     except Exception as e:
         print(f"  [follow] {obj}: {e} -> aim at the base")
@@ -1369,8 +1409,82 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         except Exception:
             pass
 
+    def _move_down_floor_z(ee_quat_xyzw):
+        """move_down's flange floor for this flange orientation (its --to-table rule when face-down)."""
+        from primitives.shared.config import (TABLE_HEIGHT, RG2_TIP_CLOSED_M, GRIPPER_CENTER_TOOL_OFFSET,
+                                              TABLE_COLLISION_MARGIN_SIDEWAYS)
+        Rm = R_.from_quat(ee_quat_xyzw).as_matrix()
+        if Rm[2, 2] < -0.5:      # face-down: closed fingertips 1 mm above the table
+            return TABLE_HEIGHT + 0.001 - (Rm @ np.array([0.0, 0.0, RG2_TIP_CLOSED_M]))[2]
+        return TABLE_HEIGHT + TABLE_COLLISION_MARGIN_SIDEWAYS - (Rm @ GRIPPER_CENTER_TOOL_OFFSET)[2]
+
+    def _gentle_place_down(step_idx, tag):
+        """translate_object --place-down with the disassembly's landing (disassemble.place_at): the same
+        move_to_clear_area, then move_down to LAND_SLOW_ABOVE_M above the CAD touch height of the held
+        stance, then a slow move_cartesian that stops at LAND_FORCE_N. move_down --to-table alone aims at
+        the closed-tip floor, below a part held by its top: yellow held by the bridge (recovery set-down,
+        2026-10-19) hit the table at 37 N, 60 N peak. Returns None (caller runs the plain primitive) when
+        the touch height cannot be computed."""
+        off = os.environ.get('GRASP_TOOL_OFFSET_M')
+        gid = state.last_grasp_id
+        if state.held_quat is None or off is None or gid is None:
+            return None
+        from disassemble import contact_flange_z, LAND_SLOW_ABOVE_M, LAND_SPEED_M_S, LAND_FORCE_N
+        try:
+            touch_gp_z = contact_flange_z(obj, gid, state.held_quat, 0.0)   # grasp-point z when the part touches
+        except Exception as e:
+            say(f"  [{step_idx}] place_down: no CAD touch height ({e}) - plain move_down")
+            return None
+        label = f"{obj}#{step_idx}{tag} place_down"
+        py3 = ['python3', '-u', '-m']
+        r = run_subprocess(py3 + ['primitives.core.move_to_clear_area', '--move', '--mode', 'real',
+                                  '--object-name', obj], label=f"{label} (clear area)", timeout_s=45, log_fh=log_fh)
+        if r.get('result') == 'failure':
+            return dict(r, movement_type='place_down')
+        snap = snapshot_robot_state()
+        tcp = snap.get('tcp') or {}
+        if not tcp.get('xyz') or not tcp.get('quat_xyzw'):
+            say(f"  [{step_idx}] place_down: no TCP pose after the clear-area move - plain move_down")
+            r = run_subprocess(py3 + ['primitives.core.move_down', '--mode', 'real', '--to-table'],
+                               label=f"{label} (lower)", timeout_s=310, log_fh=log_fh)
+            return dict(r, movement_type='place_down')
+        x, y, _ = tcp['xyz']
+        floor = _move_down_floor_z(tcp['quat_xyzw'])
+        # grasp depth is along the tool z axis: vertical for a top-down gripper, flat for a sideways one
+        cz = touch_gp_z - (R_.from_quat(tcp['quat_xyzw']).as_matrix() @ np.array([0.0, 0.0, float(off)]))[2]
+        # Both stages stay at or above move_down's floor (a sideways stance predicts the touch below it;
+        # the plain primitive stopped at the floor there too). Slow stage: <= 25 mm, ~6 s.
+        z_slow = max(cz, floor) + LAND_SLOW_ABOVE_M
+        z_end = max(floor, cz - 0.010)        # 10 mm past the predicted touch
+        say(f"  [{step_idx}] place_down: CAD touch at flange z {cz:.4f} (floor {floor:.4f}); slow from "
+            f"{z_slow:.4f} to {z_end:.4f} until {LAND_FORCE_N:g} N")
+        if tcp['xyz'][2] > z_slow + 0.002:
+            r = run_subprocess(py3 + ['primitives.core.move_down', '--mode', 'real', '--to-table',
+                                      '--height', f"{z_slow:.4f}"],
+                               label=f"{label} (lower to {1000*LAND_SLOW_ABOVE_M:.0f} mm above the touch)",
+                               timeout_s=310, log_fh=log_fh)
+            if r.get('result') == 'failure':
+                return dict(r, movement_type='place_down')
+        dur = max(3.0, (z_slow - z_end) / LAND_SPEED_M_S)
+        r = run_subprocess(py3 + ['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{x:.4f}", f"{y:.4f}",
+                                  f"{z_end:.4f}", '--keep-orientation', '--min-z', f"{z_end - 0.001:.4f}",
+                                  '--max-force', f"{LAND_FORCE_N:g}", '--min-duration', f"{dur:.1f}"],
+                           label=f"{label} (land, slow, until {LAND_FORCE_N:g} N)", timeout_s=120, log_fh=log_fh)
+        if r.get('result') == 'failure' and r.get('contact') and str(r.get('error', '')).startswith('contact'):
+            say(f"  [{step_idx}] place_down: touched down ({r.get('error')})")
+            r = dict(r, result='success')
+        return dict(r, movement_type='place_down')
+
     def execute(step_idx, step, tool_name, kw, tag=""):
         """Run one primitive. Returns its result dict, or None if the argv build failed."""
+        if tool_name == 'translate_object' and kw.get('action') == 'place_down':
+            snap_before = snapshot_robot_state()
+            _record_snapshot(snap_fh, "before", f"{obj}#{step_idx}{tag} place_down", snap_before)
+            r = _gentle_place_down(step_idx, tag)
+            if r is not None:
+                state.update_from_result(tool_name, r)
+                _record_snapshot(snap_fh, "after", f"{obj}#{step_idx}{tag} place_down", snapshot_robot_state())
+                return r
         if tool_name == 'move_to_grasp':
             age = camera_frame_age()
             if age is None or age > CAMERA_MAX_AGE_S:
@@ -1966,6 +2080,8 @@ def main() -> int:
                     failed = obj
                     break
             first_object = False
+            if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED:
+                record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")))
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
