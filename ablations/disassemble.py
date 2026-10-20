@@ -337,6 +337,11 @@ def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
             return tcp
         print(f"    [seat-grasp] {name}: seen ({1000*d_obs[0]:+.1f}, {1000*d_obs[1]:+.1f}) mm from its CAD "
               f"seat - too far, ignoring the read", flush=True)
+    if os.environ.get('BASE_FROM', 'marker') == 'icp':
+        # 2026-10-20: with the CAD-fit base read the CAD seat is within ~2 mm; a recorded offset was learned
+        # against an older read of a base that has moved and turned since - (+6.4, -8.1) mm put fork_yellow's
+        # fingers on it (6.5 N). Not applied.
+        return tcp
     try:
         d = json.load(open(REPO / 'ablations/logs/seated_offsets.json')).get(name)
         if d and d.get('seat_minus_pred_mm'):
