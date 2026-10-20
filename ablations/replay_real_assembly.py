@@ -639,6 +639,53 @@ FOLLOW_READ_Z = 0.30          # flange height for the close read of a seated ref
 FOLLOW_READ_S = 10.0
 
 
+HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
+HELD_YAW_MIN_DEG = 0.3
+
+
+def held_yaw_calibration(obj, state, say, log_fh=None):
+    """Before the insert, with the part held at safe height: read the held part's yaw with the camera
+    and turn the wrist in place by the difference to the orientation the chain assumes
+    (state.held_quat), so the part - not just the flange - faces its slot. Nothing measured the part's
+    yaw in the fingers after a pick/regrasp; the prismatic VERIFY showed ori_dev up to 3.85 deg at the
+    seat on 2026-10-19 and every insert visibly turned the part at contact (operator). Compared modulo
+    the part's fold symmetry. Skips when the part is not seen or the difference is outside
+    (HELD_YAW_MIN_DEG, HELD_YAW_MAX_DEG)."""
+    if state.held_quat is None:
+        return
+    from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+    from utils.data_path_finder import get_symmetry_dir
+    o = observe_base_pose(obj, timeout_s=6.0)
+    if o is None:
+        say(f"  [held-yaw] {obj}: not seen while held -> no yaw calibration")
+        return
+    Rm = R_.from_quat(o[1]); Rc = R_.from_quat(state.held_quat)
+    try:
+        fold = load_symmetry_data(obj, str(get_symmetry_dir()))
+        cands = [R_.from_matrix(m) for m in equivalent_orientations(Rm.as_matrix(), fold)]
+    except Exception:
+        cands = [Rm]
+    best = min(cands, key=lambda c: (c.inv() * Rc).magnitude())
+    d = Rc * best.inv()                                   # world rotation taking measured -> chain
+    rv = d.as_rotvec(); err_deg = -np.degrees(rv[2])      # measured yaw - chain yaw about world z
+    say(f"  [held-yaw] {obj}: held part reads {err_deg:+.2f} deg from the chain's orientation "
+        f"(tilt part {np.degrees(np.hypot(rv[0], rv[1])):.1f} deg)")
+    if not (HELD_YAW_MIN_DEG <= abs(err_deg) <= HELD_YAW_MAX_DEG):
+        return
+    snap = snapshot_robot_state(); tcp = (snap.get('tcp') or {})
+    if not tcp.get('xyz') or not tcp.get('quat_xyzw'):
+        return
+    turn = R_.from_euler('z', -err_deg, degrees=True)
+    q_new = (turn * R_.from_quat(tcp['quat_xyzw'])).as_quat()
+    x, y, z = tcp['xyz']
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                        f"{x:.4f}", f"{y:.4f}", f"{z:.4f}", '--quat', *[f"{v:.6f}" for v in q_new]],
+                       label=f'held-yaw: turn the wrist {-err_deg:+.2f} deg in place', timeout_s=60, log_fh=log_fh)
+    if r.get('result') == 'success':
+        state.held_quat = tuple(float(v) for v in (turn * Rc).as_quat())
+        say(f"  [held-yaw] {obj}: wrist turned {-err_deg:+.2f} deg; chain orientation updated")
+
+
 def record_follow_reads(obj, say, observed_base=None, log_fh=None):
     """Before `obj`'s pick (arm free, gripper empty): read each part it sits between (FOLLOWS_SEATED)
     from a hover FOLLOW_READ_Z above its CAD seat and keep its base-frame xy error in the ledger
@@ -1652,6 +1699,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             continue
 
         t_step = time.time()                       # insert logs written from here belong to this step
+        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not _SAFETY_STOP:
+            held_yaw_calibration(obj, state, say, log_fh)
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
