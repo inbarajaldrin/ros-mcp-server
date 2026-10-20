@@ -64,12 +64,20 @@ def capture(n=12, timeout=6.0):
     node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append(m), 20)
     node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
     node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['t'].append(m), 50)
-    t0 = time.time() + 0.3; end = time.time() + timeout
-    while time.time() < end and (len([m for m in st['d'] if m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec > t0]) < n or 'i' not in st):
+    # frames stamped >= 0.25 s after the TCP last moved (depth_timing 2026-10-20), not a fixed wait
+    stamp = lambda m: m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
+    t_call = time.time() + 0.05; end = time.time() + timeout + 3.0; t0 = t_call + 0.25
+    while time.time() < end:
         rclpy.spin_once(node, timeout_sec=0.02)
+        if len(st['t']) >= 20:
+            P = np.array([[stamp(m), m.pose.position.x, m.pose.position.y, m.pose.position.z] for m in st['t'][-400:]])
+            mv = np.nonzero(np.linalg.norm(P[:, 1:] - P[-1, 1:], axis=1) > 0.0005)[0]
+            t0 = max(t_call, (P[mv[-1], 0] if len(mv) else P[0, 0]) + 0.25)
+        if len([m for m in st['d'] if stamp(m) > t0]) >= n and 'i' in st:
+            break
     node.destroy_node(); rclpy.shutdown()
     br = CvBridge()
-    fr = [m for m in st['d'] if m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec > t0][-n:]
+    fr = [m for m in st['d'] if stamp(m) > t0][-n:]
     if len(fr) < 3 or 'i' not in st or not st['t']:
         return None
     d = np.median(np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(np.float32) for m in fr]), 0)

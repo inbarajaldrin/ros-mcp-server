@@ -98,7 +98,22 @@ def main():
     # motion segments from the TCP speed
     v = np.linalg.norm(np.diff(T[:, 2:5], axis=0), axis=1) / np.maximum(np.diff(T[:, 0]), 1e-4)
     moving = np.r_[False, v > 0.001]
-    stops = [T[i, 0] for i in range(1, len(T)) if moving[i - 1] and not moving[i] and not moving[min(i + 250, len(T) - 1)]]
+    # a stop: the last sample above 5 mm/s, followed by >= 1 s under 0.5 mm/s (slow-downs mid-move are not stops)
+    stops = []
+    fast = np.r_[False, v > 0.005]; still = np.r_[True, v < 0.0005]
+    i = 1
+    while i < len(T):
+        if fast[i - 1] and not fast[i]:
+            j = i
+            while j < len(T) and not fast[j]:
+                j += 1
+            seg = still[i:j]
+            k = next((q for q in range(len(seg)) if seg[q:].all() and T[min(i + q + len(seg[q:]) - 1, len(T) - 1), 0] - T[i + q, 0] >= 1.0), None)
+            if k is not None:
+                stops.append(T[i + k, 0])
+            i = j
+        else:
+            i += 1
     # per-frame camera-frame fits (independent of the TCP), then world poses for a sweep of delta
     M = model_points(a.base, []); tree = cKDTree(M)
     rng = np.random.default_rng(0)
@@ -137,7 +152,13 @@ def main():
     print(f"stamp latency: moving frames agree best with the TCP at stamp {best[0]*1000:+.0f} ms "
           f"(median xy {best[1]} mm; at 0 ms {dict(sweep).get(0.0)} mm)", flush=True)
     P = world_poses(best[0])
-    res = {'n_frames': len(fits), 'arrival_minus_stamp_ms': round(1000 * float(np.median(lat_arr)), 1),
+    # timeline: every frame's world xy error vs the still-arm median, with the TCP speed at its stamp
+    spd = np.array([np.interp(st_, T[1:, 0], v) for st_ in stamps])
+    ref = np.median(P[spd < 0.0005, :2], 0) if (spd < 0.0005).sum() >= 5 else np.median(P[:, :2], 0)
+    errs = np.hypot(*(P[:, :2] - ref).T)
+    timeline = [[round(float(stamps[k] - T[0, 0]), 3), round(1000 * float(spd[k]), 1), round(float(errs[k]), 2)] for k in range(len(stamps))]
+    res_tl = timeline
+    res = {'timeline_t_speedmm_s_errmm': res_tl, 'n_frames': len(fits), 'arrival_minus_stamp_ms': round(1000 * float(np.median(lat_arr)), 1),
            'stamp_latency_ms': round(1000 * best[0]), 'sweep': sweep, 'stops': []}
     for ts in stops:
         after = [k for k, s in enumerate(stamps) if s > ts]
@@ -155,6 +176,8 @@ def main():
         print(f"stop at {ts - T[0,0]:.1f} s: first frame +{1000*first:.0f} ms, settled (<= {SETTLE_MM} mm, {SETTLE_DEG} deg) "
               f"after {'never' if st is None else f'{st:.2f} s'}; first frames off {np.round(err[:6], 1).tolist()} mm", flush=True)
     out = OUT / time.strftime('%Y%m%d_%H%M%S'); out.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out / 'raw.npz', tcp=T, stamps=np.array([x[0] for x in buf['d']]),
+                        arrivals=np.array([x[1] for x in buf['d']]), depth=np.stack([x[2] for x in buf['d']]), K=buf['K'])
     json.dump(res, open(out / 'result.json', 'w'), indent=1)
     print(f"-> {out}/result.json")
 

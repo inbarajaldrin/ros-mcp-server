@@ -67,6 +67,7 @@ class _TopFaces(dict):
 
 
 TOP_FACE = _TopFaces()
+STILL_MARGIN_S = 0.25        # use depth frames stamped this long after the TCP stopped (depth_timing 2026-10-20)
 PITCH_MAX_DEG = 1.5
 HEIGHT_MAX_MM = 2.5
 
@@ -81,10 +82,28 @@ def capture_world(n=10, timeout=6.0):
     node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
     node.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: st.__setitem__('c', m), 2)
     node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st.__setitem__('t', m), 10)
-    t_start = time.time() + 0.3            # frames from after the call, not buffered ones
-    end = time.time() + timeout
-    while time.time() < end and (len([m for m in st['d'] if _stamp(m) > t_start]) < n or 'i' not in st or 't' not in st):
+    # Frames stamped >= STILL_MARGIN_S after the TCP last moved (depth_timing 2026-10-20: frames taken while the
+    # arm moves are ~10 mm off and no time shift fixes them; after the stop they are right at once, but arrive
+    # 150 ms (median) to 650 ms (p90) after their stamp - the old fixed sleeps were waiting for those).
+    st['tp'] = []
+    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['tp'].append(
+        (_stamp(m), m.pose.position.x, m.pose.position.y, m.pose.position.z)), 100)
+    end = time.time() + timeout + 3.0
+    def still_since():
+        tp = st['tp'][-400:]
+        if len(tp) < 20:
+            return None
+        P = np.array(tp)
+        mv = np.nonzero(np.linalg.norm(P[:, 1:] - P[-1, 1:], axis=1) > 0.0005)[0]
+        return P[mv[-1], 0] if len(mv) else P[0, 0]
+    t_call = time.time() + 0.05
+    t_start = t_call
+    while time.time() < end:
         rclpy.spin_once(node, timeout_sec=0.02)
+        ss = still_since()
+        t_start = max(t_call, ss + STILL_MARGIN_S) if ss is not None else t_call + STILL_MARGIN_S
+        if len([m for m in st['d'] if _stamp(m) > t_start]) >= n and 'i' in st and 't' in st:
+            break
     node.destroy_node(); rclpy.shutdown()
     frames = [m for m in st['d'] if _stamp(m) > t_start][-n:]
     if len(frames) < 3 or 'i' not in st or 't' not in st:

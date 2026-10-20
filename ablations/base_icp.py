@@ -27,7 +27,15 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 
+import functools
+
+
 def model_points(base, seated, step=0.0015):
+    return _model_points(base, tuple(seated), step)
+
+
+@functools.lru_cache(maxsize=16)
+def _model_points(base, seated, step=0.0015):
     from grasp_depth import load_mesh, surface_points
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
     V, F = load_mesh(base); P = [surface_points(V, F, step)]
