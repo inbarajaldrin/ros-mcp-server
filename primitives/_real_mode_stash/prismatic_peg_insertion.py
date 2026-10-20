@@ -138,6 +138,14 @@ MAX_RETRIES = 3
 RETRY_SHIFT_MIN_M = 0.0015      # below: the stall is not an xy miss (noise / a seated part), no shift
 RETRY_SHIFT_MAX_M = 0.010       # above: more than the aim or grasp can be off (half a part thickness) -> no shift
 STAGE_MATCH_TOL_M = 0.008       # a stall within this of a CAD contact height is reported as that stage
+# Corridor stage (INSERT_GEOMETRY.md, 2026-10-19): a stall BELOW a seated part's top is the part wedged
+# inside that part's opening (line_green 5-9 mm into the U openings, +-1.1 mm clearance; yellow's legs
+# astride line_green). The old retry retracted 10 mm above the stall - still inside the opening - and
+# locked Rz, so attempts 2 and 3 restarted wedged (3 x 5.0 mm, 20:56 and 21:12). A corridor retry
+# retracts above the entrance, keeps Rz compliant and re-aims by at most the clearance scale.
+CORRIDOR_DEPTH_M = 0.020        # how far below a seated part's top counts as inside its opening
+CORRIDOR_EXIT_M = 0.008         # retract to this above the entrance before the next attempt
+CORRIDOR_SHIFT_MAX_M = 0.002    # re-aim bound inside a corridor (the measured slide is mostly the wedge pivot)
 DEFAULT_TIMEOUT = 60.0
 
 # ============================================================================
@@ -922,7 +930,7 @@ class PrismaticPegInsertion(Node):
                 # 2026-05-07: on retry, lock Rz too. Operator observation:
                 # yaw consistently rotates opposite-direction-from-helpful
                 # under jaws-on-rim contact, defeating the retry.
-                rz_at_contact = (attempt == 1)
+                rz_at_contact = (attempt == 1) or bool(getattr(self, '_corridor_retry', False))
                 self.get_logger().warn(
                     f"[CONTACT] Fx={fx:.2f} Fy={fy:.2f} Tx={tx:.4f} Ty={ty:.4f} "
                     f"-> XYZ+Rx/Ry compliance (Rz={'free' if rz_at_contact else 'LOCKED'}), "
@@ -1247,6 +1255,12 @@ class PrismaticPegInsertion(Node):
             if attempt < MAX_RETRIES:
                 current_pos = self.get_ee_position()
                 retry_z = current_pos[2] + 0.01 if current_pos is not None else initial_pos[2]
+                cor = self._corridor_of(self.last_stall_z)
+                self._corridor_retry = cor is not None
+                if cor is not None:
+                    retry_z = max(retry_z, cor[1] + CORRIDOR_EXIT_M)
+                    self.get_logger().warn(f"[RETRY {attempt + 1}] wedged in {cor[0]}'s opening -> retract above its "
+                                           f"entrance (Z={retry_z:.4f}), Rz stays compliant")
                 self.retract_upward(retry_z)
                 rclpy.spin_once(self, timeout_sec=0.5)
 
@@ -1315,12 +1329,25 @@ class PrismaticPegInsertion(Node):
         k, v = min(self.contact_candidates.items(), key=lambda kv: abs(kv[1] - z))
         return f"{k} ({1000*(z - v):+.1f} mm)" if abs(v - z) <= STAGE_MATCH_TOL_M else f"between contacts ({1000*(z - self.target_z):+.1f} mm above the seat)"
 
+    def _corridor_of(self, z):
+        """(name, top_tcp_z) of the seated part whose opening a stall at z sits inside, else None."""
+        if not self.contact_candidates or z is None:
+            return None
+        for k, top in self.contact_candidates.items():
+            if k.startswith('OBJ:') and top - CORRIDOR_DEPTH_M <= z <= top + 0.002:
+                return k, top
+        return None
+
     def _retry_shift(self, attempt):
         """xy shift of the aim for `attempt` from the last stall's measured slide (see RETRY_SHIFT_*)."""
         d = self.last_dev_vec
         if d is None:
             return np.zeros(2), "no deviation measured"
         n = float(np.linalg.norm(d))
+        if self._corridor_of(self.last_stall_z) is not None and n >= RETRY_SHIFT_MIN_M:
+            sign = 1.0 if attempt == 2 else -1.0
+            d2 = sign * d * min(1.0, CORRIDOR_SHIFT_MAX_M / n)
+            return d2, f"corridor: {'toward' if sign > 0 else 'away from'} the slide, bounded ({1000*d2[0]:+.1f}, {1000*d2[1]:+.1f}) mm"
         if n < RETRY_SHIFT_MIN_M:
             return np.zeros(2), f"slide {1000*n:.1f} mm < {1000*RETRY_SHIFT_MIN_M:.1f}: not an xy miss"
         if n > RETRY_SHIFT_MAX_M:
