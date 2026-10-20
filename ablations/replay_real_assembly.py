@@ -277,6 +277,7 @@ def snapshot_robot_state(timeout_s: float = 2.0) -> dict:
 # place-down pass.
 
 STAGING_MAX_RETRIES = 2   # extra place-down passes before giving up
+GRIP_WIDTH_TOL_MM = 8.0   # a close ending further than this from the grasp's own width took the wrong thing
 
 
 def staging_single_pass_ok(obj: str, base_name: str, observed_quat):
@@ -1552,6 +1553,15 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         except (TypeError, ValueError):
             return None
 
+    def _prev_tool(idx):
+        """Tool of the step before step idx (1-based), or None."""
+        try:
+            return parse_tool_call(sequence[idx - 2])[0] if idx >= 2 else None
+        except Exception:
+            return None
+
+    grip_redone = {}
+
     def _next_tool(idx):
         try:
             return parse_tool_call(sequence[idx])[0] if idx < len(sequence) else None
@@ -1624,6 +1634,39 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
+        # Grip-width guard: a close that ends far from the grasp's own width took the wrong thing
+        # (2026-10-19 20:53: flat u_brown, fingers closed across both legs at 69.9 mm instead of
+        # 21 on a leg; the part slipped out in the reorient and the release command failed).
+        # verify_grasp only checks "closed on something". Open, lift, re-pick once.
+        if (tool_name == 'control_gripper' and str(kw.get('command')) == 'close' and not _SAFETY_STOP
+                and result.get('result') != 'failure' and result.get('final_width_mm') is not None
+                and _prev_tool(step_idx) == 'move_to_grasp' and not grip_redone.get(step_idx)):
+            try:
+                from spacing_check import grasp_width_mm
+                want = grasp_width_mm(obj, state.last_grasp_id or 1)
+            except Exception:
+                want = None
+            got = float(result['final_width_mm'])
+            if want is not None and abs(got - want) > GRIP_WIDTH_TOL_MM:
+                grip_redone[step_idx] = True
+                say(f"  [{step_idx}] grip {got:.1f} mm, expected {want:.1f} ± {GRIP_WIDTH_TOL_MM:g} -> wrong grasp; "
+                    f"open, lift, re-pick once")
+                redo = [('control_gripper', dict(command='open')),
+                        ('move_to_safe_height', {}),
+                        ('move_to_grasp', dict(object_name=obj, grasp_id=state.last_grasp_id or 1)),
+                        ('control_gripper', dict(command='close'))]
+                for j, (t_, k_) in enumerate(redo, start=1):
+                    r_ = execute(step_idx, f"re-pick {t_}", t_, k_, tag=f"g{j}")
+                    if r_ is None or r_.get('result') == 'failure':
+                        result = r_ or {'result': 'failure', 'error': 're-pick build failed'}
+                        break
+                    time.sleep(0.5)
+                else:
+                    result = r_
+                    got = float(result.get('final_width_mm') or 0)
+                    if abs(got - want) > GRIP_WIDTH_TOL_MM:
+                        say(f"  [{step_idx}] re-pick grip {got:.1f} mm, still not {want:.1f} -> stopping")
+                        result = dict(result, result='failure', error='wrong grasp twice')
 
         # Staging regrasp: move_to_grasp has just turned top-down over the clear area
         # and observed the part before descending. If the face it landed on cannot be
