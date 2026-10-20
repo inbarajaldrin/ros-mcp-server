@@ -686,7 +686,7 @@ def held_yaw_calibration(obj, state, say, log_fh=None):
         say(f"  [held-yaw] {obj}: wrist turned {-err_deg:+.2f} deg; the held part now matches the chain")
 
 
-def record_follow_reads(obj, say, observed_base=None, log_fh=None):
+def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_staging=False):
     """Before `obj`'s pick (arm free, gripper empty): read each part it sits between (FOLLOWS_SEATED)
     from a hover FOLLOW_READ_Z above its CAD seat and keep its base-frame xy error in the ledger
     (`rel_err_mm`) for follow_seated_offset. Close range because the base view (0.56 m) is not good
@@ -723,6 +723,15 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None):
             continue
         say(f"  [follow] {p}: no close read -> {obj} follows the insert-based offsets")
     json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+    if observed_base is not None:
+        # the reads left the arm above the base; the pick needs the camera on the part again
+        # (2026-10-19 21:xx: line_green at the clear area was out of view -> pick failed)
+        if part_at_staging:
+            run_subprocess(['python3', '-u', '-m', 'primitives.core.move_to_clear_area', '--mode', 'real'],
+                           label='follow read: back above the clear area', timeout_s=60, log_fh=log_fh)
+        else:
+            run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                           label='follow read: back home', timeout_s=60, log_fh=log_fh)
 
 
 def reread_base(bname, prev, log_fh=None):
@@ -2195,7 +2204,7 @@ def main() -> int:
             first_object = False
             if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED:
                 record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
-                                    getattr(args, 'observed_base', None), log_fh)
+                                    getattr(args, 'observed_base', None), log_fh, bool(args.part_at_staging))
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
