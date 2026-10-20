@@ -76,13 +76,14 @@ def main():
     else:
         half = f['half_cross_m']; along = a.at_long / 1000.0
     c = np.array([f['cx'], f['cy']])
-    face = c[axis] - sgn * half + sgn * a.face_offset_mm / 1000.0   # the face the block meets (base frame)
+    face = c[axis] - sgn * half                                      # the CAD face the taps stop at (base frame)
+    meas = face - sgn * a.face_offset_mm / 1000.0                     # where that face is now (offset toward the block)
     pad_z = f['z']                                          # pad centre at the part's top: tips 14.9 mm below
     def base_pt(push_coord):
         p = np.zeros(3); p[axis] = push_coord; p[1 - axis] = c[1 - axis] + (along if axis != long_ax else 0.0)
         p[2] = pad_z
         return p
-    start_b = base_pt(face - sgn * (a.gap_mm / 1000.0 + BLOCK_HALF_PUSH_M))
+    start_b = base_pt(meas - sgn * (a.gap_mm / 1000.0 + BLOCK_HALF_PUSH_M))
     push_b = base_pt(face + sgn * (a.push_mm / 1000.0 - BLOCK_HALF_PUSH_M))
     W = lambda p: np.array([bx, by, bz]) + Rb.apply(p)
     fz = lambda p: p[2] + RG2_TIP_CLOSED_M - RG2_PAD_HALF_M

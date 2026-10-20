@@ -1640,7 +1640,25 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             # tilted, or shifted along its axis = an end on base1's top past the pocket end; a
             # regrasp holds it where it is. 2026-10-15: a bar 4-7 mm high and +5 mm along its axis
             # (pitch only 1.2 deg) went to the top-down reseat, which cannot move it, and failed.
-            ok = nudge_into_slot(obj, ob, res, say, out_dir)
+            ok = False
+            shift = float((res.get('axial') or {}).get('shift_mm', 0.0))
+            f_ = res.get('face') or {}
+            if abs(shift) >= NUDGE_SHIFT_MM and f_:
+                # taps along the bar to its CAD end face (operator 2026-10-20: a slow push drags the unfixed
+                # base - cycle 1's axial push moved base3 10 mm); start clear of the MEASURED end
+                lax = f_.get('long_axis', 'y')
+                toward = ('-' if shift > 0 else '+') + lax
+                say(f"  [seat-check] {obj}: shifted {shift:+.0f} mm along its length -> taps toward {toward} to the CAD end face")
+                run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
+                                '--toward', toward, '--face-offset-mm', f"{abs(shift) + 3:.0f}", '--taps', '3'],
+                               label=f'tap {obj} {toward}', timeout_s=300)
+                res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
+                ob = res2.get('observed_base') or ob
+                say(f"  [seat-check] {obj} after the taps: {json.dumps({k: v for k, v in res2.items() if k not in ('profile_mm', 'observed_base')})}")
+                ok = bool(res2.get('ok'))
+                res = res2 if 'pitch_deg' in res2 else res
+            if not ok:
+                ok = nudge_into_slot(obj, ob, res, say, out_dir)      # the slow push as the fallback
             if not ok:
                 res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
                 if _level_but_high(res2):                      # nudged level but still high: a roll
