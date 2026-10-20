@@ -635,28 +635,46 @@ def verify_seated(objs, say, second_view=None) -> bool:
     return ok_all
 
 
-def record_follow_reads(obj, say):
-    """Before `obj`'s pick (arm at home, gripper empty): read the parts it sits between
-    (FOLLOWS_SEATED) with verify_assembly and keep their base-frame xy error in the ledger
-    (`rel_err_mm`) for follow_seated_offset. The home view does not reach the base (2026-10-19: neither
-    base1 nor the U parts in its poses), so this mostly keeps what verify_seated recorded from the base
-    view after the previous part; a part never verified this run has no read and the insert-based
-    fallback is used. forget_verified drops the entry when the part is pulled out."""
+FOLLOW_READ_Z = 0.30          # flange height for the close read of a seated reference part
+FOLLOW_READ_S = 10.0
+
+
+def record_follow_reads(obj, say, observed_base=None, log_fh=None):
+    """Before `obj`'s pick (arm free, gripper empty): read each part it sits between (FOLLOWS_SEATED)
+    from a hover FOLLOW_READ_Z above its CAD seat and keep its base-frame xy error in the ledger
+    (`rel_err_mm`) for follow_seated_offset. Close range because the base view (0.56 m) is not good
+    enough here: 2026-10-19 20:56 it read the U parts within 1 mm of CAD, line_green then sat 5.5 mm
+    into their openings for 13 s and slid 6 mm across before dropping in; the disassembly's hover reads
+    the same evening put u_brown 7 mm off. Without a base read or a part not seen, the verify_seated
+    entry (base view) stays, else the insert-based fallback is used."""
     parts = FOLLOWS_SEATED.get(obj)
     if not parts:
         return
     led = _ledger()
+    if observed_base is not None:
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        (bx, by, bz), bq = observed_base
+        Rb = R_.from_quat(bq)
+        for p in parts:
+            sp, _ = load_seat_pose_in_base('base1', p)
+            seat_w = np.array([bx, by, bz]) + Rb.apply(sp)
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{seat_w[0]:.4f}", f"{seat_w[1]:.4f}", f"{FOLLOW_READ_Z:.2f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                               label=f'follow read: hover above {p}', timeout_s=60, log_fh=log_fh)
+            if r.get('result') != 'success':
+                break
+            time.sleep(1.0)
+            o = observe_base_pose(p, timeout_s=FOLLOW_READ_S)
+            if o is None:
+                say(f"  [follow] {p}: not seen from {FOLLOW_READ_Z:.2f} m above its seat")
+                continue
+            e = Rb.inv().apply(np.array(o[0]) - seat_w)
+            led.setdefault(p, {})['rel_err_mm'] = [1000 * float(e[0]), 1000 * float(e[1])]
+            say(f"  [follow] {p}: seen ({1000*e[0]:+.1f}, {1000*e[1]:+.1f}) mm from its CAD seat (base frame, close read)")
     for p in parts:
-        r = _read_part(p)
-        e = r.get('position_error_m') if r.get('result') == 'success' and not _not_detected(r) else None
-        if isinstance(e, dict) and 'x' in e and 'y' in e:
-            led.setdefault(p, {})['rel_err_mm'] = [1000 * float(e['x']), 1000 * float(e['y'])]
-            say(f"  [follow] {p}: seen ({1000*float(e['x']):+.1f}, {1000*float(e['y']):+.1f}) mm from its CAD seat (base frame)")
-        elif isinstance((led.get(p) or {}).get('rel_err_mm'), list):
-            say(f"  [follow] {p}: not read from here; keeping the base-view read "
-                f"({led[p]['rel_err_mm'][0]:+.1f}, {led[p]['rel_err_mm'][1]:+.1f}) mm")
-        else:
-            say(f"  [follow] {p}: not read from here -> {obj} follows the insert-based offsets")
+        if isinstance((led.get(p) or {}).get('rel_err_mm'), list):
+            continue
+        say(f"  [follow] {p}: no close read -> {obj} follows the insert-based offsets")
     json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
 
 
@@ -2127,7 +2145,8 @@ def main() -> int:
                     break
             first_object = False
             if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED:
-                record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")))
+                record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
+                                    getattr(args, 'observed_base', None), log_fh)
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
