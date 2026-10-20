@@ -1441,7 +1441,7 @@ CROSS_NUDGE_AT_MM = 12.0                  # push this far in from the high end (
 
 
 def _seat_checked(obj) -> bool:
-    if obj in SEAT_CHECK_OBJECTS:
+    if obj in SEAT_CHECK_OBJECTS or os.environ.get('SEAT_CHECK_ALL', '1') == '1':   # every part (2026-10-20)
         return True
     try:
         from seat_check import TOP_FACE
@@ -1631,6 +1631,10 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             continue
         if res.get('ok'):
             return True
+        if res.get('mode', '').startswith('median height'):
+            if res.get('ok'):
+                return True
+            say(f"\n!!! {obj}: top {res.get('height_err_mm'):+.1f} mm from its CAD height - not seated"); return False
         if 'pitch_deg' not in res:
             say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
         shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))

@@ -124,7 +124,16 @@ def measure(obj, observed_base, Pw, base='base1'):
     m = (np.abs(Pb[:, 0]) < f['hx']) & (np.abs(Pb[:, 1]) < f['hy']) & (np.abs(Pb[:, 2] - f['z']) < 0.012)
     P = Pb[m]
     if len(P) < 200:
-        return {'ok': False, 'error': f'only {len(P)} depth points on the {obj} top face'}
+        # small top face (forks: 21 x 21 mm): no plane, the median height of the points over the CAD top
+        # footprint vs CAD (2026-10-20: both forks' telemetry ended before the retry that seated them; this
+        # read them at +0.2 / -0.3 mm)
+        mm = (np.abs(Pb[:, 0]) < f['hx'] + 0.005) & (np.abs(Pb[:, 1]) < f['hy'] + 0.005) & (Pb[:, 2] > f['z'] - 0.025)
+        if mm.sum() < 50:
+            return {'ok': False, 'error': f'only {int(mm.sum())} depth points over the {obj} top'}
+        h = float(1000 * (np.median(Pb[mm, 2]) - f['z']))
+        return {'ok': bool(abs(h) <= HEIGHT_MAX_MM), 'height_err_mm': round(h, 2), 'n_points': int(mm.sum()),
+                'mode': 'median height (small top face)', 'face': {k: f[k] for k in ('cx', 'cy', 'z', 'long_axis', 'half_long_m', 'half_cross_m')},
+                'limits': {'height_mm': HEIGHT_MAX_MM}}
     for _ in range(3):                                         # trimmed least squares: z = a x + b y + c
         A = np.c_[P[:, 0], P[:, 1], np.ones(len(P))]
         coef, *_ = np.linalg.lstsq(A, P[:, 2], rcond=None)
