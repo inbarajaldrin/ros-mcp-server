@@ -641,6 +641,7 @@ FOLLOW_READ_S = 10.0
 
 HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
 HELD_READ_S = 10.0
+HELD_READ_ABOVE_SEAT_M = 0.045   # flange above the predicted seat for the pre-insert read (U rim contact is +31 mm)
 HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
 
@@ -668,16 +669,26 @@ def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None, lift_
             return
         time.sleep(1.0)
     elif observed_base is not None:
-        # Pre-insert fallback above the base (works for line_green, whose top marker stays high enough).
-        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        (bx, by, bz), bq = observed_base
-        sp, _ = load_seat_pose_in_base('base1', obj)
-        w = np.array([bx, by, bz]) + R_.from_quat(bq).apply(sp)
-        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                            f"{w[0]:.4f}", f"{w[1]:.4f}", f"{FOLLOW_READ_Z:.2f}", '--keep-orientation'],
-                           label=f'held-yaw: carry {obj} above its seat for the read', timeout_s=90, log_fh=log_fh)
-        if r.get('result') != 'success':
+        # Pre-insert read, low above the seat: after rotate_object the part shows the camera the face it was
+        # seen with mid-insert (u_brown 8x/5 s at flange 0.186 m, 0x at 0.30 m and 0x lifted 20 mm at the
+        # regrasp, 2026-10-20). Two moves: over at the current height, then straight down to seat + HELD_READ_ABOVE_SEAT_M
+        # (the part's bottom stays above the rim contact, which is 31 mm above the seat for the U parts).
+        try:
+            from disassemble import seat_grasp
+            tcp = seat_grasp(obj, state.last_grasp_id or 1, observed_base)
+        except Exception as e:
+            say(f"  [held-yaw] {obj}: no seat pose for the read ({e})")
             return
+        snap = snapshot_robot_state(); cur = (snap.get('tcp') or {}).get('xyz')
+        if not cur:
+            return
+        z_read = float(tcp[2]) + HELD_READ_ABOVE_SEAT_M
+        for lab, z in (('over the seat', max(cur[2], z_read)), ('down for the read', z_read)):
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{tcp[0]:.4f}", f"{tcp[1]:.4f}", f"{z:.4f}", '--keep-orientation'],
+                               label=f'held-yaw: {lab} ({obj})', timeout_s=90, log_fh=log_fh)
+            if r.get('result') != 'success':
+                return
         time.sleep(1.0)
     # a held part is detected at only ~1-2 Hz (u_brown: 8 samples in 5 s, 2026-10-19 21:35) and the
     # localizer pauses after the lift: wait up to HELD_READ_S for HELD_READ_MIN samples, fold-aware mean
