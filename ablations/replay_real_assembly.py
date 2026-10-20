@@ -466,6 +466,44 @@ def _seen_here(obj, timeout_s=5.0) -> bool:
     return ok
 
 
+PICK_FINGER_CLEAR_MM = 15.0       # the recorded grasp's open fingers must have this much room from base1 and the
+                                  # other parts (base read scatters ~8 mm): yellow flat with its bridge grasp 5 mm from
+                                  # base1's edge put a finger on the base -> PROTECTIVE_STOP (2026-10-19)
+
+
+def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
+    """True when `obj` can be picked with grasp `gid` where it lies. If the fingers would land within
+    PICK_FINGER_CLEAR_MM of base1 or another part, relocate it first (disassemble --relocate: clearest
+    grasp at its own opening, a spot in the staging region when it is there) and return True on success;
+    False only when the part is not seen or the relocation fails."""
+    try:
+        from spacing_check import observe_parts, PARTS, finger_outlines, base_outline, outline, gap_mm
+        seen = observe_parts(PARTS)
+        ob = observe_base_pose('base1')
+        if obj not in seen or ob is None:
+            return True                                   # cannot judge here; the pick's own checks apply
+        obst = [('base1', base_outline(ob))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj]
+        gaps = {n: min(gap_mm(f, o) for f in finger_outlines(obj, seen[obj], gid, width_mm)) for n, o in obst}
+        worst = min(gaps, key=gaps.get)
+        if gaps[worst] >= PICK_FINGER_CLEAR_MM:
+            return True
+        msg = (f"  [pick] {obj} grasp {gid}: open fingers {gaps[worst]:.0f} mm from {worst} "
+               f"(< {PICK_FINGER_CLEAR_MM:g}) -> relocating it first")
+        print(msg, flush=True)
+        if log_fh: log_fh.write(msg + "\n")
+        in_staging = seen[obj][0][0] >= 0.19 and seen[obj][0][1] <= -0.22
+        r = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', 'x',
+                            '--relocate', obj, '--grasp-id', 'auto'] + (['--spot-staging'] if in_staging else []),
+                           label=f'relocate {obj} (pick room)', timeout_s=900, log_fh=log_fh)
+        if r.get('result') == 'failure':
+            return False
+        LAST_SEEN_XY.pop(obj, None)                        # it moved: look for it again
+        return True
+    except Exception as e:
+        print(f"  [pick] room check failed ({e}) -> picking as recorded", flush=True)
+        return True
+
+
 def _part_view(obj, log_fh=None) -> bool:
     """Camera straight above `obj`'s last-seen position (centred, closer) — the staging view at 0.62 m
     sees the whole region but detected a standing yellow only intermittently (2026-10-19: seen by the
@@ -1887,6 +1925,19 @@ def main() -> int:
                     msg = f"\n!!! {obj}: not seen from above its last position nor from the staging view"
                     print(msg, flush=True)
                     if log_fh: log_fh.write(msg + "\n")
+                    failed = obj
+                    break
+            # Room for the recorded grasp's open fingers where the part lies (relocates it if not)
+            if not args.dry_run and not args.part_at_staging and not _SAFETY_STOP:
+                gid_ = next((parse_tool_call(s_)[1].get('grasp_id') for s_ in entry.get('tool_sequence', []) or []
+                             if 'move_to_grasp' in s_), None)
+                # the fingers come down at the recorded PRE-GRASP opening (fmb1_assembly.json), not the grip width
+                _ao = json.load(open(REPO_ROOT / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
+                open_mm = next((o_['gripper_width_mm'] for o_ in _ao if o_['object_name'] == obj), None)
+                if gid_ is not None and open_mm and not _pick_room(obj, int(gid_), float(open_mm), log_fh):
+                    failed = obj
+                    break
+                if obj not in LAST_SEEN_XY and not _seen_here(obj) and not _part_view(obj, log_fh):
                     failed = obj
                     break
             ok = replay_object(entry, state, args, log_fh=log_fh, snap_fh=snap_fh)
