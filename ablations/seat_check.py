@@ -25,9 +25,18 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / 'ablations'))
 
-X_CAM = np.eye(4)   # localizer's calibrated camera mount (config/robot_config.yaml, 2026-10-13)
-X_CAM[:3, :3] = R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957]).as_matrix()
-X_CAM[:3, 3] = [-0.01446, -0.04424, 0.07317]
+def _load_x_cam():
+    """The wrist camera mount from the localizer's config - the single source (the depth path used to carry its
+    own copy, and after the 2026-10-20 recalibration markers and depth disagreed by 10 mm)."""
+    import yaml
+    c = yaml.safe_load(open('/home/aldrin/Desktop/ros2_ws/src/aruco_camera_localizer/config/robot_config.yaml'))
+    X = np.eye(4)
+    X[:3, :3] = R.from_quat(c['cam_offset_quat']).as_matrix()
+    X[:3, 3] = c['cam_offset_position']
+    return X
+
+
+X_CAM = _load_x_cam()
 VIEW_FLANGE_Z = 0.56
 # Top face in the base frame and the half-extents to sample (CAD, trimmed off the edges).
 # line_green: 25.9 x 140 x 25.9 mm bar along base y, seat centre z 24.5 mm -> top 37.45 mm.

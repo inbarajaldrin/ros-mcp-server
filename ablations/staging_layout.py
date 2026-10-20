@@ -224,8 +224,9 @@ def depth_raised(say=print):
     D = np.median(np.stack([np.frombuffer(m.data, np.uint16).reshape(m.height, m.width) for m in st['d'][-10:]]), 0) / 1000.0
     K = np.array(st['i'].k).reshape(3, 3); p, o = st['t'].pose.position, st['t'].pose.orientation
     ee = R.from_quat([o.x, o.y, o.z, o.w])
-    cam_p = np.array([p.x, p.y, p.z]) + ee.apply([-0.01446, -0.04424, 0.07317])
-    cam_r = ee * R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957])
+    from seat_check import X_CAM            # the localizer config's mount (single source, 2026-10-20)
+    cam_p = np.array([p.x, p.y, p.z]) + ee.apply(X_CAM[:3, 3])
+    cam_r = ee * R.from_matrix(X_CAM[:3, :3])
     h, w = D.shape; u, v = np.meshgrid(np.arange(w), np.arange(h))
     X = np.stack([(u - K[0, 2]) / K[0, 0] * D, (v - K[1, 2]) / K[1, 1] * D, D], -1)[D > 0.2]
     W = cam_r.apply(X) + cam_p

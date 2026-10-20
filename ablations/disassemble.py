@@ -29,9 +29,18 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from scipy.spatial.transform import Rotation as R  # noqa: E402
 
-X_CAM = np.eye(4)   # localizer's calibrated camera mount (config/robot_config.yaml, 2026-10-13)
-X_CAM[:3, :3] = R.from_quat([-0.0238, -0.00386, -0.01645, 0.99957]).as_matrix()
-X_CAM[:3, 3] = [-0.01446, -0.04424, 0.07317]
+def _load_x_cam():
+    """The wrist camera mount from the localizer's config - the single source (the depth path used to carry its
+    own copy, and after the 2026-10-20 recalibration markers and depth disagreed by 10 mm)."""
+    import yaml
+    c = yaml.safe_load(open('/home/aldrin/Desktop/ros2_ws/src/aruco_camera_localizer/config/robot_config.yaml'))
+    X = np.eye(4)
+    X[:3, :3] = R.from_quat(c['cam_offset_quat']).as_matrix()
+    X[:3, 3] = c['cam_offset_position']
+    return X
+
+
+X_CAM = _load_x_cam()
 STAGING_XY = (-0.320, -0.500)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
 FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the opened fingers (spacing_check needs 25 mm)

@@ -1091,7 +1091,7 @@ def aim_bias(obj: str):
     actually seated relative to the prediction (2026-10-17: u_orange seated -4..-7 mm in y on every
     run and today -9.5 mm, beyond the 8 mm spiral, twice). The prior refined from contact data —
     the spiral then searches around where the part really goes."""
-    if obj not in AIM_BIAS_PARTS:
+    if obj not in AIM_BIAS_PARTS or os.environ.get('NO_AIM_BIAS'):
         return 0.0, 0.0
     try:
         h = json.load(open(SEAT_HISTORY)).get(obj, [])
