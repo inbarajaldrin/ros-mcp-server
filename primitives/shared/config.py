@@ -385,6 +385,18 @@ def get_gripper_width_mm(object_name: str, grasp_id: int,
     return _load_grasp_width_table().get((object_name, int(grasp_id)), default_mm)
 
 
+def get_base_for_part(object_name: str) -> str | None:
+    """The base a part assembles into (base_name of the fmb*_assembly.json that lists it)."""
+    for path in _ASSEMBLY_JSON_PATHS:
+        try:
+            d = _json.load(open(path))
+            if any(o.get('object_name') == object_name for o in d.get('assembly_order', [])):
+                return d.get('base_name')
+        except Exception:
+            pass
+    return None
+
+
 def get_grasp_id_for_assembly(object_name: str) -> int | None:
     """Returns the grasp_id used in the FMB1 assembly for `object_name`, or
     None if the object isn't in the assembly. Used by loop scripts so

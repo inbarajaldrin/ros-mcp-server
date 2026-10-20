@@ -644,9 +644,10 @@ def main():
             return place_at(p_.x, p_.y, GRIP_WIDTH_MM[a.place_held], home=True)
         # Held as for the insert (seat stance, insert grasp): land it gently.
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        gid_ = next(o['grasp_id'] for o in json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
-                    if o['object_name'] == a.place_held)
-        cz = contact_flange_z(a.place_held, gid_, load_seat_pose_in_base('base1', a.place_held)[1], grasp_offset_for(a.place_held))
+        from primitives.shared.config import get_grasp_id_for_assembly, get_base_for_part
+        gid_ = get_grasp_id_for_assembly(a.place_held)          # any assembly (2026-10-20: FMB3 line_red)
+        cz = contact_flange_z(a.place_held, gid_, load_seat_pose_in_base(get_base_for_part(a.place_held) or 'base1',
+                                                                          a.place_held)[1], grasp_offset_for(a.place_held))
         return place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
     order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
     sel = a.relocate or a.only

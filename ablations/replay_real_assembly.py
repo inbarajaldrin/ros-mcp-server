@@ -702,6 +702,13 @@ def pre_insert_base_read(obj, state, args, say, log_fh=None):
         say(f"  [base@insert] {obj}: read moved {dmm:.1f} mm / {ddeg:.2f} deg - treated as a misread, kept the previous"); return
     if dmm < PRE_INSERT_MIN_MM and ddeg < PRE_INSERT_MIN_DEG:
         say(f"  [base@insert] {obj}: base unchanged ({dmm:.1f} mm, {ddeg:.2f} deg)"); return
+    if os.environ.get('PRE_INSERT_BASE_APPLY', '0') != '1':
+        # 2026-10-20 FMB3: from the hover the held part hides markers and the base fills the image - the read
+        # jumped 4.2 mm / 1.0 deg (line_brown) and 8.4 mm (line_red, nothing had moved the base); a read from the
+        # standard view while holding a bar was 8 mm off in y. Logged only; the insert aims at the last read
+        # taken with an empty gripper from the standard view. PRE_INSERT_BASE_APPLY=1 restores applying it.
+        say(f"  [base@insert] {obj}: hover read differs {dmm:.1f} mm / {ddeg:.2f} deg from the last clean read "
+            f"({1000*x1:.1f}, {1000*y1:.1f}) mm - logged, not applied (held-part reads are biased)"); return
     args.observed_base = nb
     say(f"  [base@insert] {obj}: base moved {dmm:.1f} mm / {ddeg:.2f} deg since the last read -> the insert aims at the fresh read "
         f"({1000*x1:.1f}, {1000*y1:.1f}) mm")
