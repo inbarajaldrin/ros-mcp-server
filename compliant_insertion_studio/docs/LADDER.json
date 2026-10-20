@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 15:40",
+ "updated": "2026-10-20 16:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -22,7 +22,7 @@
      "id": "M2",
      "title": "Base free + measured errors",
      "status": "active",
-     "note": "base moved 6.7 cm / 3.5 deg worked; FMB3 seated on an unfixed base; sigmas from data still open"
+     "note": "next: FMB3 cycles (disassemble + reassemble) with the base moved ~3 cm, then turned ~5 deg (operator moves it)"
     },
     {
      "id": "M3a",
@@ -68,8 +68,8 @@
     {
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
-     "status": "next",
-     "note": "per-part loop like FMB1's"
+     "status": "active",
+     "note": "generalizing disassemble.py to FMB3"
     }
    ]
   },
@@ -103,8 +103,14 @@
     {
      "id": "HE2",
      "title": "Hand-eye refit from CAD fits over tilted views",
-     "status": "active",
-     "note": "survey of 11 views done; first joint fit not usable (mount and base pose trade off: D drifted to 2 deg / 10 mm, spread not better) - not applied. Next: per-view CAD fits + stronger prior, more wrist variety"
+     "status": "done",
+     "note": "mount already at the floor: 6-dof CAD fits agree to 1.8 mm median over 11 views; refit not needed. The 11 mm was a 4-dof fit forcing a 0.9 deg-pitched base flat"
+    },
+    {
+     "id": "BASEFIT",
+     "title": "Base read = 6-dof CAD fit (BASE_FROM=icp)",
+     "status": "done",
+     "note": "startup, between parts, before insert; 1.2 mm rms live"
     },
     {
      "id": "SIGMA",

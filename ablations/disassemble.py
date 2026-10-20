@@ -47,12 +47,16 @@ FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the
 ANN = "/home/aldrin/Documents/aruco-grasp-annotator/data/aruco/{}_aruco.json"
 
 
-def footprint_half_extents(name, base_name='base1'):
+RUN = {'base': 'base1', 'parts': ('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')}   # set in main from --assembly-json
+
+
+def footprint_half_extents(name, base_name=None):
     """World xy half-extents (ex, ey) of the part as disassembly sets it down: its largest face
     (so a u part that tips over still fits), long side along the seated long axis (it is
     carried and lowered without reorienting). A fixed 100 mm square put line_green (140 mm)
     against u_brown and the fingers reaching for u_brown struck it: protective stop 2026-10-14."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    base_name = base_name or RUN['base']
     dim = json.load(open(ANN.format(name)))['cad_object_info']['dimensions']
     h = np.array([dim['length'], dim['width'], dim['height']]) / 2
     ext = np.abs(R.from_quat(load_seat_pose_in_base(base_name, name)[1]).as_matrix()) @ h
@@ -103,6 +107,15 @@ def verify_held(name):
     ok, res = run(['python3', '-u', 'queries/verify_grasp.py', '--object-name', name, '--mode', 'real',
                    '--width-only'], f'verify_grasp {name}', 30)
     return ok
+
+
+def _in_staging(cx, cy, ex, ey):
+    """The whole outline inside the cell layout's staging region and clear of its parked region (another
+    assembly). 2026-10-20: FMB3 lines were sent to x +0.18..0.24, beside the parked FMB1 set."""
+    from primitives.shared.config import STAGING_REGION as S, PARKED_REGION as P
+    inside = S['x'][0] <= cx - ex and cx + ex <= S['x'][1] and S['y'][0] <= cy - ey and cy + ey <= S['y'][1]
+    parked = P is not None and not (cx + ex < P['x'][0] or cx - ex > P['x'][1] or cy + ey < P['y'][0] or cy - ey > P['y'][1])
+    return inside and not parked
 
 
 def depth_free_spots(extents, exclude_xy):
@@ -182,6 +195,7 @@ def depth_free_spots(extents, exclude_xy):
         for i, j in zip(*np.nonzero(ok_s)):
             cx, cy = x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell
             if (not (0.30 < np.hypot(cx, cy) < 0.68)
+                    or not _in_staging(cx, cy, ex, ey)
                     or any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy)
                     or not in_view(cx, cy, ex, ey)):
                 ok_s[i, j] = False
@@ -275,7 +289,7 @@ def grasp_offset_for(name):
 SEAT_OBS_MAX_M = 0.020      # a seated part read further than this from its CAD seat is a misread (base reads step ~8 mm, seats sit ~6 mm off)
 
 
-def seat_grasp(name, gid, observed_base, base_name='base1', observed_part=None):
+def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
     """Flange pose the insert holds `name` at when seated (same chain as translate_object,
     same grasp depth as the insert: grasp_offset_for), shifted in xy to where the part really is:
     its own observed pose when the camera sees it seated (`observed_part`, as observe_base_pose
@@ -287,6 +301,7 @@ def seat_grasp(name, gid, observed_base, base_name='base1', observed_part=None):
     seat offset (U parts 5-6 mm in y, yellow 6 mm) became a grasp offset (operator, 2026-10-15)."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
     from primitives.shared.config import get_object_base_offset_m
+    base_name = base_name or RUN['base']
     (bx, by, bz), bq = observed_base
     dz = float(get_object_base_offset_m(name)[2])
     _, seat_q = load_seat_pose_in_base(base_name, name)
@@ -319,13 +334,14 @@ def seat_grasp(name, gid, observed_base, base_name='base1', observed_part=None):
     return tcp
 
 
-def observe_base(base_name='base1'):
+def observe_base(base_name=None):
     """Read the base from straight above (as the replay's startup), then stay there: x, y and
     yaw from the depth outline of its top face (base_depth.py), the marker read as fallback."""
-    from primitives.shared.config import DEFAULT_BASE_POSITION as DBP
+    from primitives.shared.config import ASSEMBLY_REGION_CENTER as DBP     # the cell layout's assembly region
     sys.path.insert(0, str(REPO / 'ablations'))
-    from replay_real_assembly import observe_base_pose
+    from replay_real_assembly import observe_base_pose, choose_base_read
     from base_depth import VIEW_FLANGE_Z, measure
+    base_name = base_name or RUN['base']
     ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",
                    f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view', 60)
     if not ok:
@@ -336,7 +352,7 @@ def observe_base(base_name='base1'):
     time.sleep(1.0)                                            # settle before the depth frames
     ob_d, info = measure(ob, base_name)                        # x, y, yaw from the depth outline
     print(f"[base] depth outline: {json.dumps(info)}", flush=True)
-    return ob_d if (ob_d is not None and os.environ.get('BASE_FROM', 'marker') == 'depth') else ob
+    return choose_base_read(base_name, ob, ob_d, lambda m: print(m, flush=True))
 
 
 LAND_SLOW_ABOVE_M = 0.015        # last stretch before the expected touch: slow, guarded
@@ -448,7 +464,7 @@ def plan_staging_layout(names, a):
     over the staging region (depth: is it clear?) and draw a layout there. (layout|None, message)."""
     from staging_layout import draw, look
     from replay_real_assembly import observe_base_pose
-    ob_ = observe_base_pose('base1')
+    ob_ = observe_base_pose(RUN['base'])
     base_yaw = float(R.from_quat(ob_[1]).as_euler('xyz')[2]) if ob_ else 0.0
     tz, raised = look(say=lambda m: print(m, flush=True))
     if tz is None:
@@ -485,14 +501,14 @@ def finish_staging_layout(layout, ob):
     A part that did not tip stays upright (the assembly does it in one pass) — reported, not fatal.
     Records the layout + what was observed; ends at home."""
     from staging_layout import STAGING_VIEW, TOP_DOWN_Q, OUT
-    from spacing_check import check as spacing, observe_parts, PARTS
+    from spacing_check import check as spacing, observe_parts
     from tip_part import is_flat
     ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                    '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
     if not ok:
         return 1
     time.sleep(1.5)
-    seen = observe_parts(PARTS)
+    seen = observe_parts(RUN['parts'])
     missing = [p['name'] for p in layout['parts'] if p['name'] not in seen]
     if missing:
         # Yellow reads below the table for 8-15 s after arm motion (rejected as a misread -> "not
@@ -527,14 +543,14 @@ def finish_staging_layout(layout, ob):
                   f"{(p.get('tip_result') or {}).get('stopped')})", flush=True)
         print(f"  [layout] {n}: {'flat' if flat else 'upright'} at ({1000*seen[n][0][0]:.0f}, "
               f"{1000*seen[n][0][1]:.0f}) mm", flush=True)
-    ok_sp, rep = spacing(seen, ob)
-    rep['unseen'] = [n for n in PARTS if n not in seen]
+    ok_sp, rep = spacing(seen, ob, base=RUN['base'])
+    rep['unseen'] = [n for n in RUN['parts'] if n not in seen]
     print(f"[spacing] {json.dumps(rep)}", flush=True)
     if not ok_sp and not bad and rep.get('too_close'):
         # A part fell or slid on after release/tip (u_brown set down upright ended flat 90 mm away, 16 mm
         # from yellow, 2026-10-19): move the part that strayed farthest from its plan with --relocate
         # (clearest grasp at its own opening, free spot seen from home), then check again. Once.
-        names = {x for pair in rep['too_close'] for x in pair[:2] if x != 'base1'}
+        names = {x for pair in rep['too_close'] for x in pair[:2] if not str(x).startswith('base')}
         def strayed(n):
             p = next(q for q in layout['parts'] if q['name'] == n)
             want = np.array(p.get('land_xy') or p['place_xy'])
@@ -550,14 +566,14 @@ def finish_staging_layout(layout, ob):
                 run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                        '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
                 time.sleep(1.5)
-                seen = observe_parts(PARTS)
-                miss = [n for n in PARTS if n not in seen]
+                seen = observe_parts(RUN['parts'])
+                miss = [n for n in RUN['parts'] if n not in seen]
                 if miss:
                     run(py('primitives.move_home', '--mode', 'real'), 'home (second look)', 60)
                     time.sleep(1.5)
                     seen.update(observe_parts(miss))
-                ok_sp, rep = spacing(seen, ob)
-                rep['unseen'] = [n for n in PARTS if n not in seen]
+                ok_sp, rep = spacing(seen, ob, base=RUN['base'])
+                rep['unseen'] = [n for n in RUN['parts'] if n not in seen]
                 bad = [f"{n} not seen" for n in rep['unseen']]
                 layout['relocated'] = mover
                 print(f"[spacing] after relocating {mover}: {json.dumps(rep)}", flush=True)
@@ -620,6 +636,12 @@ def main():
                          'height): place it as the saved layout (staging_layout.json) says, then take the '
                          'remaining parts out as planned')
     a = ap.parse_args()
+    try:                                   # the run's base and parts (2026-10-20: FMB3 on base3)
+        _d = json.load(open(a.assembly_json))
+        RUN['base'] = _d.get('base_name') or RUN['base']
+        RUN['parts'] = tuple(e['object_name'] for e in _d.get('assembly_order', [])) or RUN['parts']
+    except Exception as e:
+        ap.error(f'--assembly-json: {e}')
     if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
         os.nice(5 - os.nice(0))
     if a.to_staging and not a.only:
@@ -649,7 +671,7 @@ def main():
         cz = contact_flange_z(a.place_held, gid_, load_seat_pose_in_base(get_base_for_part(a.place_held) or 'base1',
                                                                           a.place_held)[1], grasp_offset_for(a.place_held))
         return place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
-    order = json.load(open(REPO / 'ablations/eval_resources/fmb1_assembly.json'))['assembly_order']
+    order = json.load(open(REPO / f"ablations/eval_resources/fmb{RUN['base'][4:]}_assembly.json"))['assembly_order']
     sel = a.relocate or a.only
     parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
     from primitives.shared.config import DEFAULT_BASE_POSITION
@@ -703,7 +725,7 @@ def main():
         if a.grasp_id == 'auto':
             # A part lying against base1 or a neighbour: grasp where both open fingers have room
             # (2026-10-15: line_green 7 mm from base1 — its centre grasp put a finger on the base).
-            from spacing_check import clear_grasp, observe_parts, PARTS
+            from spacing_check import clear_grasp, observe_parts
             from replay_real_assembly import observe_base_pose
             if a.spot_staging:                              # the part is in the staging region
                 from staging_layout import STAGING_VIEW, TOP_DOWN_Q
@@ -711,8 +733,8 @@ def main():
                                *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
                 if not ok: return 1
                 time.sleep(1.5)
-            seen = observe_parts(PARTS)
-            ob_ = observe_base_pose('base1')
+            seen = observe_parts(RUN['parts'])
+            ob_ = observe_base_pose(RUN['base'])
             if name not in seen or ob_ is None:
                 print(f"{name} or base1 not seen — stopping"); return 1
             gid, rep = clear_grasp(name, seen[name], ob_, seen, w)
@@ -757,7 +779,7 @@ def main():
     if a.dry_run:
         sys.path.insert(0, str(REPO / 'ablations'))
         from replay_real_assembly import observe_base_pose
-        ob = observe_base_pose('base1')
+        ob = observe_base_pose(RUN['base'])
         if ob:
             print(f"[base] observed from here: ({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}, {1000*ob[0][2]:.1f}) mm,"
                   f" yaw {R.from_quat(ob[1]).as_euler('xyz', degrees=True)[2]:.2f} deg")
@@ -815,14 +837,14 @@ def main():
             # held), clear of base1 and every part seen there - the fixed clear area was used blind and a
             # pulled u_orange landed against yellow and tipped (2026-10-20).
             from staging_layout import STAGING_VIEW, TOP_DOWN_Q
-            from spacing_check import observe_parts, PARTS
+            from spacing_check import observe_parts
             from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
             ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                            '--quat', *map(str, TOP_DOWN_Q)), 'staging view (choose a free spot)', 90)
             if not ok: return 1
             time.sleep(1.5)
-            seen = observe_parts([n for n in PARTS if n != name])
-            sp_, sq_ = load_seat_pose_in_base('base1', name)
+            seen = observe_parts([n for n in RUN['parts'] if n != name])
+            sp_, sq_ = load_seat_pose_in_base(RUN['base'], name)
             Rb_ = R.from_quat(ob[1])
             seen[name] = (tuple(np.array(ob[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
             fx, fy, gap = staging_spot(name, seen, ob, gid, w)
@@ -878,7 +900,7 @@ def main():
         forget_verified(name)                               # ...and so is its verified-seated record
         lp = layout['parts'][i] if layout else None
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        cz = contact_flange_z(name, gid, load_seat_pose_in_base('base1', name)[1], grasp_offset_for(name))
+        cz = contact_flange_z(name, gid, load_seat_pose_in_base(RUN['base'], name)[1], grasp_offset_for(name))
         if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None, contact_z=cz) != 0:
             return 1
         if lp and lp.get('tip'):
@@ -899,10 +921,10 @@ def main():
         return 1
     # Where did the parts actually land? The spots were planned clear, but a part that slips or
     # tips lands elsewhere (2026-10-15: line_green 7 mm from base1). Check from home, fail closed.
-    from spacing_check import check as spacing, observe_parts, PARTS
-    seen = observe_parts(PARTS)
-    ok_sp, rep = spacing(seen, ob)
-    rep['unseen'] = [n for n in PARTS if n not in seen]
+    from spacing_check import check as spacing, observe_parts
+    seen = observe_parts(RUN['parts'])
+    ok_sp, rep = spacing(seen, ob, base=RUN['base'])
+    rep['unseen'] = [n for n in RUN['parts'] if n not in seen]
     print(f"[spacing] {json.dumps(rep)}", flush=True)
     if not ok_sp:
         print("\n!!! parts too close for the open gripper after disassembly — stopping")
