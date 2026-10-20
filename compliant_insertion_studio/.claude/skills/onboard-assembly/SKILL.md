@@ -44,11 +44,12 @@ a CAD rule.
 ## 3. Run one part at a time, recorded
 
 ```bash
-NO_AIM_BIAS=1 BASE_FROM=depth python3 -u ablations/replay_real_assembly.py \
+NO_AIM_BIAS=1 BASE_FROM=icp python3 -u ablations/replay_real_assembly.py \
   --assembly-json ablations/ground_truth_resources/Assembly_fmb_assembly_N_results.json --only PART
 ```
 
-Start a DIAG bag around each part (`DIAG=1 compliant_insertion_studio/scripts/record_demo_bag.sh DIR`,
+A whole cycle (pull every part to the staging region, reassemble, one bag):
+`bash ablations/assembly_cycle.sh <assembly json> <label>`. Start a DIAG bag around each part (`DIAG=1 compliant_insertion_studio/scripts/record_demo_bag.sh DIR`,
 stop with SIGINT in a trap). Check the exit code; stop and iterate on the first problem.
 
 ## 4. Base pose: what to trust
@@ -61,8 +62,11 @@ stop with SIGINT in a trap). Check the exit code; stop and iterate on the first 
 - **Depth outline vs markers per base.** On base3 both the seated line_brown and the empty line_red
   channel sat +4 mm in x of the marker frame and on the depth outline: use `BASE_FROM=depth` there. Check a
   new base the same way (slot walls / a seated part in depth vs CAD) before trusting either.
-- Next step (operator): register the CAD model to the depth point cloud for the base and seated parts —
-  every surface, not a rectangle fit.
+- **Default now: `BASE_FROM=icp`** — a 6-dof fit of the base's CAD model to the depth cloud in the camera frame
+  (`base_icp.read_icp`), x/y/yaw reported: 1.8 mm median spread over 11 views at 1.1-1.3 mm rms, robust to
+  parts hiding some of the base. Falls back to the outline, then the markers. A 4-dof (forced-flat) fit is
+  wrong on a base pitched ~1 deg on the table (base3): it shifted xy by up to 11 mm in tilted views.
+- The hand-eye mount did not need a refit (`handeye_icp_survey.py survey|solve6` checks it from CAD fits).
 - The base is not fixed. It moves under inserts and pushes (20 mm over the line_red recovery). Re-read
   between parts.
 

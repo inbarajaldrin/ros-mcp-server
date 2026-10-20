@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 16:20",
+ "updated": "2026-10-20 16:45",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -69,7 +69,7 @@
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
      "status": "active",
-     "note": "generalizing disassemble.py to FMB3"
+     "note": "cycle 1 running (base where it is); then operator moves the base ~3 cm, cycle 2; turns ~5 deg, cycle 3"
     }
    ]
   },
