@@ -129,7 +129,7 @@ DRIFT_EXEMPT_DROP_M = 0.005     # m - this far below the first [CONTACT] z: in t
 ORIENTATION_DEVIATION = 3.0     # degrees - max orientation change at verify
 
 # Retry
-MAX_RETRIES = 3
+MAX_RETRIES = int(__import__('os').environ.get('PRISMATIC_MAX_RETRIES', '3'))   # the replay runs 1 and re-reads the base between (2026-10-20)
 # Retry aim (2026-10-19): a stall above the seat with the part slid off the aim is an xy error, not a
 # compliance problem — the pockets are sub-mm (CAD: yellow x +-0.6 / y +-0.5 mm; feet round
 # line_green +-1 mm), so the same descent at the same xy ends the same way (3 attempts, 5.0 mm each,

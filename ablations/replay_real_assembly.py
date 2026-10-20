@@ -1433,6 +1433,8 @@ def _record_snapshot(snap_fh, when: str, label: str, snap: dict) -> None:
 
 
 INSERT_MAX_RECOVERIES = 1
+INSERT_OUTER_TRIES = 3            # insert attempts with a fresh base read before each (PRISMATIC_MAX_RETRIES=1)
+os.environ.setdefault('PRISMATIC_MAX_RETRIES', '1')
 SEAT_CHECK_OBJECTS = ('line_green',)      # FMB1's; any bar of any assembly is checked too (_seat_checked, 2026-10-20)
 BAR_RATIO = 4.0                           # top face this much longer than wide = a bar (line_green 5.4, U parts 3.3)
 CROSS_END_DIFF_MM = 1.5                   # one end this much higher than the other ...
@@ -2109,6 +2111,25 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 print(msg)
                 if log_fh: log_fh.write(msg)
                 return True
+
+        # Outer attempts (2026-10-20): the insert runs ONE attempt; between attempts the part is lifted, the base
+        # re-read from a view the held part does not block, and the insert aims again. Blind in-insert retries
+        # aimed at a base the previous attempt had pushed (fork_yellow slid base3 ~30 mm over cycle 2).
+        k_try = 1
+        while (result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert'
+               and k_try < INSERT_OUTER_TRIES and not _SAFETY_STOP and not args.dry_run):
+            k_try += 1
+            prev_ob = getattr(args, 'observed_base', None)
+            say(f"  [{step_idx}] insert attempt {k_try - 1} failed -> lift, re-read the base, attempt {k_try}/{INSERT_OUTER_TRIES}")
+            r_ = execute(step_idx, 'lift for a re-read', 'move_to_safe_height', dict(object_name=obj), tag=f"try{k_try}lift")
+            if r_ is None or r_.get('result') == 'failure':
+                break
+            pre_insert_base_read(obj, state, args, say, log_fh)
+            nb = getattr(args, 'observed_base', None)
+            if prev_ob is not None and nb is not None:
+                say(f"  [{step_idx}] base after attempt {k_try - 1}: moved "
+                    f"{1000*np.hypot(nb[0][0]-prev_ob[0][0], nb[0][1]-prev_ob[0][1]):.1f} mm since the attempt's aim")
+            result = execute(step_idx, step, tool_name, kw, tag=f"try{k_try}") or result
 
         if (result.get('result') == 'failure' and tool_name == 'translate_object'
                 and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES
