@@ -118,6 +118,21 @@ def _in_staging(cx, cy, ex, ey):
     return inside and not parked
 
 
+STAGED = REPO / 'ablations/logs/staged_parts.json'
+
+
+def record_staged(name, x, y):
+    """Where the disassembly set `name` down: the reassembly looks there first for a part neither home nor the
+    staging view sees (2026-10-20 cycle 1: fork_orange, set down here, was only seen from straight above)."""
+    try:
+        d = json.load(open(STAGED)) if STAGED.exists() else {}
+    except Exception:
+        d = {}
+    d[name] = [round(float(x), 4), round(float(y), 4), time.time()]
+    STAGED.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(d, open(STAGED, 'w'), indent=1)
+
+
 def depth_free_spots(extents, exclude_xy):
     """Free table spots, one per part (half-extents ex, ey), from one aligned-depth frame at
     home. A spot is a clear rectangle of the part plus FINGER_CLEAR/2 on every side; each chosen
@@ -912,6 +927,7 @@ def main():
         cz = contact_flange_z(name, gid, load_seat_pose_in_base(RUN['base'], name)[1], grasp_offset_for(name))
         if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None, contact_z=cz) != 0:
             return 1
+        record_staged(name, sx, sy)
         if lp and lp.get('tip'):
             from tip_part import tip
             r_ = tip(lp, layout['table_z'], say=lambda m: print(m, flush=True))

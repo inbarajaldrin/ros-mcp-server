@@ -1625,7 +1625,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             toward, at = plan
             say(f"  [seat-check] {obj}: high end on a channel lip -> sideways nudge toward {toward} at {at:+.0f} mm")
             r = run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
-                                '--toward', toward, '--at-long', f"{at:.0f}"], label=f'nudge {obj} {toward}', timeout_s=240)
+                                f'--toward={toward}', '--at-long', f"{at:.0f}"], label=f'nudge {obj} {toward}', timeout_s=240)
             ob = observe_base_pose(RUN_BASE['name']) or ob
             args.observed_base = ob
             continue
@@ -1650,7 +1650,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
                 toward = ('-' if shift > 0 else '+') + lax
                 say(f"  [seat-check] {obj}: shifted {shift:+.0f} mm along its length -> taps toward {toward} to the CAD end face")
                 run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
-                                '--toward', toward, '--face-offset-mm', f"{abs(shift) + 3:.0f}", '--taps', '3'],
+                                f'--toward={toward}', '--face-offset-mm', f"{abs(shift) + 3:.0f}", '--taps', '3'],
                                label=f'tap {obj} {toward}', timeout_s=300)
                 res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
                 ob = res2.get('observed_base') or ob
@@ -2342,6 +2342,15 @@ def main() -> int:
         # arm (home, gripper open — all table parts in view) or the operator put it. Start
         # poses do not change until a part is picked, and after an insert the arm sits over
         # the base where the next part may be out of view (a 30 s observe timeout each).
+        # Where the disassembly set parts down (disassemble.record_staged, < 3 h old): the last-seen position
+        # for a part no view sees, so _part_view looks straight above it.
+        try:
+            _st = json.load(open(REPO_ROOT / 'ablations/logs/staged_parts.json'))
+            for _n, (_x, _y, _t) in _st.items():
+                if time.time() - _t < 3 * 3600:
+                    LAST_SEEN_XY.setdefault(_n, (_x, _y))
+        except Exception:
+            pass
         if getattr(args, 'derive_sequence', False) and not args.dry_run:
             names = [e.get('object_name') for e in entries]
             skip = set(names[:names.index(args.start_from)]) if getattr(args, 'start_from', None) in names else set()
