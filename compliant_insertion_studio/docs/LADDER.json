@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 18:10",
+ "updated": "2026-10-20 17:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -22,7 +22,7 @@
      "id": "M2",
      "title": "Base free + measured errors",
      "status": "active",
-     "note": "next: FMB3 cycles (disassemble + reassemble) with the base moved ~3 cm, then turned ~5 deg (operator moves it)"
+     "note": "base moved by the arm (35 mm) and turned ~4 deg by the inserts themselves; cycles reassemble with recoveries, not clean. Blocker: inserts that push the unfixed base"
     },
     {
      "id": "M3a",
@@ -69,7 +69,7 @@
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
      "status": "active",
-     "note": "cycle 1 done 4/4 (depth-verified) but not clean: fixes for spot planning, the clear-view read, part-not-seen, axial taps; next cycle 2 with the base slid +30 mm by the arm"
+     "note": "cycles 1-2 done 4/4 (depth-verified) after recoveries; base slides under hard insert attempts (fork_yellow pushed base3 ~30 mm over cycle 2). Not clean yet"
     }
    ]
   },
@@ -121,8 +121,8 @@
     {
      "id": "SIGMA",
      "title": "Fused estimator INSIDE aruco_camera_localizer -> VisionPose",
-     "status": "next",
-     "note": "operator 10-14: all visible markers (per-marker/sticker calibration) + depth CAD fit + UR5e TF in the localizer itself, not side scripts; publishes T + sigma + stamp + stationary_since + source (seams 10-19); the base for pose6d. Also root-causes the sticky detection sets at 0.56 m"
+     "status": "active",
+     "note": "v1 in the localizer package (fused_estimator.py, af6c3a2+): base3 = 6-dof base read within 0.4 mm; loose parts refine at ~1.2 mm rms; seated parts rejected (joint multi-object fit next); per-part bias file + sigma from repeatability next; replay not consuming it yet"
     }
    ]
   }
