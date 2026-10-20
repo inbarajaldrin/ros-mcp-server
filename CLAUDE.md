@@ -125,8 +125,13 @@ after the startup (home + gripper open, all table parts in view) and before any 
 with `--skip-startup` it plans from wherever you put the arm. Falls back to the recorded sequence
 for a part it can't observe. A part already on an insertable face gets 1 pass (pick → rotate → insert).
 
-**Staging region = clear area = clear space** — the fixed spot (−0.320, −0.500) m where a part is
-set down and regrasped (`primitives/core/move_to_clear_area.py`). Before regrasping there, the
+**Cell layout** — `primitives/shared/cell_layout.yaml` names the assembly region (where the run's
+base sits; the startup base read flies over it), the **clear area** (where a part is set down and
+regrasped to reorient, `primitives/core/move_to_clear_area.py`; (−0.320, −0.500) m in the active
+layout) and the **staging region** (where parts wait outside the assembly, with its camera view).
+Pick a layout with `active:` or `FMB_LAYOUT=<name>`; add a layout rather than editing a used one.
+The replay takes the base and parts from the assembly JSON (FMB1 base1, FMB3 base3), and the
+per-part tables (grip width, grasp depth, base size) come from CAD for any assembly. Before regrasping there, the
 replay checks the landing with the planner's rule and, if the part toppled onto a face that
 can't be inserted in one pass, runs another place-down pass (max 2).
 

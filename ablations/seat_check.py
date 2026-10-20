@@ -40,7 +40,33 @@ X_CAM = _load_x_cam()
 VIEW_FLANGE_Z = 0.56
 # Top face in the base frame and the half-extents to sample (CAD, trimmed off the edges).
 # line_green: 25.9 x 140 x 25.9 mm bar along base y, seat centre z 24.5 mm -> top 37.45 mm.
-TOP_FACE = {'line_green': dict(z=0.03745, hx=0.008, hy=0.062, long_axis='y')}
+# 2026-10-20: from CAD for any part in any base (seat pose * mesh): the face at the part's highest z,
+# its centre (cx, cy) and half-extents trimmed 5 mm across / 8 mm along. line_green gives the old values.
+TRIM_CROSS_M, TRIM_LONG_M = 0.005, 0.008
+
+
+def top_face(obj, base='base1'):
+    from grasp_depth import load_mesh
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    V, _ = load_mesh(obj)
+    sp, sq = load_seat_pose_in_base(base, obj)
+    W = V @ R.from_quat(sq).as_matrix().T + sp
+    top = float(W[:, 2].max()); T = W[W[:, 2] > top - 1e-3]
+    lo, hi = T[:, :2].min(0), T[:, :2].max(0)
+    c, h = (lo + hi) / 2, (hi - lo) / 2
+    long_axis = 'y' if h[1] >= h[0] else 'x'
+    trim = (TRIM_CROSS_M, TRIM_LONG_M) if long_axis == 'y' else (TRIM_LONG_M, TRIM_CROSS_M)
+    return dict(z=round(top, 5), cx=float(c[0]), cy=float(c[1]), hx=float(h[0] - trim[0]), hy=float(h[1] - trim[1]),
+                long_axis=long_axis, base=base, half_cross_m=float(min(h)), half_long_m=float(max(h)))
+
+
+class _TopFaces(dict):
+    def __missing__(self, k):                     # k = obj or (obj, base)
+        obj, base = (k if isinstance(k, tuple) else (k, 'base1'))
+        v = top_face(obj, base); self[k] = v; return v
+
+
+TOP_FACE = _TopFaces()
 PITCH_MAX_DEG = 1.5
 HEIGHT_MAX_MM = 2.5
 
@@ -79,12 +105,13 @@ def _stamp(m):
     return m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec if m.header.stamp.sec else time.time()
 
 
-def measure(obj, observed_base, Pw):
-    """Plane fit to the part's top face inside its footprint (base frame)."""
-    f = TOP_FACE[obj]
+def measure(obj, observed_base, Pw, base='base1'):
+    """Plane fit to the part's top face inside its footprint (base frame, centred on the CAD top face)."""
+    f = TOP_FACE[(obj, base)]
     (bx, by, bz), bq = observed_base
     Tb = np.eye(4); Tb[:3, :3] = R.from_quat(bq).as_matrix(); Tb[:3, 3] = [bx, by, bz]
     Pb = (Pw - Tb[:3, 3]) @ Tb[:3, :3]                         # world -> base frame
+    Pb = Pb - np.array([f['cx'], f['cy'], 0.0])                # ... about the part's own top-face centre
     m = (np.abs(Pb[:, 0]) < f['hx']) & (np.abs(Pb[:, 1]) < f['hy']) & (np.abs(Pb[:, 2] - f['z']) < 0.012)
     P = Pb[m]
     if len(P) < 200:
@@ -110,12 +137,37 @@ def measure(obj, observed_base, Pw):
     pitch = float(np.degrees(np.arctan(long_slope)))
     roll = float(np.degrees(np.arctan(cross_slope)))
     h_err = float(1000 * (c - f['z']))                         # top-face height at the seat centre
-    ends = [float(1000 * (c + long_slope * s * (f['hy'] + 0.008) - f['z'])) for s in (-1, 1)]
+    ends = [float(1000 * (c + long_slope * s * f['half_long_m'] - f['z'])) for s in (-1, 1)]
+    # across the part: where its top face sits (centroid of the points at its height, top-face frame) and
+    # the cross profile - which side is high / which way it is shifted (2026-10-20, FMB3 lines)
+    band = Pb[(np.abs(Pb[:, ax]) < f['half_long_m'] - 0.01) & (np.abs(Pb[:, cx]) < f['half_cross_m'] + 0.012)
+              & (Pb[:, 2] > f['z'] - 0.006) & (Pb[:, 2] < f['z'] + 0.012)]
+    cross = {}
+    if len(band) > 100:
+        xs = 1000 * band[:, cx]
+        cross = dict(extent_mm=[round(float(np.percentile(xs, 2)), 1), round(float(np.percentile(xs, 98)), 1)],
+                     centre_mm=round(float((np.percentile(xs, 2) + np.percentile(xs, 98)) / 2), 1),
+                     cad_half_mm=round(1000 * f['half_cross_m'], 1),
+                     edge_heights_mm=[round(float(np.median(1000 * band[xs < np.percentile(xs, 15), 2]) - 1000 * f['z']), 1),
+                                      round(float(np.median(1000 * band[xs > np.percentile(xs, 85), 2]) - 1000 * f['z']), 1)])
+        # per end: the two long edges' heights (what a bar riding a channel lip at one end shows: that end
+        # high AND its edge on the lip side high - 2026-10-20 line_brown, -y end, -x edge +2 mm)
+        per_end = []
+        for sgn_ in (-1, 1):
+            e = band[np.abs(band[:, ax] - sgn_ * (f['half_long_m'] - 0.022)) < 0.010]
+            if len(e) < 40:
+                per_end.append(None); continue
+            xe = 1000 * e[:, cx]; ce = (np.percentile(xe, 2) + np.percentile(xe, 98)) / 2
+            lo_, hi_ = e[xe < ce - 4.0], e[xe > ce + 4.0]
+            per_end.append([round(float(np.percentile(1000 * lo_[:, 2], 80) - 1000 * f['z']), 1) if len(lo_) > 10 else None,
+                            round(float(np.percentile(1000 * hi_[:, 2], 80) - 1000 * f['z']), 1) if len(hi_) > 10 else None])
+        cross['end_edge_heights_mm'] = per_end        # [[-cross edge, +cross edge] at the -long end, ... at the +long end]
     ok = abs(pitch) <= PITCH_MAX_DEG and abs(h_err) <= HEIGHT_MAX_MM and max(map(abs, ends)) <= HEIGHT_MAX_MM + 1.5
     return {'ok': bool(ok), 'pitch_deg': round(pitch, 2), 'roll_deg': round(roll, 2),
             'height_err_mm': round(h_err, 2), 'end_heights_mm': [round(e, 2) for e in ends],
             'residual_mm': round(float(1000 * np.std(r[keep])), 2), 'n_points': int(len(P)),
-            'axial': axial, 'profile_mm': {'bins': bins.tolist(), 'top_z': [None if z is None else round(z, 1) for z in prof]},
+            'axial': axial, 'cross': cross, 'face': {k: f[k] for k in ('cx', 'cy', 'z', 'long_axis', 'half_long_m', 'half_cross_m')},
+            'profile_mm': {'bins': bins.tolist(), 'top_z': [None if z is None else round(z, 1) for z in prof]},
             'limits': {'pitch_deg': PITCH_MAX_DEG, 'height_mm': HEIGHT_MAX_MM}}
 
 
@@ -126,7 +178,7 @@ def view_pose(obj, observed_base):
             f"{bx:.4f}", f"{by:.4f}", f"{VIEW_FLANGE_Z:.4f}", '--quat', *map(str, SEAT_EE_QUAT)]
 
 
-def check(obj, observed_base, move=True, out_dir=None):
+def check(obj, observed_base, move=True, out_dir=None, base='base1'):
     if move:
         env = os.environ.copy(); env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
         p = subprocess.run(view_pose(obj, observed_base), capture_output=True, text=True, timeout=60,
@@ -137,14 +189,14 @@ def check(obj, observed_base, move=True, out_dir=None):
         # Same view as the base read: re-fit the base outline so the part is measured against
         # where the base is NOW (the arm's 7th-axis slider creeps under the insert's push).
         from base_depth import measure as base_from_depth
-        ob_d, info = base_from_depth(observed_base)
+        ob_d, info = base_from_depth(observed_base, base)
         if ob_d is not None:
             observed_base = ob_d
     cap = capture_world()
     if cap is None:
         return {'ok': False, 'error': 'no depth frames'}
     Pw, d, color, nf = cap
-    res = measure(obj, observed_base, Pw)
+    res = measure(obj, observed_base, Pw, base)
     res['n_frames'] = nf
     res['observed_base'] = observed_base
     if out_dir:
@@ -160,16 +212,17 @@ def check(obj, observed_base, move=True, out_dir=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--object', default='line_green', choices=sorted(TOP_FACE))
+    ap.add_argument('--object', default='line_green')
+    ap.add_argument('--base', default='base1')
     ap.add_argument('--no-move', action='store_true', help='measure from where the arm is')
     ap.add_argument('--out-dir', default=None)
     a = ap.parse_args()
     from replay_real_assembly import observe_base_pose
     from disassemble import observe_base
-    ob = observe_base_pose('base1') if a.no_move else observe_base('base1')
+    ob = observe_base_pose(a.base) if a.no_move else observe_base(a.base)
     if ob is None:
-        print(json.dumps({'ok': False, 'error': 'base1 not observed'})); return 1
-    res = check(a.object, ob, move=not a.no_move, out_dir=a.out_dir)
+        print(json.dumps({'ok': False, 'error': f'{a.base} not observed'})); return 1
+    res = check(a.object, ob, move=not a.no_move, out_dir=a.out_dir, base=a.base)
     print(json.dumps(res))
     return 0 if res.get('ok') else 1
 
