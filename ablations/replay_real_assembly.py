@@ -640,6 +640,10 @@ FOLLOW_READ_S = 10.0
 
 
 HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
+HELD_YAW_APPLY = False        # 2026-10-20: three corrected line_green inserts (+2.26, +1.68, +1.92 deg read) had the
+                              # slot turn the TCP by +0.05, -1.96, -2.96 deg at entry vs <= 0.8 deg uncorrected -
+                              # the turn made the seat worse twice. Read and log only until an A/B with an
+                              # independent reference settles the sign/bias of the close-range read.
 HELD_READ_S = 6.0             # one bounded read; the U parts and yellow are never seen while held (2026-10-20:
                               # 0x at the regrasp +20 mm, at 0.30 m, at seat +45 mm) - the tool camera cannot see
                               # their markers in the grasp; line_green reads fine at safe height
@@ -712,6 +716,9 @@ def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None, lift_
     say(f"  [held-yaw] {obj}: held part reads {err_deg:+.2f} deg from the chain's orientation "
         f"(tilt part {np.degrees(np.hypot(rv[0], rv[1])):.1f} deg)")
     if not (HELD_YAW_MIN_DEG <= abs(err_deg) <= HELD_YAW_MAX_DEG):
+        return
+    if not HELD_YAW_APPLY:
+        say(f"  [held-yaw] {obj}: read only (HELD_YAW_APPLY off) - no turn")
         return
     snap = snapshot_robot_state(); tcp = (snap.get('tcp') or {})
     if not tcp.get('xyz') or not tcp.get('quat_xyzw'):
