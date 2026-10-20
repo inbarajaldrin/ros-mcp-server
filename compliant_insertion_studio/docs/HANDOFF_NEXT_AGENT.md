@@ -2,7 +2,7 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: **2026-10-18** (OptiPlex cell). The 2026-05-07 architecture below still
+> Date of last update: **2026-10-19 evening** (OptiPlex cell). The 2026-05-07 architecture below still
 > stands; 2026-08-16 changed the branch and bringup path; 2026-10-14 fixed the grasp depth and
 > added robot self-disassembly, a hands-off loop and depth seat checking; 2026-10-15 made the loop
 > robust to the 7th-axis slider, fixed line_green's slot aim and scripted every recovery;
@@ -240,6 +240,48 @@ rectangle, ≥ 25 mm apart; one tippable part per cycle stays upright (u_brown �
 - Seat-offset history (`ablations/logs/seat_offset_history.json`): every part seats 5–8 mm in −y from the CAD
   prediction (yellow −5…−9, U parts −2…−10); the aim bias absorbs the median, the compliance finds the rest.
   The constant −y bias is the queued calibration item, not a ladder problem.
+
+**2026-10-19 evening — game plan, geometry, per-part iteration.** Operator directions (all in memory notes
+and the game plan): the base will not stay fixed (cm, degrees) — everything follows the camera-read base;
+solve pose per part but the abstracted insertion primitive carries NO per-part settings (stages, clearances,
+free DOFs from CAD + observation); remove the errors we can measure before touching the primitive; iterate
+ONE part (pull + reinsert), judged by ease metrics from raw logs, never the FSM label; reads are an
+optimization target (measure the grasp error once on the held part, then chain); commit freely.
+- **Game plan** (Claude Doc, link in memory `game-plan-doc`): tracks A perception/pose, B one primitive,
+  C operations, milestones M0–M3; the planner / execute-mate / vision boundary (for prompt2assembly transfer);
+  GPT's review verbatim in `docs/GPT_PLAN_REVIEW_2026-10-19.md` (agrees: base-free before the primitive; adds
+  pose freshness gates, measure the seated part not the TCP, re-read the base after contact, 30 single-part
+  trials per condition).
+- **Ease metrics**: `ablations/insert_ease.py` (attempts, contact→seat s, seat dev in the base frame, lateral
+  force-time N·s, stalls); `ablations/insert_stages.py` (time per CAD stage). `docs/INSERT_GEOMETRY.md`: the
+  prismatic parts spend 58 % of insert time wedged in a corridor (line_green 5–9 mm into the U openings,
+  ±1.1 mm; yellow's legs astride line_green, ±1 mm) that no TCP tilt shows; per-stage rules for the primitive.
+- **Loop 1019c** (staging): cycles 1–2 clean (1338 s, 1152 s), cycle 3 failed on line_green turned −4.5° from
+  insert-derived U offsets. **Loop 1019d**: cycle 1 clean (1395 s), cycle 2 stopped by a relocation judged
+  failed after it had worked (fixed `8fd53c5`); its assembly then passed by hand with two autonomous recoveries.
+- **Fixes (all committed)**: seated-part grasp from a close hover read (`seat_grasp(observed_part=)`; the base
+  view reads step ~8 mm between two localizer detection sets); gentle clear-area set-down in the assembly
+  (sideways stances still release at move_down's 80 mm floor — operator: the topple is acceptable);
+  seated-part tops from the rotated CAD mesh (`cad_geometry`, U tops were 24.5 mm low); line_green's turn from
+  close hover reads of the seated U parts (`record_follow_reads`, 0.30 m above each seat; the base-view reads
+  said 1 mm while the bar found the slot 6 mm across), insert-based fallback capped 1.5°; grip-width guard
+  after every close (expected `config.grip_width_mm` ± 8 mm → open, lift, re-pick once; a flat u_brown closed
+  across both legs at 69 mm and slipped out — the opening chooser had judged 32 mm clearance from a pose it
+  could not have, logged now); fold-aware orientation mean in `observe_parts`; corridor-aware prismatic
+  retries (`df1c0a5`: retract above the entrance — the old 10 mm retract stayed inside the opening — Rz
+  compliant, re-aim ≤ 2 mm); telemetry meta on the trajectory-reached exit; **held-yaw calibration** before
+  every insert (`held_yaw_calibration`: read the held part above the base, turn the wrist by the difference to
+  the chain, modulo fold symmetry, 0.3–6°) — line_green read +2.26° on its first use; yellow's marker is not
+  visible while held; u_brown is detected only above the base (0 over the taped clear area).
+- **Per-part data tonight**: `ablations/part_loop.sh u_brown 3` — iteration 1 (no correction): straight drop,
+  contact→seat 0 s, dev (−0.1, +0.1) mm, 0 N·s; iteration 2: 14.5 s on the rim, (+1.7, +2.5) mm, 24.8 N·s;
+  iteration 3 never ran: the **workspace light went off** at ~21:45 and the verify failed closed (localizer
+  sees nothing). Board then: u_brown, u_orange seated; line_green at (314, −471), yellow at (283, −337).
+- **Next**: `compliant_insertion_studio/scripts/when_lit.sh '<cmd>'` gates any command on the light. Resume
+  with line_green then yellow (`replay --only … --skip-startup`), then `part_loop.sh u_brown 3` for the held-yaw
+  A/B (GPT's experiment 2), then plain-layout cycles (`fmb1_loop.py --layout spots`) before any tipping loop.
+  Open: the held-yaw read for yellow (marker hidden by the bridge grasp); line_green's held-xy; the U parts'
+  seat spread (2–7 mm; the hover reads put u_brown at (−6.4, −3.0) mm from CAD) — GPT's experiment 1.
 
 ---
 
