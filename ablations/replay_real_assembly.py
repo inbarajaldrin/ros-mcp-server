@@ -640,6 +640,8 @@ FOLLOW_READ_S = 10.0
 
 
 HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
+HELD_READ_S = 10.0
+HELD_READ_MIN = 3
 HELD_YAW_MIN_DEG = 0.3
 
 
@@ -655,11 +657,15 @@ def held_yaw_calibration(obj, state, say, log_fh=None):
         return
     from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
     from utils.data_path_finder import get_symmetry_dir
-    o = observe_base_pose(obj, timeout_s=6.0)
-    if o is None:
-        say(f"  [held-yaw] {obj}: not seen while held -> no yaw calibration")
+    # a held part is detected at only ~1-2 Hz (u_brown: 8 samples in 5 s, 2026-10-19 21:35) and the
+    # localizer pauses after the lift: wait up to HELD_READ_S for HELD_READ_MIN samples, fold-aware mean
+    obs = observe_object_orientation(obj, HELD_READ_S, n_samples=HELD_READ_MIN)
+    S = [x for x in (obs.get('samples') or []) if x.get('quat_xyzw')]
+    if len(S) < HELD_READ_MIN:
+        say(f"  [held-yaw] {obj}: seen {len(S)}x in {HELD_READ_S:.0f} s while held -> no yaw calibration")
         return
-    Rm = R_.from_quat(o[1]); Rc = R_.from_quat(state.held_quat)
+    from spacing_check import mean_quat_fold_aware
+    Rm = R_.from_quat(mean_quat_fold_aware(obj, [x['quat_xyzw'] for x in S])); Rc = R_.from_quat(state.held_quat)
     try:
         fold = load_symmetry_data(obj, str(get_symmetry_dir()))
         cands = [R_.from_matrix(m) for m in equivalent_orientations(Rm.as_matrix(), fold)]
