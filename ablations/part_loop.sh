@@ -5,7 +5,7 @@
 # the part must be reachable (nothing seated on top of it).
 #
 #   bash ablations/part_loop.sh u_brown 3 [/tmp/out.log]
-set -u
+# (no set -u: ROS setup.bash references unbound variables)
 PART=${1:?part}; N=${2:-3}; OUT=${3:-/tmp/claude-1000/part_loop_${PART}.out}
 cd "$(dirname "$0")/.."
 source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
