@@ -59,7 +59,15 @@ def _action(node, ActionT, name, goal, timeout):
     return r.result().result, ''
 
 
+def _plain_numbers(argv):
+    """'-2.9e-06' -> '-0.0000029': argparse takes a negative number in exponent form for an option flag (2026-10-21:
+    a held pose with one tiny component made every drive call fail 'expected 7 arguments')."""
+    import re
+    return [f'{float(a):.10f}' if re.fullmatch(r'-\d*\.?\d+[eE][-+]?\d+', a) else a for a in argv]
+
+
 def main():
+    sys.argv[1:] = _plain_numbers(sys.argv[1:])
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest='op', required=True)
     d = sp.add_parser('drive'); d.add_argument('--mate', required=True)
