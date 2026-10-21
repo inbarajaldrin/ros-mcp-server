@@ -2246,6 +2246,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                         args.observed_base = nb
                     continue
                 r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
+                if t_ == 'translate_object' and r_ is not None and r_.get('result') == 'failure':
+                    wc = _wedge_check()                    # never lift a held part out of a wedge
+                    if wc is not None:
+                        if wc:
+                            print(f"\n  ✓ {obj} complete")
+                        return wc
                 if r_ is None or r_.get('result') == 'failure':
                     result = r_ or {'result': 'failure', 'error': 'recovery build failed'}
                     say(f"  [{step_idx}] recovery step {t_} failed")
