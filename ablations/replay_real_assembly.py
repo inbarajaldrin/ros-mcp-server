@@ -1639,6 +1639,11 @@ def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
         dx_b = float(np.clip((da[0] + db[0]) / 2, -MAX_FOLLOW_MM, MAX_FOLLOW_MM))
         # slot direction from pa to pb: (db_x - da_x, yb - ya) -> angle from base +y
         dyaw = float(np.clip(-np.arctan2(db[0] - da[0], yb - ya), -np.radians(cap), np.radians(cap)))
+        if os.environ.get('FOLLOW_YAW', '1') == '0':
+            # test switch (2026-10-21): two depth notch reads of the same seated parts differed by 1.5 mm each
+            # (+3.5/-1.5 vs +2.0/-0.5 mm) = +-1.3 deg of yaw, the whole corridor tolerance (INSERT_GEOMETRY.md)
+            print(f"  [follow] {obj}: yaw {np.degrees(dyaw):+.2f} deg not applied (FOLLOW_YAW=0)", flush=True)
+            dyaw = 0.0
         dw = Rb @ np.array([dx_b, 0.0])
         print(f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame, from the {src}"
               f", cap {cap:g} deg) — " + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))), flush=True)
