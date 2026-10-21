@@ -1406,6 +1406,7 @@ class AssemblyState:
         self.last_grasp_id: Optional[int] = None  # carried from move_to_grasp
         self.last_grasp_object: Optional[str] = None
         self.held_yaw_offset: float = 0.0         # measured in-hand yaw of the held part (held read), deg; 0 = square
+        self.held_tcp_quat = None                 # TCP orientation when held_quat was last set (the chain's flange)
 
     def update_from_result(self, tool_name: str, result: dict) -> None:
         if tool_name == 'move_to_grasp':
@@ -1643,7 +1644,9 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     def after(flag, n):
         i = argv.index(flag); return [float(v) for v in argv[i + 1:i + 1 + n]]
     mate = mate_for(obj, base)
-    tq = (snap.get('tcp') or {}).get('quat_xyzw')
+    # the flange the chained held orientation was produced with (not now: after a wrist turn the world orientation is
+    # stale - the in-hand yaw grew +1.23 -> +11.15 -> +19.19 deg over three attempts, 2026-10-21)
+    tq = getattr(STATE_REF.get('state'), 'held_tcp_quat', None) or (snap.get('tcp') or {}).get('quat_xyzw')
     if mate is None or tq is None:
         return {'result': 'failure', 'error': f'drive_mate: no mate for {obj} on {base}' if mate is None else 'no TCP'}
     pos = after('--final-base-pos', 3); q = after('--final-base-orientation', 4)
@@ -2428,8 +2431,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 os.environ.pop('HELD_YAW_OFFSET_DEG', None)
         else:
             result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
+        _hq_before = state.held_quat
         state.update_from_result(tool_name, result)
         snap_after = snapshot_robot_state()
+        if state.held_quat is not None and state.held_quat != _hq_before:
+            # the flange the chained orientation belongs to: the held pose in the flange is fixed by the grasp,
+            # the world one is not (every later wrist turn - a hover yaw fix, a view - turns the part with it)
+            state.held_tcp_quat = (snap_after.get('tcp') or {}).get('quat_xyzw')
         _record_snapshot(snap_fh, "after", label, snap_after)
         return result
 
