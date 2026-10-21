@@ -319,6 +319,15 @@ def grasp_offset_for(name):
 SEAT_OBS_MAX_M = 0.020      # a seated part read further than this from its CAD seat is a misread (base reads step ~8 mm, seats sit ~6 mm off)
 
 
+def seat_ee_quat(observed_base):
+    """Top-down flange for grasping a SEATED part: SEAT_EE_QUAT turned by the base's yaw. A seated part turns with
+    its (free) base; the fixed SEAT_EE_QUAT closed the fingers ~4 deg across the parts once base1 sat at -3.8 deg
+    (2026-10-21, operator: a wrong yaw only twists the part and moves the base). Same rule as the insert's hover
+    (cardinal + base yaw)."""
+    yaw = float(R.from_quat(observed_base[1]).as_euler('xyz')[2])
+    return tuple(float(v) for v in (R.from_euler('z', yaw) * R.from_quat(SEAT_EE_QUAT)).as_quat())
+
+
 def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
     """Flange pose the insert holds `name` at when seated (same chain as translate_object,
     same grasp depth as the insert: grasp_offset_for), shifted in xy to where the part really is:
@@ -338,7 +347,7 @@ def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
     held = (R.from_quat(bq) * R.from_quat(seat_q)).as_quat()       # seated orientation in world
     out = predict_tcp_at_seat(base_name=base_name, object_name=name, grasp_id=gid,
                               base_world_xyz=[bx, by, bz + dz], base_world_quat_xyzw=bq,
-                              held_quat_xyzw=held, ee_orientation_xyzw=SEAT_EE_QUAT,
+                              held_quat_xyzw=held, ee_orientation_xyzw=seat_ee_quat(observed_base),
                               flange_offset_m=grasp_offset_for(name))
     tcp = np.array(out['predicted_tcp_at_seat']['xyz_m'])
     if observed_part is not None:
@@ -967,7 +976,7 @@ def main():
         tcp = seat_grasp(name, gid, ob) if not (i == start and a.resume_held) else None
         if tcp is not None:
             print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
-        q = [str(v) for v in SEAT_EE_QUAT]
+        q = [str(v) for v in (seat_ee_quat(ob) if ob is not None else SEAT_EE_QUAT)]
         if tcp is not None:
             # Hover at the estimate with the gripper open, then read the part itself from there (close
             # range, straight above: steady detections; from the base view, 0.56 m up, the small seated
