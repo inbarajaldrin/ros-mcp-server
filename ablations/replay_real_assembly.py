@@ -1149,11 +1149,34 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
     if not parts:
         return
     led = _ledger()
+    depth_done = set()
     if observed_base is not None:
+        # CAD + depth first (operator 2026-10-21): the gap between each part's legs, measured from one still depth view
+        # of the base against the CAD gap. The marker close read called u_brown +0.6 mm off; depth put its gap +3.0 mm
+        # (-10..+16 vs CAD -13..+13) and line_green, aimed at CAD, landed on the leg every attempt.
+        try:
+            (bx_, by_, bz_), _ = observed_base
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{bx_:.4f}", f"{by_:.4f}", "0.56", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                               label='follow read: depth view of the base', timeout_s=60, log_fh=log_fh)
+            if r.get('result') == 'success':
+                time.sleep(1.0)
+                from notch_depth import measure as _notches
+                nd = _notches(RUN_BASE['name'], observed_base, list(parts))
+                for p, v in (nd.items() if isinstance(nd, dict) else []):
+                    if isinstance(v, dict) and 'dx_m' in v:
+                        led.setdefault(p, {})['rel_err_mm'] = [1000 * float(v['dx_m']), 0.0]
+                        depth_done.add(p)
+                        say(f"  [follow] {p}: gap {v['gap_mm']} mm vs CAD {v['cad_gap_mm']} (width {v['width_mm']}) -> "
+                            f"{1000*v['dx_m']:+.1f} mm across (depth vs CAD)")
+                    else:
+                        say(f"  [follow] {p}: depth gap not measured ({(v or {}).get('error') if isinstance(v, dict) else v})")
+        except Exception as e:
+            say(f"  [follow] depth gap read failed ({e}) - marker close reads")
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
         (bx, by, bz), bq = observed_base
         Rb = R_.from_quat(bq)
-        for p in parts:
+        for p in [p_ for p_ in parts if p_ not in depth_done]:
             sp, _ = load_seat_pose_in_base(RUN_BASE['name'], p)
             seat_w = np.array([bx, by, bz]) + Rb.apply(sp)
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
@@ -2671,6 +2694,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             say(f"\n!!! {obj}: wedged and not seated by the nudges")
             return False
 
+        if 'stopped at hover' in str(result.get('error', '')):
+            say(f"  [{step_idx}] {obj}: stopped at the insert hover (STOP_AT_HOVER) - no descent")
+            return False
         if result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert':
             wc = _wedge_check()
             if wc is not None:
