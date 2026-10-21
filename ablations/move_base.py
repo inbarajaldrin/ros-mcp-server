@@ -156,8 +156,11 @@ def main():
         if a.dry_run:
             return True
         (bx, by, _), _ = ob
-        return go(['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx:.4f}", f"{by:.4f}", f"{VIEW_Z:.2f}",
-                   '--quat', '0', '1', '0', '0'], 'view the base').get('result') != 'failure'
+        for q in (('0', '1', '0', '0'), ('1', '0', '0', '0')):   # top-down, or the same turned pi about z when the
+            if go(['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx:.4f}", f"{by:.4f}", f"{VIEW_Z:.2f}",
+                   '--quat', *q], 'view the base').get('result') != 'failure':     # first would wind wrist_3 past 4 rad
+                return True
+        return False
 
     ob, info = read_base(a.base)
     if ob is None:
