@@ -1629,6 +1629,9 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
         say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ not in ('profile_mm', 'observed_base')})}")
         if res.get('ok'):
             return True
+        if _level_but_high(res) or abs(res.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:
+            say(f"  [nudge] {obj}: level along it now but high/rolled - stop nudging, edge press next")
+            return False
     return False
 
 
@@ -1636,6 +1639,7 @@ EDGE_OFFSET_MM = 8.0                 # tap/press point off the bar's centreline 
 EDGE_TAP_N = 3.0                     # measuring tap: a 3 N centre tap did not move the wedged bar
 EDGE_PRESS_N = 5.0                   # operator's limit for pressing parts in the base
 EDGE_DIFF_MIN_MM = 0.8               # edges closer than this: no roll to fix -> do not guess
+ROLL_PRESS_DEG = 3.0                 # depth roll this large (close tilted view): a cocked bar -> edge press
 
 
 def _level_but_high(res) -> bool:
@@ -1656,7 +1660,10 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
     if the edges read the same there is no roll and it stops."""
     from tap_check import tap_once
     from seat_check import check
-    taps = {s: tap_once(obj, ob, offset_x_mm=s * EDGE_OFFSET_MM, force=EDGE_TAP_N, say=say) for s in (-1, 1)}
+    from seat_check import TOP_FACE as _TF
+    across_x = _TF[(obj, RUN_BASE['name'])].get('long_axis', 'y') == 'y'          # edges lie across the long axis
+    off = lambda s: dict(offset_x_mm=s * EDGE_OFFSET_MM) if across_x else dict(offset_y_mm=s * EDGE_OFFSET_MM)
+    taps = {s: tap_once(obj, ob, **off(s), force=EDGE_TAP_N, say=say, base=RUN_BASE['name']) for s in (-1, 1)}
     if not all(t['contact'] and t['err_mm'] is not None for t in taps.values()):
         say(f"  [edge] {obj}: an edge tap found no contact {taps} -> not pressing"); return False
     hi = max(taps, key=lambda s: taps[s]['err_mm'])
@@ -1665,7 +1672,7 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
         say(f"  [edge] {obj}: edges level ({taps[-1]['err_mm']:+.1f} / {taps[1]['err_mm']:+.1f} mm) — "
             f"not a roll, not pressing"); return False
     say(f"  [edge] {obj}: {'+x' if hi > 0 else '-x'} edge high by {diff:.1f} mm -> press it at {EDGE_PRESS_N:g} N")
-    tap_once(obj, ob, offset_x_mm=hi * EDGE_OFFSET_MM, force=EDGE_PRESS_N, press_mm=4.0, say=say)
+    tap_once(obj, ob, **off(hi), force=EDGE_PRESS_N, press_mm=4.0, say=say, base=RUN_BASE['name'])
     res = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
     say(f"  [seat-check] {obj} after the edge press: "
         f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
@@ -1686,6 +1693,17 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
         ob = res.get('observed_base') or ob                    # re-fitted from the check's own view
         args.observed_base = ob
         say(f"  [seat-check] {obj}: {json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
+        if 'pitch_deg' in res and not res.get('ok') and (_level_but_high(res) or abs(res.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG
+                                                           and abs(res['pitch_deg']) <= res.get('limits', {}).get('pitch_deg', 1.5)):
+            # cocked across its width (operator 2026-10-20: "this is a roll issue ... we already faced a roll solve for
+            # fmb1"): the FMB1 edge press - tap both edges, press the high one - not axial nudges
+            say(f"  [seat-check] {obj}: level along it but {res.get('height_err_mm', 0):+.1f} mm high, roll {res.get('roll_deg', 0):+.1f} deg "
+                f"-> edge press (FMB1 roll fix)")
+            if press_high_edge(obj, ob, say, out_dir):
+                return True
+            if attempt >= RESEAT_MAX:
+                say(f"\n!!! {obj} still not seated after the edge press"); return False
+            continue
         plan = cross_nudge_plan(res) if 'pitch_deg' in res else None
         if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
             plan = None        # shifted along its length: the axial nudge first (line_red 2026-10-20: -16 mm,
@@ -1739,7 +1757,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
                 ok = nudge_into_slot(obj, ob, res, say, out_dir)      # the slow push as the fallback
             if not ok:
                 res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-                if _level_but_high(res2):                      # nudged level but still high: a roll
+                if _level_but_high(res2) or abs(res2.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:   # level but high: a roll
                     say(f"  [seat-check] {obj}: level but {res2['height_err_mm']:+.1f} mm high after the nudge -> edge taps")
                     ok = press_high_edge(obj, ob, say, out_dir)
                 if not ok:

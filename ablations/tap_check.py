@@ -55,7 +55,7 @@ def tcp_z():
 
 
 def tap_once(obj, observed_base, offset_x_mm=0.0, offset_y_mm=0.0, force=TAP_FORCE_N,
-             press_mm=1000 * MAX_PRESS_M, say=print):
+             press_mm=1000 * MAX_PRESS_M, say=print, base='base1'):
     """One guarded tap on `obj`'s top face with closed fingers, from and back to safe height.
     Returns {'contact': bool, 'err_mm': contact height minus the seated-top contact height}."""
     from seat_check import TOP_FACE
@@ -63,8 +63,9 @@ def tap_once(obj, observed_base, offset_x_mm=0.0, offset_y_mm=0.0, force=TAP_FOR
     if force > 5.0:
         raise ValueError("tap force above 5 N (operator's limit for parts in the base)")
     (bx, by, bz), bq = observed_base
-    tap = np.array([bx, by, bz]) + R.from_quat(bq).apply([offset_x_mm / 1000, offset_y_mm / 1000,
-                                                          TOP_FACE[obj]['z']])
+    f = TOP_FACE[(obj, base)]               # the part's own CAD top face in its base (2026-10-20: was base1's centre)
+    tap = np.array([bx, by, bz]) + R.from_quat(bq).apply([f['cx'] + offset_x_mm / 1000, f['cy'] + offset_y_mm / 1000,
+                                                          f['z']])
     z_contact = tap[2] + RG2_TIP_CLOSED_M
     q = ['0.0', '1.0', '0.0', '0.0']
     X = lambda z: [f"{tap[0]:.4f}", f"{tap[1]:.4f}", f"{z:.4f}"]
