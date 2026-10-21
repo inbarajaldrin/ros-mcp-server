@@ -6,7 +6,7 @@ check, base outline and nudge decision reads this depth; this shows it. Each ali
 robot frame through the wrist camera mount (the localizer's config, the same X_CAM the checks use) and the
 TCP pose, and is coloured by its height above the table: table dark, base top (~35 mm) green, a seated bar's
 top (~55 mm above the table) yellow/red; holes (no depth) black. A scale bar and the min/max sit at the bottom.
-~1 Hz, half resolution (the OptiPlex is CPU-bound; the localizer comes first).
+~0.5 Hz, quarter resolution (the OptiPlex is CPU-bound; the localizer comes first).
 
     python3 -u compliant_insertion_studio/scripts/depth_view.py      # then add /depth_view as an Image panel
 """
@@ -28,7 +28,7 @@ from seat_check import _load_x_cam   # noqa: E402
 
 TABLE_Z = -0.0625 - 0.0175            # world z of the table (base origin -62.5 mm, base half-height 17.5 mm)
 H_MAX_MM = 80.0                       # colour scale 0..80 mm above the table
-PERIOD_S = 1.0
+PERIOD_S = 2.0
 
 
 def main():
@@ -46,8 +46,8 @@ def main():
         if time.time() - last < PERIOD_S or not all(k in st for k in 'dit'):
             continue
         last = time.time()
-        d = br.imgmsg_to_cv2(st['d'], 'passthrough').astype(np.float32)[::2, ::2] / 1000.0
-        K = np.array(st['i'].k).reshape(3, 3).copy(); K[:2] /= 2.0
+        d = br.imgmsg_to_cv2(st['d'], 'passthrough').astype(np.float32)[::4, ::4] / 1000.0
+        K = np.array(st['i'].k).reshape(3, 3).copy(); K[:2] /= 4.0
         p, o = st['t'].pose.position, st['t'].pose.orientation
         Tw = np.eye(4); Tw[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); Tw[:3, 3] = [p.x, p.y, p.z]
         Tc = Tw @ X

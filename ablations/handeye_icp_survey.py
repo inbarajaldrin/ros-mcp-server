@@ -61,28 +61,28 @@ def capture(n=12, timeout=6.0):
     from geometry_msgs.msg import PoseStamped
     from sensor_msgs.msg import CameraInfo, Image
     rclpy.init(); node = rclpy.create_node('he_icp'); st = {'d': [], 't': []}
-    node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append(m), 20)
+    node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append((time.time(), m)), 20)
     node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
-    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['t'].append(m), 50)
+    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['t'].append((time.time(), m)), 50)
     # frames stamped >= 0.25 s after the TCP last moved (depth_timing 2026-10-20), not a fixed wait
     stamp = lambda m: m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
     t_call = time.time() + 0.05; end = time.time() + timeout + 3.0; t0 = t_call + 0.25
     while time.time() < end:
         rclpy.spin_once(node, timeout_sec=0.02)
-        if len(st['t']) >= 20:
-            P = np.array([[stamp(m), m.pose.position.x, m.pose.position.y, m.pose.position.z] for m in st['t'][-400:]])
+        if len(st['t']) >= 20:                # arrival times: the camera's stamps drift up to ~1 s (2026-10-20)
+            P = np.array([[ta, m.pose.position.x, m.pose.position.y, m.pose.position.z] for ta, m in st['t'][-400:]])
             mv = np.nonzero(np.linalg.norm(P[:, 1:] - P[-1, 1:], axis=1) > 0.0005)[0]
-            t0 = max(t_call, (P[mv[-1], 0] if len(mv) else P[0, 0]) + 0.25)
-        if len([m for m in st['d'] if stamp(m) > t0]) >= n and 'i' in st:
+            t0 = max(t_call, (P[mv[-1], 0] if len(mv) else P[0, 0]) + 1.2)
+        if len([m for ta, m in st['d'] if ta > t0]) >= n and 'i' in st:
             break
     node.destroy_node(); rclpy.shutdown()
     br = CvBridge()
-    fr = [m for m in st['d'] if stamp(m) > t0][-n:]
+    fr = [m for ta, m in st['d'] if ta > t0][-n:]
     if len(fr) < 3 or 'i' not in st or not st['t']:
         return None
     d = np.median(np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(np.float32) for m in fr]), 0)
     P = np.array([[m.pose.position.x, m.pose.position.y, m.pose.position.z, m.pose.orientation.x, m.pose.orientation.y,
-                   m.pose.orientation.z, m.pose.orientation.w] for m in st['t'][-50:]])
+                   m.pose.orientation.z, m.pose.orientation.w] for _, m in st['t'][-50:]])
     if np.ptp(P[:, :3], axis=0).max() > 0.0005:
         return None                                   # arm not still
     return d, np.array(st['i'].k).reshape(3, 3), np.median(P, 0)

@@ -68,6 +68,7 @@ class _TopFaces(dict):
 
 TOP_FACE = _TopFaces()
 STILL_MARGIN_S = 0.25        # use depth frames stamped this long after the TCP stopped (depth_timing 2026-10-20)
+ARRIVAL_WINDOW_S = 1.2       # frames ARRIVING this long after the TCP stopped (camera stamps drift up to ~1 s)
 PITCH_MAX_DEG = 1.5
 HEIGHT_MAX_MM = 2.5
 
@@ -78,16 +79,19 @@ def capture_world(n=10, timeout=6.0):
     from geometry_msgs.msg import PoseStamped
     from sensor_msgs.msg import CameraInfo, Image
     rclpy.init(); node = rclpy.create_node('seat_check'); st = {'d': []}
-    node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append(m), 20)
+    node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append((time.time(), m)), 20)
     node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
     node.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: st.__setitem__('c', m), 2)
     node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st.__setitem__('t', m), 10)
     # Frames stamped >= STILL_MARGIN_S after the TCP last moved (depth_timing 2026-10-20: frames taken while the
     # arm moves are ~10 mm off and no time shift fixes them; after the stop they are right at once, but arrive
     # 150 ms (median) to 650 ms (p90) after their stamp - the old fixed sleeps were waiting for those).
+    # 2026-10-20: the RealSense stamps drift -0.5..+1.1 s against this PC's clock (global time under load average
+    # ~19), so stillness is judged by ARRIVAL time: a frame counts if the TCP was still for ARRIVAL_WINDOW_S before
+    # it arrived (covers the worst measured delay)
     st['tp'] = []
     node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['tp'].append(
-        (_stamp(m), m.pose.position.x, m.pose.position.y, m.pose.position.z)), 100)
+        (time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z)), 100)
     end = time.time() + timeout + 3.0
     def still_since():
         tp = st['tp'][-400:]
@@ -101,11 +105,11 @@ def capture_world(n=10, timeout=6.0):
     while time.time() < end:
         rclpy.spin_once(node, timeout_sec=0.02)
         ss = still_since()
-        t_start = max(t_call, ss + STILL_MARGIN_S) if ss is not None else t_call + STILL_MARGIN_S
-        if len([m for m in st['d'] if _stamp(m) > t_start]) >= n and 'i' in st and 't' in st:
+        t_start = max(t_call, ss + ARRIVAL_WINDOW_S) if ss is not None else t_call + ARRIVAL_WINDOW_S
+        if len([m for ta, m in st['d'] if ta > t_start]) >= n and 'i' in st and 't' in st:
             break
     node.destroy_node(); rclpy.shutdown()
-    frames = [m for m in st['d'] if _stamp(m) > t_start][-n:]
+    frames = [m for ta, m in st['d'] if ta > t_start][-n:]
     if len(frames) < 3 or 'i' not in st or 't' not in st:
         return None
     br = CvBridge()
