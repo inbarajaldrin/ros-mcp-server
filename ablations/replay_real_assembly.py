@@ -706,7 +706,6 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
 
 TRACKER_JSON = REPO_ROOT / 'ablations' / 'logs' / 'part_tracker.json'
 TRACKER_MAX_AGE_S = 1800.0
-SAME_MISS_MIN_M, SAME_MISS_TOL_M = 0.006, 0.003    # two misses this large and this alike -> regrasp
 TRACKER_TRUST_S = 900.0          # a sighting this recent is where the part is when no view here sees it
 PART_VIEW_Z_FALLBACKS = (0.45, 0.38)
 
@@ -2582,19 +2581,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # Outer attempts (2026-10-20): the insert runs ONE attempt; between attempts the part is lifted, the base
         # re-read from a view the held part does not block, and the insert aims again. Blind in-insert retries
         # aimed at a base the previous attempt had pushed (fork_yellow slid base3 ~30 mm over cycle 2).
-        k_try = 1; slides = []
+        k_try = 1
         while (result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert'
                and k_try < INSERT_OUTER_TRIES and not _SAFETY_STOP and not args.dry_run):
-            # The same miss twice is the grasp, not the aim (2026-10-21: line_green slid -11.0 then -11.4 mm along its
-            # length both times, held off-centre; a third identical attempt cannot seat it): straight to the regrasp.
-            sl = result.get('slide')
-            slides.append(sl)
-            if (len(slides) >= 2 and all(isinstance(v, (list, tuple)) and len(v) == 2 and None not in v for v in slides[-2:])
-                    and np.hypot(*slides[-1]) > SAME_MISS_MIN_M
-                    and np.hypot(slides[-1][0] - slides[-2][0], slides[-1][1] - slides[-2][1]) < SAME_MISS_TOL_M):
-                say(f"  [{step_idx}] the same miss twice ({1000*slides[-2][0]:+.1f}, {1000*slides[-2][1]:+.1f}) / "
-                    f"({1000*slides[-1][0]:+.1f}, {1000*slides[-1][1]:+.1f}) mm -> the grasp, not the aim: regrasp")
-                break
             k_try += 1
             prev_ob = getattr(args, 'observed_base', None)
             say(f"  [{step_idx}] insert attempt {k_try - 1} failed -> lift, re-read the base, attempt {k_try}/{INSERT_OUTER_TRIES}")
