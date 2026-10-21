@@ -657,6 +657,15 @@ def verify_seated(objs, say, second_view=None) -> bool:
                 led[o]['rel_err_mm'] = [1000 * float(e_['x']), 1000 * float(e_['y'])]
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
             continue
+        prev = led.get(o) or {}
+        if (not _not_detected(r) and prev.get('how') == 'depth seat check' and prev.get('verified')
+                and time.time() - prev.get('t', 0) < 1800 and float(r.get('position_error_judged_m') or 1.0) < 0.005
+                and r.get('orientation_error_deg') in (None, {}, 'None')):
+            # the marker read put it in place (xy) but returned no orientation; depth confirmed the seat minutes ago
+            # (cycle 5: line_brown depth +0.02 mm, verify 'xy error 0.0 mm, orientation None' stopped the run)
+            say(f"  [verify] {o}: marker xy {1000*float(r.get('position_error_judged_m') or 0):.1f} mm, no orientation read - "
+                f"depth seat check confirmed it -> OK")
+            continue
         if _not_detected(r):
             say(f"\n!!! [verify] {o}: not detected (or only tilted, unusable pose estimates) and not verified "
                 f"earlier — cannot confirm it is seated")
