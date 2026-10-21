@@ -119,61 +119,71 @@ def pose(name, kind, timeout=15.0):
 
 
 def certify(mate):
-    """The mover's pose relative to its declared seat from where the camera is, judged against the mate's declared
-    acceptance widened by the instrument's 2 sigma per axis (the evidence carries both, and which instrument
-    measured what). z and tilt from the depth seat check; xy from the marker check. For an insertion mate a mover at
-    seat depth and flat is inside its pocket, so xy not seen (markers hidden) is reported as implied, not measured;
-    z not measured -> not certified (engagement_invalid upstream)."""
+    return certify_many([mate])[0]
+
+
+def certify_many(mates):
+    """Each mover's pose relative to its declared seat, from where the camera is: one base read and one still depth
+    capture shared by all (execute_mate re-reads every predecessor NOW). z and the long-axis tilt from the depth seat
+    check; xy from the marker check, reported only (see the judgement below). z not measured -> not certified
+    (engagement_invalid upstream)."""
     import replay_real_assembly as rr
     import seat_check as sc
-    asm, addr, m = resolve(mate)
-    obj, base = m['mover'], m['reference']
-    acc = m['acceptance']; sz = B['sigma']['seat_depth']
-    ev = {'mate': f'{asm}/{addr}', 'mover': obj, 'reference': base, 'order_position': m['order_position'],
-          'declared': acc}
-    b = pose(base, 'base', timeout=8.0)
-    if b['ok']:
-        ob = (tuple(b['xyz']), tuple(b['quat_xyzw'])); ev['base'] = {'source': b['source'], 'xyz': b['xyz']}
-    else:
-        ob = rr._last_base_pose(base); ev['base'] = {'source': 'last saved read', 'why': b['error']}
-    z_err = tilt = math.nan
-    if ob is not None:
-        cap = sc.capture_world()
-        if cap is not None:
+    R_ = [resolve(m_) for m_ in mates]
+    bases = {m['reference'] for _, _, m in R_}
+    obs, bev = {}, {}
+    for base in bases:
+        b = pose(base, 'base', timeout=8.0)
+        if b['ok']:
+            obs[base] = (tuple(b['xyz']), tuple(b['quat_xyzw'])); bev[base] = {'source': b['source'], 'xyz': b['xyz']}
+        else:
+            obs[base] = rr._last_base_pose(base); bev[base] = {'source': 'last saved read', 'why': b['error']}
+    cap = sc.capture_world() if any(v is not None for v in obs.values()) else None
+    out = []
+    for asm, addr, m in R_:
+        obj, base = m['mover'], m['reference']
+        acc = m['acceptance']; sz = B['sigma']['seat_depth']; ob = obs[base]
+        ev = {'mate': f'{asm}/{addr}', 'mover': obj, 'reference': base, 'order_position': m['order_position'],
+              'declared': acc, 'base': bev[base]}
+        z_err = tilt = math.nan
+        if ob is None:
+            ev['depth'] = {'error': 'no base pose'}
+        elif cap is None:
+            ev['depth'] = {'error': 'no still depth frames'}
+        else:
             r = sc.measure(obj, ob, cap[0], base)
             ev['depth'] = {k: r.get(k) for k in ('ok', 'error', 'height_err_mm', 'pitch_deg', 'roll_deg', 'end_heights_mm',
                                                  'n_points', 'mode')}
             if r.get('height_err_mm') is not None:
                 z_err = r['height_err_mm'] / 1000.0
                 tilt = abs(r['pitch_deg']) if r.get('pitch_deg') is not None else math.nan
+        rr.RUN_BASE['name'] = base
+        v = rr._read_part(obj)
+        ex = ey = math.nan
+        if not rr._not_detected(v) and isinstance(v.get('position_error_m'), dict):
+            ex, ey = float(v['position_error_m']['x']), float(v['position_error_m']['y'])
+            ev['markers'] = {'position_error_m': v['position_error_m'], 'orientation_error_deg': v.get('orientation_error_deg')}
         else:
-            ev['depth'] = {'error': 'no still depth frames'}
-    rr.RUN_BASE['name'] = base
-    v = rr._read_part(obj)
-    ex = ey = math.nan
-    if not rr._not_detected(v) and isinstance(v.get('position_error_m'), dict):
-        ex, ey = float(v['position_error_m']['x']), float(v['position_error_m']['y'])
-        ev['markers'] = {'position_error_m': v['position_error_m'], 'orientation_error_deg': v.get('orientation_error_deg')}
-    else:
-        ev['markers'] = {'error': v.get('error') or 'not detected'}
-    # judged on what carries a stated sigma: the seat height (depth, test-measured repeatability) against the declared
-    # half-width + 2 sigma, and the long-axis tilt against the declared 1 deg (its repeatability is not measured yet,
-    # so no widening). Marker xy has no stated sigma: reported, not judged - for an insertion mate a mover at seat
-    # depth is inside its pocket. Roll is not judged (a seated bar reads a -3 deg roll bias, 2026-10-20).
-    lim_z = acc['halfwidth_m'][2] + 2 * sz['z']
-    lim_t = acc['tilt_deg']
-    ev['limits'] = {'z_m': lim_z, 'tilt_deg': lim_t,
-                    'rule': 'z: declared half-width + 2 sigma (seat_depth); tilt: declared; xy: reported only (no sigma)'}
-    xy_seen = math.isfinite(ex)
-    if not math.isfinite(z_err):
-        inside, method = False, 'markers' if xy_seen else 'none'
-        ev['verdict'] = 'not certified: seat height not measured from this view'
-    else:
-        inside = bool(abs(z_err) <= lim_z and (not math.isfinite(tilt) or tilt <= lim_t))
-        method = 'both' if xy_seen else 'depth_seat_check'
-        ev['verdict'] = ('inside' if inside else 'outside') + ' (xy implied by seat depth)'
-    return {'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
-            'tilt_deg': tilt, 'method': method, 'evidence': ev}
+            ev['markers'] = {'error': v.get('error') or 'not detected'}
+        # judged on what carries a stated sigma: the seat height (depth, test-measured repeatability) against the
+        # declared half-width + 2 sigma, and the long-axis tilt against the declared 1 deg (its repeatability is not
+        # measured yet, so no widening). Marker xy has no stated sigma: reported, not judged - for an insertion mate a
+        # mover at seat depth is inside its pocket. Roll is not judged (a seated bar reads a -3 deg roll bias).
+        lim_z = acc['halfwidth_m'][2] + 2 * sz['z']
+        lim_t = acc['tilt_deg']
+        ev['limits'] = {'z_m': lim_z, 'tilt_deg': lim_t,
+                        'rule': 'z: declared half-width + 2 sigma (seat_depth); tilt: declared; xy: reported only (no sigma)'}
+        xy_seen = math.isfinite(ex)
+        if not math.isfinite(z_err):
+            inside, method = False, 'markers' if xy_seen else 'none'
+            ev['verdict'] = 'not certified: seat height not measured from this view'
+        else:
+            inside = bool(abs(z_err) <= lim_z and (not math.isfinite(tilt) or tilt <= lim_t))
+            method = 'both' if xy_seen else 'depth_seat_check'
+            ev['verdict'] = ('inside' if inside else 'outside') + ' (xy implied by seat depth)'
+        out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
+                    'tilt_deg': tilt, 'method': method, 'evidence': ev})
+    return out
 
 
 def main():
@@ -181,10 +191,13 @@ def main():
     sp = ap.add_subparsers(dest='op', required=True)
     p = sp.add_parser('pose'); p.add_argument('--name', required=True); p.add_argument('--kind', required=True)
     p.add_argument('--timeout', type=float, default=15.0)
-    c = sp.add_parser('certify'); c.add_argument('--mate', required=True)
+    c = sp.add_parser('certify'); c.add_argument('--mate', required=True, nargs='+')
     a = ap.parse_args()
     try:
-        out = pose(a.name, a.kind, a.timeout) if a.op == 'pose' else certify(a.mate)
+        if a.op == 'pose':
+            out = pose(a.name, a.kind, a.timeout)
+        else:
+            out = certify(a.mate[0]) if len(a.mate) == 1 else {'ok': True, 'results': certify_many(a.mate)}
     except LookupError as e:
         out = {'ok': False, 'error': str(e), 'refusal': str(e)}
     except Exception as e:
