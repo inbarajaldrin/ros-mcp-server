@@ -2165,22 +2165,32 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # x/y within 0.2 mm of the aim, four times - a ~0.7 deg yaw in the jaws on a zero-clearance channel): do not
         # pull it out and repeat; release it where it is and let the seat check's nudges/taps finish it (how wedged
         # bars were seated before).
-        if (result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert'
-                and not _SAFETY_STOP and not args.dry_run and _is_bar(obj)):
+        def _wedge_check():
+            """None: not wedged. True/False: wedged; released and nudged -> seated or not. Called after EVERY failed
+            attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
+            if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run):
+                return None
             w = _wedged_near_seat(obj, t_step)
-            if w is not None:
-                say(f"  [{step_idx}] {obj} wedged {w['dz_mm']:.1f} mm above its seat, {w['dxy_mm']:.1f} mm from the aim "
-                    f"-> release here and let the seat check nudge it in")
-                rel = _release_width(step_idx)
-                ok_rel = all((execute(step_idx, f"wedged {t_}", t_, k_, tag=f"wedge{j}") or {}).get('result') != 'failure'
-                             for j, (t_, k_) in enumerate([('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
-                                                           ('move_to_safe_height', {})], start=1))
-                if ok_rel and seat_check_and_reseat(obj, state, args, say):
-                    say(f"  [{step_idx}] {obj}: seated after the nudge")
+            if w is None:
+                return None
+            say(f"  [{step_idx}] {obj} wedged {w['dz_mm']:.1f} mm above its seat, {w['dxy_mm']:.1f} mm from the aim "
+                f"-> release here and let the seat check nudge it in")
+            rel = _release_width(step_idx)
+            ok_rel = all((execute(step_idx, f"wedged {t_}", t_, k_, tag=f"wedge{j}") or {}).get('result') != 'failure'
+                         for j, (t_, k_) in enumerate([('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
+                                                       ('move_to_safe_height', {})], start=1))
+            if ok_rel and seat_check_and_reseat(obj, state, args, say):
+                say(f"  [{step_idx}] {obj}: seated after the nudge")
+                return True
+            say(f"\n!!! {obj}: wedged and not seated by the nudges")
+            return False
+
+        if result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert':
+            wc = _wedge_check()
+            if wc is not None:
+                if wc:
                     print(f"\n  ✓ {obj} complete")
-                    return True
-                say(f"\n!!! {obj}: wedged and not seated by the nudges")
-                return False
+                return wc
 
         # Outer attempts (2026-10-20): the insert runs ONE attempt; between attempts the part is lifted, the base
         # re-read from a view the held part does not block, and the insert aims again. Blind in-insert retries
@@ -2200,6 +2210,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 say(f"  [{step_idx}] base after attempt {k_try - 1}: moved "
                     f"{1000*np.hypot(nb[0][0]-prev_ob[0][0], nb[0][1]-prev_ob[0][1]):.1f} mm since the attempt's aim")
             result = execute(step_idx, step, tool_name, kw, tag=f"try{k_try}") or result
+            if result.get('result') == 'failure':
+                wc = _wedge_check()
+                if wc is not None:
+                    if wc:
+                        print(f"\n  ✓ {obj} complete")
+                    return wc
 
         if (result.get('result') == 'failure' and tool_name == 'translate_object'
                 and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES
