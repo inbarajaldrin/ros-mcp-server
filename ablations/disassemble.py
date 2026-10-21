@@ -131,7 +131,7 @@ def _in_staging(cx, cy, ex, ey):
 STAGED = REPO / 'ablations/logs/staged_parts.json'
 
 
-def record_staged(name, x, y):
+def record_staged(name, x, y, pose=None):
     """Where the disassembly set `name` down: the reassembly looks there first for a part neither home nor the
     staging view sees (2026-10-20 cycle 1: fork_orange, set down here, was only seen from straight above)."""
     try:
@@ -139,6 +139,8 @@ def record_staged(name, x, y):
     except Exception:
         d = {}
     d[name] = [round(float(x), 4), round(float(y), 4), time.time()]
+    if pose is not None:                                 # the part's pose as set down (an obstacle the camera may miss)
+        d[name].append([[float(v) for v in pose[0]], [float(v) for v in pose[1]]])
     STAGED.parent.mkdir(parents=True, exist_ok=True)
     json.dump(d, open(STAGED, 'w'), indent=1)
 
@@ -465,6 +467,20 @@ def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
         if not ok: return 1
     PLACED['xy'] = (sx, sy)
     return 0
+
+
+T_RUN0 = float(os.environ.get("DISASSEMBLE_SINCE") or time.time())                     # parts staged before this process started are not this run's
+
+
+def _translated_to(name, pose, gid, flange_xy):
+    """The pose of `name` (carried in `pose`'s stance) once its grasp point is at flange_xy."""
+    from scipy.spatial.transform import Rotation as Rr
+    from spacing_check import GRASPS
+    g = next(g for g in json.load(open(str(GRASPS).format(name)))['grasp_points'] if g['id'] == gid)
+    (p, q) = pose
+    grip = Rr.from_quat(q).apply([g['position'][k] for k in 'xyz'])[:2] + np.asarray(p)[:2]
+    t = np.asarray(flange_xy) - grip
+    return (float(p[0] + t[0]), float(p[1] + t[1]), float(p[2])), tuple(float(v) for v in q)
 
 
 def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
@@ -882,6 +898,7 @@ def main():
     start = [o['object_name'] for o in parts].index(a.resume_held) if a.resume_held else 0
     for i, (o, (sx, sy)) in enumerate(zip(parts, spots)):
         name, gid, w = o['object_name'], o['grasp_id'], o['gripper_width_mm']
+        placed_pose = None
         if i < start:
             continue                                         # out already (resumed run)
         print(f"\n=== {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm" + (' (held: resume)' if i == start and a.resume_held else ''))
@@ -914,6 +931,17 @@ def main():
             if not ok: return 1
             time.sleep(1.5)
             seen = observe_parts([n for n in RUN['parts'] if n != name])
+            # every part this disassembly set down is an obstacle, seen or not (2026-10-21: yellow, set down near
+            # the staging view's edge, was not detected when line_green's spot was chosen)
+            try:
+                st_ = json.load(open(STAGED)) if STAGED.exists() else {}
+            except Exception:
+                st_ = {}
+            for n_, v_ in st_.items():
+                if n_ != name and n_ in RUN['parts'] and n_ not in seen and len(v_) >= 4 and v_[2] >= T_RUN0:
+                    seen[n_] = (tuple(v_[3][0]), tuple(v_[3][1]))
+                    print(f"[spot] {n_}: not seen from the staging view - placed by this run at "
+                          f"({1000*v_[0]:.0f}, {1000*v_[1]:.0f}) mm, kept as an obstacle", flush=True)
             sp_, sq_ = load_seat_pose_in_base(RUN['base'], name)
             Rb_ = R.from_quat(ob[1])
             seen[name] = (tuple(np.array(ob[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
@@ -923,6 +951,7 @@ def main():
             # staging_spot returns the GRASP POINT's target; the seat grasp carries the flange at the seat-grasp
             # TCP, which sits at that grasp point in x/y (top-down), so the flange target is the same x/y.
             sx, sy = fx, fy
+            placed_pose = _translated_to(name, seen[name], gid, (fx, fy))
             print(f"[spot] {name}: free spot in the staging region -> flange ({1000*sx:.0f}, {1000*sy:.0f}) mm, "
                   f"{gap:.0f} mm from the nearest part; seen there: {sorted(n for n in seen if n != name)}", flush=True)
             ob = observe_base()                      # back over the base for the seat grasp (and a fresh read)
@@ -973,7 +1002,7 @@ def main():
         cz = contact_flange_z(name, gid, load_seat_pose_in_base(RUN['base'], name)[1], grasp_offset_for(name))
         if place_at(sx, sy, w, home=False, turn=lp['wrist_turn'] if lp else None, contact_z=cz) != 0:
             return 1
-        record_staged(name, sx, sy)
+        record_staged(name, sx, sy, pose=placed_pose if a.to_free_spot else None)
         if lp and lp.get('tip'):
             from tip_part import tip
             r_ = tip(lp, layout['table_z'], say=lambda m: print(m, flush=True))
