@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 17:20",
+ "updated": "2026-10-20 18:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -22,7 +22,7 @@
      "id": "M2",
      "title": "Base free + measured errors",
      "status": "active",
-     "note": "base moved by the arm (35 mm) and turned ~4 deg by the inserts themselves; cycles reassemble with recoveries, not clean. Blocker: inserts that push the unfixed base"
+     "note": "3 cycles reassembled 4/4 on a base moved (35 mm) and turned (-5 deg) by the arm; clean-cycle count starts at cycle 4 (fixes landed mid-cycle 3)"
     },
     {
      "id": "M3a",
@@ -69,7 +69,7 @@
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
      "status": "active",
-     "note": "cycles 1-2 done 4/4 (depth-verified) after recoveries; base slides under hard insert attempts (fork_yellow pushed base3 ~30 mm over cycle 2). Not clean yet"
+     "note": "cycles 1-3 done 4/4 (base slid 35 mm, turned -5 deg by the arm); not yet clean. Fixed today: hover yaw stacking on retries, roll -> FMB1 edge press, wedge hold, fresh base reads between attempts, wrist_3 wind-up guard. After the fixes: 3 first-attempt inserts in a row. Next: cycle 4 as the clean test"
     }
    ]
   },
