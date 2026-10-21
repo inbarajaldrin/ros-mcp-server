@@ -68,7 +68,7 @@ STEREO_BASELINE_M = 0.055              # D415 IR baseline
 DEPTH_MARGIN = 0.15                     # aligned depth: no data in a band at the image edges (D415 FOV, IR shadow)
 
 
-def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
+def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z, shadow=True):
     """The held part is rigid with the camera, so it always occupies the same image region: what can be
     chosen is where the BASE lands in the image. Top-down views at view_z, flange yaw turned 0/+-90 deg,
     flange shifted on a grid around straight-above-the-base; score = base area the part's hull covers + base
@@ -109,7 +109,7 @@ def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
         # px along the image x (IR baseline B 55 mm) - colour-clear views of a held line gave ~1200 depth points
         z_p = float(np.median(Pc[:, 2])); z_s = view_z + 0.07
         sh = int(np.ceil(K[0, 0] * STEREO_BASELINE_M * max(0.0, 1 / z_p - 1 / z_s) / s))
-        if sh > 0:
+        if sh > 0 and shadow:
             mp = cv2.dilate(mp, np.ones((1, 2 * sh + 1), np.uint8))
         for dx in grid:
             for dy in grid:

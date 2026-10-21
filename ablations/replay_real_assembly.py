@@ -745,8 +745,13 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
         K = camera_K()
         Tfo = held_in_flange(obj, state.last_grasp_id or 1, state.held_quat, tcp['xyz'], tcp['quat_xyzw'],
                              float(np.asarray(held_tool_offset())[2]))
+        # views clear even with the held part's stereo shadow first, then views clear of its colour footprint
+        # only (the shadow margin is conservative: for a held bar it ruled out every view, cycle 4); each is
+        # only kept if the depth fit there actually succeeds (below)
         views = [v for v in score_views(obj, bname, ob, Tfo, tcp['quat_xyzw'], K, VIEW_FLANGE_Z)
                  if v['covered'] <= COVER_OK and v['outside'] <= 0.01]
+        views += [v for v in score_views(obj, bname, ob, Tfo, tcp['quat_xyzw'], K, VIEW_FLANGE_Z, shadow=False)
+                  if v['covered'] <= COVER_OK and v['outside'] <= 0.01]
     except Exception as e:
         say(f"  [base@insert] {obj}: no clear view computed ({e}) - keeping the previous read"); return
     if not views:
