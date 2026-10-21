@@ -2771,7 +2771,8 @@ def main() -> int:
             # over the assembly region of the cell layout (primitives/shared/cell_layout.yaml), wherever
             # the run's base is: DEFAULT_BASE_POSITION is base1's calibration spot
             from primitives.shared.config import ASSEMBLY_REGION_CENTER as _ARC, CELL_LAYOUT_NAME as _LN
-            _bx, _by = _ARC
+            _lb = _last_base_pose(bname)          # over the base where it was last read (it moves: 9 cm off the
+            _bx, _by = (_lb[0][0], _lb[0][1]) if _lb is not None else _ARC     # region centre left it half out of view)
             msg = f"  [layout] {_LN}: base view over the assembly region ({_bx:.3f}, {_by:.3f})"
             print(msg, flush=True)
             if log_fh: log_fh.write(msg + "\n")

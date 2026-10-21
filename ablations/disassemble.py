@@ -369,7 +369,10 @@ def observe_base(base_name=None):
     yaw from the depth outline of its top face (base_depth.py), the marker read as fallback."""
     from primitives.shared.config import ASSEMBLY_REGION_CENTER as DBP     # the cell layout's assembly region
     sys.path.insert(0, str(REPO / 'ablations'))
-    from replay_real_assembly import observe_base_pose, choose_base_read
+    from replay_real_assembly import observe_base_pose, choose_base_read, _last_base_pose
+    _lb = _last_base_pose(base_name or RUN['base'])                      # over the base where it was last read
+    if _lb is not None:
+        DBP = (_lb[0][0], _lb[0][1])
     from base_depth import VIEW_FLANGE_Z, measure
     base_name = base_name or RUN['base']
     ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",

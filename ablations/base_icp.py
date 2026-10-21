@@ -145,6 +145,9 @@ if __name__ == '__main__':
 # tilted views. Fitting all 6 dof in the camera frame and reporting x, y, yaw gave a 1.8 mm median spread
 # over 11 views (top-down at two heights and three wrist yaws, tilted 20/30 deg) - the mount needs no refit.
 # ---------------------------------------------------------------------------------------------------------
+COVERAGE_MIN = 0.85     # matched points must span this fraction of the base in x and in y
+
+
 def read_icp(base, ob, seated=(), n_points=8000):
     """((x, y, z_marker), quat_yaw), info from one still capture where the arm is; z is the marker read's
     (table-snapped, like every base read). None + info on failure."""
@@ -171,11 +174,23 @@ def read_icp(base, ob, seated=(), n_points=8000):
     if Tcb is None:
         return None, {'error': f'fit failed ({n} matches)'}
     Bw = Tw @ Tcb
+    # coverage: the matched points must span the base's footprint in BOTH axes of its own frame; a partial view
+    # leaves the fit free to slide along base3's channels (2026-10-20: two chained fits walked 9 + 12 mm in y with the
+    # base half out of the depth image)
+    Tbc = np.linalg.inv(Tcb)
+    Pb = Pc @ Tbc[:3, :3].T + Tbc[:3, 3]
+    d, _ = tree.query(Pb, distance_upper_bound=0.003); okm = np.isfinite(d)
+    ext = M[:, :2].max(0) - M[:, :2].min(0)
+    span = (np.percentile(Pb[okm, :2], 98, axis=0) - np.percentile(Pb[okm, :2], 2, axis=0)) if okm.sum() > 50 else np.zeros(2)
+    cov = span / ext
     e = R.from_matrix(Bw[:3, :3]).as_euler('xyz', degrees=True)
     yaw = float(np.degrees(np.arctan2(Bw[1, 0], Bw[0, 0])))
     info = {'rms_mm': round(rms, 2), 'n': n, 'xy_mm': [round(1000 * Bw[0, 3], 1), round(1000 * Bw[1, 3], 1)],
             'yaw_deg': round(yaw, 2), 'roll_pitch_deg': [round(e[0], 2), round(e[1], 2)],
             'z_mm': round(1000 * Bw[2, 3], 1), 'marker_mm': [round(1000 * bx, 1), round(1000 * by, 1)]}
+    info['coverage'] = [round(float(c), 2) for c in cov]
     if rms > 2.5 or n < 1500:
         return None, dict(info, error='fit too loose')
+    if (cov < COVERAGE_MIN).any():
+        return None, dict(info, error=f'partial view: matched points span {np.round(cov, 2).tolist()} of the base')
     return ((float(Bw[0, 3]), float(Bw[1, 3]), float(bz)), R.from_euler('z', yaw, degrees=True).as_quat()), info
