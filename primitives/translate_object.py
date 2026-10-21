@@ -262,7 +262,9 @@ def _subprocess_fast_path():
             # off its slot. Never blocks: unmeasured -> the descent goes on as before. ALIGN_AT_HOVER=0 skips it.
             if os.environ.get('ALIGN_AT_HOVER', '1') == '1':
                 ra = subprocess.run([sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.align_at_hover',
-                                     '--object-name', args.object_name, '--base-name', args.base_name],
+                                     '--object-name', args.object_name, '--base-name', args.base_name]
+                                    + (['--target-base-quat', *[f"{v:.6f}" for v in args.final_base_orientation]]
+                                       if args.final_base_orientation is not None else []),
                                     cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                     capture_output=True, text=True, timeout=180)
                 for line in ra.stdout.splitlines():

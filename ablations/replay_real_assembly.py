@@ -1484,7 +1484,7 @@ class AssemblyState:
 # ALONG the bar (y) is its own pocket's, not the U parts'.
 FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
 MAX_FOLLOW_MM = 8.0
-MAX_FOLLOW_YAW_DEG = 2.0          # from the camera's read of the two seated parts (base frame)
+MAX_FOLLOW_YAW_DEG = 4.0        # the U parts' leg gaps (depth vs CAD, 2026-10-21) put line_green's line at +2.98 deg; the old 2 deg cap cut it
 MAX_FOLLOW_YAW_INSERT_DEG = 1.5   # fallback, from the U parts' insert seat offsets: those mix the part's
 # position with how it sat in the fingers. 2026-10-19 cycle 3: inserts said u_brown x -5.5 / u_orange
 # +2.1 mm -> -4.5 deg, the camera said -2.0 / +0.9 -> -1.7 deg; line_green (CAD: +-1.1 mm in each U

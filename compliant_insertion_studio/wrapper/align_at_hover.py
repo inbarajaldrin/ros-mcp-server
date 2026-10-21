@@ -62,14 +62,16 @@ def mean_quat(qs):
     Q = np.array(qs); Q *= np.sign(Q @ Q[0])[:, None]; q = Q.mean(0); return q / np.linalg.norm(q)
 
 
-def rel_yaw_error(obj, base, Rb, Ro):
+def rel_yaw_error(obj, base, Rb, Ro, R_target_base=None):
     """Yaw (deg, about world z) taking the part's measured base-relative orientation to the nearest fold-equivalent of
     its CAD seat orientation."""
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
     from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
     from utils.data_path_finder import get_symmetry_dir
     _, sq = load_seat_pose_in_base(base, obj)
-    R_target_w = Rb * R.from_quat(sq)                              # where the part should be, in the world
+    # the commanded base frame when given: it carries the follow yaw (the line between the U parts' leg gaps, from
+    # depth) on top of the base's own yaw - both camera-measured top-down, so a mount yaw error still cancels
+    R_target_w = (R_target_base if R_target_base is not None else Rb) * R.from_quat(sq)
     try:
         fold = load_symmetry_data(obj, str(get_symmetry_dir()))
         cands = [R.from_matrix(m) for m in equivalent_orientations(R_target_w.as_matrix(), fold)]
@@ -127,6 +129,8 @@ def main():
     ap.add_argument('--object-name', required=True); ap.add_argument('--base-name', required=True)
     ap.add_argument('--tol-deg', type=float, default=0.3); ap.add_argument('--max-iter', type=int, default=3)
     ap.add_argument('--max-turn-deg', type=float, default=12.0)
+    ap.add_argument('--target-base-quat', type=float, nargs=4, default=None,
+                    help='the base frame the insert aims at (with any follow yaw); default: the base as seen now')
     ap.add_argument('--snapshot-dir', default=os.environ.get('HOVER_SNAPSHOT') or None)
     a = ap.parse_args()
     its = []; final = None; result = 'unmeasured'
@@ -138,7 +142,8 @@ def main():
             its.append({'n_base': nb, 'n_part': no, 'note': 'not enough still samples'}); break
         Rb = R.from_quat(mean_quat([q for _, q in S[a.base_name]]))
         Ro = R.from_quat(mean_quat([q for _, q in S[a.object_name]]))
-        err, tilt = rel_yaw_error(a.object_name, a.base_name, Rb, Ro)
+        err, tilt = rel_yaw_error(a.object_name, a.base_name, Rb, Ro,
+                                  R.from_quat(a.target_base_quat) if a.target_base_quat else None)
         final = err; it = {'rel_err_deg': round(err, 2), 'tilt_deg': round(tilt, 2), 'n_base': nb, 'n_part': no}
         print(f"[align] {a.object_name}: part vs its seat {err:+.2f} deg about z (tilt {tilt:.1f}; {nb}/{no} samples)", flush=True)
         if a.snapshot_dir:
