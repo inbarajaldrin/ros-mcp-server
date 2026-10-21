@@ -606,6 +606,8 @@ PICK_FINGER_CLEAR_MM = 15.0       # the recorded grasp's open fingers must have 
 
 PICK_OPENING_MM = {}              # part -> pre-grasp opening chosen for the stance it lies in (see _pick_room)
 PICK_OPEN_MAX_MM = 100.0
+PICK_POSE_MARGIN_MM = 10.0       # open finger room per side at a pick: tonight's table reads were 5-10 mm off
+PICK_CMD_TO_GAP_MM = 4.0         # commanded opening -> tip gap (39.8 commanded read 35.8, 2026-10-21)
 PICK_SELF_CLEAR_MIN_MM = 8.0      # fingers must clear the part's OWN top material by this; the recorded opening
                                   # (tuned for the standing part) gave flat yellow 6.7 mm, and with the camera's
                                   # 2-10 mm pose error a finger came down on the bridge -> PROTECTIVE_STOP, twice
@@ -651,6 +653,17 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         # parked region as an obstacle (base2/3/4 were probed one by one, 25 s)
         others = [b for b in ('base1', 'base2', 'base3', 'base4') if b != RUN_BASE['name']]
         seen, seen_bases = observe_parts(list(PARTS) + others, with_raw=True)
+        if obj not in seen:
+            # not in this view: its latest still sighting from any view (the check was skipped for line_green, picked
+            # with 5 mm per side -> finger on the bar, 87 N, 2026-10-21)
+            try:
+                e_ = json.load(open(TRACKER_JSON)).get(obj)
+                if e_ and time.time() - float(e_['t']) < TRACKER_TRUST_S:
+                    seen[obj] = (tuple(e_['xyz']), tuple(e_['quat_xyzw']))
+                    print(f"  [pick] {obj}: not in this view - judged at its tracked pose "
+                          f"({1000*e_['xyz'][0]:.0f}, {1000*e_['xyz'][1]:.0f}) mm", flush=True)
+            except Exception:
+                pass
         ob = base_pose or RUN_BASE.get('pose') or observe_base_pose(RUN_BASE['name'])
         if obj not in seen or ob is None:
             return True                                   # cannot judge here; the pick's own checks apply
@@ -2319,6 +2332,19 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'move_to_grasp' and grasp_width['mm'] is not None:
             # the part's FIRST pick (step 2 of every sequence) uses the stance-chosen opening; regrasps as recorded
             w_ = PICK_OPENING_MM.get(obj, grasp_width['mm']) if (tag == "" and step_idx == 2) else grasp_width['mm']
+            # floor: >= PICK_POSE_MARGIN_MM of open finger on each side of the part (2026-10-21: line_green picked with
+            # 5 mm per side, table reads 5-10 mm off -> a finger landed on the bar's top, 87 N, protective stop).
+            # Command units: a commanded opening gives a tip gap ~PICK_CMD_TO_GAP_MM smaller (39.8 -> 35.8 measured).
+            try:
+                from primitives.shared.config import cad_grip_width_mm as _cgw
+                floor_ = float(_cgw(obj, state.last_grasp_id or int(kw.get('grasp_id', 1)))) + 2 * PICK_POSE_MARGIN_MM + PICK_CMD_TO_GAP_MM
+                # only where nothing else judged the opening, and only for a bar: a concave part (U, inverted U)
+                # limits the opening by its own other leg, which the room check weighs (u_brown: 7 mm at 39)
+                if w_ < floor_ and obj not in PICK_OPENING_MM and _is_bar(obj):
+                    say(f"  [{step_idx}] pre-grasp {w_:g} mm -> {floor_:.1f} mm ({PICK_POSE_MARGIN_MM:g} mm of finger room per side)")
+                    w_ = floor_
+            except Exception:
+                pass
             argv += ['--pre-grasp-width', f"{w_:g}"]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
         if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
