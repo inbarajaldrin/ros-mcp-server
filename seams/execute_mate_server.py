@@ -35,12 +35,13 @@ from rclpy.action import ActionServer
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 from pa_assembly_msgs.action import ExecuteMate
 
 REPO = Path(__file__).resolve().parents[1]
 ACTION = '/ur5e/execute_mate'
+EMPTY_CLOSED_M = 0.002          # fingers closed on nothing read ~0.6 mm
 JOURNAL = REPO / 'ablations' / 'logs' / 'mate_journal.jsonl'
 B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
 
@@ -92,8 +93,9 @@ def certify(mates):
 class ExecuteMateServer(Node):
     def __init__(self):
         super().__init__('ur5e_execute_mate')
-        self.grasped = None
+        self.grasped = None; self.gap = None
         self.create_subscription(Bool, '/gripper_grasp_detected', lambda m: setattr(self, 'grasped', bool(m.data)), 10)
+        self.create_subscription(Float32, '/gripper_width_offset', lambda m: setattr(self, 'gap', m.data / 1000.0), 10)
         ActionServer(self, ExecuteMate, ACTION, self.execute, callback_group=ReentrantCallbackGroup())
         self.get_logger().info(f'ExecuteMate served at {ACTION}')
 
@@ -110,15 +112,18 @@ class ExecuteMateServer(Node):
         r.mate_class = 'insertion'; r.fastening_class = 'free'
         r.order_position = A['order'].index(addr)
         r.premise = 'at_rest: a free mate is accepted where it came to rest after the hand opened'
-        r.gripped_on_mover = bool(self.grasped)
-        r.grip_disposition = 'holding' if self.grasped else 'open'
+        # the RG2's grip flag is also set when the fingers are closed on NOTHING (2026-10-21: after line_green's
+        # closed-finger taps, gap 0.6 mm, flag true -> a seated bar refused 'not_at_rest'): holding = flag AND a gap
+        held = bool(self.grasped) and self.gap is not None and self.gap > EMPTY_CLOSED_M
+        r.gripped_on_mover = held
+        r.grip_disposition = 'holding' if held else ('closed, empty' if self.grasped else 'open')
         preds = [f'{asm}/{a}' for a in A['order'][:r.order_position]]
         ep = [] if r.order_position == 0 else episode()
         missing = [p for p in preds if not certified(ep, p)]
         if missing:
             r.next_move = f'certify {missing[0]} first'
             return self._done(gh, r, 'order_violated', f'not certified in this episode: {missing}')
-        if self.grasped:
+        if held:
             r.next_move = 'open the hand, let the part come to rest, then call again'
             return self._done(gh, r, 'not_at_rest', 'the RG2 reports a grip: a free mate is judged after release')
         res = certify(preds + [mate_id])
