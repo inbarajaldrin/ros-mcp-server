@@ -18,6 +18,15 @@
 active: fmb1_parked_2026_10_21
 
 layouts:
+  # operator 2026-10-21 16:15: scene reset by hand - base1 empty near home (read (0.032, -0.450) from the
+  # staging view), the four FMB1 parts lying in the staging region (u_brown 258/-446, u_orange 456/-496,
+  # line_green 406/-341, yellow 568/-425 mm), FMB3 moved away (not part of this run)
+  fmb1_home_2026_10_21:
+    assembly_region: {center: [0.032, -0.450], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.19, 0.62], y: [-0.62, -0.25], view: [0.400, -0.450, 0.62]}
+    base_fixed: false
+
 
   # 2026-10-21: FMB1 assembled where it was parked, FMB3 (seated) left under home. Every number measured from the
   # camera before the run: base1 (taped) at (0.459, -0.490); its parts loose around it - u_brown (0.327, -0.605),
