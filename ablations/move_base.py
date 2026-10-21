@@ -167,7 +167,10 @@ def main():
     tgt = a.to if a.to else (x0 + a.dx, y0 + a.dy, yaw0 + a.dyaw)
     print(f"[move_base] {a.base} at ({x0:.1f}, {y0:.1f}) mm {yaw0:.2f} deg -> target ({tgt[0]:.1f}, {tgt[1]:.1f}) mm {tgt[2]:.2f} deg  [{json.dumps(info)}]", flush=True)
     sx, sy = STAGING_REGION['x'], STAGING_REGION['y']
-    if not (1000 * sx[0] + 80 < tgt[0] < 1000 * sx[1] - 80 and 1000 * sy[0] + 80 < tgt[1] < 1000 * sy[1] - 80):
+    from primitives.shared.config import ASSEMBLY_REGION_CENTER as _AC, ASSEMBLY_REGION_HALF as _AH
+    in_staging = 1000 * sx[0] + 80 < tgt[0] < 1000 * sx[1] - 80 and 1000 * sy[0] + 80 < tgt[1] < 1000 * sy[1] - 80
+    in_assembly = abs(tgt[0] - 1000 * _AC[0]) < 1000 * _AH[0] and abs(tgt[1] - 1000 * _AC[1]) < 1000 * _AH[1]
+    if not (in_staging or in_assembly):         # the base lives in the assembly region of the active layout too
         print("  !!! target outside the staging/assembly area - not moving"); return 1
     first_dir = None
     for k in range(1, a.max_pushes + 1):
