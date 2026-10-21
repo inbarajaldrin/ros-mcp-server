@@ -1065,8 +1065,27 @@ def make_env() -> dict:
     return env
 
 
-def run_subprocess(argv: list[str], label: str, timeout_s: int = 600,
-                    log_fh=None) -> dict:
+PROGRAM_DROPPED = ('goal rejected', 'robot_program_running=False', 'External control program stopped',
+                   'Controller is not running')
+
+
+def run_subprocess(argv: list[str], label: str, timeout_s: int = 600, log_fh=None) -> dict:
+    """_run_subprocess_once, retried once after re-sending the external-control program when the failure was the
+    program dropping (2026-10-20: "Connection to reverse interface dropped" after a good move, no safety event)."""
+    r = _run_subprocess_once(argv, label, timeout_s, log_fh)
+    if r.get('result') == 'failure' and any(k in json.dumps(r) for k in PROGRAM_DROPPED) and not _SAFETY_STOP:
+        rr = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], capture_output=True, text=True,
+                            timeout=60, env=make_env(), cwd=str(REPO_ROOT))
+        msg = f"  [program] dropped during '{label}' -> re-sent ({'ok' if rr.returncode == 0 else 'FAILED'}), retrying once"
+        print(msg, flush=True)
+        if log_fh: log_fh.write(msg + "\n")
+        if rr.returncode == 0:
+            r = _run_subprocess_once(argv, label + ' (retry)', timeout_s, log_fh)
+    return r
+
+
+def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
+                         log_fh=None) -> dict:
     """Spawn argv as a subprocess. Stream stdout to console + log_fh live.
 
     Uses os.setsid so the child becomes its own process-group leader; this

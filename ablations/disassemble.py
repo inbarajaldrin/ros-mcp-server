@@ -70,10 +70,20 @@ def env():
     return e
 
 
-def run(argv, label, timeout=180):
+PROGRAM_DROPPED = ('goal rejected', 'robot_program_running=False', 'External control program stopped', 'Controller is not running')
+
+
+def run(argv, label, timeout=180, _retried=False):
     print(f">>> {label}: {' '.join(argv[3:])}", flush=True)
     p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env(), cwd=str(REPO))
     out = p.stdout + p.stderr
+    if p.returncode != 0 and not _retried and any(k in out for k in PROGRAM_DROPPED):
+        # the external-control program dropped (2026-10-20, no safety event): re-send it and retry once
+        r = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], capture_output=True, text=True,
+                           timeout=60, env=env(), cwd=str(REPO))
+        print(f"    [program] dropped -> re-sent: {(r.stdout.strip().splitlines() or [''])[-2:]}", flush=True)
+        if r.returncode == 0:
+            return run(argv, label, timeout, _retried=True)
     js = [l for l in out.splitlines() if l.startswith('{"result"')]
     res = json.loads(js[-1]) if js else {}
     # A guarded landing's contact stop is reported as a failure by move_cartesian and accepted by
