@@ -2,12 +2,35 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: **2026-10-19 evening** (OptiPlex cell). The 2026-05-07 architecture below still
+> Date of last update: **2026-10-20** (OptiPlex cell; see the 2026-10-20 section first). The 2026-05-07 architecture below still
 > stands; 2026-08-16 changed the branch and bringup path; 2026-10-14 fixed the grasp depth and
 > added robot self-disassembly, a hands-off loop and depth seat checking; 2026-10-15 made the loop
 > robust to the 7th-axis slider, fixed line_green's slot aim and scripted every recovery;
 > **2026-10-18: 3 consecutive hands-off cycles (disassemble + assemble) passed** — see
 > "State of the system" and the runbook under "Run commands".
+
+## 2026-10-20 (long day) — FMB3 onboarded, base free, vision tied to CAD
+
+Read `compliant_insertion_studio/.claude/skills/onboard-assembly/SKILL.md` and `docs/LADDER.json` (the ladder plugin
+draws it). In short:
+- **FMB3** (base3 + 2 lines + 2 forks) assembles; 4 cycles run (pull every part to the staging region, the arm moves
+  the empty base - `ablations/move_base.py`, one slow push per slide - reassemble). Not clean yet: recoveries
+  needed in each. `ablations/assembly_cycle.sh <json> <label>` with `MOVE_BASE="--dy=-30"` etc.
+- **Regions** live in `primitives/shared/cell_layout.yaml`; per-part numbers come from CAD for any assembly.
+- **Base read = 6-dof CAD fit to depth** (`BASE_FROM=icp`, `base_icp.read_icp`), 1.2 mm rms; the hand-eye mount
+  needed no refit (`handeye_icp_survey.py solve6`). Depth frames taken while moving are ~10 mm off: every read uses
+  frames/poses from a still arm (`depth_timing.py`).
+- **Fused estimator v1** inside the localizer package (`aruco_camera_localizer/fused_estimator.py`, 1 Hz, one core):
+  markers seed, CAD-to-depth refines, `/objects_poses_fused` + `_info` (sigma provisional). Not consumed yet.
+- **Inserts on an unfixed base**: one attempt per insert call, base re-read between attempts from a view the held
+  part does not block (`held_clear_read.py`), hover yaw ABSOLUTE (it stacked on retries: the angled insert), a bar
+  wedged near its seat is held, released and finished by the seat check, roll -> FMB1 edge press, depth seat check
+  (close, tilted - glare) confirms every part.
+- **Safety**: wrist_3 wound to 6.30 rad over the day (two protective stops, camera cable a full turn): `move_cartesian`
+  refuses |wrist_3| > 4 rad, `unwind_wrist` runs at part starts. The external-control program can drop after a good
+  move (no safety event): `ensure_program` re-sends it, the replay/disassembly retry once.
+- **Next**: clean M2 cycles; slot read for zero-clearance channels if the fresh reads are not enough; consume the
+  fused estimator (VisionPose) in the replay; M3a.
 
 ## ⚠️ Which tree can run the real assembly
 
