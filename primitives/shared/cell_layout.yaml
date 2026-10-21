@@ -27,7 +27,9 @@ layouts:
   fmb1_parked_2026_10_21:
     assembly_region: {center: [0.459, -0.490], half: [0.120, 0.120]}
     clear_area: [-0.320, -0.500]
-    staging_region: {x: [0.24, 0.70], y: [-0.70, -0.25], view: [0.400, -0.420, 0.62]}
+    # operator 2026-10-21: x to 0.70 put line_green at (680, -420), at the reach limit and next to the grey parts at
+    # the table's far edge (not FMB1 parts, so not obstacles to the spot choice) -> far edges pulled in
+    staging_region: {x: [0.24, 0.62], y: [-0.66, -0.25], view: [0.400, -0.420, 0.62]}
     parked_region: {x: [-0.06, 0.22], y: [-0.52, -0.22]}
     base_fixed: false               # operator 2026-10-21: base1 is not fixed (the tape does not hold it)
 
