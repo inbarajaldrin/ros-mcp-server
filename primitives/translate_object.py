@@ -256,6 +256,30 @@ def _subprocess_fast_path():
                          "object_name": args.object_name,
                          "error": f"hover subprocess returned {r.returncode}"})
                 sys.exit(1)
+            # Align funnel (2026-10-21, operator: use the frames and CAD, read them, fix before contact): at the hover the
+            # camera sees the base and the held part in the same frames; their relative yaw vs the CAD seat is turned
+            # out in place until < 0.3 deg. The bookkeeping (base yaw, in-hand yaw, hover fix) left line_green 5-8 deg
+            # off its slot. Never blocks: unmeasured -> the descent goes on as before. ALIGN_AT_HOVER=0 skips it.
+            if os.environ.get('ALIGN_AT_HOVER', '1') == '1':
+                ra = subprocess.run([sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.align_at_hover',
+                                     '--object-name', args.object_name, '--base-name', args.base_name],
+                                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    capture_output=True, text=True, timeout=180)
+                for line in ra.stdout.splitlines():
+                    if line.startswith('[align]') or line.startswith('{"result"'):
+                        print(line, flush=True)
+            # The operator's view of the moment before contact (2026-10-21): HOVER_SNAPSHOT=<dir> saves a wrist-camera
+            # frame here, after the hover's yaw; STOP_AT_HOVER=1 stops before any descent.
+            if os.environ.get('HOVER_SNAPSHOT'):
+                try:
+                    subprocess.run([sys.executable, '-c', _SNAP_PY, os.environ['HOVER_SNAPSHOT'], args.object_name],
+                                   timeout=20)
+                except Exception as e:
+                    print(f"[hover snapshot] failed: {e}", flush=True)
+            if os.environ.get('STOP_AT_HOVER') == '1':
+                _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
+                         "object_name": args.object_name, "error": "stopped at hover (STOP_AT_HOVER)"})
+                sys.exit(1)
             # Step 2: run prismatic_peg_insertion (stash primitive)
             prism_argv = [
                 sys.executable, '-u', '-m',
@@ -384,6 +408,23 @@ def _subprocess_fast_path():
             rj.setdefault("base_name", args.base_name)
         _output(rj)
         sys.exit(0 if rc == 0 and rj.get("result") == "success" else 1)
+
+
+_SNAP_PY = r"""
+import sys, time, os, rclpy, numpy as np, cv2
+from sensor_msgs.msg import Image
+out_dir, name = sys.argv[1], sys.argv[2]; os.makedirs(out_dir, exist_ok=True)
+rclpy.init(); n = rclpy.create_node('hover_snapshot'); g = {}
+time.sleep(1.0)                                                   # still arm: let the frame settle
+n.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: g.__setitem__('c', m), 1)
+t = time.time()
+while 'c' not in g and time.time() - t < 8: rclpy.spin_once(n, timeout_sec=0.1)
+if 'c' in g:
+    m = g['c']; a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, -1)
+    if m.encoding == 'rgb8': a = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+    p = os.path.join(out_dir, f"hover_{name}_{time.strftime('%Y%m%d_%H%M%S')}.jpg"); cv2.imwrite(p, a); print('[hover snapshot]', p, flush=True)
+n.destroy_node(); rclpy.shutdown()
+"""
 
 
 if __name__ == '__main__':
@@ -1145,6 +1186,10 @@ class TranslateObject(Node):
         # against the slot the opposite way to the base (operator saw it). Flange yaw = cardinal + base yaw - offset.
         held_off_deg = float(os.environ.get('HELD_YAW_OFFSET_DEG', '0') or 0.0)
         yaw_fix_deg = ((base_yaw_deg - wrist_dev_deg - held_off_deg) + 45.0) % 90.0 - 45.0
+        # 2026-10-21 test: the operator saw the bar turned against the slot the other way; at the hover a +3 deg world-z
+        # wrist turn brought base1's markers 3 deg TOWARD the bar in the image while the hover had applied -3.19:
+        # HOVER_YAW_SIGN=-1 applies the correction mirrored, to confirm before the term with the flip is traced
+        yaw_fix_deg *= float(os.environ.get('HOVER_YAW_SIGN', '1') or 1.0)
         r_chain = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
         if HOVER_YAW_FIX and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
             R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
