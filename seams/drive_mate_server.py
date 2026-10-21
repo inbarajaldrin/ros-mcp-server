@@ -121,8 +121,13 @@ def outcome_from_meta(mp):
     rows = [x for x in csv.DictReader(open(csv_path)) if x.get('tcp_z') not in ('', 'nan', None)]
     # the prismatic stash writes predicted_seat_xyz; the compliant FSM writes cad_prediction.predicted_tcp_at_seat
     seat = m.get('predicted_seat_xyz') or ((m.get('cad_prediction') or {}).get('predicted_tcp_at_seat') or {}).get('xyz_m')
-    if not rows or not seat:
+    if not seat:
         return {'stage_reached': 'no_trace', 'trace_path': csv_path}
+    if not rows:
+        # the insert's quickest success (straight to the seat on the trajectory) writes its meta but no CSV rows: the
+        # resting TCP decides (2026-10-21: line_green +2.3 mm, 0.3 mm in xy, reported no_trace)
+        return {'stage_reached': 'no_trace', 'trace_path': csv_path, 'seat_xyz': [float(v) for v in seat],
+                'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
     P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
     tgt = np.array(seat, float)
     end = P[-1]; d = end - tgt; still = float(np.ptp(P[:, 2])) < 0.001
