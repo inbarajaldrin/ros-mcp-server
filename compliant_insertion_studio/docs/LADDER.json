@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 00:20",
+ "updated": "2026-10-21 10:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -29,6 +29,12 @@
      "title": "Drive-mate action + lab surface",
      "status": "active",
      "note": "FMB1 4/4 certified placed=true by ExecuteMate in one journal episode (seat errors vs the graph: -0.11 / -0.42 / -0.57 / +0.42 mm), every insert by drive-mate - but across resumed runs and one direct drive-mate insert. CLEARS AT: one uninterrupted FMB1 run with SEAMS_DRIVE=1 SEAMS_CERTIFY=1. Lessons: yellow keeps its tuned CAD seat (a CAD \"fix\" broke its insert); certification uses the graph's declared seats; servers re-read config per goal"
+    },
+    {
+     "id": "UNI",
+     "title": "One insertion primitive (no part names)",
+     "status": "next",
+     "note": "today: translate_object.py:231 routes by a part-name list to two primitives (compliant_insert FSM for the U parts, prismatic_peg_insertion for lines/forks/yellow) + per-part seat-z offsets. Target: one primitive, stages + strategy (pocket search vs guarded channel descent) from CAD (insert_stages.py), seat from CAD / the graph, residuals measured by drive-mate. Gate: FMB1 4/4 + FMB3 4/4 at today's numbers, then remove the old paths"
     },
     {
      "id": "M4",
