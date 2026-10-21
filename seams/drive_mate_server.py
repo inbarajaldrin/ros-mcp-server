@@ -207,6 +207,9 @@ class DriveMateServer(Node):
                                                                     tp.orientation.z, tp.orientation.w)]]
         env = os.environ.copy()
         env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'; env['ROS_MCP_MODE'] = 'real'
+        # one attempt per goal, a wedged bar held where it stopped: retries and recoveries are the caller's (the
+        # replay sets the same two at import)
+        env['PRISMATIC_MAX_RETRIES'] = '1'; env['PRISMATIC_HOLD_IF_WEDGED'] = '1'
         env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
         self.get_logger().info(f'{g.mate_id}: {obj} into {base}, grasp {gid} at depth {1000 * depth:.1f} mm '
                                f'({1000 * off:.1f} mm off axis)')

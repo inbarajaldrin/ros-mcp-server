@@ -1503,6 +1503,58 @@ def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
         return 0.0, 0.0, 0.0
 
 
+def _seam_call(args_, timeout_s):
+    p = subprocess.run(['python3', '-u', '-m', 'seams.client', *args_], capture_output=True, text=True,
+                       timeout=timeout_s, env=make_env(), cwd=str(REPO_ROOT))
+    line = next((l for l in reversed(p.stdout.splitlines()) if l.startswith('__SEAM__ ')), None)
+    return json.loads(line[len('__SEAM__ '):]) if line else {'error': (p.stderr.strip().splitlines() or ['no answer'])[-1]}
+
+
+def insert_via_drive_mate(obj, base, argv, snap, say):
+    """SEAMS_DRIVE=1 (M3a): the insert through /ur5e/drive_mate instead of translate_object directly. Same target and
+    grasp the direct call would use, expressed in the seam's terms: target = the base pose the insert aims at (aim
+    corrections already applied, the per-part seat z removed - the server adds it), held = the part in the flange
+    frame (grasp id + grasp depth ride in it). Result mapped back to the replay's dict."""
+    from seams.client import mate_for
+    from seams.drive_mate_server import held_pose
+    from primitives.shared.config import get_object_base_offset_m, held_tool_offset
+
+    def after(flag, n):
+        i = argv.index(flag); return [float(v) for v in argv[i + 1:i + 1 + n]]
+    mate = mate_for(obj, base)
+    tq = (snap.get('tcp') or {}).get('quat_xyzw')
+    if mate is None or tq is None:
+        return {'result': 'failure', 'error': f'drive_mate: no mate for {obj} on {base}' if mate is None else 'no TCP'}
+    pos = after('--final-base-pos', 3); q = after('--final-base-orientation', 4)
+    pos[2] -= float(get_object_base_offset_m(obj)[2])
+    gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
+    hp, hq = held_pose(obj, gid, held_q, tq, float(np.asarray(held_tool_offset())[2]))
+    say(f"  [drive_mate] {mate}: target ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}")
+    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 700)
+    say(f"  [drive_mate] {mate}: {json.dumps(out)}")
+    ok = bool(out.get('seated'))
+    return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
+                error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
+
+
+def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
+    """SEAMS_CERTIFY=1 (M3a): after a part is done, fly the seat view and ask /ur5e/execute_mate. Log-only until FMB1
+    proves it: the replay's own verification still decides."""
+    from seams.client import mate_for
+    import seat_check as _sc
+    mate = mate_for(obj, base)
+    if mate is None or observed_base is None:
+        return None
+    r = run_subprocess(_sc.view_pose(obj, observed_base, base), label=f'execute_mate: seat view ({obj})', timeout_s=90,
+                       log_fh=log_fh)
+    if r.get('result') == 'failure':
+        say(f"  [execute_mate] {mate}: seat view not reached - not asked"); return None
+    out = _seam_call(['execute', '--mate', mate], 450)
+    say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
+        f"{out.get('refusal_detail', '')} depth={out.get('engagement_depth_m')}")
+    return out
+
+
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                base_offset_xy: Optional[Tuple[float, float]] = None,
                observed_base=None) -> Tuple[list[str], int]:
@@ -2166,7 +2218,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 f"(< {ROTATE_SKIP_DEG:g} deg) - running it for its snapped orientation")
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
-        result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
+        if tool_name == 'translate_object' and kw.get('action') == 'insert' and os.environ.get('SEAMS_DRIVE') == '1':
+            result = insert_via_drive_mate(obj, base_name or RUN_BASE['name'], argv, snap_before, say)
+        else:
+            result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
         state.update_from_result(tool_name, result)
         snap_after = snapshot_robot_state()
         _record_snapshot(snap_fh, "after", label, snap_after)
@@ -2514,6 +2569,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if not seat_check_and_reseat(obj, state, args, say):
             return False
 
+    if os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
+        certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None), say, log_fh)
     print(f"\n  ✓ {obj} complete")
     return True
 
