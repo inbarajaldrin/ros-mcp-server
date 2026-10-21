@@ -1682,6 +1682,49 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     return out
 
 
+DEPTH_VIEW_ZS = (0.52, 0.45)         # flange heights for the pre-pick depth read (the D415 returns no depth < ~0.45 m)
+DEPTH_PICK_MAX_MOVE_M = 0.03         # a fit this far from its marker seed is not trusted
+
+
+def depth_pick_target(obj, gid, say=print, log_fh=None):
+    """The grasp point to pick `obj` at, from its CAD fitted to depth in a view straight above it (operator
+    2026-10-21: "rely on depth to find the issue and fix perception"). From 0.45 m a depth fit of line_green
+    repeated to 0.2 mm and agreed with its high marker read (2 mm) and where it had been set down (3 mm); the
+    marker read move_to_grasp took from its low hover (no depth there) was 9-10 mm off and a finger landed on the
+    bar (87 N). Returns ((x, y, z) grasp point, object quat) or None (move_to_grasp reads markers as before)."""
+    tr = tracked(obj) or (LAST_SEEN_XY.get(obj) and (*LAST_SEEN_XY[obj], 0.0))
+    if not tr:
+        say(f"  [depth-pick] {obj}: no last sighting to look above - markers as before"); return None
+    ok = False
+    for vz in DEPTH_VIEW_ZS:
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                            f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{vz:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                            '--min-z', '0.15'], label=f'depth-pick view above {obj} at {vz:.2f} m', timeout_s=90,
+                           log_fh=log_fh)
+        if r.get('result') != 'failure':
+            ok = True; break
+    if not ok:
+        say(f"  [depth-pick] {obj}: no reachable view above it - markers as before"); return None
+    try:
+        from part_depth import read as _read
+        pose, info = _read(obj)
+    except Exception as e:
+        pose, info = None, {'error': str(e)}
+    say(f"  [depth-pick] {obj}: {json.dumps(info)}")
+    if pose is None:
+        return None
+    if np.hypot(*info.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M:
+        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm from the marker seed - not trusted"); return None
+    import json as _j
+    from primitives.shared.config import _GRASP_POINTS_DIR
+    g = next(g_ for g_ in _j.load(open(f'{_GRASP_POINTS_DIR}/{obj}_grasp_points.json'))['grasp_points'] if g_['id'] == gid)
+    (p, q) = pose
+    gp = np.asarray(p) + R_.from_quat(q).apply([g['position'][k] for k in 'xyz'])
+    LAST_SEEN_XY[obj] = (float(p[0]), float(p[1]))
+    say(f"  [depth-pick] {obj}: grasp {gid} at ({1000*gp[0]:.1f}, {1000*gp[1]:.1f}, {1000*gp[2]:.1f}) mm from the depth fit")
+    return tuple(float(v) for v in gp), tuple(float(v) for v in q)
+
+
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                base_offset_xy: Optional[Tuple[float, float]] = None,
                observed_base=None) -> Tuple[list[str], int]:
@@ -2346,6 +2389,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             except Exception:
                 pass
             argv += ['--pre-grasp-width', f"{w_:g}"]
+        if tool_name == 'move_to_grasp' and os.environ.get('PICK_FROM', 'depth') == 'depth' and not args.dry_run:
+            tgt = depth_pick_target(obj, int(kw.get('grasp_id', state.last_grasp_id or 1)), say, log_fh)
+            if tgt is not None:
+                argv += ['--target-xyz', *[f"{v:.5f}" for v in tgt[0]], '--target-xyzw', *[f"{v:.6f}" for v in tgt[1]]]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
         if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
             # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation and
