@@ -13,9 +13,20 @@
 # Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
 # only the clear area. Add a layout instead of editing one that a past run used.
 
-active: center_2026_10_20
+active: fmb1_parked_2026_10_21
 
 layouts:
+
+  # 2026-10-21: FMB1 assembled where it was parked, FMB3 (seated) left under home. Every number measured from the
+  # camera before the run: base1 (taped) at (0.459, -0.490); its parts loose around it - u_brown (0.327, -0.605),
+  # inverted_u_yellow (0.332, -0.338), u_orange (0.590, -0.341), line_green (0.603, -0.588), all reachable top-down
+  # (IK elbow >= 0.68 rad at line_green); the staging view below sees all five 29-30/30; base3 at (0.07..0.10, -0.37)
+  # with its parts = the parked region; the taped clear area seen empty.
+  fmb1_parked_2026_10_21:
+    assembly_region: {center: [0.459, -0.490], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.24, 0.70], y: [-0.70, -0.25], view: [0.400, -0.420, 0.62]}
+    parked_region: {x: [-0.06, 0.22], y: [-0.52, -0.22]}
 
   # 2026-10-20 (operator): FMB1's original arrangement, any assembly. The base under home (base3 read at
   # (-0.005, -0.488) from home), its parts around it, the clear area empty (black tape), base1 and the
