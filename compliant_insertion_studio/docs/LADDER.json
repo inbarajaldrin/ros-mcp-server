@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 18:20",
+ "updated": "2026-10-20 19:30",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -69,7 +69,7 @@
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
      "status": "active",
-     "note": "cycles 1-3 done 4/4 (base slid 35 mm, turned -5 deg by the arm); not yet clean. Fixed today: hover yaw stacking on retries, roll -> FMB1 edge press, wedge hold, fresh base reads between attempts, wrist_3 wind-up guard. After the fixes: 3 first-attempt inserts in a row. Next: cycle 4 as the clean test"
+     "note": "cycles 1-4 done 4/4, none clean. Cycle 4 added: program-drop recovery, CAD-fit read limits, aim by interlocked seated parts (fork_yellow first attempt). Cycle 5 = first with every fix from the start"
     }
    ]
   },
