@@ -132,14 +132,21 @@ def mean_quat_fold_aware(name, quats):
     m = Q.mean(axis=0); return m / np.linalg.norm(m)
 
 
-def observe_parts(names, timeout_s=8.0):
-    """{name: ((x, y, z), quat)} for the parts the camera sees now (median of samples)."""
-    from replay_real_assembly import observe_object_orientation
-    out = {}
+def observe_parts(names, timeout_s=8.0, with_raw=False):
+    """{name: ((x, y, z), quat)} for the parts the camera sees now (median of samples). One still-camera window for
+    all names (Speed T1, 2026-10-21; was one window per name, each absent name waiting out its timeout). with_raw:
+    also return {name: median pose} for names that are not parts (bases), without the part clustering."""
+    from replay_real_assembly import observe_many
+    allS = observe_many(list(names), timeout_s, n_samples=12)
+    out, raw = {}, {}
     for n in names:
-        obs = observe_object_orientation(n, timeout_s, n_samples=12)
-        S = obs.get('samples') or []
-        if obs.get('error') or not S:
+        S = allS.get(n) or []
+        if not S:
+            continue
+        if n.startswith('base'):
+            P = np.median(np.array([x['xyz'] for x in S]), axis=0)
+            Q = np.array([x['quat_xyzw'] for x in S]); Q *= np.sign(Q @ Q[0])[:, None]; q = Q.mean(0); q /= np.linalg.norm(q)
+            raw[n] = (tuple(P), tuple(q))
             continue
         # The localizer can alternate between two poses for one part (a half-hidden second marker:
         # yellow read at (293, -503) and (202, -517) in the same second, 2026-10-17); a median of
@@ -167,7 +174,7 @@ def observe_parts(names, timeout_s=8.0):
         if len(cands) > 1 and np.linalg.norm(np.subtract(cands[0][0][:2], cands[1][0][:2])) > AMBIG_MM / 1000:
             cands = [_depth_pick(n, cands)]             # readings disagree: let depth say which is real
         out[n] = cands[0]
-    return out
+    return (out, raw) if with_raw else out
 
 
 _DEPTH = {}

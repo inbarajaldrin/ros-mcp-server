@@ -158,6 +158,7 @@ def certify_many(mates):
                 z_err = r['height_err_mm'] / 1000.0
                 tilt = abs(r['pitch_deg']) if r.get('pitch_deg') is not None else math.nan
         rr.RUN_BASE['name'] = base
+        rr.VERIFY_MAX_READS = 1          # xy is reported, not judged: one marker read (Speed T1; up to 8 cost ~10 s)
         v = rr._read_part(obj)
         ex = ey = math.nan
         if not rr._not_detected(v) and isinstance(v.get('position_error_m'), dict):

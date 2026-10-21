@@ -358,6 +358,58 @@ rclpy.shutdown()
 """
 
 
+_OBSERVE_MANY_HELPER = r"""
+import json, sys, time, rclpy
+from tf2_msgs.msg import TFMessage
+from geometry_msgs.msg import PoseStamped
+want = set(sys.argv[1].split(',')); deadline_s = float(sys.argv[2]); n_want = int(sys.argv[3])
+SETTLE_S = float(sys.argv[4]) if len(sys.argv) > 4 else 2.0
+STILL_WINDOW_S = 0.8
+rclpy.init(); n = rclpy.create_node('replay_observe_many')
+samples = {}; pending = []; tcp = []; last_new = [time.time()]
+def cb(msg):
+    for t in msg.transforms:
+        if t.child_frame_id in want:
+            q = t.transform.rotation; p = t.transform.translation
+            pending.append((time.time(), t.child_frame_id, {'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]}))
+def on_tcp(m):
+    tcp.append((time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z)); del tcp[:-3000]
+def settle():
+    keep = []
+    for t_pub, name, smp in pending:
+        if not tcp or tcp[-1][0] < t_pub:
+            keep.append((t_pub, name, smp)); continue
+        win = [c for c in tcp if t_pub - STILL_WINDOW_S <= c[0] <= t_pub]
+        if len(win) >= 10 and max(((c[1]-win[-1][1])**2 + (c[2]-win[-1][2])**2 + (c[3]-win[-1][3])**2) ** 0.5 for c in win) <= 0.0005:
+            if name not in samples:
+                last_new[0] = time.time()
+            samples.setdefault(name, []).append(smp)
+    pending[:] = keep
+n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
+n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 100)
+t0 = time.time(); deadline = t0 + deadline_s
+while time.time() < deadline:
+    rclpy.spin_once(n, timeout_sec=0.02); settle()
+    full = [k for k in samples if len(samples[k]) >= n_want]
+    # done when every name seen so far has its samples and no new name has appeared for SETTLE_S
+    if samples and len(full) == len(samples) and time.time() - last_new[0] >= SETTLE_S:
+        break
+print(json.dumps({'samples': samples, 'waited_s': round(time.time() - t0, 2)}))
+n.destroy_node(); rclpy.shutdown()
+"""
+
+
+def observe_many(names, timeout_s=8.0, n_samples=12, settle_s=2.0) -> dict:
+    """{name: [samples]} for every name the camera sees now, from ONE still-camera window (Speed T1, 2026-10-21:
+    names observed one by one each waited out their own timeout when not in view - 8 s per absent part)."""
+    try:
+        proc = subprocess.run(['python3', '-c', _OBSERVE_MANY_HELPER, ','.join(names), str(timeout_s), str(n_samples),
+                               str(settle_s)], capture_output=True, text=True, timeout=timeout_s + 15, env=make_env())
+        return json.loads(proc.stdout.strip().splitlines()[-1]).get('samples', {})
+    except Exception:
+        return {}
+
+
 def observe_object_orientation(object_name: str, timeout_s: float = 30.0, n_samples: int = 3) -> dict:
     """Observe a part's resting pose on /objects_poses_real. Waits rather than sampling
     once: the localizer goes quiet while the arm moves, so absence of a detection means
@@ -380,6 +432,8 @@ LAST_BASE_POSE = REPO_ROOT / 'ablations/logs/last_base_pose.json'
 
 
 def _save_base_pose(base_name, ob):
+    if base_name == RUN_BASE.get('name'):
+        RUN_BASE['pose'] = ob                     # the applied read: picks reuse it (Speed T1)
     try:
         d = json.load(open(LAST_BASE_POSE)) if LAST_BASE_POSE.exists() else {}
         d[base_name] = [list(map(float, ob[0])), list(map(float, ob[1])), time.time()]
@@ -584,7 +638,7 @@ def _finger_clearance_mm(obj, pose, gid, open_mm, obstacles):
     return own, other
 
 
-def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
+def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
     """True when `obj` can be picked with grasp `gid` where it lies — choosing the pre-grasp opening for
     the stance it lies in (PICK_OPENING_MM): the recorded one or wider, whichever keeps the open fingers
     farthest from the part's own material and from base1 / the other parts. If no opening keeps them
@@ -592,19 +646,25 @@ def _pick_room(obj, gid, width_mm, log_fh=None) -> bool:
     on success; False only when the part is not seen or the relocation fails."""
     try:
         from spacing_check import observe_parts, PARTS, base_outline, outline
-        seen = observe_parts(PARTS)
-        ob = observe_base_pose(RUN_BASE['name'])
+        # Speed T1 (2026-10-21): every part AND every other base from one still window; the run's base from its
+        # applied read (it was re-observed by markers per pick: 11 reads, 64 s in one FMB1 run) and the layout's
+        # parked region as an obstacle (base2/3/4 were probed one by one, 25 s)
+        others = [b for b in ('base1', 'base2', 'base3', 'base4') if b != RUN_BASE['name']]
+        seen, seen_bases = observe_parts(PARTS + others, with_raw=True)
+        ob = base_pose or RUN_BASE.get('pose') or observe_base_pose(RUN_BASE['name'])
         if obj not in seen or ob is None:
             return True                                   # cannot judge here; the pick's own checks apply
-        obst = [(RUN_BASE['name'], base_outline(ob, RUN_BASE['name']))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj]
-        for other in ('base1', 'base2', 'base3', 'base4'):     # another assembly's base on the table is an obstacle too
-            if other != RUN_BASE['name']:
-                ob_o = observe_base_pose(other, timeout_s=2.0)
-                if ob_o is not None:
-                    try:
-                        obst.append((other, base_outline(ob_o, other)))
-                    except Exception:
-                        pass
+        obst = [(RUN_BASE['name'], base_outline(ob, RUN_BASE['name']))] + [(n, np.asarray(outline(n, seen[n]))[:, :2]) for n in seen if n != obj and n in PARTS]
+        for other in others:                                      # another assembly's base on the table is an obstacle too
+            if other in seen_bases:
+                try:
+                    obst.append((other, base_outline(seen_bases[other], other)))
+                except Exception:
+                    pass
+        from primitives.shared.config import PARKED_REGION as _PR
+        if _PR is not None:
+            obst.append(('parked region', np.array([[_PR['x'][0], _PR['y'][0]], [_PR['x'][1], _PR['y'][0]],
+                                                    [_PR['x'][1], _PR['y'][1]], [_PR['x'][0], _PR['y'][1]]])))
         best = None
         for open_mm in np.arange(width_mm, PICK_OPEN_MAX_MM + 0.1, 4.0):
             own, other = _finger_clearance_mm(obj, seen[obj], gid, float(open_mm), obst)
@@ -2993,7 +3053,8 @@ def main() -> int:
                 # the fingers come down at the recorded PRE-GRASP opening (fmb1_assembly.json), not the grip width
                 from primitives.shared.config import get_gripper_width_mm as _ggw   # any assembly (was FMB1's file)
                 open_mm = _ggw(obj, int(gid_)) if gid_ is not None else None
-                if gid_ is not None and open_mm and not _pick_room(obj, int(gid_), float(open_mm), log_fh):
+                if gid_ is not None and open_mm and not _pick_room(obj, int(gid_), float(open_mm), log_fh,
+                                                                     base_pose=getattr(args, 'observed_base', None)):
                     failed = obj
                     break
                 if obj not in LAST_SEEN_XY and not _seen_here(obj) and not _part_view(obj, log_fh):
