@@ -1134,11 +1134,18 @@ class TranslateObject(Node):
         # to the wrist, so the base yaw, folded to +-45 deg, is the whole correction.
         # 2026-10-15: yellow 6/6 failed at cardinal yaw, seated with the ~3 deg base yaw.
         base_yaw_deg = float(np.degrees(np.arctan2(R_base_current[1, 0], R_base_current[0, 0])))
-        yaw_fix_deg = (base_yaw_deg + 45.0) % 90.0 - 45.0
+        # ABSOLUTE: the wrist's own yaw off the cardinals is taken out first. Relative to the current wrist, every
+        # re-entry added the base yaw again (2026-10-20 cycle 3: line_brown's hover wrist went -3.95, -8.51,
+        # -15.28 deg over three lift-and-retry attempts - the "angled insertion" the operator saw).
+        xf = R_fk @ np.array([1.0, 0.0, 0.0]); xd = np.array([-1.0, 0.0, 0.0])      # top-down (0,1,0,0) x axis
+        wrist_dev_deg = float(np.degrees(np.arctan2(xf[1], xf[0]) - np.arctan2(xd[1], xd[0])))
+        wrist_dev_deg = (wrist_dev_deg + 45.0) % 90.0 - 45.0
+        yaw_fix_deg = ((base_yaw_deg - wrist_dev_deg) + 45.0) % 90.0 - 45.0
         r_chain = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
         if HOVER_YAW_FIX and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
             R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
-            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw; "
+            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw {base_yaw_deg:+.2f}, "
+                                   f"wrist already {wrist_dev_deg:+.2f} off cardinal; "
                                    f"chain residual {np.degrees(r_chain[2]):+.2f} deg ignored)")
         else:
             self.get_logger().info(f"Hover yaw fix: none (base yaw {yaw_fix_deg:+.2f} deg)")
