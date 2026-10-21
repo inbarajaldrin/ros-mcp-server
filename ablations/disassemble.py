@@ -972,10 +972,13 @@ def main():
     # tips lands elsewhere (2026-10-15: line_green 7 mm from base1). Check from home, fail closed.
     from spacing_check import check as spacing, observe_parts
     from primitives.shared.config import STAGING_VIEW as _SV        # every staged part in view (not home)
-    run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in _SV],
-           '--quat', '0', '1', '0', '0'), 'staging view (check the landings)', 90)
-    time.sleep(1.5)
+    ok_v, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in _SV],
+                     '--quat', '0', '1', '0', '0'), 'staging view (check the landings)', 90)
+    if not ok_v:                       # fail closed (2026-10-20: a refused move "checked" nothing and passed)
+        print("!!! staging view move failed - landings not checked"); return 1
     seen = observe_parts(RUN['parts'])
+    if not seen:
+        print("!!! no part seen from the staging view - landings not checked"); return 1
     ok_sp, rep = spacing(seen, ob, base=RUN['base'])
     rep['unseen'] = [n for n in RUN['parts'] if n not in seen]
     print(f"[spacing] {json.dumps(rep)}", flush=True)
