@@ -1677,6 +1677,8 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     tq = getattr(STATE_REF.get('state'), 'held_tcp_quat', None) or (snap.get('tcp') or {}).get('quat_xyzw')
     if mate is None or tq is None:
         return {'result': 'failure', 'error': f'drive_mate: no mate for {obj} on {base}' if mate is None else 'no TCP'}
+    if '--final-base-pos' not in argv:            # no measured base: the seam takes a VisionPose, never a default
+        return {'result': 'failure', 'error': f'drive_mate: no observed {base} pose to aim at'}
     pos = after('--final-base-pos', 3); q = after('--final-base-orientation', 4)
     pos[2] -= float(get_object_base_offset_m(obj)[2])
     gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
@@ -3084,8 +3086,16 @@ def main() -> int:
             # over the assembly region of the cell layout (primitives/shared/cell_layout.yaml), wherever
             # the run's base is: DEFAULT_BASE_POSITION is base1's calibration spot
             from primitives.shared.config import ASSEMBLY_REGION_CENTER as _ARC, CELL_LAYOUT_NAME as _LN
+            from primitives.shared.config import ASSEMBLY_REGION_HALF as _ARH
             _lb = _last_base_pose(bname)          # over the base where it was last read (it moves: 9 cm off the
             _bx, _by = (_lb[0][0], _lb[0][1]) if _lb is not None else _ARC     # region centre left it half out of view)
+            if abs(_bx - _ARC[0]) > _ARH[0] or abs(_by - _ARC[1]) > _ARH[1]:
+                # the last read is outside this layout's assembly region: the base was moved (operator reset
+                # 2026-10-21 16:15 - the view went to the old spot, the depth fit latched onto the parts lying there)
+                _bx, _by = _ARC
+            _tb = tracked(bname, TRACKER_TRUST_S)  # a recent still sighting from any view is where it is now
+            if _tb is not None:
+                _bx, _by = _tb[0], _tb[1]
             msg = f"  [layout] {_LN}: base view over the assembly region ({_bx:.3f}, {_by:.3f})"
             print(msg, flush=True)
             if log_fh: log_fh.write(msg + "\n")
