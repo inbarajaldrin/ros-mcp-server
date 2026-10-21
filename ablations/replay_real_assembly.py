@@ -311,26 +311,46 @@ def staging_single_pass_ok(obj: str, base_name: str, observed_quat):
 _OBSERVE_ORIENTATION_HELPER = r"""
 import json, sys, time, rclpy
 from tf2_msgs.msg import TFMessage
+from geometry_msgs.msg import PoseStamped
 
 want = sys.argv[1]
 deadline_s = float(sys.argv[2])
 want_samples = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+STILL_WINDOW_S = 0.8     # a pose counts only if the TCP did not move (> 0.5 mm) in this window before it was
+                         # published: the localizer stamps at publish, frames arrive 150-650 ms late (depth_timing
+                         # 2026-10-20) and poses from frames taken while moving are ~10 mm off
 
 rclpy.init()
 n = rclpy.create_node('replay_observe_orientation')
-samples = []
+samples = []; pending = []; tcp = []
 
 def cb(msg):
     for t in msg.transforms:
         if t.child_frame_id == want:
             q = t.transform.rotation
             p = t.transform.translation
-            samples.append({'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]})
+            pending.append((time.time(), {'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]}))
+
+def on_tcp(m):
+    tcp.append((time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z))
+    del tcp[:-3000]
+
+def settle():
+    keep = []
+    for t_pub, smp in pending:
+        if not tcp or tcp[-1][0] < t_pub:                 # TCP history must cover the publish time
+            keep.append((t_pub, smp)); continue
+        win = [c for c in tcp if t_pub - STILL_WINDOW_S <= c[0] <= t_pub]
+        if len(win) >= 10 and max(((c[1]-win[-1][1])**2 + (c[2]-win[-1][2])**2 + (c[3]-win[-1][3])**2) ** 0.5 for c in win) <= 0.0005:
+            samples.append(smp)
+    pending[:] = keep
 
 n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
+n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 100)
 deadline = time.time() + deadline_s
 while time.time() < deadline and len(samples) < want_samples:
-    rclpy.spin_once(n, timeout_sec=0.1)
+    rclpy.spin_once(n, timeout_sec=0.02)
+    settle()
 print(json.dumps({'object': want, 'samples': samples,
                   'waited_s': round(deadline_s - (deadline - time.time()), 2)}))
 n.destroy_node()
