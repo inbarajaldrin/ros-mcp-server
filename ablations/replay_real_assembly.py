@@ -2248,6 +2248,11 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     nb = reread_base(args_base_name(args), getattr(args, 'observed_base', None), log_fh)
                     if nb is not None:
                         args.observed_base = nb
+                    # back over the part we just set down - the re-read took the camera to the base, and the regrasp
+                    # then waited for a part out of view (2026-10-20: line_brown sat at the clear area all along)
+                    run_subprocess(['python3', '-u', '-m', 'primitives.core.move_to_clear_area', '--mode', 'real'],
+                                   label='back over the set-down part', timeout_s=90, log_fh=log_fh)
+                    _seen_here(obj, 10.0)                   # frames from after the arm stopped (still-frame rule)
                     continue
                 r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
                 if t_ == 'translate_object' and r_ is not None and r_.get('result') == 'failure':
