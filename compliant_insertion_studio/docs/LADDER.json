@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 04:20",
+ "updated": "2026-10-21 05:05",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -41,6 +41,41 @@
      "title": "RL driver",
      "status": "next",
      "note": "admittance servo, Isaac ROS policy behind the same action"
+    }
+   ]
+  },
+  {
+   "name": "Speed",
+   "rungs": [
+    {
+     "id": "T0",
+     "title": "Cycle time measured, not guessed",
+     "status": "active",
+     "note": "stamp every replay block (start/end/motion) + ablations/cycle_time.py: per part wall / arm-moving / dead time, per block. Coarse baseline from the 10-21 FMB1 seam run: startup 48 s (8 s moving), base read 24 s (9 s), home -> first pick 92 s (5 s), 3-4.5 s dead before every primitive"
+    },
+    {
+     "id": "T1",
+     "title": "Read once, no needless trips",
+     "status": "next",
+     "note": "run base + obstacles from the startup read and the layout (no re-probing base2/3/4 per pick), view-to-view without home stops, certify from the seat-check view"
+    },
+    {
+     "id": "T2",
+     "title": "No process start per step",
+     "status": "next",
+     "note": "long-lived worker: one ROS node, primitives run in it (the 3-4.5 s per-step dead time)"
+    },
+    {
+     "id": "T3",
+     "title": "Move floors by distance",
+     "status": "next",
+     "note": "2.5 s floor for mm moves -> joint-distance durations with a lower floor; tested with nothing gripped first"
+    },
+    {
+     "id": "TGOAL",
+     "title": "FMB1 wall time halved, same success",
+     "status": "next",
+     "note": "CLEARS AT: a full FMB1 run (4/4 seated, verified) whose cycle_time.py wall time is <= 50% of the instrumented baseline, dead time <= 1 s per primitive"
     }
    ]
   },
