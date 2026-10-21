@@ -56,3 +56,23 @@ planner layer and in the experiments that populate sigmas.
 
 Ownership: everything above is built here. pose6d (the localizer distillation) ports in behind the VisionPose
 contract when it is ready, the same way the twin planner ports in behind the ROS surface.
+
+## M3a as built (2026-10-21)
+
+All in `seams/`; interfaces in `~/Desktop/ros2_ws/src/pa_msgs/` (`pa_gripper_msgs`, `pa_assembly_msgs` copied
+unchanged from prompt2assembly; `fmb_seam_msgs` ours: `VisionPose`, `DriveMate`, `GetVisionPose`, `CertifySeat`).
+
+| surface | server | what it wraps / decides |
+| --- | --- | --- |
+| `/ur5e/rg2/grip` (Grip) | `grip_adapter.py` | `primitives.control_gripper`; widths read back; force = stub (RG2 runs at the driver's 40 N; the driver can take a force, `rg_gripper.py` passes none) |
+| `/vision/get_pose`, `/vision/certify_seat` | `vision_server.py` -> `vision_ops.py` | no motion; still-TCP marker samples, the 6-dof base CAD fit, the depth seat check; sigma from the read's own spread or a measured test, else refused |
+| `/objects/poses` | `vision_server.py` | relay of `/objects_poses_real` |
+| `/ur5e/drive_mate` (DriveMate) | `drive_mate_server.py` | today's insert, one attempt; grasp id + depth read off `held` (part in tool0); seated / stage / slide from the raw trace |
+| `/ur5e/execute_mate` (ExecuteMate) | `execute_mate_server.py` | resolve, order gate (journal), predecessors re-read now, free-mate at-rest, seat via vision; journals every call |
+
+`bindings.yaml` maps the graph's mates to this table (FMB1 from the prompt2assembly graph; no FMB3 graph exists
+there). The replay is the reference planner: `SEAMS_DRIVE=1` sends its inserts through drive-mate, `SEAMS_CERTIFY=1`
+asks ExecuteMate from the seat view after each part (log-only until proven). Recorded debt: the insert still routes
+by part name and adds a per-part seat z; a predecessor the camera cannot see (line_green under yellow) is carried on
+its journalled certification instead of `engagement_invalid`; certification judges z + long-axis tilt only (marker
+xy has no stated sigma; roll has a known -3 deg bias on seated bars).

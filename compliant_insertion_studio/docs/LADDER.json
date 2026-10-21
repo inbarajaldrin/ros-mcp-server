@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 20:25",
+ "updated": "2026-10-21 04:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -21,14 +21,14 @@
     {
      "id": "M2",
      "title": "Base free + measured errors",
-     "status": "active",
-     "note": "CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8"
+     "status": "next",
+     "note": "PAUSED by the operator 10-20 (M3a first, on FMB1). CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8"
     },
     {
      "id": "M3a",
      "title": "Drive-mate action + lab surface",
-     "status": "next",
-     "note": "classical FSM behind /ur5e/drive_mate; Grip adapter; ExecuteMate certifying from vision"
+     "status": "active",
+     "note": "servers built + refusals tested with no motion: /ur5e/drive_mate (today's insert; grasp + depth from the held pose; seated from the raw trace, 38/40 agree with the FSM), /ur5e/execute_mate (order gate, predecessors re-read, at-rest, seat via vision), /vision/get_pose + /vision/certify_seat, /objects/poses, /ur5e/rg2/grip (force = stub). CLEARS AT: FMB1 4/4 with SEAMS_DRIVE=1 SEAMS_CERTIFY=1, every part placed=true. Needs FMB1 on the table (parked + disassembled now) and light"
     },
     {
      "id": "M4",
@@ -68,8 +68,8 @@
     {
      "id": "LOOP3",
      "title": "FMB3 disassemble + reassemble loop",
-     "status": "active",
-     "note": "cycles 1-4 done 4/4, none clean. Cycle 4 added: program-drop recovery, CAD-fit read limits, aim by interlocked seated parts (fork_yellow first attempt). Cycle 5 = first with every fix from the start"
+     "status": "next",
+     "note": "paused 10-20 for M3a (FMB3 fully seated). cycles 1-4 done 4/4, none clean. Cycle 4 added: program-drop recovery, CAD-fit read limits, aim by interlocked seated parts (fork_yellow first attempt). Cycle 5 = first with every fix from the start"
     }
    ]
   },
