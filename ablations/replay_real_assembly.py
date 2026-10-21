@@ -717,6 +717,7 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
 
 
 TRACKER_JSON = REPO_ROOT / 'ablations' / 'logs' / 'part_tracker.json'
+STATE_REF = {}                      # the current AssemblyState, for helpers outside replay_object
 TRACKER_MAX_AGE_S = 1800.0
 TRACKER_TRUST_S = 900.0          # a sighting this recent is where the part is when no view here sees it
 PART_VIEW_Z_FALLBACKS = (0.45, 0.38)
@@ -1116,6 +1117,9 @@ def held_yaw_calibration(obj, state, say, log_fh=None, observed_base=None, lift_
         f"(tilt part {np.degrees(np.hypot(rv[0], rv[1])):.1f} deg)")
     if not (HELD_YAW_MIN_DEG <= abs(err_deg) <= HELD_YAW_MAX_DEG):
         return
+    # the measured in-hand yaw goes to the insert's hover (a wrist turn here is undone by the hover's absolute yaw)
+    state.held_yaw_offset = float(err_deg)
+    say(f"  [held-yaw] {obj}: in-hand yaw {err_deg:+.2f} deg -> the insert's hover takes it out")
     if not HELD_YAW_APPLY:
         say(f"  [held-yaw] {obj}: read only (HELD_YAW_APPLY off) - no turn")
         return
@@ -1401,8 +1405,11 @@ class AssemblyState:
         self.held_quat: Optional[Tuple[float, float, float, float]] = None
         self.last_grasp_id: Optional[int] = None  # carried from move_to_grasp
         self.last_grasp_object: Optional[str] = None
+        self.held_yaw_offset: float = 0.0         # measured in-hand yaw of the held part (held read), deg; 0 = square
 
     def update_from_result(self, tool_name: str, result: dict) -> None:
+        if tool_name == 'move_to_grasp':
+            self.held_yaw_offset = 0.0           # a new grasp: its in-hand yaw is unknown until read
         if not isinstance(result, dict):
             return
         # rotate_object emits final_object_orientation.quat (preferred when present)
@@ -1642,6 +1649,9 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     pos = after('--final-base-pos', 3); q = after('--final-base-orientation', 4)
     pos[2] -= float(get_object_base_offset_m(obj)[2])
     gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
+    off_ = float(getattr(STATE_REF.get('state'), 'held_yaw_offset', 0.0) or 0.0)
+    if off_:
+        held_q = list((R_.from_euler('z', off_, degrees=True) * R_.from_quat(held_q)).as_quat())   # the measured part
     hp, hq = held_pose(obj, gid, held_q, tq, float(np.asarray(held_tool_offset())[2]))
     say(f"  [drive_mate] {mate}: target ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}")
     out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 700)
@@ -2407,8 +2417,15 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 f"(< {ROTATE_SKIP_DEG:g} deg) - running it for its snapped orientation")
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
+        STATE_REF['state'] = state
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and os.environ.get('SEAMS_DRIVE') == '1':
             result = insert_via_drive_mate(obj, base_name or RUN_BASE['name'], argv, snap_before, say)
+        elif tool_name == 'translate_object' and kw.get('action') == 'insert' and getattr(state, 'held_yaw_offset', 0.0):
+            os.environ['HELD_YAW_OFFSET_DEG'] = f"{state.held_yaw_offset:.3f}"
+            try:
+                result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
+            finally:
+                os.environ.pop('HELD_YAW_OFFSET_DEG', None)
         else:
             result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
         state.update_from_result(tool_name, result)

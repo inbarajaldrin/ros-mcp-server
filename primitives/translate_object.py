@@ -1140,11 +1140,15 @@ class TranslateObject(Node):
         xf = R_fk @ np.array([1.0, 0.0, 0.0]); xd = np.array([-1.0, 0.0, 0.0])      # top-down (0,1,0,0) x axis
         wrist_dev_deg = float(np.degrees(np.arctan2(xf[1], xf[0]) - np.arctan2(xd[1], xd[0])))
         wrist_dev_deg = (wrist_dev_deg + 45.0) % 90.0 - 45.0
-        yaw_fix_deg = ((base_yaw_deg - wrist_dev_deg) + 45.0) % 90.0 - 45.0
+        # The part's own yaw in the jaws (measured, world z; HELD_YAW_OFFSET_DEG from the held read / drive-mate's held
+        # pose): the jaws do not square it - line_green sat +1.64 deg in them (depth, 2026-10-21) and went in turned
+        # against the slot the opposite way to the base (operator saw it). Flange yaw = cardinal + base yaw - offset.
+        held_off_deg = float(os.environ.get('HELD_YAW_OFFSET_DEG', '0') or 0.0)
+        yaw_fix_deg = ((base_yaw_deg - wrist_dev_deg - held_off_deg) + 45.0) % 90.0 - 45.0
         r_chain = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
         if HOVER_YAW_FIX and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
             R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
-            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw {base_yaw_deg:+.2f}, "
+            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw {base_yaw_deg:+.2f}, held {held_off_deg:+.2f}, "
                                    f"wrist already {wrist_dev_deg:+.2f} off cardinal; "
                                    f"chain residual {np.degrees(r_chain[2]):+.2f} deg ignored)")
         else:
