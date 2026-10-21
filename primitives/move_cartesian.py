@@ -35,6 +35,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from primitives.shared.config import SAFE_HEIGHT
 from primitives.shared.ik import compute_cartesian_waypoints_ik, dh_params, forward_kinematics
 from primitives.shared.velocity_profiles import compute_duration, s_curve_profile
+WRIST3_ABS_MAX = 4.0             # rad: the wrist camera's cable (operator: a worn D415 cable/plug)
 
 ACTION = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
 JOINTS = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
@@ -116,6 +117,11 @@ def main():
         dq = np.abs(np.array(wps[-1]) - q0)
         if float(np.max(dq[:5])) > a.max_joint_step:                      # arm swing: the 2026-10-07 lesson
             out["error"] = f"joint step {float(np.max(dq[:5])):.2f} rad > {a.max_joint_step}"; result(out); return 1
+        if abs(float(wps[-1][5])) > WRIST3_ABS_MAX:
+            # 2026-10-20: views and pushes wound wrist_3 to 6.30 rad over the day (past its 2*pi limit: two
+            # protective stops, the camera cable a full turn around the wrist). Every move was within its own step
+            # limit; nothing bounded the total. Refuse instead.
+            out["error"] = f"wrist_3 would end at {float(wps[-1][5]):+.2f} rad (|.| > {WRIST3_ABS_MAX}) - unwind first"; result(out); return 1
         if float(dq[5]) > a.max_wrist3_step:
             out["error"] = f"wrist_3 step {float(dq[5]):.2f} rad > {a.max_wrist3_step}"; result(out); return 1
         step = float(np.max(dq))                                           # the duration still follows the largest joint

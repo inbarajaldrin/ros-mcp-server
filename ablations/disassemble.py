@@ -846,6 +846,8 @@ def main():
         if i < start:
             continue                                         # out already (resumed run)
         print(f"\n=== {name} -> ({1000*sx:.0f}, {1000*sy:.0f}) mm" + (' (held: resume)' if i == start and a.resume_held else ''))
+        if not a.dry_run and not (i == start and a.resume_held):     # gripper empty: unwind wrist_3 if wound up
+            run(py('primitives.core.unwind_wrist', '--mode', 'real'), 'unwind wrist_3 if wound', 120)
         if i == start and a.resume_held:
             pass                                             # carried already: straight to placing
         elif ob is None:

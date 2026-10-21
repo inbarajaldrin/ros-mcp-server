@@ -1831,6 +1831,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
     sequence = entry.get('tool_sequence', []) or []
 
     print(f"\n{'='*72}\n  Replaying object: {obj}  ({len(sequence)} steps)\n{'='*72}")
+    if not args.dry_run and not getattr(args, 'part_at_staging', False) or (not args.dry_run and state.held_quat is None):
+        # gripper empty between parts: unwind wrist_3 if the day's moves wound it up (camera cable; 2026-10-20)
+        run_subprocess(['python3', '-u', '-m', 'primitives.core.unwind_wrist', '--mode', 'real'],
+                       label='unwind wrist_3 if wound', timeout_s=120, log_fh=log_fh)
 
     # Base the object is headed for — move_to_grasp uses it to pick the wrist whose
     # reorient keeps the camera away from the table (primitives/shared/camera_up.py).
