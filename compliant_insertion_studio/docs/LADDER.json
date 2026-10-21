@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 05:05",
+ "updated": "2026-10-21 00:10",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -28,7 +28,7 @@
      "id": "M3a",
      "title": "Drive-mate action + lab surface",
      "status": "active",
-     "note": "servers built + refusals tested with no motion: /ur5e/drive_mate (today's insert; grasp + depth from the held pose; seated from the raw trace, 38/40 agree with the FSM), /ur5e/execute_mate (order gate, predecessors re-read, at-rest, seat via vision), /vision/get_pose + /vision/certify_seat, /objects/poses, /ur5e/rg2/grip (force = stub). CLEARS AT: FMB1 4/4 with SEAMS_DRIVE=1 SEAMS_CERTIFY=1, every part placed=true. Needs FMB1 on the table (parked + disassembled now) and light"
+     "note": "FMB1 through the seams: u_brown, u_orange, line_green inserted by drive-mate and certified placed=true by ExecuteMate; inverted_u_yellow pending (misses 13-15 mm when picked from the far side - pose-dependent aim error under analysis). Fixed on the way: drive-mate judges the seat at rest, certify by end heights, view fallback, ExecuteMate is the authority (no extra checks after a certified seat)"
     },
     {
      "id": "M4",
@@ -50,14 +50,14 @@
     {
      "id": "T0",
      "title": "Cycle time measured, not guessed",
-     "status": "active",
-     "note": "stamp every replay block (start/end/motion) + ablations/cycle_time.py: per part wall / arm-moving / dead time, per block. Coarse baseline from the 10-21 FMB1 seam run: startup 48 s (8 s moving), base read 24 s (9 s), home -> first pick 92 s (5 s), 3-4.5 s dead before every primitive"
+     "status": "done",
+     "note": "replay + disassembly write timing rows, motion recorder (position + wrist turns), cycle_time.py. Baseline run: 1088 s wall, arm moving 25%"
     },
     {
      "id": "T1",
      "title": "Read once, no needless trips",
-     "status": "next",
-     "note": "run base + obstacles from the startup read and the layout (no re-probing base2/3/4 per pick), view-to-view without home stops, certify from the seat-check view"
+     "status": "active",
+     "note": "one survey window for all parts (49.0 s -> 4.7 s measured); pick check uses the known base read + parked region (was 64 s + 25 s per run); certify reads markers once; part tracker: a part seen in any view is never searched for blind"
     },
     {
      "id": "T2",
