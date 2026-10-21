@@ -63,16 +63,20 @@ def capture(n=12, timeout=6.0):
     rclpy.init(); node = rclpy.create_node('he_icp'); st = {'d': [], 't': []}
     node.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', lambda m: st['d'].append((time.time(), m)), 20)
     node.create_subscription(CameraInfo, '/camera/camera/aligned_depth_to_color/camera_info', lambda m: st.__setitem__('i', m), 2)
-    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['t'].append((time.time(), m)), 50)
+    mv_ = {'ref': None, 't': None}               # last time the TCP moved > 0.5 mm (from the first sample on)
+    def on_tcp(m):
+        now = time.time(); p = np.array([m.pose.position.x, m.pose.position.y, m.pose.position.z])
+        if mv_['ref'] is None or np.linalg.norm(p - mv_['ref']) > 0.0005:
+            mv_['ref'] = p; mv_['t'] = now
+        st['t'].append((now, m)); del st['t'][:-200]
+    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 50)
     # frames stamped >= 0.25 s after the TCP last moved (depth_timing 2026-10-20), not a fixed wait
     stamp = lambda m: m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
     t_call = time.time() + 0.05; end = time.time() + timeout + 3.0; t0 = t_call + 0.25
     while time.time() < end:
         rclpy.spin_once(node, timeout_sec=0.02)
-        if len(st['t']) >= 20:                # arrival times: the camera's stamps drift up to ~1 s (2026-10-20)
-            P = np.array([[ta, m.pose.position.x, m.pose.position.y, m.pose.position.z] for ta, m in st['t'][-400:]])
-            mv = np.nonzero(np.linalg.norm(P[:, 1:] - P[-1, 1:], axis=1) > 0.0005)[0]
-            t0 = max(t_call, (P[mv[-1], 0] if len(mv) else P[0, 0]) + 1.2)
+        if mv_['t'] is not None:              # arrival times: the camera's stamps drift up to ~1 s (2026-10-20)
+            t0 = max(t_call, mv_['t'] + 1.2)
         if len([m for ta, m in st['d'] if ta > t0]) >= n and 'i' in st:
             break
     node.destroy_node(); rclpy.shutdown()

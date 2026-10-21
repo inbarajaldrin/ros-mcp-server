@@ -89,17 +89,15 @@ def capture_world(n=10, timeout=6.0):
     # 2026-10-20: the RealSense stamps drift -0.5..+1.1 s against this PC's clock (global time under load average
     # ~19), so stillness is judged by ARRIVAL time: a frame counts if the TCP was still for ARRIVAL_WINDOW_S before
     # it arrived (covers the worst measured delay)
-    st['tp'] = []
-    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: st['tp'].append(
-        (time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z)), 100)
+    st['mv'] = {'ref': None, 't': None}         # last time the TCP moved > 0.5 mm (arrival clock, from the first sample)
+    def on_tcp(m):
+        now = time.time(); p = np.array([m.pose.position.x, m.pose.position.y, m.pose.position.z])
+        if st['mv']['ref'] is None or np.linalg.norm(p - st['mv']['ref']) > 0.0005:
+            st['mv']['ref'] = p; st['mv']['t'] = now
+    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 100)
     end = time.time() + timeout + 3.0
     def still_since():
-        tp = st['tp'][-400:]
-        if len(tp) < 20:
-            return None
-        P = np.array(tp)
-        mv = np.nonzero(np.linalg.norm(P[:, 1:] - P[-1, 1:], axis=1) > 0.0005)[0]
-        return P[mv[-1], 0] if len(mv) else P[0, 0]
+        return st['mv']['t']
     t_call = time.time() + 0.05
     t_start = t_call
     while time.time() < end:

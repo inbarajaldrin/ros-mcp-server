@@ -765,10 +765,7 @@ def choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
     depth cloud in the camera frame, base_icp.read_icp; 2026-10-20: 1.8 mm median spread over 11 views, and it
     uses every surface, so a held part or seated parts hiding some of the base do not bias it). 'icp' falls back
     to the outline, then the markers, when the fit is loose. Call with the arm still, at the read's view."""
-    out = _choose_base_read(bname, ob_marker, ob_depth, say, tag)
-    if out is not None and getattr(choose_base_read, 'source', 'marker') in ('icp', 'depth'):
-        _save_base_pose(bname, out)
-    return out
+    return _choose_base_read(bname, ob_marker, ob_depth, say, tag)      # saved where a read is APPLIED
 
 
 def _choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
@@ -885,6 +882,7 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
     if dmm < PRE_INSERT_MIN_MM and ddeg < PRE_INSERT_MIN_DEG:
         say(f"  [base@insert] {obj}: base unchanged ({dmm:.1f} mm, {ddeg:.2f} deg)"); return
     args.observed_base = nb
+    _save_base_pose(bname, nb)
     say(f"  [base@insert] {obj}: base moved {dmm:.1f} mm / {ddeg:.2f} deg -> the insert aims at the clear-view read "
         f"({1000*x1:.1f}, {1000*y1:.1f}) mm")
 
@@ -1100,6 +1098,7 @@ def reread_base(bname, prev, log_fh=None):
         msg += f"; moved ({1000*(ob[0][0]-prev[0][0]):+.1f}, {1000*(ob[0][1]-prev[0][1]):+.1f}) mm since the last read"
     print(msg, flush=True)
     if log_fh: log_fh.write(msg + "\n")
+    _save_base_pose(bname, ob)
     return ob
 
 
@@ -2805,6 +2804,7 @@ def main() -> int:
                 msg = f"  [base] {bname} not observed -> DEFAULT_BASE_POSITION + per-object offsets"
             else:
                 args.observed_base = ob
+                _save_base_pose(bname, ob)
                 msg = (f"  [base] {bname} observed at ({1000*ob[0][0]:.1f}, {1000*ob[0][1]:.1f}, "
                        f"{1000*ob[0][2]:.1f}) mm, yaw {np.degrees(2*np.arctan2(ob[1][2], ob[1][3])):.2f} deg "
                        f"-> inserts aim at it (per-object z offsets kept)")
