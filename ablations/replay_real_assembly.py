@@ -689,6 +689,7 @@ HELD_YAW_MIN_DEG = 0.3
 PRE_INSERT_HOVER_DZ = 0.10      # flange above the predicted seat TCP for the pre-insert base read
 PRE_INSERT_MIN_MM, PRE_INSERT_MIN_DEG = 0.5, 0.2     # smaller changes: keep the previous read
 PRE_INSERT_MAX_MM, PRE_INSERT_MAX_DEG = 15.0, 3.0    # larger: a misread, keep the previous read
+PRE_INSERT_MAX_MM_ICP, PRE_INSERT_MAX_DEG_ICP = 30.0, 10.0   # with a CAD-fit read (its own rms/inlier gates)
 
 
 def choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
@@ -800,7 +801,11 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
     (x0, y0, _), q0 = ob; (x1, y1, _), q1 = nb
     dmm = 1000 * float(np.hypot(x1 - x0, y1 - y0))
     ddeg = float(np.degrees(abs((R_.from_quat(q1) * R_.from_quat(q0).inv()).as_euler('xyz')[2])))
-    if dmm > PRE_INSERT_MAX_MM or ddeg > PRE_INSERT_MAX_DEG:
+    # a CAD fit carries its own quality gates (rms, inliers); a hard attempt really does push the base ~10 mm / 4 deg
+    # (cycle 4: fork_orange's re-read was thrown away as a 'misread' at 3.9 deg)
+    mx_mm, mx_deg = (PRE_INSERT_MAX_MM_ICP, PRE_INSERT_MAX_DEG_ICP) if getattr(choose_base_read, 'source', '') == 'icp' \
+        else (PRE_INSERT_MAX_MM, PRE_INSERT_MAX_DEG)
+    if dmm > mx_mm or ddeg > mx_deg:
         say(f"  [base@insert] {obj}: read moved {dmm:.1f} mm / {ddeg:.2f} deg - treated as a misread, kept the previous"); return
     if dmm < PRE_INSERT_MIN_MM and ddeg < PRE_INSERT_MIN_DEG:
         say(f"  [base@insert] {obj}: base unchanged ({dmm:.1f} mm, {ddeg:.2f} deg)"); return
