@@ -1448,6 +1448,7 @@ INSERT_MAX_RECOVERIES = 1
 PRE_INSERT_VIEW_TRIES = 3         # clear views tried for a depth read with the part in hand
 INSERT_OUTER_TRIES = 3            # insert attempts with a fresh base read before each (PRISMATIC_MAX_RETRIES=1)
 os.environ.setdefault('PRISMATIC_MAX_RETRIES', '1')
+os.environ.setdefault('PRISMATIC_HOLD_IF_WEDGED', '1')     # a wedged bar stays put: released and nudged (see below)
 SEAT_CHECK_OBJECTS = ('line_green',)      # FMB1's; any bar of any assembly is checked too (_seat_checked, 2026-10-20)
 BAR_RATIO = 4.0                           # top face this much longer than wide = a bar (line_green 5.4, U parts 3.3)
 CROSS_END_DIFF_MM = 1.5                   # one end this much higher than the other ...
@@ -1464,6 +1465,41 @@ def _seat_checked(obj) -> bool:
         return f['half_long_m'] >= BAR_RATIO * f['half_cross_m']
     except Exception:
         return False
+
+
+def _is_bar(obj) -> bool:
+    try:
+        from seat_check import TOP_FACE
+        f = TOP_FACE[(obj, RUN_BASE['name'])]
+        return f['half_long_m'] >= BAR_RATIO * f['half_cross_m']
+    except Exception:
+        return False
+
+
+WEDGE_MAX_DZ_MM = 7.0       # stalled at most this far above the seat ...
+WEDGE_MAX_DXY_MM = 2.5      # ... and this close to the aim in x/y: wedged in the channel, not a miss
+
+
+def _wedged_near_seat(obj, since):
+    """The last insert's end state from its raw CSV (not the FSM label): {'dz_mm', 'dxy_mm'} if it ended still,
+    within WEDGE_MAX_DZ_MM above and WEDGE_MAX_DXY_MM of its predicted seat, else None."""
+    import csv as _csv, glob as _glob
+    metas = [m for m in _glob.glob(str(REPO_ROOT / f'compliant_insertion_studio/logs/insert_{obj}_*.meta.json'))
+             if os.path.getmtime(m) >= since - 1]
+    if not metas:
+        return None
+    mp = max(metas, key=os.path.getmtime)
+    try:
+        m = json.load(open(mp))
+        rows = [x for x in _csv.DictReader(open(mp.replace('.meta.json', '.csv'))) if x.get('tcp_z') not in ('', 'nan', None)]
+        P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
+        tgt = np.array(m['predicted_seat_xyz'])
+    except Exception:
+        return None
+    end = P[-1]; dz = 1000 * (end[2] - tgt[2]); dxy = 1000 * float(np.hypot(*(end[:2] - tgt[:2])))
+    if 0 < dz <= WEDGE_MAX_DZ_MM and dxy <= WEDGE_MAX_DXY_MM and 1000 * np.ptp(P[:, 2]) < 1.0:
+        return {'dz_mm': dz, 'dxy_mm': dxy}
+    return None
 
 
 def cross_nudge_plan(res):
@@ -2124,6 +2160,27 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 print(msg)
                 if log_fh: log_fh.write(msg)
                 return True
+
+        # A bar wedged just above its seat (2026-10-20 cycle 3: line_brown stalled 4.5-4.8 mm above the seat with
+        # x/y within 0.2 mm of the aim, four times - a ~0.7 deg yaw in the jaws on a zero-clearance channel): do not
+        # pull it out and repeat; release it where it is and let the seat check's nudges/taps finish it (how wedged
+        # bars were seated before).
+        if (result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert'
+                and not _SAFETY_STOP and not args.dry_run and _is_bar(obj)):
+            w = _wedged_near_seat(obj, t_step)
+            if w is not None:
+                say(f"  [{step_idx}] {obj} wedged {w['dz_mm']:.1f} mm above its seat, {w['dxy_mm']:.1f} mm from the aim "
+                    f"-> release here and let the seat check nudge it in")
+                rel = _release_width(step_idx)
+                ok_rel = all((execute(step_idx, f"wedged {t_}", t_, k_, tag=f"wedge{j}") or {}).get('result') != 'failure'
+                             for j, (t_, k_) in enumerate([('control_gripper', dict(command=f"{rel:g}" if rel else 'open')),
+                                                           ('move_to_safe_height', {})], start=1))
+                if ok_rel and seat_check_and_reseat(obj, state, args, say):
+                    say(f"  [{step_idx}] {obj}: seated after the nudge")
+                    print(f"\n  ✓ {obj} complete")
+                    return True
+                say(f"\n!!! {obj}: wedged and not seated by the nudges")
+                return False
 
         # Outer attempts (2026-10-20): the insert runs ONE attempt; between attempts the part is lifted, the base
         # re-read from a view the held part does not block, and the insert aims again. Blind in-insert retries

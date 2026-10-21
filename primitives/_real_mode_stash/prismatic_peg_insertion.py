@@ -12,6 +12,7 @@ Retries with retract + re-approach if insertion fails.
 
 import argparse
 import json
+import os
 import numpy as np
 import subprocess
 import sys
@@ -1290,6 +1291,19 @@ class PrismaticPegInsertion(Node):
 
         # All retries exhausted - return to initial pose
         self.get_logger().error(f"[FAILED] All {MAX_RETRIES} attempts exhausted")
+        # 2026-10-20: a part that ended wedged just above its seat (x/y at the aim) is held there instead of pulled
+        # out, so the caller can release it and nudge it in (PRISMATIC_HOLD_IF_WEDGED=1; line_brown stalled 4.5-4.8 mm
+        # above the seat at the aim four times and every retract-and-retry did the same)
+        cur = self.get_ee_position()
+        if (os.environ.get('PRISMATIC_HOLD_IF_WEDGED') == '1' and cur is not None and self.target_xyz is not None):
+            dz = 1000 * (cur[2] - self.target_xyz[2]); dxy = 1000 * float(np.hypot(cur[0] - self.target_xyz[0], cur[1] - self.target_xyz[1]))
+            if 0 < dz <= 7.0 and dxy <= 2.5:
+                self.get_logger().warn(f"[WEDGED] {dz:.1f} mm above the seat, {dxy:.1f} mm from the aim - holding here (no retract)")
+                self._tele_phase = "ABORT"; self._tele_event = "wedged_hold"
+                self._tele_log_row()
+                self._tele_close("abort", f"wedged {dz:.1f} mm above the seat, held")
+                restore_controllers()
+                return False
         self._tele_phase = "ABORT"
         self._tele_event = "all_retries_exhausted"
         self._tele_log_row()
