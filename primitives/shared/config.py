@@ -145,7 +145,12 @@ PER_OBJECT_BASE_OFFSET_M: dict = {
     # predicts; XY nearly identical.
     # Final offset = line_green offset (+1.13, +1.88, +4.76) + Δ
     #              = (+1.34, +1.16, -6.92) mm
-    "inverted_u_yellow": (+0.00134, +0.00116, -0.00692),
+    # 2026-10-21: -6.0 mm of the old -6.92 was a CAD data error, now fixed at the source: fmb_assembly1.json had
+    # yellow's seat at z 27.0 mm, 6.0 mm above prompt2assembly's exact-geometry graph (the other parts agree within
+    # ~1 mm) and above the depth reading of a seated yellow (-5.8 mm vs the old CAD). Corrected to 21.0 mm there and
+    # removed here, so every insert / seat-grasp target is unchanged and the raw-CAD readers (depth seat check,
+    # certification) now compare against where the part really sits.
+    "inverted_u_yellow": (+0.00134, +0.00116, -0.00092),
     # 2026-05-07: line_green calibrated from operator-manual-seat (with
     # u_brown + u_orange already seated as flanking obstacles):
     #   TCP_actual=(+3.31, -399.38, +191.73) mm

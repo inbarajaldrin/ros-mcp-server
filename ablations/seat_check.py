@@ -71,6 +71,7 @@ STILL_MARGIN_S = 0.25        # use depth frames stamped this long after the TCP 
 ARRIVAL_WINDOW_S = 1.2       # frames ARRIVING this long after the TCP stopped (camera stamps drift up to ~1 s)
 PITCH_MAX_DEG = 1.5
 HEIGHT_MAX_MM = 2.5
+PITCH_FACE_MIN_M = 0.05       # the pitch angle decides only on top faces at least this half-long
 
 
 def capture_world(n=10, timeout=6.0):
@@ -201,7 +202,12 @@ def measure(obj, observed_base, Pw, base='base1'):
             per_end.append([round(float(np.percentile(1000 * lo_[:, 2], 80) - 1000 * f['z']), 1) if len(lo_) > 10 else None,
                             round(float(np.percentile(1000 * hi_[:, 2], 80) - 1000 * f['z']), 1) if len(hi_) > 10 else None])
         cross['end_edge_heights_mm'] = per_end        # [[-cross edge, +cross edge] at the -long end, ... at the +long end]
-    ok = abs(pitch) <= PITCH_MAX_DEG and abs(h_err) <= HEIGHT_MAX_MM and max(map(abs, ends)) <= HEIGHT_MAX_MM + 1.5
+    # The pitch ANGLE decides only on long faces: on a short one a ~1 mm read error at each end is a big angle
+    # (seated, 2026-10-21: line_green half-length 70 mm read 0.05-0.1 deg; u_brown 35 mm -1.6..-2.9 deg; yellow 21 mm
+    # -2.9 deg, ends +1.1 / -1.1 mm). Short faces are judged by their end heights, in mm.
+    long_face = f['half_long_m'] >= PITCH_FACE_MIN_M
+    ok = (abs(h_err) <= HEIGHT_MAX_MM and max(map(abs, ends)) <= (HEIGHT_MAX_MM + 1.5 if long_face else HEIGHT_MAX_MM)
+          and (abs(pitch) <= PITCH_MAX_DEG or not long_face))
     return {'ok': bool(ok), 'pitch_deg': round(pitch, 2), 'roll_deg': round(roll, 2),
             'height_err_mm': round(h_err, 2), 'end_heights_mm': [round(e, 2) for e in ends],
             'residual_mm': round(float(1000 * np.std(r[keep])), 2), 'n_points': int(len(P)),
