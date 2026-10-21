@@ -674,10 +674,9 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
                     obst.append((other, base_outline(seen_bases[other], other)))
                 except Exception:
                     pass
-        from primitives.shared.config import PARKED_REGION as _PR
-        if _PR is not None:
-            obst.append(('parked region', np.array([[_PR['x'][0], _PR['y'][0]], [_PR['x'][1], _PR['y'][0]],
-                                                    [_PR['x'][1], _PR['y'][1]], [_PR['x'][0], _PR['y'][1]]])))
+        # (the layout's parked-region rectangle is NOT an obstacle here: it is a padded box - edge at x 0.22 with base3's
+        # real edge ~0.17 - and every part set down at the staging edge read 7 mm from it and was sent to relocation,
+        # 2026-10-21; the other base's measured outline above is the obstacle)
         best = None
         for open_mm in np.arange(width_mm, PICK_OPEN_MAX_MM + 0.1, 4.0):
             own, other = _finger_clearance_mm(obj, seen[obj], gid, float(open_mm), obst)
@@ -705,7 +704,7 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         print(msg, flush=True)
         if log_fh: log_fh.write(msg + "\n")
         in_staging = seen[obj][0][0] >= 0.19 and seen[obj][0][1] <= -0.22
-        r = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', 'x',
+        r = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', RUN_BASE.get('json', 'x'),
                             '--relocate', obj, '--grasp-id', 'auto'] + (['--spot-staging'] if in_staging else []),
                            label=f'relocate {obj} (pick room)', timeout_s=900, log_fh=log_fh)
         if r.get('result') == 'failure':
@@ -2885,6 +2884,7 @@ def main() -> int:
         print("ERROR: no assembly_order entries in JSON")
         return 2
     RUN_BASE['name'] = d.get('base_name') or RUN_BASE['name']      # FMB3: base3 (every base1 default reads this)
+    RUN_BASE['json'] = str(Path(args.assembly_json).resolve())     # child drivers (relocate) read the same assembly
     RUN_BASE['parts'] = tuple(e['object_name'] for e in entries)
 
     state = AssemblyState()
@@ -3093,7 +3093,7 @@ def main() -> int:
                     msg = f"  [spacing] {pair[0]} / {pair[1]} too close -> relocating {mover}"
                     print(msg, flush=True)
                     if log_fh: log_fh.write(msg + "\n")
-                    r_ = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', 'x',
+                    r_ = run_subprocess([sys.executable, '-u', str(REPO_ROOT / 'ablations/disassemble.py'), '--assembly-json', RUN_BASE.get('json', 'x'),
                                          '--relocate', mover, '--grasp-id', 'auto'] + (['--spot-staging'] if in_staging else []),
                                         label=f'relocate {mover}', timeout_s=900, log_fh=log_fh)
                     if r_.get('result') == 'failure':
