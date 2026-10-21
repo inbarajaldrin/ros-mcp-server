@@ -97,6 +97,7 @@ ZERO_GLITCH_PERIOD_S = 0.102    # robot-side wrench glitch period
 
 # Exit criteria
 Z_TOLERANCE = 0.005             # m — 5mm tolerance (peg may not reach exact target due to tilt/friction)
+AT_SEAT_DZ_M = 0.0025          # m - this close to the seat after the trajectory = seated: stop (the depth seat check's 2.5 mm)
 EXIT_TORQUE_AVG_THRESHOLD = 0.09  # N-m - rolling average Tx/Ty must be below this to exit
 EXIT_TORQUE_WINDOW = 0.5        # seconds - rolling average window
 EXIT_SUSTAINED_TIME = 1.0       # seconds - Z at target + low avg torques must hold this long
@@ -1205,6 +1206,17 @@ class PrismaticPegInsertion(Node):
                     self.stop_force_mode()
                     # telemetry only: this exit left a CSV with no meta (line_green, 2026-10-19 20:12)
                     self._tele_close("success", f"reached_target_via_trajectory z={post_z:.4f} tx={post_tx:.4f} ty={post_ty:.4f}")
+                    return True
+                elif post_z <= target_z + AT_SEAT_DZ_M:
+                    # At seat depth the part is in: stop pushing. Force mode on a seated bar with a residual torque
+                    # (Ty 0.054 vs 0.05) pushed it 10 mm sideways and the drift guard pulled it out, and on a free
+                    # base the push drags the base (2026-10-21, line_green at +0.6 mm, xy on target). Tilt is the
+                    # depth seat check's / certification's to judge (edge press, nudges).
+                    self.get_logger().info(
+                        f"[SUCCESS] At seat depth via trajectory (Z={post_z:.4f}, {1000*(post_z-target_z):+.1f} mm; "
+                        f"Tx={post_tx:.4f}, Ty={post_ty:.4f}) - stop; tilt left to the seat check")
+                    self.stop_force_mode()
+                    self._tele_close("success", f"at_seat_depth z={post_z:.4f} tx={post_tx:.4f} ty={post_ty:.4f}")
                     return True
                 else:
                     self.get_logger().info(
