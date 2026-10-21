@@ -38,9 +38,12 @@ set -u
 
 # Patterns are assembled at runtime so this script's own command line can never match
 # them (pkill/pgrep self-match killed the calling shell before — exit 144, CLAUDE.md).
-R=replay_real_assembly; M=primitives; W=wrapper.compliant_insert
-REPLAY_PAT="ablations/${R}\.py"
-ASSEMBLY_PAT="(ablations/${R}\.py|-m ${M}\.|${M}/[a-z_/]+\.py|compliant_insertion_studio\.${W})"
+# Orchestrators = every driver script under ablations/ (replay, disassemble, move_base, nudge_part, the cycle script,
+# ...) and any shell running one. 2026-10-21: only the replay was stopped; disassemble.py carried on after the motion
+# halt and, with a restarted run, two processes commanded the arm for ~2 min (their goals preempting each other).
+R=replay_real_assembly; M=primitives; W=wrapper.compliant_insert; A=ablations
+REPLAY_PAT="${A}/[a-z_0-9]+\.(py|sh)"
+ASSEMBLY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${M}\.|${M}/[a-z_/]+\.py|compliant_insertion_studio\.${W})"
 
 alive() { pgrep -f "$ASSEMBLY_PAT" 2>/dev/null; }
 wait_gone() {  # seconds
@@ -68,7 +71,9 @@ step 1/3 "Stop the assembly processes"
 if [ -z "$(alive)" ]; then
     ok "no assembly running"
 else
-    for pid in $(pgrep -f "$REPLAY_PAT"); do kill -SIGINT "$pid" 2>/dev/null && ok "SIGINT replay ($pid)"; done
+    for pid in $(pgrep -f "$REPLAY_PAT"); do
+        kill -SIGINT "$pid" 2>/dev/null && ok "SIGINT $(ps -o args= -p "$pid" 2>/dev/null | cut -c1-70) ($pid)"
+    done
     if wait_gone 25; then
         ok "all assembly processes exited"
     else
