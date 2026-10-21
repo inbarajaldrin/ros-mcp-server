@@ -376,6 +376,48 @@ def observe_object_orientation(object_name: str, timeout_s: float = 30.0, n_samp
         return {'error': f'observe failed: {e}'}
 
 
+LAST_BASE_POSE = REPO_ROOT / 'ablations/logs/last_base_pose.json'
+
+
+def _save_base_pose(base_name, ob):
+    try:
+        d = json.load(open(LAST_BASE_POSE)) if LAST_BASE_POSE.exists() else {}
+        d[base_name] = [list(map(float, ob[0])), list(map(float, ob[1])), time.time()]
+        json.dump(d, open(LAST_BASE_POSE, 'w'), indent=1)
+    except Exception:
+        pass
+
+
+def _last_base_pose(base_name):
+    try:
+        p, q, _ = json.load(open(LAST_BASE_POSE))[base_name]
+        return tuple(p), tuple(q)
+    except Exception:
+        return None
+
+
+def camera_brightness(timeout=3.0):
+    """Mean of one colour frame (0-255), None if no frame."""
+    try:
+        proc = subprocess.run(['python3', '-c', _BRIGHTNESS_HELPER], capture_output=True, text=True, timeout=timeout + 10,
+                              env=make_env())
+        return float(proc.stdout.strip().splitlines()[-1])
+    except Exception:
+        return None
+
+
+_BRIGHTNESS_HELPER = r"""
+import time, rclpy, numpy as np
+from sensor_msgs.msg import Image
+rclpy.init(); n = rclpy.create_node('brightness'); g = {}
+n.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: g.__setitem__('c', m), 1)
+t = time.time()
+while 'c' not in g and time.time() - t < 3: rclpy.spin_once(n, timeout_sec=0.1)
+print(float(np.frombuffer(g['c'].data, np.uint8).mean()) if 'c' in g else -1)
+"""
+LOW_LIGHT_BRIGHTNESS = 40.0      # below: markers need close views (0.40 m saw line_red 5/5 at brightness ~5)
+
+
 def observe_base_pose(base_name: str, timeout_s: float = 15.0):
     """The base's pose as the camera sees it, for the inserts (2026-10-14).
 
@@ -387,6 +429,18 @@ def observe_base_pose(base_name: str, timeout_s: float = 15.0):
     obs = observe_object_orientation(base_name, timeout_s, n_samples=15)
     S = obs.get('samples') or []
     if obs.get('error') or len(S) < 5:
+        # markers not readable (low light, 2026-10-20: brightness 4.6/255 and no marker anywhere, while the depth
+        # CAD fit still read the base at 1.27 mm rms): fall back to the depth fit seeded from the last base pose
+        if os.environ.get('BASE_FROM') == 'icp' and str(base_name).startswith('base'):
+            seed = _last_base_pose(base_name)
+            if seed is not None:
+                try:
+                    from base_icp import read_icp
+                    oi, info = read_icp(base_name, seed)
+                    print(f"  [base] {base_name}: markers not read -> depth CAD fit from the last pose: {json.dumps(info)}", flush=True)
+                    return oi
+                except Exception:
+                    return None
         return None
     import numpy as _np
     P = _np.median(_np.array([s_['xyz'] for s_ in S]), axis=0)
@@ -480,6 +534,7 @@ def _staging_view(log_fh=None):
 
 LAST_SEEN_XY = {}                 # part -> (x, y) from its latest observation (derive step, view checks)
 PART_VIEW_Z = 0.52                # flange height for a look straight above one part (RGB only; depth not needed)
+PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer view (2026-10-20)
 
 
 def _seen_here(obj, timeout_s=5.0) -> bool:
@@ -595,9 +650,13 @@ def _part_view(obj, log_fh=None) -> bool:
     derive step, then not for 20 s at the pick). Confirms the part is seen (20 s) before returning
     True; falls back to the staging view, then fails."""
     xy = LAST_SEEN_XY.get(obj)
+    b_ = camera_brightness()
+    vz = PART_VIEW_Z_LOW_LIGHT if (b_ is not None and 0 <= b_ < LOW_LIGHT_BRIGHTNESS) else PART_VIEW_Z
+    if vz != PART_VIEW_Z:
+        print(f"  [view] low light (brightness {b_:.0f}) -> view {obj} from {vz:.2f} m", flush=True)
     if xy is not None:
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                            f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{PART_VIEW_Z:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                            f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{vz:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
                            label=f'view above {obj}', timeout_s=90, log_fh=log_fh)
         if r.get('result') != 'failure':
             time.sleep(1.5)
@@ -706,6 +765,13 @@ def choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
     depth cloud in the camera frame, base_icp.read_icp; 2026-10-20: 1.8 mm median spread over 11 views, and it
     uses every surface, so a held part or seated parts hiding some of the base do not bias it). 'icp' falls back
     to the outline, then the markers, when the fit is loose. Call with the arm still, at the read's view."""
+    out = _choose_base_read(bname, ob_marker, ob_depth, say, tag)
+    if out is not None and getattr(choose_base_read, 'source', 'marker') in ('icp', 'depth'):
+        _save_base_pose(bname, out)
+    return out
+
+
+def _choose_base_read(bname, ob_marker, ob_depth=None, say=print, tag='base'):
     mode = os.environ.get('BASE_FROM', 'marker')
     choose_base_read.source = 'marker'
     if mode == 'icp' and ob_marker is not None:
