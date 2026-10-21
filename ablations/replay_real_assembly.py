@@ -1334,13 +1334,70 @@ def aim_bias(obj: str):
     return float(m[0]) / 1000, float(m[1]) / 1000
 
 
+FOLLOW_GENERAL_MAX_MM = 4.0       # bound on the shift toward the seated parts' measured positions
+FOLLOW_GENERAL_MAX_AGE_S = 7200.0
+
+
+def _overlapping_seated(obj):
+    """Parts seated before `obj` (assembly order, CAD) whose seated xy footprint overlaps obj's: what it interlocks
+    with. No part names - from the CAD meshes at their seat poses in the run's base."""
+    try:
+        from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        from grasp_depth import load_mesh
+        def box(p):
+            V, _ = load_mesh(p); sp, sq = load_seat_pose_in_base(RUN_BASE['name'], p)
+            W = V @ R_.from_quat(sq).as_matrix().T + sp
+            return W[:, :2].min(0), W[:, :2].max(0)
+        lo, hi = box(obj)
+        out = []
+        for p in get_seated_so_far(RUN_BASE['name'], obj):
+            l2, h2 = box(p)
+            if (l2 < hi).all() and (lo < h2).all():
+                out.append(p)
+        return out
+    except Exception:
+        return []
+
+
+def _follow_seated_general(obj, base_quat):
+    """2026-10-20 (operator: seated parts inside the CAD tolerance band are more data): aim `obj` by the measured
+    seat errors (base frame, camera, verify ledger 'rel_err_mm') of the parts it interlocks with - fork_yellow aimed by
+    the base landed on top of the two lines (each ~3-4 mm off CAD) every attempt. Mean, bounded, no yaw."""
+    parts = _overlapping_seated(obj)
+    if not parts:
+        return 0.0, 0.0, 0.0
+    led = _ledger()
+    errs = [np.array(led[p]['rel_err_mm'], dtype=float) for p in parts
+            if isinstance((led.get(p) or {}).get('rel_err_mm'), list) and time.time() - led[p].get('t', 0) < FOLLOW_GENERAL_MAX_AGE_S]
+    if len(errs) < len(parts):
+        print(f"  [follow] {obj}: measured seat errors of {parts} not all recorded -> aim at the base", flush=True)
+        return 0.0, 0.0, 0.0
+    # each reference constrains only ACROSS its long axis (a line is continuous along it: its along-error is marker
+    # bias, irrelevant to what sits across it)
+    from seat_check import TOP_FACE
+    E = np.full((len(errs), 2), np.nan)
+    for i, (p, e) in enumerate(zip(parts, errs)):
+        ax = 0 if TOP_FACE[(p, RUN_BASE['name'])].get('long_axis', 'y') == 'y' else 1
+        if TOP_FACE[(p, RUN_BASE['name'])]['half_long_m'] >= 2 * TOP_FACE[(p, RUN_BASE['name'])]['half_cross_m']:
+            E[i, ax] = e[ax]                     # elongated: across only
+        else:
+            E[i] = e                             # compact: both
+    m = np.array([np.nanmean(E[:, k]) if np.isfinite(E[:, k]).any() else 0.0 for k in (0, 1)])
+    m = np.clip(m, -FOLLOW_GENERAL_MAX_MM, FOLLOW_GENERAL_MAX_MM)
+    dw = R_.from_quat(base_quat).as_matrix()[:2, :2] @ m
+    print(f"  [follow] {obj}: interlocks with {parts} -> aim shifted ({m[0]:+.1f}, {m[1]:+.1f}) mm (base frame, mean of "
+          f"their measured seat errors {[np.round(e, 1).tolist() for e in errs]})", flush=True)
+    return float(dw[0]) / 1000, float(dw[1]) / 1000, 0.0
+
+
 def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
     """(dx, dy) world metres to add to `obj`'s insert base position and a yaw (rad) to turn its
     base frame by about the base origin, from the seat offsets of the parts it sits between
     (SEATED_OFFSETS). Zeros when they are not all there."""
     parts = FOLLOWS_SEATED.get(obj)
     if not parts:
-        return 0.0, 0.0, 0.0
+        return _follow_seated_general(obj, base_quat)
     try:
         from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
         d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
