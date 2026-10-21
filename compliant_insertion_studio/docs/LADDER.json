@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 00:10",
+ "updated": "2026-10-21 00:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -28,7 +28,7 @@
      "id": "M3a",
      "title": "Drive-mate action + lab surface",
      "status": "active",
-     "note": "FMB1 through the seams: u_brown, u_orange, line_green inserted by drive-mate and certified placed=true by ExecuteMate; inverted_u_yellow pending (misses 13-15 mm when picked from the far side - pose-dependent aim error under analysis). Fixed on the way: drive-mate judges the seat at rest, certify by end heights, view fallback, ExecuteMate is the authority (no extra checks after a certified seat)"
+     "note": "FMB1 4/4 certified placed=true by ExecuteMate in one journal episode (seat errors vs the graph: -0.11 / -0.42 / -0.57 / +0.42 mm), every insert by drive-mate - but across resumed runs and one direct drive-mate insert. CLEARS AT: one uninterrupted FMB1 run with SEAMS_DRIVE=1 SEAMS_CERTIFY=1. Lessons: yellow keeps its tuned CAD seat (a CAD \"fix\" broke its insert); certification uses the graph's declared seats; servers re-read config per goal"
     },
     {
      "id": "M4",
