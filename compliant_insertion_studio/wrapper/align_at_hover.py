@@ -145,6 +145,10 @@ def main():
         err, tilt = rel_yaw_error(a.object_name, a.base_name, Rb, Ro,
                                   R.from_quat(a.target_base_quat) if a.target_base_quat else None)
         final = err; it = {'rel_err_deg': round(err, 2), 'tilt_deg': round(tilt, 2), 'n_base': nb, 'n_part': no}
+        if a.target_base_quat:                                     # commanded base (ICP + follow) vs the markers now
+            it['cmd_vs_seen_base_yaw_deg'] = round(float(np.degrees(
+                (R.from_quat(a.target_base_quat) * Rb.inv()).as_rotvec()[2])), 2)
+            print(f"[align] commanded base vs base seen now: {it['cmd_vs_seen_base_yaw_deg']:+.2f} deg about z", flush=True)
         print(f"[align] {a.object_name}: part vs its seat {err:+.2f} deg about z (tilt {tilt:.1f}; {nb}/{no} samples)", flush=True)
         if a.snapshot_dir:
             snapshot(a.snapshot_dir, f"{a.object_name}_{k}")
