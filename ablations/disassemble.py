@@ -178,7 +178,7 @@ def depth_free_spots(extents, exclude_xy):
     v = d > 0.1
     Pc = np.stack([(uu - K[0, 2]) / K[0, 0] * d, (vv - K[1, 2]) / K[1, 1] * d, d], -1)[v]
     Pw = Pc @ Tc[:3, :3].T + Tc[:3, 3]
-    Pw = Pw[np.hypot(Pw[:, 0], Pw[:, 1]) < 0.72]               # reachable ring only: far floor/walls made
+    Pw = Pw[np.hypot(Pw[:, 0], Pw[:, 1]) < SPOT_RING_M[1] + 0.04]   # reachable ring only: far floor/walls made
                                                                # the grid huge and each search step ~0.4 s
     table_z = np.percentile(Pw[:, 2], 30)                      # most of the view is bare table
     cell = 0.01; x0, y0 = Pw[:, 0].min(), Pw[:, 1].min()
@@ -219,7 +219,7 @@ def depth_free_spots(extents, exclude_xy):
         ok_s = boxsum(seen, kx, ky) > 0.9 * kx * ky
         for i, j in zip(*np.nonzero(ok_s)):
             cx, cy = x0 + (i + kx / 2) * cell, y0 + (j + ky / 2) * cell
-            if (not (0.30 < np.hypot(cx, cy) < 0.68)
+            if (not (SPOT_RING_M[0] < np.hypot(cx, cy) < SPOT_RING_M[1])
                     or not _in_staging(cx, cy, ex, ey)
                     or any(np.hypot(cx - exx, cy - eyy) < er + max(ex, ey) for exx, eyy, er in exclude_xy)
                     or not in_view(cx, cy, ex, ey)):
@@ -277,6 +277,9 @@ SEAT_OFFSET_MAX_M = 0.012                  # a recorded seat offset larger than 
 SEAT_EE_QUAT = (0.0, 1.0, 0.0, 0.0)        # top-down, yaw 180: every logged insert (2026-10-07/14)
 HOVER_DZ = 0.10
 SEAT_READ_S = 10.0          # wait for the seated part's markers from the hover (localizer ~3-4 Hz)
+SPOT_RING_M = (0.30, 0.80)                 # spot centres this far from the robot axis (2026-10-21: was 0.68; line_green
+                                           # was picked from 0.843 m, IK elbow 0.68 rad there; FMB1 parked at 0.46 m
+                                           # left no room for four parts inside 0.68)
 N_DEPTH = 10                               # depth frames per free-spot map (median)
 SPOT_TRIES = 24                            # candidates tried per part in the spot search
 SPOT_SEARCH_NODES = 2000                    # search budget (each node: one boxsum over the grid)
@@ -487,6 +490,8 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
             if (P2[:, 0].min() < REGION['x'][0] or P2[:, 0].max() > REGION['x'][1]
                     or P2[:, 1].min() < REGION['y'][0] or P2[:, 1].max() > REGION['y'][1]):
                 continue
+            if np.hypot(grip[0] + t[0], grip[1] + t[1]) > SPOT_RING_M[1]:
+                continue                                       # the set-down must be reachable (and the pick after)
             gap = min(gap_mm(P2, o) for o in obst)
             if gap < 1000 * CLEARANCE_M or gap <= best[2]:
                 continue
@@ -745,6 +750,10 @@ def main():
         spots, note = [(0.0, 0.0)], "staging region (spot decided after looking from the staging view)"
     elif a.to_staging:
         spots, note = [tuple(STAGING_XY)] * len(parts), "staging region (--to-staging)"
+    elif a.to_free_spot:
+        # each spot is chosen per part from the staging view (below); an up-front plan for all four is not used
+        # and failed on a crowded table (FMB1 parked at 0.46 m, 2026-10-21)
+        spots, note = [(0.0, 0.0)] * len(parts), "a free spot per part, chosen from the staging view"
     elif a.layout == 'staging' and a.resume_held:
         from staging_layout import OUT
         layout = json.load(open(OUT))

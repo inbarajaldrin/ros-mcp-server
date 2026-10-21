@@ -9,6 +9,8 @@
 #                    generated layouts, and the view the assembly looks from for parts home cannot see).
 #   parked_region    where another assembly is parked: an obstacle, never scanned for this run's parts
 #                    (optional).
+#   base_fixed       true when the run's base is fixed to the table: planners must not push it (move_base refuses).
+#                    false (default): the arm may slide / turn the EMPTY base when a plan needs it.
 #
 # Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
 # only the clear area. Add a layout instead of editing one that a past run used.
@@ -27,6 +29,7 @@ layouts:
     clear_area: [-0.320, -0.500]
     staging_region: {x: [0.24, 0.70], y: [-0.70, -0.25], view: [0.400, -0.420, 0.62]}
     parked_region: {x: [-0.06, 0.22], y: [-0.52, -0.22]}
+    base_fixed: false               # operator 2026-10-21: base1 is not fixed (the tape does not hold it)
 
   # 2026-10-20 (operator): FMB1's original arrangement, any assembly. The base under home (base3 read at
   # (-0.005, -0.488) from home), its parts around it, the clear area empty (black tape), base1 and the

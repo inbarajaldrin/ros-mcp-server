@@ -435,5 +435,6 @@ CLEAR_AREA_XY = tuple(float(v) for v in (_os.environ['FMB_CLEAR_AREA'].split(','
                                          else CELL_LAYOUT['clear_area']))
 STAGING_REGION = {'x': tuple(CELL_LAYOUT['staging_region']['x']), 'y': tuple(CELL_LAYOUT['staging_region']['y'])}
 STAGING_VIEW = tuple(float(v) for v in CELL_LAYOUT['staging_region']['view'])
+BASE_FIXED = bool(CELL_LAYOUT.get('base_fixed', False))   # the run's base is fixed: never push it (cell_layout.yaml)
 PARKED_REGION = ({'x': tuple(CELL_LAYOUT['parked_region']['x']), 'y': tuple(CELL_LAYOUT['parked_region']['y'])}
                  if CELL_LAYOUT.get('parked_region') else None)

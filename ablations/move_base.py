@@ -138,6 +138,10 @@ def main():
     ap.add_argument('--max-pushes', type=int, default=4)
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
+    from primitives.shared.config import BASE_FIXED
+    if BASE_FIXED:
+        print("the active cell layout says the base is fixed (base_fixed: true) - not pushing it", flush=True)
+        return 1
     from primitives.shared.config import STAGING_REGION
 
     def view(ob):
