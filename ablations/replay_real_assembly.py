@@ -706,6 +706,8 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
 
 TRACKER_JSON = REPO_ROOT / 'ablations' / 'logs' / 'part_tracker.json'
 TRACKER_MAX_AGE_S = 1800.0
+TRACKER_TRUST_S = 900.0          # a sighting this recent is where the part is when no view here sees it
+PART_VIEW_Z_FALLBACKS = (0.45, 0.38)
 
 
 def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
@@ -734,9 +736,14 @@ def _part_view(obj, log_fh=None) -> bool:
     if vz != PART_VIEW_Z:
         print(f"  [view] low light (brightness {b_:.0f}) -> view {obj} from {vz:.2f} m", flush=True)
     if xy is not None:
-        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                            f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{vz:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
-                           label=f'view above {obj}', timeout_s=90, log_fh=log_fh)
+        # far out a top-down view at PART_VIEW_Z has no IK path (2026-10-21: line_green at 0.80 m, view z 0.52):
+        # come lower until one is reachable - the pick itself happens lower still
+        for vz_ in [vz] + [z_ for z_ in PART_VIEW_Z_FALLBACKS if z_ < vz]:
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{vz_:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                               label=f'view above {obj} at {vz_:.2f} m', timeout_s=90, log_fh=log_fh)
+            if r.get('result') != 'failure':
+                break
         if r.get('result') != 'failure':
             time.sleep(1.5)
             if _seen_here(obj, 20.0):
@@ -745,6 +752,16 @@ def _part_view(obj, log_fh=None) -> bool:
             print(msg, flush=True)
             if log_fh: log_fh.write(msg + "\n")
     if _staging_view(log_fh) and _seen_here(obj, 20.0):
+        return True
+    # A recent still-camera sighting from any view is where the part is (parts do not move by themselves);
+    # move_to_grasp looks at it again from its own hover before it descends.
+    tr = tracked(obj, TRACKER_TRUST_S)
+    if tr is not None:
+        LAST_SEEN_XY[obj] = (tr[0], tr[1])
+        msg = (f"  [view] {obj}: no view here sees it, the tracker saw it at ({1000*tr[0]:.0f}, {1000*tr[1]:.0f}) mm "
+               f"{tr[2]:.0f} s ago -> picking from there (move_to_grasp looks again)")
+        print(msg, flush=True)
+        if log_fh: log_fh.write(msg + "\n")
         return True
     return False
 
