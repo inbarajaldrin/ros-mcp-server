@@ -17,8 +17,8 @@ the push, lowered from safe height beside the face (guarded: stops on touch, the
 fingertips TIP_ABOVE_TABLE_M over the table (below the base top, CAD), then a straight push guarded at
 MAX_FORCE_N, at most STEP_MAX_MM past the face; back off; lift.
   slide: the middle of the face opposite the move, along the move (the larger error axis of the base frame)
-  turn:  the same face but LEVER_MM off its middle: an off-centre push turns the base as it slides; the
-         lever's side sets the sense. Turn first (a turn also slides it), then slide.
+  turn:  a couple - the face LEVER_MM off its middle, then the opposite face at the opposite end, same step: the
+         turns add, the slides cancel (one off-centre push mostly slid the base). Turn first, then slide.
 """
 import argparse
 import json
@@ -101,10 +101,18 @@ def push(base, ob, face_dir_b, along_mm, step_mm, dry):
     if dry:
         return True
     for argv, label in [(['primitives.control_gripper', 'close', '--mode', 'real'], 'close'),
-                        (['primitives.move_to_safe_height', '--mode', 'real'], 'safe height'),
-                        (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s_w, SAFE_HEIGHT + 0.05), '--quat', *Q], 'over the start')]:
+                        (['primitives.move_to_safe_height', '--mode', 'real'], 'safe height')]:
         if go(argv, label).get('result') == 'failure':
             return False
+    r0 = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s_w, SAFE_HEIGHT + 0.05), '--quat', *Q], 'over the start')
+    if r0.get('result') == 'failure' and 'wrist_3' in str(r0.get('error', '')):
+        # the closed finger block pushes the same with the wrist turned pi: take that one instead of winding wrist_3
+        # past its limit (2026-10-21: the second corner of a turn wanted wrist_3 -5.69 rad)
+        Q = [f"{v:.6f}" for v in (R.from_euler('z', np.pi) * R.from_quat(q)).as_quat()]
+        r0 = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s_w, SAFE_HEIGHT + 0.05), '--quat', *Q],
+                'over the start (wrist turned pi)')
+    if r0.get('result') == 'failure':
+        return False
     for extra in (0.0, 0.010, 0.020):
         s2 = s_w - push_w * extra
         r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s2, fz), '--quat', *Q, '--min-z', '0.13',
@@ -193,6 +201,14 @@ def main():
                 print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); return 0
         if not push(a.base, ob, d, lever, step, a.dry_run):
             print("  !!! push failed - stopping"); return 1
+        if lever != 0.0 and np.hypot(*e_b) <= a.tol_mm:          # pure turn: couple; with a slide still owed, the
+                                                                   # single push from the side that also reduces it
+            # the other corner (operator 2026-10-21): the same push from the opposite face at the opposite end turns
+            # the base the same way while the two slides cancel - one off-centre push alone slid base1 17 mm and
+            # turned it 0.3 deg. push() measures the lever along the face's own tangent (d turned +90), which flips
+            # with d: the SAME lever on -d is the opposite end, and (-L t) x (-d) = L t x d, the same turn.
+            if not push(a.base, ob, -d, lever, step, a.dry_run):
+                print("  !!! push failed - stopping"); return 1
         if a.dry_run:
             return 0
         if not view(ob):
