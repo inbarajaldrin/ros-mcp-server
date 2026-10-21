@@ -1297,7 +1297,7 @@ class PrismaticPegInsertion(Node):
         cur = self.get_ee_position()
         if (os.environ.get('PRISMATIC_HOLD_IF_WEDGED') == '1' and cur is not None and self.target_xyz is not None):
             dz = 1000 * (cur[2] - self.target_xyz[2]); dxy = 1000 * float(np.hypot(cur[0] - self.target_xyz[0], cur[1] - self.target_xyz[1]))
-            if 0 < dz <= 7.0 and dxy <= 2.5:
+            if 0 < dz <= 7.0 and dxy <= 5.0:
                 self.get_logger().warn(f"[WEDGED] {dz:.1f} mm above the seat, {dxy:.1f} mm from the aim - holding here (no retract)")
                 self._tele_phase = "ABORT"; self._tele_event = "wedged_hold"
                 self._tele_log_row()

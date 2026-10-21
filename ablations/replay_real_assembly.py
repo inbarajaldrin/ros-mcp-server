@@ -1477,7 +1477,7 @@ def _is_bar(obj) -> bool:
 
 
 WEDGE_MAX_DZ_MM = 7.0       # stalled at most this far above the seat ...
-WEDGE_MAX_DXY_MM = 2.5      # ... and this close to the aim in x/y: wedged in the channel, not a miss
+WEDGE_MAX_DXY_MM = 5.0      # ... and this close to the aim in x/y (cycle 3: 3.8-4.4 mm, 5 mm high = on the channel edge)
 
 
 def _wedged_near_seat(obj, since):
