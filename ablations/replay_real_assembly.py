@@ -2429,9 +2429,13 @@ def main() -> int:
         # Arm empty, at home or safe height: re-read the base, then the same check-and-fix the
         # replay runs after an insert (the seat check flies to its own view).
         from disassemble import observe_base
-        ob = observe_base('base1')
+        try:
+            RUN_BASE['name'] = json.load(open(args.assembly_json)).get('base_name') or 'base1'
+        except Exception:
+            pass
+        ob = observe_base(RUN_BASE['name'])
         if ob is None:
-            print("base1 not observed — stopping"); return 1
+            print(f"{RUN_BASE['name']} not observed — stopping"); return 1
         args.observed_base = ob
         def say(m):
             print(m, flush=True)
