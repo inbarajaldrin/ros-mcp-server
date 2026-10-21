@@ -57,7 +57,10 @@ def main():
     mp = Path(a.timing.replace('.timing.jsonl', '.motion.jsonl'))
     iv = moving_intervals(load(mp)) if mp.exists() else []
     parts = [r for r in rows if r['kind'] == 'part']
-    leaves = [r for r in rows if r['kind'] != 'part']
+    nonpart = [r for r in rows if r['kind'] != 'part']
+    # count a block once: drop rows nested inside another non-part row (observe_base -> observe)
+    leaves = [r for r in nonpart if not any(o is not r and o['t0'] <= r['t0'] and r['t1'] <= o['t1']
+                                            and (o['t1'] - o['t0']) > (r['t1'] - r['t0']) for o in nonpart)]
     t0 = min(r['t0'] for r in rows); t1 = max(r['t1'] for r in rows)
     out = {'run': {'wall_s': t1 - t0, 'moving_s': moving_in(iv, t0, t1)}, 'parts': [], 'blocks': []}
     for p in parts:
