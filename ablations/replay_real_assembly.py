@@ -650,7 +650,7 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         # applied read (it was re-observed by markers per pick: 11 reads, 64 s in one FMB1 run) and the layout's
         # parked region as an obstacle (base2/3/4 were probed one by one, 25 s)
         others = [b for b in ('base1', 'base2', 'base3', 'base4') if b != RUN_BASE['name']]
-        seen, seen_bases = observe_parts(PARTS + others, with_raw=True)
+        seen, seen_bases = observe_parts(list(PARTS) + others, with_raw=True)
         ob = base_pose or RUN_BASE.get('pose') or observe_base_pose(RUN_BASE['name'])
         if obj not in seen or ob is None:
             return True                                   # cannot judge here; the pick's own checks apply
