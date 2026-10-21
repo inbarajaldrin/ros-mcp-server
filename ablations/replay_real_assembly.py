@@ -642,6 +642,9 @@ def verify_seated(objs, say, second_view=None) -> bool:
             if prev.get('verified') and occ:
                 say(f"  [verify] {o}: not visible (under {occ[0]}) — verified before it was covered -> OK")
                 continue
+            if prev.get('verified') and prev.get('how') == 'depth seat check' and time.time() - prev.get('t', 0) < 1800:
+                say(f"  [verify] {o}: markers not seen — depth seat check confirmed it ({time.time() - prev['t']:.0f} s ago) -> OK")
+                continue
             if second_view is not None and not moved:
                 say(f"  [verify] {o}: not detected from above the base — second look from home")
                 moved = True
@@ -1680,6 +1683,18 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
 
 
 def seat_check_and_reseat(obj, state, args, say) -> bool:
+    """The depth seat check (+ nudges / edge press); a pass is recorded in the verify ledger as a depth
+    confirmation, which verify_seated accepts when the markers cannot see the part (2026-10-20: fork_orange,
+    depth -0.08 mm from its CAD height, failed the run on 'marker not detected')."""
+    ok = _seat_check_and_reseat(obj, state, args, say)
+    if ok:
+        led = _ledger()
+        led[obj] = dict(verified=True, t=time.time(), how='depth seat check')
+        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+    return ok
+
+
+def _seat_check_and_reseat(obj, state, args, say) -> bool:
     """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
     grasp (the pose the insert released it from), and insert it again. Fails closed."""
     from seat_check import check
