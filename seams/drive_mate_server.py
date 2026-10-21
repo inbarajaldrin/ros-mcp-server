@@ -234,8 +234,12 @@ class DriveMateServer(Node):
         tq = self.tcp.orientation
         held_world = (R.from_quat([tq.x, tq.y, tq.z, tq.w]) * R.from_quat(q_fo)).as_quat()
         tp = g.target.pose
-        from primitives.shared.config import get_object_base_offset_m
-        dz = float(get_object_base_offset_m(obj)[2])          # known debt: per-part seat-z offset (docstring)
+        # read fresh every goal: a server started before a config edit kept the old offset and aimed yellow 6 mm
+        # deep while the planner (a new process) used the new one (2026-10-21)
+        import importlib
+        import primitives.shared.config as _cfg
+        importlib.reload(_cfg)
+        dz = float(_cfg.get_object_base_offset_m(obj)[2])     # known debt: per-part seat-z offset (docstring)
         argv = ['python3', '-u', '-m', 'primitives.translate_object', '--mode', 'real', '--object-name', obj,
                 '--base-name', base, '--insert', '--insertion-type', 'compliant', '--grasp-id', str(gid),
                 '--current-object-orientation', *[f'{v:.6f}' for v in held_world],
