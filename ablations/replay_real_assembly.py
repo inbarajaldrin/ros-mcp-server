@@ -704,12 +704,31 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         return True
 
 
+TRACKER_JSON = REPO_ROOT / 'ablations' / 'logs' / 'part_tracker.json'
+TRACKER_MAX_AGE_S = 1800.0
+
+
+def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
+    """(x, y, age_s) of `obj`'s latest still-camera sighting from ANY view (ablations/part_tracker.py), or None."""
+    try:
+        e = json.load(open(TRACKER_JSON)).get(obj)
+        age = time.time() - float(e['t'])
+        return (float(e['xyz'][0]), float(e['xyz'][1]), age) if age <= max_age_s else None
+    except Exception:
+        return None
+
+
 def _part_view(obj, log_fh=None) -> bool:
     """Camera straight above `obj`'s last-seen position (centred, closer) — the staging view at 0.62 m
     sees the whole region but detected a standing yellow only intermittently (2026-10-19: seen by the
     derive step, then not for 20 s at the pick). Confirms the part is seen (20 s) before returning
     True; falls back to the staging view, then fails."""
     xy = LAST_SEEN_XY.get(obj)
+    tr = tracked(obj)
+    if tr is not None and (xy is None or np.hypot(tr[0] - xy[0], tr[1] - xy[1]) > 0.01):
+        print(f"  [view] {obj}: last seen by the tracker at ({1000*tr[0]:.0f}, {1000*tr[1]:.0f}) mm "
+              f"{tr[2]:.0f} s ago -> look there", flush=True)
+        xy = (tr[0], tr[1])
     b_ = camera_brightness()
     vz = PART_VIEW_Z_LOW_LIGHT if (b_ is not None and 0 <= b_ < LOW_LIGHT_BRIGHTNESS) else PART_VIEW_Z
     if vz != PART_VIEW_Z:
@@ -753,6 +772,12 @@ def verify_seated(objs, say, second_view=None) -> bool:
     missed by all 8 reads from above and seen 30/30 from home, and a good cycle stopped."""
     led = _ledger(); ok_all = True; moved = False
     for o in reversed(list(objs)):        # covering parts first: their ledger time must be newer
+        prev_ = led.get(o) or {}
+        if (os.environ.get('SEAMS_CERTIFY') == '1' and prev_.get('verified') and prev_.get('how') == 'execute_mate'
+                and time.time() - prev_.get('t', 0) < 1800):
+            # certified by ExecuteMate this run; every later certification re-reads its predecessors
+            say(f"  [verify] {o}: certified by ExecuteMate {time.time() - prev_['t']:.0f} s ago -> OK (not re-read)")
+            continue
         r = _read_part(o)
         if _not_detected(r):
             prev = led.get(o) or {}
@@ -1617,6 +1642,11 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
         say(f"  [execute_mate] {mate}: not measurable from the {side} view ({out.get('refusal_detail', '')}) - next view")
     if out is None:
         say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
+    if out.get('placed'):
+        led = _ledger()
+        led[obj] = dict(verified=True, t=time.time(), how='execute_mate',
+                        depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
+        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
         f"{out.get('refusal_detail', '')} depth={out.get('engagement_depth_m')}")
     return out
@@ -2632,12 +2662,21 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # run_assembly_step's settle-window discipline).
         time.sleep(0.5)
 
-    if _seat_checked(obj) and not args.dry_run and getattr(args, 'seat_check', True):
+    if os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
+        # ExecuteMate is the authority (operator 2026-10-21: no diagnostics once the part is known seated). The
+        # replay's own depth seat check and reseat run only as the recovery for a measured not_at_seat, or when no
+        # view could measure the seat.
+        bn_ = base_name or RUN_BASE['name']
+        out = certify_via_execute_mate(obj, bn_, getattr(args, 'observed_base', None), say, log_fh) or {}
+        if not out.get('placed') and _seat_checked(obj) and getattr(args, 'seat_check', True):
+            say(f"  [execute_mate] {obj}: {out.get('refusal') or 'no answer'} -> the replay's seat check / reseat")
+            if not seat_check_and_reseat(obj, state, args, say):
+                return False
+            if out.get('refusal') == 'not_at_seat':
+                out = certify_via_execute_mate(obj, bn_, getattr(args, 'observed_base', None), say, log_fh) or {}
+    elif _seat_checked(obj) and not args.dry_run and getattr(args, 'seat_check', True):
         if not seat_check_and_reseat(obj, state, args, say):
             return False
-
-    if os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
-        certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None), say, log_fh)
     print(f"\n  ✓ {obj} complete")
     return True
 
@@ -2825,7 +2864,8 @@ def main() -> int:
         # for a part no view sees, so _part_view looks straight above it.
         try:
             _st = json.load(open(REPO_ROOT / 'ablations/logs/staged_parts.json'))
-            for _n, (_x, _y, _t) in _st.items():
+            for _n, _v in _st.items():
+                _x, _y, _t = _v[:3]                     # entries may carry the placed pose after (x, y, t)
                 if time.time() - _t < 3 * 3600:
                     LAST_SEEN_XY.setdefault(_n, (_x, _y))
         except Exception:
@@ -3163,18 +3203,27 @@ def _start_timing(timing_path, motion_path):
                                           stderr=subprocess.DEVNULL)
     except Exception:
         pass
+    try:
+        _tn = 'part_' + 'tracker.py'                     # built at runtime: pgrep must not match this process
+        if subprocess.run(['pgrep', '-f', _tn], capture_output=True).returncode == 0:
+            raise RuntimeError('a tracker is already running (standing process)')
+        _TIMING['tracker'] = subprocess.Popen(['python3', '-u', str(REPO_ROOT / 'ablations' / 'part_tracker.py')],
+                                              env=make_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
     print(f"  [timing] {timing_path}", flush=True)
     atexit.register(_stop_timing)
 
 
 def _stop_timing():
-    r = _TIMING.get('rec')
-    if r is not None and r.poll() is None:
-        r.send_signal(signal.SIGINT)
-        try:
-            r.wait(timeout=5)
-        except Exception:
-            r.terminate()
+    for k in ('rec', 'tracker'):
+        r = _TIMING.get(k)
+        if r is not None and r.poll() is None:
+            r.send_signal(signal.SIGINT)
+            try:
+                r.wait(timeout=5)
+            except Exception:
+                r.terminate()
 
 
 def _timed(fn, kind, label_of):

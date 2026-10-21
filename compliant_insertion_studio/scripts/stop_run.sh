@@ -45,7 +45,10 @@ R=replay_real_assembly; M=primitives; W=wrapper.compliant_insert; A=ablations
 REPLAY_PAT="${A}/[a-z_0-9]+\.(py|sh)"
 ASSEMBLY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${M}\.|${M}/[a-z_/]+\.py|compliant_insertion_studio\.${W})"
 
-alive() { pgrep -f "$ASSEMBLY_PAT" 2>/dev/null; }
+# passive helpers (never command the arm) keep running: the part tracker and the motion recorder
+T1=part_tracker; T2=motion_recorder; PASSIVE="${A}/(${T1}|${T2})\.py"
+drivers() { for p in $(pgrep -f "$1" 2>/dev/null); do ps -o args= -p "$p" 2>/dev/null | grep -qE "$PASSIVE" || echo "$p"; done; }
+alive() { drivers "$ASSEMBLY_PAT"; }
 wait_gone() {  # seconds
     local end=$((SECONDS + $1))
     while [ $SECONDS -lt $end ]; do [ -z "$(alive)" ] && return 0; sleep 0.5; done
@@ -71,7 +74,7 @@ step 1/3 "Stop the assembly processes"
 if [ -z "$(alive)" ]; then
     ok "no assembly running"
 else
-    for pid in $(pgrep -f "$REPLAY_PAT"); do
+    for pid in $(drivers "$REPLAY_PAT"); do
         kill -SIGINT "$pid" 2>/dev/null && ok "SIGINT $(ps -o args= -p "$pid" 2>/dev/null | cut -c1-70) ($pid)"
     done
     if wait_gone 25; then
