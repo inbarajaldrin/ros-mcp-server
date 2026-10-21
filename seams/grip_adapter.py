@@ -13,8 +13,11 @@ the cell's adapter. It holds no width: every number in the result is read back f
   width      /gripper_width_offset (tip-to-tip gap, mm; plate spacing minus 2 x 4.6 mm, prompt2assembly's
              rg2.grasp-geometry fingertip_offset_mm)
   holding    /gripper_grasp_detected (the RG2's own stall/grip flag), or stalled > STALL_MM short of a closing command
-  force      NOT controllable through onrobot_ros (the RG2 closes at its configured force). Declared, not faked:
-             verdict notes it and the evidence carries NaN for the measured effort (the RG2 reports none)
+  force      STUB (seam left open). goal.force is recorded, not applied: onrobot_ros's rg_gripper node passes no force,
+             so every command runs at the driver default 400 (= 40 N, the RG2 maximum). The driver itself can
+             (custom_libraries/onrobot.py move_gripper(width, force_val): register 0, units 0.1 N, 0..400); opening
+             it = rg_gripper.command_callback accepting "width,force" + passing FORCE_N here. Not needed yet.
+             The RG2 reports no effort, so the evidence carries NaN for it
   identity   expect_span_m > 0 -> width_vs_span: |measured gap - declared span| <= SPAN_TOL_M
 """
 import json
@@ -40,6 +43,7 @@ OPEN_M = 0.100                 # RG2 full opening (tip gap ~100 mm)
 REACH_TOL_M = 0.002
 STALL_M = 0.002
 SPAN_TOL_M = 0.003
+FORCE_APPLIED_N = 40.0         # what the RG2 actually closes at today (driver default 400 x 0.1 N)
 
 
 class GripAdapter(Node):
@@ -83,7 +87,8 @@ class GripAdapter(Node):
         ev = {'goal': {'width_m': g.width_m, 'force': g.force, 'expect': g.expect, 'expect_span_m': g.expect_span_m},
               'cmd': cmd, 'rc': p.returncode, 'width_measured_m': res.width_measured_m, 'holding': res.holding,
               'reached': res.reached, 'identity_verified': res.identity_verified, 'verdict': res.verdict,
-              'force_note': 'not controllable through onrobot_ros: RG2 closes at its configured force'}
+              'force_requested_n': g.force, 'force_applied_n': FORCE_APPLIED_N,
+              'force_note': 'stub: requested force not applied (onrobot_ros passes none; seam open)'}
         self.events.publish(String(data=json.dumps(ev)))
         gh.succeed()
         return res
