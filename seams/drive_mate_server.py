@@ -13,8 +13,9 @@ driver plugs in behind the same action later (M3b).
           held      VisionPose of the mover in the FLANGE frame (tool0) - the grasp. The grasp id and the grasp
                     depth are read off it: the CAD grasp point that lies on the tool axis (<= HELD_AXIS_TOL_M off
                     it) is the grasp, its tool-z coordinate the depth (GRASP_TOOL_OFFSET_M of the insert)
-  result  seated          from the raw trace, never the FSM label: the insert ended still (< 1 mm z range over its
-                          last 50 samples) with |tcp_z - predicted seat z| < SEATED_DZ_M
+  result  seated          never the FSM label: where the arm RESTS after the insert (TCP still < 0.5 mm over 0.5 s)
+                          with |tcp_z - predicted seat z| < SEATED_DZ_M. The trace alone cannot say it (its seat
+                          detector ends logging on arrival, still descending); its own reading is kept as trace_stage
           stage_reached   seat | wedged (still, 0 < dz <= 7 mm, within 5 mm of the aim: on a channel edge) | above |
                           below | unsettled (the trace ends still moving) | no_trace.  Checked 2026-10-20 against the
                           last 40 FMB1 inserts: 38 agree with the FSM label, 2 ended within 1 mm but moving
@@ -60,6 +61,7 @@ LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 HELD_AXIS_TOL_M = 0.006          # a CAD grasp point this close to the tool axis is the grasp
 SEATED_DZ_M = 0.005              # CLAUDE.md: |tcp_z - predicted_seat| < 5 mm and motion stopped
 WEDGE_DZ_M, WEDGE_DXY_M = 0.007, 0.005
+REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert: < 0.5 mm over 0.5 s
 
 
 def resolve(mate):
@@ -134,8 +136,26 @@ def outcome_from_meta(mp):
     else:
         stage = 'above' if d[2] > 0 else 'below'
     return {'stage_reached': stage, 'seated': stage == 'seat', 'still': still, 'trace_path': csv_path,
+            'seat_xyz': [float(v) for v in tgt],
             'slide': [float(d[0]), float(d[1])], 'measured_correction': [float(v) for v in d],
             'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
+
+
+def judge_at_rest(out, rest):
+    """Seat judged where the arm came to rest after the insert (the decider); the trace's own reading is kept as
+    trace_stage. slide / measured_correction are the resting TCP vs the predicted seat."""
+    P, still = rest
+    tgt = np.array(out['seat_xyz']); d = np.asarray(P) - tgt; dxy = float(np.hypot(d[0], d[1]))
+    if not still:
+        stage = 'unsettled'
+    elif abs(d[2]) < SEATED_DZ_M:
+        stage = 'seat'
+    elif 0 < d[2] <= WEDGE_DZ_M and dxy <= WEDGE_DXY_M:
+        stage = 'wedged'
+    else:
+        stage = 'above' if d[2] > 0 else 'below'
+    return dict(out, trace_stage=out['stage_reached'], stage_reached=stage, seated=stage == 'seat', still=still,
+                judged_on='resting TCP', slide=[float(d[0]), float(d[1])], measured_correction=[float(v) for v in d])
 
 
 class DriveMateServer(Node):
@@ -146,6 +166,23 @@ class DriveMateServer(Node):
         ActionServer(self, DriveMate, ACTION, self.execute, goal_callback=self.on_goal,
                      cancel_callback=self.on_cancel, callback_group=ReentrantCallbackGroup())
         self.get_logger().info(f'drive-mate served at {ACTION}')
+
+    def resting_tcp(self, window_s=REST_WINDOW_S, timeout_s=5.0):
+        """The TCP once the arm has stopped after the insert: (xyz, still) from a window of samples. The insert's
+        trace ends when its seat detector fires - on arrival, still descending (2026-10-21 u_brown: trace ended
+        moving at +1.5 mm, the arm rested at +1.3 mm, seated) - so the trace cannot say whether it came to rest."""
+        t_end = time.time() + timeout_s; buf = []
+        while time.time() < t_end:
+            p = self.tcp
+            if p is not None:
+                buf.append((time.time(), p.position.x, p.position.y, p.position.z))
+                w = [b for b in buf if b[0] >= buf[-1][0] - window_s]
+                if buf[-1][0] - buf[0][0] >= window_s:
+                    P = np.array([b[1:] for b in w])
+                    if float(np.ptp(P, axis=0).max()) < REST_STILL_M:
+                        return P[-1], True
+            time.sleep(0.02)
+        return (np.array(buf[-1][1:]), False) if buf else None
 
     def on_goal(self, goal):
         return GoalResponse.REJECT if self.busy.locked() else GoalResponse.ACCEPT
@@ -227,6 +264,9 @@ class DriveMateServer(Node):
             time.sleep(0.5)
         rc = self.proc.returncode; self.proc = None
         out = trace_outcome(obj, t0)
+        rest = self.resting_tcp()
+        if rest is not None and out.get('seat_xyz') is not None:
+            out = judge_at_rest(out, rest)
         res.stage_reached = out['stage_reached']; res.seated = bool(out.get('seated', False))
         res.trace_path = out.get('trace_path', '')
         if 'slide' in out:

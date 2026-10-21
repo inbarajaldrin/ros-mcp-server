@@ -125,13 +125,13 @@ class ExecuteMateServer(Node):
         if res is None:
             return self._done(gh, r, 'engagement_invalid', 'vision certify did not answer')
         this = res[-1]
-        r.engagement_measured = this['method'] != 'none'
+        r.engagement_measured = this['method'] in ('both', 'depth_seat_check')    # the seat height certifies; markers alone do not
         r.engaged = bool(this['inside'])
         r.engagement_depth_m = float(this['error_mate_frame_m'][2])
         r.granted_on = this['method']
         pre = {}
         for p, c in zip(preds, res[:-1]):
-            if c['method'] == 'none':
+            if c['method'] not in ('both', 'depth_seat_check'):
                 pre[p] = 'not measurable from this view - carried on its journalled certification'
             elif not c['inside']:
                 r.engagement_json = json.dumps({'this': this, 'predecessors': res[:-1]}, default=float)

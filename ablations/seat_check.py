@@ -214,9 +214,15 @@ VIEW_TILT_DEG = 25.0         # 2026-10-20: straight down, the overhead lights re
 VIEW_DIST_M = 0.47           # 3 mm high where it was seated); tilted 25 deg and close (D415 min ~0.45 m) it read flat
 
 
-def view_pose(obj, observed_base, base='base1'):
+VIEW_SIDES = ('outer', 'inner', 'along+', 'along-')
+
+
+def view_pose(obj, observed_base, base='base1', side='outer'):
     """Close, tilted view of the part: camera aimed at its CAD top-face centre from VIEW_DIST_M, tilted
-    VIEW_TILT_DEG, from the part's outer side across its long axis (out of the lights' mirror direction)."""
+    VIEW_TILT_DEG, from the part's outer side across its long axis (out of the lights' mirror direction).
+    side='inner' views from the other side, 'along+'/'along-' from either end along the long axis - for a base so far
+    out that the outer view is beyond reach (2026-10-21: base1 at (0.46, -0.49), u_brown's outer view at y -0.74 had
+    no IK path; from the inner side, looking across the base, its far top face read an impossible -2.3 mm end)."""
     from tilted_seat_view import aimed_flange
     f = TOP_FACE[(obj, base)]
     (bx, by, bz), bq = observed_base
@@ -225,6 +231,10 @@ def view_pose(obj, observed_base, base='base1'):
     cross = 0 if f['long_axis'] == 'y' else 1
     c = (f['cx'], f['cy'])[cross]
     d = np.zeros(3); d[cross] = 1.0 if c > 0.005 else -1.0
+    if side == 'inner':
+        d = -d
+    elif side in ('along+', 'along-'):                         # from an end of the part, along its long axis
+        d = np.zeros(3); d[1 - cross] = 1.0 if side == 'along+' else -1.0
     pf, qf, _ = aimed_flange(tgt, Rb.apply(d), VIEW_TILT_DEG, VIEW_DIST_M, X_CAM, float(Rb.as_euler('xyz')[2]))
     return ['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
             *[f"{v:.4f}" for v in pf], '--quat', *[f"{v:.6f}" for v in qf], '--min-z', '0.15']
@@ -233,8 +243,11 @@ def view_pose(obj, observed_base, base='base1'):
 def check(obj, observed_base, move=True, out_dir=None, base='base1'):
     if move:
         env = os.environ.copy(); env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
-        p = subprocess.run(view_pose(obj, observed_base, base), capture_output=True, text=True, timeout=60,
-                           env=env, cwd=str(REPO))
+        for side in VIEW_SIDES:                                # outer first; inner when outer is out of reach
+            p = subprocess.run(view_pose(obj, observed_base, base, side), capture_output=True, text=True, timeout=60,
+                               env=env, cwd=str(REPO))
+            if p.returncode == 0:
+                break
         if p.returncode != 0:
             return {'ok': False, 'error': 'view move failed: ' + (p.stdout + p.stderr).strip().splitlines()[-1][:200]}
         time.sleep(1.0)                                        # settle before the depth frames

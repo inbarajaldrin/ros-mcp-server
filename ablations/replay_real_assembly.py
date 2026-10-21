@@ -1545,11 +1545,18 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     mate = mate_for(obj, base)
     if mate is None or observed_base is None:
         return None
-    r = run_subprocess(_sc.view_pose(obj, observed_base, base), label=f'execute_mate: seat view ({obj})', timeout_s=90,
-                       log_fh=log_fh)
-    if r.get('result') == 'failure':
-        say(f"  [execute_mate] {mate}: seat view not reached - not asked"); return None
-    out = _seam_call(['execute', '--mate', mate], 450)
+    out = None
+    for side in _sc.VIEW_SIDES:                     # vision does no motion: the planner tries views until it measures
+        r = run_subprocess(_sc.view_pose(obj, observed_base, base, side), label=f'execute_mate: seat view ({obj}, {side})',
+                           timeout_s=90, log_fh=log_fh)
+        if r.get('result') == 'failure':
+            continue
+        out = _seam_call(['execute', '--mate', mate], 450)
+        if out.get('refusal') != 'engagement_invalid':
+            break
+        say(f"  [execute_mate] {mate}: not measurable from the {side} view ({out.get('refusal_detail', '')}) - next view")
+    if out is None:
+        say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
     say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
         f"{out.get('refusal_detail', '')} depth={out.get('engagement_depth_m')}")
     return out
@@ -2713,6 +2720,7 @@ def main() -> int:
         snap_path = log_dir / f"replay{only_tag}_{ts}.snapshots.jsonl"
         log_fh = open(log_path, "w", buffering=1)  # line-buffered
         snap_fh = open(snap_path, "w", buffering=1)
+        _start_timing(log_dir / f"replay{only_tag}_{ts}.timing.jsonl", log_dir / f"replay{only_tag}_{ts}.motion.jsonl")
         log_fh.write(
             f"# replay_real_assembly log\n"
             f"# started: {_dt.datetime.now().isoformat()}\n"
@@ -3075,6 +3083,71 @@ def main() -> int:
                     fh.close()
                 except Exception:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# Timing (2026-10-21, Speed track T0): one JSONL row per subprocess / read / seam call / part, plus an independent
+# motion recorder (TCP speed). ablations/cycle_time.py splits the wall time into arm-moving and arm-still.
+# Logging only: nothing here changes what the replay does.
+# ---------------------------------------------------------------------------
+_TIMING = {'fh': None, 'rec': None}
+
+
+def _start_timing(timing_path, motion_path):
+    import atexit
+    _TIMING['fh'] = open(timing_path, 'a', buffering=1)
+    try:
+        _TIMING['rec'] = subprocess.Popen(['python3', '-u', str(REPO_ROOT / 'ablations' / 'motion_recorder.py'),
+                                           str(motion_path)], env=make_env(), stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    print(f"  [timing] {timing_path}", flush=True)
+    atexit.register(_stop_timing)
+
+
+def _stop_timing():
+    r = _TIMING.get('rec')
+    if r is not None and r.poll() is None:
+        r.send_signal(signal.SIGINT)
+        try:
+            r.wait(timeout=5)
+        except Exception:
+            r.terminate()
+
+
+def _timed(fn, kind, label_of):
+    import functools
+
+    @functools.wraps(fn)
+    def w(*a, **k):
+        t0 = time.time()
+        try:
+            out = fn(*a, **k)
+            return out
+        finally:
+            fh = _TIMING.get('fh')
+            if fh is not None:
+                try:
+                    lab = label_of(a, k)
+                except Exception:
+                    lab = '?'
+                row = {'kind': kind, 'label': lab, 't0': t0, 't1': time.time()}
+                o = locals().get('out')
+                if isinstance(o, dict) and o.get('duration_s') is not None:
+                    row['commanded_s'] = o.get('duration_s')
+                if isinstance(o, dict) and 'result' in o:
+                    row['result'] = o.get('result')
+                fh.write(json.dumps(row, default=str) + '\n')
+    return w
+
+
+run_subprocess = _timed(run_subprocess, 'subprocess', lambda a, k: k.get('label') or (a[1] if len(a) > 1 else '?'))
+observe_object_orientation = _timed(observe_object_orientation, 'observe', lambda a, k: a[0])
+observe_base_pose = _timed(observe_base_pose, 'observe_base', lambda a, k: a[0])
+camera_brightness = _timed(camera_brightness, 'brightness', lambda a, k: '')
+_seam_call = _timed(_seam_call, 'seam', lambda a, k: ' '.join(a[0][:3]))
+replay_object = _timed(replay_object, 'part', lambda a, k: a[0]['object_name'])
 
 
 if __name__ == '__main__':

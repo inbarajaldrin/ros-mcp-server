@@ -165,20 +165,26 @@ def certify_many(mates):
             ev['markers'] = {'position_error_m': v['position_error_m'], 'orientation_error_deg': v.get('orientation_error_deg')}
         else:
             ev['markers'] = {'error': v.get('error') or 'not detected'}
-        # judged on what carries a stated sigma: the seat height (depth, test-measured repeatability) against the
-        # declared half-width + 2 sigma, and the long-axis tilt against the declared 1 deg (its repeatability is not
-        # measured yet, so no widening). Marker xy has no stated sigma: reported, not judged - for an insertion mate a
-        # mover at seat depth is inside its pocket. Roll is not judged (a seated bar reads a -3 deg roll bias).
+        # judged on what carries a stated sigma: the seat height (depth, test-measured repeatability). Marker xy has no
+        # stated sigma: reported, not judged - for an insertion mate a mover at seat depth is inside its pocket.
+        # Tilt is judged in the unit that has a stated sigma: the heights at both ends of the top face against the same
+        # z band; the angle is reported only (2026-10-21: one seated u_brown read -2.9 / -1.9 / -1.6 deg from three
+        # views - the angle's repeatability is not measured, so it cannot decide).
         lim_z = acc['halfwidth_m'][2] + 2 * sz['z']
-        lim_t = acc['tilt_deg']
-        ev['limits'] = {'z_m': lim_z, 'tilt_deg': lim_t,
-                        'rule': 'z: declared half-width + 2 sigma (seat_depth); tilt: declared; xy: reported only (no sigma)'}
+        ev['limits'] = {'z_m': lim_z, 'rule': 'centre and both end heights: declared half-width + 2 sigma (seat_depth); '
+                                              'tilt angle and marker xy: reported only (no stated sigma)'}
         xy_seen = math.isfinite(ex)
+        ends = (ev.get('depth') or {}).get('end_heights_mm') or []
+        if math.isfinite(z_err) and ends and min(ends) / 1000.0 < -lim_z:
+            # the pocket floor stops the part: an end read below the seat by more than the band is the view, not
+            # the part (2026-10-21: u_brown seen across the base read -2.29 mm at one end) -> not measured
+            ev['invalid'] = f'an end {min(ends):.2f} mm below the seat - physically impossible, reading rejected'
+            z_err = tilt = math.nan
         if not math.isfinite(z_err):
             inside, method = False, 'markers' if xy_seen else 'none'
-            ev['verdict'] = 'not certified: seat height not measured from this view'
+            ev['verdict'] = 'not certified: ' + (ev.get('invalid') or 'seat height not measured from this view')
         else:
-            inside = bool(abs(z_err) <= lim_z and (not math.isfinite(tilt) or tilt <= lim_t))
+            inside = bool(abs(z_err) <= lim_z and all(abs(e) / 1000.0 <= lim_z for e in ends))
             method = 'both' if xy_seen else 'depth_seat_check'
             ev['verdict'] = ('inside' if inside else 'outside') + ' (xy implied by seat depth)'
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
