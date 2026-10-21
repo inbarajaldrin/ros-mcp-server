@@ -2668,6 +2668,22 @@ def main() -> int:
             if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED:
                 record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
                                     getattr(args, 'observed_base', None), log_fh, bool(args.part_at_staging))
+            # --part-at-staging is a claim, not a fact (2026-10-20: line_brown was 38 cm away, in plain view from
+            # home, and move_to_grasp gave up after 40 tries at the clear area): not seen there -> home, then above
+            # its last position / the staging view.
+            if (not args.dry_run and args.part_at_staging and not _SAFETY_STOP and not _seen_here(obj)):
+                msg = f"  [view] {obj}: not at the clear area -> look from home, then the staging view"
+                print(msg, flush=True)
+                if log_fh: log_fh.write(msg + "\n")
+                run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                               label='look from home', timeout_s=60, log_fh=log_fh)
+                time.sleep(1.0)
+                if not _seen_here(obj, 10.0) and not _part_view(obj, log_fh):
+                    msg = f"\n!!! {obj}: not at the clear area, not seen from home nor the staging view"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
+                    failed = obj
+                    break
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP

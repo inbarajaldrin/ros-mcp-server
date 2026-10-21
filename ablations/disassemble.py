@@ -393,6 +393,9 @@ def contact_flange_z(name, gid, quat_xyzw, grasp_tool_offset_m):
     return TABLE_HEIGHT + below + grasp_tool_offset_m
 
 
+PLACED = {}
+
+
 def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
     """Carry the held part at the current height (orientation kept, or turned `turn` rad about
     vertical from the seated top-down grasp) above (sx, sy), lower it onto the table, release,
@@ -444,6 +447,7 @@ def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
             print(f"    touched down: {res.get('error')}", flush=True)
             ok = True
         if not ok: return 1
+    PLACED['xy'] = (sx, sy)
     return 0
 
 
@@ -690,7 +694,20 @@ def main():
         gid_ = get_grasp_id_for_assembly(a.place_held)          # any assembly (2026-10-20: FMB3 line_red)
         cz = contact_flange_z(a.place_held, gid_, load_seat_pose_in_base(get_base_for_part(a.place_held) or 'base1',
                                                                           a.place_held)[1], grasp_offset_for(a.place_held))
-        return place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
+        rc = place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
+        if rc == 0:
+            # look where it landed (2026-10-20: a part assumed at the clear area was 38 cm away) and record it
+            sys.path.insert(0, str(REPO / 'ablations'))
+            from replay_real_assembly import observe_base_pose
+            run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{STAGING_XY[0]:.4f}", f"{STAGING_XY[1]:.4f}",
+                   '0.52', '--quat', '0', '1', '0', '0'), 'look at the landing', 90)
+            seen = observe_base_pose(a.place_held, timeout_s=8.0)
+            if seen is None:
+                print(f"!!! {a.place_held} not seen at the clear area after the set-down"); return 1
+            d = 1000 * float(np.hypot(seen[0][0] - STAGING_XY[0], seen[0][1] - STAGING_XY[1]))
+            print(f"[place-held] {a.place_held} seen at ({1000*seen[0][0]:.0f}, {1000*seen[0][1]:.0f}) mm, {d:.0f} mm from the clear area", flush=True)
+            record_staged(a.place_held, seen[0][0], seen[0][1])
+        return rc
     order = json.load(open(REPO / f"ablations/eval_resources/fmb{RUN['base'][4:]}_assembly.json"))['assembly_order']
     sel = a.relocate or a.only
     parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
