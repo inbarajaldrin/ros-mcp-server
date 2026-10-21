@@ -64,6 +64,7 @@ OFFSET_STEP_M = 0.02
 OFFSET_PENALTY = 0.5                    # per metre of offset: prefer the least oblique clear view
 MIN_PART_CLEAR_M = 0.10                 # held part's lowest point at least this above the base top
 COVER_OK = 0.01                         # a view is clear below this covered fraction
+STEREO_BASELINE_M = 0.055              # D415 IR baseline
 DEPTH_MARGIN = 0.15                     # aligned depth: no data in a band at the image edges (D415 FOV, IR shadow)
 
 
@@ -104,6 +105,12 @@ def score_views(obj, base_name, ob, T_f_o, tcp_q, K, view_z):
         part_uv = (K @ (Pc / Pc[:, 2:3]).T).T[:, :2]
         big = np.zeros((3 * H, 3 * W), np.uint8); off = np.array([W, H])
         mp = big.copy(); cv2.fillConvexPoly(mp, cv2.convexHull((part_uv / s + off).astype(np.int32)), 1)
+        # the D415's stereo shadow: a part at z_p in front of a surface at z_s blanks depth over ~ f * B * (1/z_p - 1/z_s)
+        # px along the image x (IR baseline B 55 mm) - colour-clear views of a held line gave ~1200 depth points
+        z_p = float(np.median(Pc[:, 2])); z_s = view_z + 0.07
+        sh = int(np.ceil(K[0, 0] * STEREO_BASELINE_M * max(0.0, 1 / z_p - 1 / z_s) / s))
+        if sh > 0:
+            mp = cv2.dilate(mp, np.ones((1, 2 * sh + 1), np.uint8))
         for dx in grid:
             for dy in grid:
                 pf = np.array([bx + dx, by + dy, view_z])

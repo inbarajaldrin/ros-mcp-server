@@ -728,27 +728,39 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
         say(f"  [base@insert] {obj}: no clear view computed ({e}) - keeping the previous read"); return
     if not views:
         say(f"  [base@insert] {obj}: no view of the base clear of the held part - keeping the previous read"); return
-    v = views[0]
-    say(f"  [base@insert] {obj}: view with the part in hand: wrist {v['turn']:+.0f} deg, shift {v['shift_mm']} mm "
-        f"(base covered {v['covered']:.0%})")
     back = ['primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{x:.4f}" for x in tcp['xyz']],
             '--quat', *[f"{x:.6f}" for x in tcp['quat_xyzw']], '--min-z', '0.15']
-    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                        *[f"{x:.4f}" for x in v['flange_xyz']], '--quat', *[f"{x:.6f}" for x in v['flange_quat']],
-                        '--min-z', '0.15'], label=f'base@insert: clear view ({obj})', timeout_s=90, log_fh=log_fh)
+    # Try views until one gives a depth read (2026-10-20: views predicted clear gave ~1200 depth points for a held
+    # line - the D415's stereo shadow behind a part 0.25 m away blanks more than the colour image shows). Distinct
+    # shift directions first, at most PRE_INSERT_VIEW_TRIES.
+    tried, picked = [], []
+    for v in views:
+        dirn = (np.sign(v['shift_mm'][0]), np.sign(v['shift_mm'][1]), v['turn'])
+        if dirn in tried:
+            continue
+        tried.append(dirn); picked.append(v)
+        if len(picked) >= PRE_INSERT_VIEW_TRIES:
+            break
     nb = None
-    if r.get('result') == 'success':
-        time.sleep(1.5)
+    for v in picked:
+        say(f"  [base@insert] {obj}: view with the part in hand: wrist {v['turn']:+.0f} deg, shift {v['shift_mm']} mm "
+            f"(base covered {v['covered']:.0%})")
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                            *[f"{x:.4f}" for x in v['flange_xyz']], '--quat', *[f"{x:.6f}" for x in v['flange_quat']],
+                            '--min-z', '0.15'], label=f'base@insert: clear view ({obj})', timeout_s=90, log_fh=log_fh)
+        if r.get('result') != 'success':
+            continue
         nb = observe_base_pose(bname, timeout_s=6.0)
         if nb is not None and os.environ.get('BASE_FROM', 'marker') in ('depth', 'icp'):
             nd, info = _depth(nb, bname)
             say(f"  [base@insert] {obj}: depth outline {json.dumps(info)}")
             nb = choose_base_read(bname, nb, nd, say, tag=f'base@insert] [{obj}')
             if choose_base_read.source == 'marker':
-                # 2026-10-20 cycle 1: both depth reads failed at the base's image edge and the oblique marker read
-                # (5.2 mm / 1.5 deg off) was applied - three failed attempts. Keep the last depth read instead.
-                say(f"  [base@insert] {obj}: no depth read from the clear view - keeping the previous read")
+                # never apply an oblique marker read (cycle 1: 5.2 mm / 1.5 deg off, three failed attempts)
+                say(f"  [base@insert] {obj}: no depth read from this view")
                 nb = None
+        if nb is not None:
+            break
     r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back ({obj})', timeout_s=90, log_fh=log_fh)
     if r2.get('result') != 'success':                       # once more before failing closed
         r2 = run_subprocess(['python3', '-u', '-m', *back], label=f'base@insert: back, retry ({obj})', timeout_s=90, log_fh=log_fh)
@@ -1433,6 +1445,7 @@ def _record_snapshot(snap_fh, when: str, label: str, snap: dict) -> None:
 
 
 INSERT_MAX_RECOVERIES = 1
+PRE_INSERT_VIEW_TRIES = 3         # clear views tried for a depth read with the part in hand
 INSERT_OUTER_TRIES = 3            # insert attempts with a fresh base read before each (PRISMATIC_MAX_RETRIES=1)
 os.environ.setdefault('PRISMATIC_MAX_RETRIES', '1')
 SEAT_CHECK_OBJECTS = ('line_green',)      # FMB1's; any bar of any assembly is checked too (_seat_checked, 2026-10-20)
