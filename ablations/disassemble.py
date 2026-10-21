@@ -694,6 +694,13 @@ def main():
                          'height): place it as the saved layout (staging_layout.json) says, then take the '
                          'remaining parts out as planned')
     a = ap.parse_args()
+    if not a.dry_run:                    # Speed T0: the same timing rows + motion recorder as the replay
+        import replay_real_assembly as _rr
+        _ts = time.strftime('%Y%m%d_%H%M%S')
+        _rr._start_timing(REPO / 'ablations' / 'logs' / f'disassemble_{_ts}.timing.jsonl',
+                          REPO / 'ablations' / 'logs' / f'disassemble_{_ts}.motion.jsonl')
+        globals()['run'] = _rr._timed(run, 'subprocess', lambda a_, k_: a_[1] if len(a_) > 1 else k_.get('label', '?'))
+        globals()['observe_base'] = _rr._timed(observe_base, 'observe_base', lambda a_, k_: 'base')
     try:                                   # the run's base and parts (2026-10-20: FMB3 on base3)
         _d = json.load(open(a.assembly_json))
         RUN['base'] = _d.get('base_name') or RUN['base']
