@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-20 19:30",
+ "updated": "2026-10-20 20:25",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -22,7 +22,7 @@
      "id": "M2",
      "title": "Base free + measured errors",
      "status": "active",
-     "note": "3 cycles reassembled 4/4 on a base moved (35 mm) and turned (-5 deg) by the arm; clean-cycle count starts at cycle 4 (fixes landed mid-cycle 3)"
+     "note": "CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8"
     },
     {
      "id": "M3a",
