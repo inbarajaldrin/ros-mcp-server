@@ -1682,7 +1682,8 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
 
 
 DEPTH_VIEW_ZS = (0.52, 0.45)         # flange heights for the pre-pick depth read (the D415 returns no depth < ~0.45 m)
-DEPTH_PICK_MAX_MOVE_M = 0.03         # a fit this far from its marker seed is not trusted
+DEPTH_PICK_MAX_MOVE_M = 0.010        # a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
+DEPTH_PICK_MIN_MATCHED = 0.30        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21)
 
 
 def depth_pick_target(obj, gid, say=print, log_fh=None):
@@ -1712,8 +1713,10 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     say(f"  [depth-pick] {obj}: {json.dumps(info)}")
     if pose is None:
         return None
-    if np.hypot(*info.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M:
-        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm from the marker seed - not trusted"); return None
+    if (np.hypot(*info.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M
+            or info.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)):
+        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm on {info.get('n')}/{info.get('n_data')} points "
+            f"- not trusted, markers as before"); return None
     import json as _j
     from primitives.shared.config import _GRASP_POINTS_DIR
     g = next(g_ for g_ in _j.load(open(f'{_GRASP_POINTS_DIR}/{obj}_grasp_points.json'))['grasp_points'] if g_['id'] == gid)
