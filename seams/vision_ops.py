@@ -118,6 +118,26 @@ def pose(name, kind, timeout=15.0):
             'view_z': float(tcp[2]), 'detection_set': '', 'n': int(n), 'symmetry': _sym(name)}
 
 
+def _vol_centroid(V, F):
+    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    v = np.einsum('ij,ij->i', a, np.cross(b, c)) / 6.0
+    return ((a + b + c) / 4.0 * v[:, None]).sum(0) / v.sum()
+
+
+def graph_seat_dz(obj, base, graph_z_mm):
+    """How far our assembly JSON's seat sits ABOVE the graph's declared seat (m), centroid to centroid. The
+    certification reference top face is ours minus this."""
+    if graph_z_mm is None:
+        return 0.0
+    from grasp_depth import load_mesh
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    from scipy.spatial.transform import Rotation as R
+    Vb, Fb = load_mesh(base); cb = _vol_centroid(Vb, Fb)
+    V, F = load_mesh(obj); sp, sq = load_seat_pose_in_base(base, obj)
+    c = _vol_centroid(V @ R.from_quat(sq).as_matrix().T + sp, F)
+    return float((c[2] - cb[2]) - graph_z_mm / 1000.0)
+
+
 def certify(mate):
     return certify_many([mate])[0]
 
@@ -152,6 +172,14 @@ def certify_many(mates):
             ev['depth'] = {'error': 'no still depth frames'}
         else:
             r = sc.measure(obj, ob, cap[0], base)
+            # against the graph's declared seat: our CAD reference is dz above it, so a part on the graph's seat reads
+            # -dz against ours (yellow: -5.8 mm measured, dz +6.0 mm)
+            dz = graph_seat_dz(obj, base, m.get('graph_seat_z_mm'))
+            if r.get('height_err_mm') is not None:
+                r['height_err_mm'] = round(r['height_err_mm'] + 1000 * dz, 2)
+            if r.get('end_heights_mm'):
+                r['end_heights_mm'] = [round(e + 1000 * dz, 2) for e in r['end_heights_mm']]
+            ev['graph_seat_dz_mm'] = round(1000 * dz, 2)
             ev['depth'] = {k: r.get(k) for k in ('ok', 'error', 'height_err_mm', 'pitch_deg', 'roll_deg', 'end_heights_mm',
                                                  'n_points', 'mode')}
             if r.get('height_err_mm') is not None:

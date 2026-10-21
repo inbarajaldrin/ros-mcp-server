@@ -11,11 +11,14 @@ fmb1:
   reference: base1
   order: [mate:00, mate:01, mate:02, mate:03]          # the graph's linear extension (occurrence 01, 04, 02, 03)
   acceptance: {halfwidth_m: [0.001, 0.001, 0.001], tilt_deg: 1.0}
+  # graph_seat_z_mm: the mover's volume centroid above the base's, at the graph's assembled pose (occurrence
+  # translations, exact geometry). Certification measures against THIS seat, not our assembly JSON: ours puts yellow
+  # 6.0 mm high (u_brown +0.5, line_green +1.05), and our insert is tuned to ours (2026-10-21).
   mates:
-    mate:00: {mover: u_brown,           occurrence: occurrence:01, label: Body2}
-    mate:01: {mover: u_orange,          occurrence: occurrence:04, label: Body5}
-    mate:02: {mover: line_green,        occurrence: occurrence:02, label: Body3}
-    mate:03: {mover: inverted_u_yellow, occurrence: occurrence:03, label: Body4}
+    mate:00: {mover: u_brown,           occurrence: occurrence:01, label: Body2, graph_seat_z_mm: 17.50}
+    mate:01: {mover: u_orange,          occurrence: occurrence:04, label: Body5, graph_seat_z_mm: 17.50}
+    mate:02: {mover: line_green,        occurrence: occurrence:02, label: Body3, graph_seat_z_mm: 24.25}
+    mate:03: {mover: inverted_u_yellow, occurrence: occurrence:03, label: Body4, graph_seat_z_mm: 14.26}
 
 # Sigma (decided 2026-10-20, ARCHITECTURE_SEAMS): from the read's own sample spread until calibrated by tests; a read
 # that cannot state its sigma is refused, not averaged. Marker reads: the spread of their still samples (>= 3).
