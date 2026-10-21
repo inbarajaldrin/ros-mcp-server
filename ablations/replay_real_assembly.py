@@ -1639,7 +1639,7 @@ EDGE_OFFSET_MM = 8.0                 # tap/press point off the bar's centreline 
 EDGE_TAP_N = 3.0                     # measuring tap: a 3 N centre tap did not move the wedged bar
 EDGE_PRESS_N = 5.0                   # operator's limit for pressing parts in the base
 EDGE_DIFF_MIN_MM = 0.8               # edges closer than this: no roll to fix -> do not guess
-ROLL_PRESS_DEG = 3.0                 # depth roll this large (close tilted view): a cocked bar -> edge press
+ROLL_PRESS_DEG = 5.0                 # depth roll this large: a cocked bar -> edge press (a seated bar reads ~-3 deg: bias)
 
 
 def _level_but_high(res) -> bool:
