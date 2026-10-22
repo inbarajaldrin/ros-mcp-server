@@ -324,7 +324,11 @@ def _subprocess_fast_path():
 
         # Free base (2026-10-21, operator): no compliance - guarded touches that retract on first contact and correct
         # (compliant_insertion_studio/wrapper/touch_insert.py); the compliant search's lateral push dragged the base.
-        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'touch') == 'touch'
+        # 2026-10-21 20:12: 9 touches at the aim and 2-4 mm around it all stopped on the rim; a CAD overlay put the
+        # held part within ~1-2 mm of its chained pose and over the seat - u_brown's pocket admits it only within about
+        # +-1 x +-0.5 mm, below what a probe grid (or any read: 2-5 mm view spread) hits. So the default stays the
+        # sliding search (light on a free base); touch is opt-in (INSERT_MODE=touch).
+        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'compliant') == 'touch'
                 and args.final_base_pos is not None and args.final_base_orientation is not None
                 and args.current_object_orientation is not None):
             touch_argv = [sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.touch_insert',
