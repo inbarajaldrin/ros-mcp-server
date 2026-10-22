@@ -322,6 +322,21 @@ def _subprocess_fast_path():
             })
             sys.exit(0 if success else 1)
 
+        # Free base (2026-10-21, operator): no compliance - guarded touches that retract on first contact and correct
+        # (compliant_insertion_studio/wrapper/touch_insert.py); the compliant search's lateral push dragged the base.
+        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'touch') == 'touch'
+                and args.final_base_pos is not None and args.final_base_orientation is not None
+                and args.current_object_orientation is not None):
+            touch_argv = [sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.touch_insert',
+                          '--object-name', args.object_name, '--base-name', args.base_name,
+                          '--grasp-id', str(args.grasp_id),
+                          '--current-object-orientation', *[f"{v:.6f}" for v in args.current_object_orientation],
+                          '--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos],
+                          '--final-base-orientation', *[f"{v:.6f}" for v in args.final_base_orientation]]
+            print(f"[touch route] {' '.join(touch_argv[2:])}", flush=True)
+            rt = subprocess.run(touch_argv, env=_make_env())
+            sys.exit(rt.returncode)
+
         # Build wrapper argv. Hardcoded autonomous-search params match the
         # working production config validated against u_brown / u_orange runs
         # (see compliant_insertion_studio/scripts/loop_autonomous_insert.sh).
