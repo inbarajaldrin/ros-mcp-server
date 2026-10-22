@@ -3727,21 +3727,37 @@ def main() -> int:
             # (staging_layout.py; cell_layout.yaml). Plan those from the staging view, then back home -
             # or from above the clear area when the part waits there (--part-at-staging; 2026-10-20 the
             # planner looked at FMB1's parked set for an FMB3 part sitting at the clear area).
-            def _unseen_view():
-                if args.part_at_staging:
-                    r_ = run_subprocess(['python3', '-u', '-m', 'primitives.core.move_to_clear_area', '--mode', 'real'],
-                                        label='view the clear area', timeout_s=90, log_fh=log_fh)
-                    time.sleep(1.5)
-                    return r_.get('result') != 'failure'
-                return _staging_view(log_fh)
-            if unseen_home and _unseen_view():
-                seen_there = observe_many([e['object_name'] for e, _, _ in unseen_home], timeout_s=8.0, n_samples=6)
-                for entry, seq, bn in unseen_home:
-                    entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0,
-                                                                       samples=seen_there.get(entry['object_name']))
-                    msg = f"  [derive-sequence] {entry['object_name']} (staging view): {note}"
+            # With --part-at-staging the clear area holds ONE part; the others wait in the staging region. Look from
+            # the clear area first, then from the staging view for what it did not see (10-22 08:04: only the clear
+            # area was viewed, u_orange/line_green/yellow each waited out a 15 s observe and ran the RECORDED
+            # sequence - 48 s, and a part on another face would have run the wrong pass count).
+            def _clear_view():
+                r_ = run_subprocess(['python3', '-u', '-m', 'primitives.core.move_to_clear_area', '--mode', 'real'],
+                                    label='view the clear area', timeout_s=90, log_fh=log_fh)
+                time.sleep(1.5)
+                return r_.get('result') != 'failure'
+            views_ = ([('clear area', _clear_view)] if args.part_at_staging else []) + \
+                     [('staging view', lambda: _staging_view(log_fh))]
+            pending_ = list(unseen_home)
+            for k_, (vname_, go_) in enumerate(views_):
+                if not pending_ or not go_():
+                    continue
+                seen_there = observe_many([e['object_name'] for e, _, _ in pending_], timeout_s=8.0, n_samples=6)
+                rest_ = []
+                for entry, seq, bn in pending_:
+                    s_ = seen_there.get(entry['object_name'])
+                    if not s_ and k_ < len(views_) - 1:
+                        rest_.append((entry, seq, bn)); continue          # try the next view, no 15 s wait here
+                    if s_:
+                        entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0,
+                                                                           samples=s_)
+                    else:
+                        note = "not seen from any view -> recorded sequence"
+                    msg = f"  [derive-sequence] {entry['object_name']} ({vname_}): {note}"
                     print(msg)
                     if log_fh: log_fh.write(msg + "\n")
+                pending_ = rest_
+            if unseen_home:
                 if not getattr(args, 'base_from_camera', False):
                     # the base view comes next when the base is read from the camera: it is a straight high move
                     # from the staging view, home in between was a 4 s stop (ASSEMBLY_STATE_MACHINE.md item 7)
