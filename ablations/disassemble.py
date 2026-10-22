@@ -490,6 +490,7 @@ def place_at(sx, sy, w, home=True, turn=None, contact_z=None):
 
 
 T_RUN0 = float(os.environ.get("DISASSEMBLE_SINCE") or time.time())                     # parts staged before this process started are not this run's
+STAGED_OBSTACLE_S = 3 * 3600                     # a set-down this recent is an obstacle for a free spot, from any process
 
 
 def _translated_to(name, pose, gid, flange_xy):
@@ -965,15 +966,18 @@ def main():
             time.sleep(1.5)
             seen = observe_parts([n for n in RUN['parts'] if n != name])
             # every part this disassembly set down is an obstacle, seen or not (2026-10-21: yellow, set down near
-            # the staging view's edge, was not detected when line_green's spot was chosen)
+            # the staging view's edge, was not detected when line_green's spot was chosen). Set-downs by EARLIER
+            # processes count too (10-22 07:49: one --only process per part, so T_RUN0 dropped the yellow and
+            # line_green was set down across it) - a stale record only costs room, never a collision.
             try:
                 st_ = json.load(open(STAGED)) if STAGED.exists() else {}
             except Exception:
                 st_ = {}
             for n_, v_ in st_.items():
-                if n_ != name and n_ in RUN['parts'] and n_ not in seen and len(v_) >= 4 and v_[2] >= T_RUN0:
+                if (n_ != name and n_ in RUN['parts'] and n_ not in seen and len(v_) >= 4
+                        and v_[2] >= min(T_RUN0, time.time() - STAGED_OBSTACLE_S)):
                     seen[n_] = (tuple(v_[3][0]), tuple(v_[3][1]))
-                    print(f"[spot] {n_}: not seen from the staging view - placed by this run at "
+                    print(f"[spot] {n_}: not seen from the staging view - set down at "
                           f"({1000*v_[0]:.0f}, {1000*v_[1]:.0f}) mm, kept as an obstacle", flush=True)
             sp_, sq_ = load_seat_pose_in_base(RUN['base'], name)
             Rb_ = R.from_quat(ob[1])
