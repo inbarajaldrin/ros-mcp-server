@@ -169,6 +169,91 @@ def _tcp_pose_now():
     return ((p.position.x, p.position.y, p.position.z), (p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w))
 
 
+DARK_R, RED_R = 110, 130            # colour image red channel: part top <= 110, base top >= 130 (lit or long exposure)
+
+
+def held_offset(obj, base, held_q, grasp_id=1, img=None, tcp_pose=None, debug_path=None):
+    """In-hand error of a held part, from ONE still frame of it over its base (operator 10-21: "do you see how much
+    offset there is" - the part ~5-10 mm off its socket while the chained pose put it over it).
+
+    Base pose from its markers in this frame (solvePnP); the part where the held-pose chain says it is (seat pose
+    moved with the TCP: predict_tcp_at_seat); its CAD top-face outline projected; along each edge, the real edge is
+    the dark (part) -> red (base top) transition searched along the edge normal, kept only where red lies outside;
+    the 2-D image shift that best fits all edge offsets, scaled at the top face's depth, is the part's error in the
+    camera frame -> world. Returns (dxyz_world_m [real - chained], info) or (None, info)."""
+    import cv2
+    from seat_check import X_CAM
+    from handeye_icp_survey import T as _T
+    from grasp_depth import load_mesh, surface_points
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
+    from primitives.shared.config import held_tool_offset
+    if img is None:
+        img, _ = still_frame(n_avg=3); tcp_pose = _tcp_pose_now()
+    if img is None or tcp_pose is None:
+        return None, {'error': 'no still frame'}
+    bpose, binfo = base_pose_world(base, img=img, tcp_pose=tcp_pose)
+    if bpose is None:
+        return None, dict(binfo, error='base not read')
+    bp, bq = np.array(bpose[0]), bpose[1]; Rb = R.from_quat(bq)
+    p_now, q_now = np.asarray(tcp_pose[0]), tcp_pose[1]
+    K, D = _intrinsics()
+    Tcw = np.linalg.inv(_T(p_now, q_now) @ X_CAM)
+    pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=bp,
+                               base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=list(q_now),
+                               flange_offset_m=float(held_tool_offset()[2]))
+    st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); dR = R.from_quat(q_now) * R.from_quat(pred['predicted_tcp_at_seat']['quat_xyzw']).inv()
+    sp, sq = load_seat_pose_in_base(base, obj)
+    V, F = load_mesh(obj); Pb = R.from_quat(sq).apply(surface_points(V, F, 0.002)) + sp
+    top = Pb[:, 2].max(); x0, x1, y0, y1 = Pb[:, 0].min(), Pb[:, 0].max(), Pb[:, 1].min(), Pb[:, 1].max()
+    corners_b = np.array([[x0, y0, top], [x1, y0, top], [x1, y1, top], [x0, y1, top]])
+    Wc = dR.apply(Rb.apply(corners_b) + bp - st) + p_now            # chained top-face corners, world
+    Pc = (Tcw[:3, :3] @ Wc.T).T + Tcw[:3, 3]
+    uv, _ = cv2.projectPoints(Pc.astype(np.float32), np.zeros(3), np.zeros(3), K, D); uv = uv.reshape(-1, 2)
+    Rch = img[:, :, 2].astype(np.float32)
+    H, Wd = Rch.shape; cen = uv.mean(0)
+    A, b = [], []
+    for k in range(4):
+        p, q = uv[k], uv[(k + 1) % 4]; e = q - p; L = np.linalg.norm(e)
+        if L < 20:
+            continue
+        n = np.array([-e[1], e[0]]) / L
+        if np.dot(n, (p + q) / 2 - cen) < 0:
+            n = -n                                                  # outward normal
+        for s_ in np.linspace(0.2, 0.8, 25):
+            c = p + s_ * e
+            ts = np.arange(-60, 61)
+            pts = np.round(c[None] + ts[:, None] * n[None]).astype(int)
+            ok = (pts[:, 0] >= 0) & (pts[:, 0] < Wd) & (pts[:, 1] >= 0) & (pts[:, 1] < H)
+            if not ok.all():
+                continue
+            r = Rch[pts[:, 1], pts[:, 0]]
+            # the part -> base edge: a dark sample (part top <= 90) whose next 3 outward average >= 115 (a 1-2 px shadow
+            # band at ~110 sits between them), outermost such crossing that still has red within 10 px beyond
+            r = np.convolve(r, np.ones(3) / 3, mode='same')
+            hit = None
+            for i in range(1, len(ts) - 11):
+                if r[i] <= 90 and r[i + 1:i + 4].mean() >= 115 and r[i + 1:i + 11].max() >= RED_R:
+                    hit = i
+            if hit is not None:
+                A.append(n); b.append(ts[hit] + 0.5)
+    if len(A) < 8:
+        return None, dict(binfo, error=f'edges not found ({len(A)} samples)')
+    A, b = np.array(A), np.array(b)
+    shift, *_ = np.linalg.lstsq(A, b, rcond=None)                   # image shift real - chained (px)
+    resid = float(np.sqrt(np.mean((A @ shift - b) ** 2)))
+    Z = float(Pc[:, 2].mean())
+    d_cam = np.array([shift[0] * Z / K[0, 0], shift[1] * Z / K[1, 1], 0.0])
+    d_world = (_T(p_now, q_now) @ X_CAM)[:3, :3] @ d_cam
+    info = dict(binfo, shift_px=[round(float(v), 1) for v in shift], resid_px=round(resid, 1), n_edge=len(A),
+                depth_m=round(Z, 3), dxy_mm=[round(1000 * float(v), 1) for v in d_world[:2]])
+    if debug_path:
+        v = img.copy()
+        cv2.polylines(v, [np.round(uv).astype(np.int32).reshape(-1, 1, 2)], True, (255, 0, 255), 2)
+        cv2.polylines(v, [np.round(uv + shift).astype(np.int32).reshape(-1, 1, 2)], True, (0, 255, 255), 2)
+        cv2.imwrite(debug_path, v)
+    return d_world, info
+
+
 def measure(obj, base):
     """(yaw error deg about the base z: turn the part by this to seat it, tilt deg, info) or (None, None, info)."""
     import cv2

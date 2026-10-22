@@ -1775,6 +1775,73 @@ def track_base_in_hand(base, observed_base, say, log_fh=None):
     return ((pose[0][0], pose[0][1], oz), tuple(float(v) for v in (tilt * yaw_only).as_quat()))
 
 
+HOVER_ALIGN_ABOVE_M = 0.10      # TCP height over its predicted seat for the in-image part-vs-socket alignment
+HOVER_ALIGN_TOL_M = 0.001
+HOVER_ALIGN_ITERS = 3           # reads (median)
+HOVER_ALIGN_MAX_M = 0.012       # a larger 'offset' is a misread, not a pick error
+
+
+def hover_align(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
+    """Operator 10-21 ("do you see how much offset there is ... it is not even above the socket"): the held part was
+    ~5-10 mm off its socket while the chained pose put it there - the in-hand error of the pick. Over the predicted
+    seat, the camera sees the part's top face against the red base top: marker_yaw.held_offset measures the part's
+    real position against the chain in one still frame (edges vs the projected CAD outline, base from the same frame),
+    the arm moves by minus that, and measures again (<= 3 rounds). Returns the base pose to aim the insert at:
+    shifted by minus the total correction, so the seat target moves with the measured part."""
+    if observed_base is None or held_q is None:
+        return observed_base
+    from compliant_insertion_studio.wrapper.marker_yaw import held_offset
+    from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
+    from primitives.shared.config import held_tool_offset
+    snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
+    if not tcp.get('quat_xyzw'):
+        return observed_base
+    (bx, by, bz), bq = observed_base
+    pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
+                               base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=tcp['quat_xyzw'],
+                               flange_offset_m=float(held_tool_offset()[2]))
+    st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); sq = pred['predicted_tcp_at_seat']['quat_xyzw']
+    # The measured offset is the part's error IN THE HAND (real - chained, relative to the flange): moving the arm does
+    # not change it (10-21: four rounds read (1.0,-4.8) (1.2,-6.0) (1.2,-4.5) (1.4,-6.3) mm). Measure it a few times
+    # over the seat, take the median, and move the aim by minus it once.
+    tgt = [st[0], st[1], st[2] + HOVER_ALIGN_ABOVE_M]
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                        *[f"{v:.5f}" for v in tgt], '--quat', *[f"{v:.6f}" for v in sq], '--min-z', '0.15'],
+                       label='hover align view', timeout_s=60, log_fh=log_fh)
+    if r.get('result') == 'failure':
+        say(f"  [hover-align] {obj}: hover not reached ({r.get('error', '')})"); return observed_base
+    reads = []
+    _emitter(False)
+    try:
+        for k in range(HOVER_ALIGN_ITERS):
+            d, info = held_offset(obj, base, held_q, grasp_id)
+            if d is None:
+                say(f"  [hover-align] {obj}: read {k} not measured ({info.get('error')})"); continue
+            reads.append(np.asarray(d[:2]))
+            say(f"  [hover-align] {obj} read {k}: part {info['dxy_mm']} mm off its chained pose "
+                f"({info['n_edge']} edge samples, resid {info['resid_px']} px)")
+    finally:
+        _emitter(True)
+    if len(reads) < 2:
+        return observed_base
+    total = np.median(np.array(reads), axis=0)
+    if np.hypot(*total) > HOVER_ALIGN_MAX_M:
+        say(f"  [hover-align] {obj}: {1000*np.hypot(*total):.1f} mm is more than a pick can be off - not applied")
+        return observed_base
+    say(f"  [hover-align] {obj}: aim corrected by ({-1000*total[0]:+.1f}, {-1000*total[1]:+.1f}) mm (median of {len(reads)})")
+    return ((bx - total[0], by - total[1], bz), bq)
+
+
+def _emitter(on):
+    """The D415 projector's dots swamp the colour image in a dark room (10-21): off for colour-only reads."""
+    try:
+        subprocess.run(['ros2', 'param', 'set', '/camera/camera', 'depth_module.emitter_enabled', '1' if on else '0'],
+                       capture_output=True, timeout=10, env=make_env())
+        time.sleep(0.8)
+    except Exception:
+        pass
+
+
 def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
     """ExecuteMate for every mate in assembly order from ONE top-down view over the base (no motion between calls,
     nothing moved on a refusal). Returns {obj: execute_mate output}."""
@@ -2532,6 +2599,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 and not BASE_FIXED_CFG()):
             args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                                     say, log_fh)
+            if os.environ.get('HOVER_ALIGN', '1') == '1':
+                args.observed_base = hover_align(obj, base_name or RUN_BASE['name'], args.observed_base,
+                                                 state.held_quat, state.last_grasp_id or 1, say, log_fh)
         try:
             argv, timeout_s = build_argv(tool_name, kw, state,
                                          base_offset_xy=args.base_offset_xy,
