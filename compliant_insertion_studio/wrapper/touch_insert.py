@@ -258,6 +258,15 @@ def main():
 
 def finish(stem, meta, result):
     meta['outcome'] = result
+    # the final TCP as the trace's one row: record_seat_offset (fmb1_loop.insert_summary) reads where the part ended from
+    # the CSV - the empty one meant no U-part seat was ever recorded on the touch route, and line_green, which threads
+    # between them (+-1.1 mm), aimed at the bare base (10-22 15:48: it landed rolled 6.7 deg on a U edge, +6.5 mm high)
+    try:
+        p_, _ = tcp_now()
+        with open(str(stem) + '.csv', 'a') as fh:
+            fh.write(f"{time.time():.3f},{p_[0]:.6f},{p_[1]:.6f},{p_[2]:.6f}\n")
+    except Exception:
+        pass
     if meta.get('seat_z_measured') is not None:              # the seat corrected by the measured rim (grasp depth)
         meta['predicted_seat_xyz_chain'] = list(meta['predicted_seat_xyz'])
         meta['predicted_seat_xyz'] = meta['predicted_seat_xyz'][:2] + [meta['seat_z_measured']]
