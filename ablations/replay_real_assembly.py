@@ -1781,6 +1781,7 @@ DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today 
                                      # picks); u_brown lying on its side slid 8.5 mm along its uniform top face, was held
                                      # 8.5 mm off and the 8 mm spiral missed its pocket twice (rim, +34 mm).
                                      # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
+DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
 DEPTH_PICK_MIN_MATCHED = 0.30        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21)
 
 
@@ -1812,9 +1813,10 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     if pose is None:
         return None
     if (np.hypot(*info.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M
+            or abs(info.get('turned_deg', 0.0)) > DEPTH_PICK_MAX_TURN_DEG
             or info.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)):
-        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm on {info.get('n')}/{info.get('n_data')} points "
-            f"- not trusted, markers as before"); return None
+        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm, turned {info.get('turned_deg')} deg on "
+            f"{info.get('n')}/{info.get('n_data')} points - not trusted, markers as before"); return None
     import json as _j
     from primitives.shared.config import _GRASP_POINTS_DIR
     g = next(g_ for g_ in _j.load(open(f'{_GRASP_POINTS_DIR}/{obj}_grasp_points.json'))['grasp_points'] if g_['id'] == gid)
