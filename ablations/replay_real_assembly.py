@@ -3529,6 +3529,13 @@ observe_many = _timed(observe_many, 'observe_many', lambda a, k: ','.join(a[0]) 
 held_yaw_calibration = _timed(held_yaw_calibration, 'held_yaw', lambda a, k: a[0])
 pre_insert_base_read = _timed(pre_insert_base_read, 'pre_insert_read', lambda a, k: a[0])
 verify_seated = _timed(verify_seated, 'verify', lambda a, k: ','.join(a[0]) if a else '')
+# reads that ran untimed (10-25 s per part showed only as gaps, ASSEMBLY_STATE_MACHINE.md): base ICP/outline choice,
+# the part depth fit at the pick, the line_green notch read, the one-view certification, the part view
+choose_base_read = _timed(choose_base_read, 'base_read', lambda a, k: a[0])
+depth_pick_target = _timed(depth_pick_target, 'depth_pick', lambda a, k: a[0])
+record_follow_reads = _timed(record_follow_reads, 'follow_reads', lambda a, k: a[0])
+certify_once_at_end = _timed(certify_once_at_end, 'certify_once', lambda a, k: ','.join(a[0]) if a else '')
+_part_view = _timed(_part_view, 'part_view', lambda a, k: a[0])
 
 
 if __name__ == '__main__':
