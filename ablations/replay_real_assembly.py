@@ -1988,7 +1988,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
     xy = st[:2].copy()
     yaw_total = 0.0
-    gain, last_move, last_d = 1.0, None, None
+    gain, last_move, last_d, best_meas, final_reading = 1.0, None, None, None, None
     for k in range(SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
         if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
@@ -2025,6 +2025,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # Measure from there instead (the hand-eye tilt lever grows to ~1.7 mm/deg; the dip grid covers +-1.5 mm)
             say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
             z_meas = z_clear
+            # from the clear height the reading moves ~2.4 mm per mm of step (u_orange twice, 10-22 03:28 and 04:39: a 1:1
+            # first step overshot 7.6 -> -10.3 mm); start the gain there and keep learning it
+            gain = SERVO_GAIN_CLEAR
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                                 f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                                label=f'servo up to measure {k}', timeout_s=60, log_fh=log_fh)
@@ -2058,6 +2061,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             say(f"  [servo] {obj} round {k}: left-edge spread {sp_x} px > {SERVO_MAX_SPREAD_PX} - far-edge component only "
                 f"{info['d_far_only_mm']} mm")
         yi = info.get('yaw_img_deg')
+        final_reading = np.asarray(d, float)                    # every measured reading, before any turn or step
+        if best_meas is None or np.hypot(*final_reading) < np.hypot(*best_meas[1]):
+            best_meas = (xy.copy(), final_reading.copy())
         say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
         # 10-22 00:12: four turns of -0.31..-0.35 deg left the reading at -0.3 (noise floor ~0.3 deg): a turn below
@@ -2095,6 +2101,11 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         step = dv / gain
         xy = xy - step
         last_move, last_d = step, dv
+    if best_meas is not None and final_reading is not None and np.hypot(*final_reading) > np.hypot(*best_meas[1]) + 0.0005:
+        # the last step made the reading worse (an overshoot): aim from the best measurement with the learned gain
+        xy = best_meas[0] - best_meas[1] / max(gain, 0.4)
+        say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*best_meas[1][0]:+.1f}, "
+            f"{1000*best_meas[1][1]:+.1f}) mm at gain {gain:.2f}")
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
@@ -2120,6 +2131,7 @@ SERVO_YAW_TOL_DEG = 0.3
 SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
 SERVO_MAX_SPREAD_PX = 12.0     # a fit whose edge residuals spread more than this does not match the part (good fits: 1-4 px)
 SERVO_MAX_YAW_DEG = 4.0        # the whole servo may turn the wrist this much; base and grasp reads are within ~3 deg
+SERVO_GAIN_CLEAR = 2.4         # reading change per mm of xy step when measured from the clear height (measured twice)
 SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
 SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
