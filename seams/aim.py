@@ -38,15 +38,33 @@ SEATED_OFFSETS = LOGS / 'seated_offsets.json'       # {part: {seat_minus_pred_mm
 SEAT_HISTORY = LOGS / 'seat_offset_history.json'    # {part: [[dx, dy] mm, ...]}
 ASSEMBLY_STATE = LOGS / 'assembly_state.json'       # ledger {part: {verified, t, how, rel_err_mm?}}
 
+# line_green drops between the arms of BOTH seated U parts (CAD: u_brown at base y -47.5 mm,
+# u_orange at +48.5, line_green centred between them), so its slot is the line through where the
+# U parts really seated — their force search finds that (seat TCP - CAD-predicted TCP; same
+# orientation, so it is the part's own shift). Across the logged cycles line_green went straight
+# in only when the two U parts sat at the same x (diff 0.05, -0.49 mm) and failed whenever they
+# differed (-2.8, +6.3, +3.6 mm): a 3.6 mm difference over 96 mm turns the slot 2.2 deg, the
+# bar's ends ~2.7 mm off (2026-10-15). Aim line_green at the slot's x and yaw; its position
+# ALONG the bar (y) is its own pocket's, not the U parts'.
 FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
 MAX_FOLLOW_MM = 8.0
-MAX_FOLLOW_YAW_DEG = 4.0
-MAX_FOLLOW_YAW_INSERT_DEG = 1.5
+MAX_FOLLOW_YAW_DEG = 4.0        # the U parts' leg gaps (depth vs CAD, 2026-10-21) put line_green's line at +2.98 deg; the old 2 deg cap cut it
+MAX_FOLLOW_YAW_INSERT_DEG = 1.5   # fallback, from the U parts' insert seat offsets: those mix the part's
+# position with how it sat in the fingers. 2026-10-19 cycle 3: inserts said u_brown x -5.5 / u_orange
+# +2.1 mm -> -4.5 deg, the camera said -2.0 / +0.9 -> -1.7 deg; line_green (CAD: +-1.1 mm in each U
+# opening) wedged 4-8 mm into the openings on all 6 attempts. In 11 earlier runs today it was turned
+# -3.2..+0.7 deg and always ended within 0.9 deg of the base (the openings turn it back on attempt 1,
+# Rz free) - so the real slot turn is small and a wrong large turn is what fails.
+# 2026-10-20 (operator: seated parts inside the CAD tolerance band are more data): any other part is aimed by the
+# measured seat errors of the parts it interlocks with - fork_yellow aimed by the base landed on top of the two lines
+# (each ~3-4 mm off CAD) every attempt. Mean, bounded, no yaw.
 FOLLOW_GENERAL_MAX_MM = 4.0
 FOLLOW_GENERAL_MAX_AGE_S = 7200.0
+# 2026-10-17: u_orange seated -4..-7 mm in y on every run and then -9.5 mm, beyond the 8 mm spiral, twice - the prior
+# refined from contact data, so the search runs around where the part really goes. line_green follows the U parts instead.
 AIM_BIAS_PARTS = ('u_brown', 'u_orange', 'inverted_u_yellow')
-AIM_BIAS_N = 5
-AIM_BIAS_MIN = 3
+AIM_BIAS_N = 5                   # median of the last N seat offsets of the part
+AIM_BIAS_MIN = 3                 # ...once there are at least this many
 AIM_BIAS_MAX_MM = 8.0
 
 Pose = Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]

@@ -1,12 +1,11 @@
 """seams.aim keeps the replay's aim (2026-10-22, AR1): for every part and every record state, aim_for_insert gives the
-pose replay_real_assembly.build_argv sent as --final-base-pos / --final-base-orientation. Offline (CAD meshes only).
+pose replay_real_assembly.build_argv sent as --final-base-pos / --final-base-orientation before the move (golden values
+in testdata/aim_golden.json, taken from build_argv at 5b94f9e). Offline (CAD meshes only).
 
     python3 -m pytest -q seams/test_aim.py
 """
-import importlib
 import itertools
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -38,46 +37,21 @@ SWITCHES = [dict(), dict(SEAMS_DRIVE='1'), dict(FOLLOW_YAW='0'), dict(NO_AIM_BIA
             dict(INSERT_YAW_OFFSET_DEG='1.5'), dict(SEAMS_DRIVE='1', FOLLOW_YAW='0', INSERT_YAW_OFFSET_DEG='-2')]
 
 
-@pytest.fixture(scope='module')
-def rr():
-    sys.argv = ['replay_real_assembly']
-    return importlib.import_module('replay_real_assembly')
-
-
-def _old_aim(rr, obj, tmp, records, env, monkeypatch):
-    """What build_argv sent before seams.aim: run it on the same records (files) and switches (env)."""
-    off, led, hist = records
-    for name, data in (('SEATED_OFFSETS', off), ('ASSEMBLY_STATE', led), ('SEAT_HISTORY', hist)):
-        p = tmp / f'{name}.json'
-        p.write_text(json.dumps(data))
-        monkeypatch.setattr(rr, name, p)
-    for k in ('SEAMS_DRIVE', 'FOLLOW_YAW', 'NO_AIM_BIAS', 'INSERT_YAW_OFFSET_DEG'):
-        monkeypatch.delenv(k, raising=False)
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    monkeypatch.setattr(rr.time, 'time', lambda: NOW)
-    rr._APPLIED_BIAS.clear()
-    st = rr.AssemblyState()
-    st.held_quat, st.last_grasp_id = (0.0, 0.0, 0.0, 1.0), 1
-    argv, _ = rr.build_argv('translate_object', dict(action='insert', object_name=obj, base_name='base1'), st,
-                            observed_base=BASE1)
-    i = argv.index('--final-base-pos'); j = argv.index('--final-base-orientation')
-    return [float(v) for v in argv[i + 1:i + 4]], [float(v) for v in argv[j + 1:j + 5]], dict(rr._APPLIED_BIAS)
+GOLDEN = json.load(open(REPO / 'seams/testdata/aim_golden.json'))['cases']
 
 
 @pytest.mark.parametrize('obj,rec,sw', list(itertools.product(PARTS, RECORDS, range(len(SWITCHES)))))
-def test_same_aim_as_build_argv(rr, obj, rec, sw, tmp_path, monkeypatch):
-    env = SWITCHES[sw]
-    p_old, q_old, bias_old = _old_aim(rr, obj, tmp_path, RECORDS[rec], env, monkeypatch)
+def test_same_aim_as_build_argv(obj, rec, sw):
+    """GOLDEN = build_argv before seams.aim (5b94f9e) on the same records and switches."""
+    g = GOLDEN[f"{obj}|{rec}|{sw}"]
     off, led, hist = RECORDS[rec]
-    f = A.load_facts(env=env, now=NOW)
+    f = A.load_facts(env=SWITCHES[sw], now=NOW)
     f = A.AimFacts(seated_offsets=off, ledger=led, seat_history=hist, one_node=f.one_node, no_aim_bias=f.no_aim_bias,
                    follow_yaw=f.follow_yaw, yaw_exp_deg=f.yaw_exp_deg, now=NOW)
     a = A.aim_for_insert(obj, 'base1', BASE1, f)
-    # build_argv prints 6 decimals
-    assert np.allclose(a.argv_pos(), p_old, atol=2e-6), (a.argv_pos(), p_old, a.corrections)
-    assert np.allclose(a.quat, q_old, atol=2e-6) or np.allclose(a.quat, -np.array(q_old), atol=2e-6)
-    assert np.allclose(a.shift('bias'), bias_old.get(obj, (0.0, 0.0)), atol=1e-12)
+    assert np.allclose(a.argv_pos(), g['pos'], atol=2e-6), (a.argv_pos(), g['pos'], a.corrections)   # argv had 6 decimals
+    assert np.allclose(a.quat, g['quat'], atol=2e-6) or np.allclose(a.quat, -np.array(g['quat']), atol=2e-6)
+    assert np.allclose(a.shift('bias'), g['bias'], atol=1e-12)
 
 
 def test_measured_base_unchanged_without_records():
@@ -95,3 +69,28 @@ def test_one_node_follows_the_inserts_not_the_camera():
     f = A.AimFacts(seated_offsets=OFFSETS, ledger=LEDGER_CAM, one_node=True, now=NOW)
     c = A.aim_for_insert('line_green', 'base1', BASE1, f).corrections[0]
     assert c.name == 'follow' and 'from the inserts' in c.detail
+
+
+@pytest.mark.parametrize('obj,rec,sw', [(o, r, s) for o in PARTS for r in ('none', 'camera', 'all') for s in (0, 1, 4)])
+def test_replay_sends_the_aim(obj, rec, sw, tmp_path, monkeypatch):
+    """The replay's build_argv (wired to seams.aim) still sends the golden pose, and keeps the Aim for drive-mate."""
+    sys.argv = ['replay_real_assembly']
+    import replay_real_assembly as rr
+    off, led, hist = RECORDS[rec]
+    for name, data in (('SEATED_OFFSETS', off), ('ASSEMBLY_STATE', led), ('SEAT_HISTORY', hist)):
+        (tmp_path / f'{name}.json').write_text(json.dumps(data))
+        monkeypatch.setattr(A, name, tmp_path / f'{name}.json')
+    for k in ('SEAMS_DRIVE', 'FOLLOW_YAW', 'NO_AIM_BIAS', 'INSERT_YAW_OFFSET_DEG'):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in SWITCHES[sw].items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(A.time, 'time', lambda: NOW)
+    st = rr.AssemblyState()
+    st.held_quat, st.last_grasp_id = (0.0, 0.0, 0.0, 1.0), 1
+    argv, _ = rr.build_argv('translate_object', dict(action='insert', object_name=obj, base_name='base1'), st,
+                            observed_base=BASE1)
+    i = argv.index('--final-base-pos')
+    g = GOLDEN[f"{obj}|{rec}|{sw}"]
+    assert np.allclose([float(v) for v in argv[i + 1:i + 4]], g['pos'], atol=2e-6)
+    assert st.aim is not None and st.aim.obj == obj
+    assert np.allclose(np.array(st.aim.pos) + [0, 0, st.aim.seat_dz_m], g['pos'], atol=2e-6)

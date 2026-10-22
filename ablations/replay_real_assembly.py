@@ -1512,6 +1512,7 @@ class AssemblyState:
         self.last_grasp_object: Optional[str] = None
         self.held_yaw_offset: float = 0.0         # measured in-hand yaw of the held part (held read), deg; 0 = square
         self.held_tcp_quat = None                 # TCP orientation when held_quat was last set (the chain's flange)
+        self.aim = None                           # seams.aim.Aim of the last insert argv built (drive-mate sends it)
 
     def update_from_result(self, tool_name: str, result: dict) -> None:
         if tool_name == 'move_to_grasp':
@@ -1556,23 +1557,7 @@ class AssemblyState:
 # Tool → subprocess argv
 # ---------------------------------------------------------------------------
 
-# line_green drops between the arms of BOTH seated U parts (CAD: u_brown at base y -47.5 mm,
-# u_orange at +48.5, line_green centred between them), so its slot is the line through where the
-# U parts really seated — their force search finds that (seat TCP - CAD-predicted TCP; same
-# orientation, so it is the part's own shift). Across the logged cycles line_green went straight
-# in only when the two U parts sat at the same x (diff 0.05, -0.49 mm) and failed whenever they
-# differed (-2.8, +6.3, +3.6 mm): a 3.6 mm difference over 96 mm turns the slot 2.2 deg, the
-# bar's ends ~2.7 mm off (2026-10-15). Aim line_green at the slot's x and yaw; its position
-# ALONG the bar (y) is its own pocket's, not the U parts'.
-FOLLOWS_SEATED = {'line_green': ('u_brown', 'u_orange')}
-MAX_FOLLOW_MM = 8.0
-MAX_FOLLOW_YAW_DEG = 4.0        # the U parts' leg gaps (depth vs CAD, 2026-10-21) put line_green's line at +2.98 deg; the old 2 deg cap cut it
-MAX_FOLLOW_YAW_INSERT_DEG = 1.5   # fallback, from the U parts' insert seat offsets: those mix the part's
-# position with how it sat in the fingers. 2026-10-19 cycle 3: inserts said u_brown x -5.5 / u_orange
-# +2.1 mm -> -4.5 deg, the camera said -2.0 / +0.9 -> -1.7 deg; line_green (CAD: +-1.1 mm in each U
-# opening) wedged 4-8 mm into the openings on all 6 attempts. In 11 earlier runs today it was turned
-# -3.2..+0.7 deg and always ended within 0.9 deg of the base (the openings turn it back on attempt 1,
-# Rz free) - so the real slot turn is small and a wrong large turn is what fails.
+from seams.aim import FOLLOWS_SEATED, aim_for_insert, load_facts   # noqa: E402  (AR1: the aim rules live there)
 SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: seat - predicted TCP, mm}
 # Written after every successful insert, entry removed when disassemble.py pulls the part out:
 # it describes the parts seated NOW, whichever process seated them (a line_green-only retry
@@ -1610,131 +1595,8 @@ def forget_seat_offset(obj: str) -> None:
         pass
 
 
-SEAT_HISTORY = REPO_ROOT / 'ablations/logs/seat_offset_history.json'   # {part: [[dx, dy] mm, ...]}
-AIM_BIAS_PARTS = ('u_brown', 'u_orange', 'inverted_u_yellow')   # line_green follows the U parts instead
-AIM_BIAS_N = 5                   # median of the last N seat offsets of the part
-AIM_BIAS_MIN = 3                 # ...once there are at least this many
-AIM_BIAS_MAX_MM = 8.0
-_APPLIED_BIAS = {}               # part -> (dx, dy) m applied to this run's insert aim
-
-
-def aim_bias(obj: str):
-    """(dx, dy) world metres to add to `obj`'s insert aim: the median of where its last inserts
-    actually seated relative to the prediction (2026-10-17: u_orange seated -4..-7 mm in y on every
-    run and today -9.5 mm, beyond the 8 mm spiral, twice). The prior refined from contact data —
-    the spiral then searches around where the part really goes."""
-    if obj not in AIM_BIAS_PARTS or os.environ.get('NO_AIM_BIAS'):
-        return 0.0, 0.0
-    try:
-        h = json.load(open(SEAT_HISTORY)).get(obj, [])
-    except Exception:
-        h = []
-    if len(h) < AIM_BIAS_MIN:
-        return 0.0, 0.0
-    m = np.clip(np.median(np.array(h[-AIM_BIAS_N:]), axis=0), -AIM_BIAS_MAX_MM, AIM_BIAS_MAX_MM)
-    return float(m[0]) / 1000, float(m[1]) / 1000
-
-
-FOLLOW_GENERAL_MAX_MM = 4.0       # bound on the shift toward the seated parts' measured positions
-FOLLOW_GENERAL_MAX_AGE_S = 7200.0
-
-
-def _overlapping_seated(obj):
-    """Parts seated before `obj` (assembly order, CAD) whose seated xy footprint overlaps obj's: what it interlocks
-    with. No part names - from the CAD meshes at their seat poses in the run's base."""
-    try:
-        from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
-        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        from grasp_depth import load_mesh
-        def box(p):
-            V, _ = load_mesh(p); sp, sq = load_seat_pose_in_base(RUN_BASE['name'], p)
-            W = V @ R_.from_quat(sq).as_matrix().T + sp
-            return W[:, :2].min(0), W[:, :2].max(0)
-        lo, hi = box(obj)
-        out = []
-        for p in get_seated_so_far(RUN_BASE['name'], obj):
-            l2, h2 = box(p)
-            if (l2 < hi).all() and (lo < h2).all():
-                out.append(p)
-        return out
-    except Exception:
-        return []
-
-
-def _follow_seated_general(obj, base_quat):
-    """2026-10-20 (operator: seated parts inside the CAD tolerance band are more data): aim `obj` by the measured
-    seat errors (base frame, camera, verify ledger 'rel_err_mm') of the parts it interlocks with - fork_yellow aimed by
-    the base landed on top of the two lines (each ~3-4 mm off CAD) every attempt. Mean, bounded, no yaw."""
-    parts = _overlapping_seated(obj)
-    if not parts:
-        return 0.0, 0.0, 0.0
-    led = _ledger()
-    errs = [np.array(led[p]['rel_err_mm'], dtype=float) for p in parts
-            if isinstance((led.get(p) or {}).get('rel_err_mm'), list) and time.time() - led[p].get('t', 0) < FOLLOW_GENERAL_MAX_AGE_S]
-    if len(errs) < len(parts):
-        print(f"  [follow] {obj}: measured seat errors of {parts} not all recorded -> aim at the base", flush=True)
-        return 0.0, 0.0, 0.0
-    # each reference constrains only ACROSS its long axis (a line is continuous along it: its along-error is marker
-    # bias, irrelevant to what sits across it)
-    from seat_check import TOP_FACE
-    E = np.full((len(errs), 2), np.nan)
-    for i, (p, e) in enumerate(zip(parts, errs)):
-        ax = 0 if TOP_FACE[(p, RUN_BASE['name'])].get('long_axis', 'y') == 'y' else 1
-        if TOP_FACE[(p, RUN_BASE['name'])]['half_long_m'] >= 2 * TOP_FACE[(p, RUN_BASE['name'])]['half_cross_m']:
-            E[i, ax] = e[ax]                     # elongated: across only
-        else:
-            E[i] = e                             # compact: both
-    m = np.array([np.nanmean(E[:, k]) if np.isfinite(E[:, k]).any() else 0.0 for k in (0, 1)])
-    m = np.clip(m, -FOLLOW_GENERAL_MAX_MM, FOLLOW_GENERAL_MAX_MM)
-    dw = R_.from_quat(base_quat).as_matrix()[:2, :2] @ m
-    print(f"  [follow] {obj}: interlocks with {parts} -> aim shifted ({m[0]:+.1f}, {m[1]:+.1f}) mm (base frame, mean of "
-          f"their measured seat errors {[np.round(e, 1).tolist() for e in errs]})", flush=True)
-    return float(dw[0]) / 1000, float(dw[1]) / 1000, 0.0
-
-
-def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
-    """(dx, dy) world metres to add to `obj`'s insert base position and a yaw (rad) to turn its
-    base frame by about the base origin, from the seat offsets of the parts it sits between
-    (SEATED_OFFSETS). Zeros when they are not all there."""
-    parts = FOLLOWS_SEATED.get(obj)
-    if not parts:
-        return _follow_seated_general(obj, base_quat)
-    try:
-        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-        d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
-        last = {k: v['seat_minus_pred_mm'] for k, v in d.items()}
-        if not all(p in last for p in parts):
-            print(f"  [follow] {obj}: seat offsets of {parts} not all recorded ({SEATED_OFFSETS.name}) "
-                  f"-> aim at the base")
-            return 0.0, 0.0, 0.0
-        Rb = R_.from_quat(base_quat).as_matrix()[:2, :2]
-        (pa, pb) = parts
-        led = _ledger()
-        cam = {p: (led.get(p) or {}).get('rel_err_mm') for p in parts}
-        if all(isinstance(v, list) and len(v) == 2 for v in cam.values()) and not one_node():
-            # one node: no follow reads this run - the ledger's camera reads would be stale; the U parts' own inserts
-            # (where compliance found their seats, record_seat_offset) are this run's measurement
-            da, db = (np.array(cam[p], dtype=float) for p in parts)           # mm, base frame (camera)
-            src, cap = 'camera', MAX_FOLLOW_YAW_DEG
-        else:
-            da, db = (Rb.T @ np.array(last[p][:2]) for p in parts)           # mm, base frame (inserts)
-            src, cap = 'inserts', MAX_FOLLOW_YAW_INSERT_DEG
-        ya = 1000 * load_seat_pose_in_base(RUN_BASE['name'], pa)[0][1]; yb = 1000 * load_seat_pose_in_base(RUN_BASE['name'], pb)[0][1]
-        dx_b = float(np.clip((da[0] + db[0]) / 2, -MAX_FOLLOW_MM, MAX_FOLLOW_MM))
-        # slot direction from pa to pb: (db_x - da_x, yb - ya) -> angle from base +y
-        dyaw = float(np.clip(-np.arctan2(db[0] - da[0], yb - ya), -np.radians(cap), np.radians(cap)))
-        if os.environ.get('FOLLOW_YAW', '1') == '0':
-            # test switch (2026-10-21): two depth notch reads of the same seated parts differed by 1.5 mm each
-            # (+3.5/-1.5 vs +2.0/-0.5 mm) = +-1.3 deg of yaw, the whole corridor tolerance (INSERT_GEOMETRY.md)
-            print(f"  [follow] {obj}: yaw {np.degrees(dyaw):+.2f} deg not applied (FOLLOW_YAW=0)", flush=True)
-            dyaw = 0.0
-        dw = Rb @ np.array([dx_b, 0.0])
-        print(f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame, from the {src}"
-              f", cap {cap:g} deg) — " + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))), flush=True)
-        return float(dw[0]) / 1000, float(dw[1]) / 1000, dyaw
-    except Exception as e:
-        print(f"  [follow] {obj}: {e} -> aim at the base")
-        return 0.0, 0.0, 0.0
+SEAT_HISTORY = REPO_ROOT / 'ablations/logs/seat_offset_history.json'   # {part: [[dx, dy] mm, ...]} - seams.aim's bias
+_APPLIED_BIAS = {}               # part -> (dx, dy) m seat-history bias in this run's insert aim (record_seat_offset)
 
 
 def _seam_call(args_, timeout_s):
@@ -1751,7 +1613,7 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     frame (grasp id + grasp depth ride in it). Result mapped back to the replay's dict."""
     from seams.client import mate_for
     from seams.drive_mate_server import held_pose
-    from primitives.shared.config import get_object_base_offset_m, held_tool_offset
+    from primitives.shared.config import held_tool_offset
 
     def after(flag, n):
         i = argv.index(flag); return [float(v) for v in argv[i + 1:i + 1 + n]]
@@ -1761,10 +1623,10 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     tq = getattr(STATE_REF.get('state'), 'held_tcp_quat', None) or (snap.get('tcp') or {}).get('quat_xyzw')
     if mate is None or tq is None:
         return {'result': 'failure', 'error': f'drive_mate: no mate for {obj} on {base}' if mate is None else 'no TCP'}
-    if '--final-base-pos' not in argv:            # no measured base: the seam takes a VisionPose, never a default
+    aim = getattr(STATE_REF.get('state'), 'aim', None)
+    if '--final-base-pos' not in argv or aim is None or aim.obj != obj:   # the seam takes a VisionPose, never a default
         return {'result': 'failure', 'error': f'drive_mate: no observed {base} pose to aim at'}
-    pos = after('--final-base-pos', 3); q = after('--final-base-orientation', 4)
-    pos[2] -= float(get_object_base_offset_m(obj)[2])
+    pos, q = list(aim.pos), list(aim.quat)       # seam terms: no per-part seat z (the server adds it)
     gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
     off_ = float(getattr(STATE_REF.get('state'), 'held_yaw_offset', 0.0) or 0.0)
     if off_:
@@ -2515,6 +2377,7 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
         if 'base_name' in kw and kw['base_name']:
             argv += ['--base-name', kw['base_name']]
         if action == 'insert':
+            state.aim = None
             argv += ['--insert', '--use-default-base-position',
                      '--insertion-type', 'compliant']
             # grasp_id is required by the compliant_insert path. Chain from the
@@ -2523,35 +2386,18 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
             argv += ['--grasp-id', str(gid)]
             argv += state.quat_argv()
             if observed_base is not None:
-                # Camera-observed base (see observe_base_pose). Per-object offsets keep only
-                # their z (seat depth); their xy were fudges for the hand-tuned default base.
-                from primitives.shared.config import get_object_base_offset_m
-                (ox, oy, oz), oq = observed_base
-                dz = float(get_object_base_offset_m(kw['object_name'])[2])
-                fx, fy, fyaw = follow_seated_offset(kw['object_name'], oq)
-                ox, oy = ox + fx, oy + fy
-                bx_, by_ = aim_bias(kw['object_name'])
-                if bx_ or by_:
-                    _APPLIED_BIAS[kw['object_name']] = (bx_, by_)
-                    ox, oy = ox + bx_, oy + by_
-                    print(f"  [aim] {kw['object_name']}: + seat-history bias ({1000*bx_:+.1f}, {1000*by_:+.1f}) mm", flush=True)
-                if fyaw:                       # turn the base frame about its origin (line_green sits there)
-                    oq = tuple((R_.from_euler('z', fyaw) * R_.from_quat(oq)).as_quat())
-                dyaw_exp = float(os.environ.get('INSERT_YAW_OFFSET_DEG', '0') or 0)
-                if dyaw_exp:
-                    # Experiment hook (2026-10-20 entry-yaw sweep): turn the insert's base frame by dyaw about the
-                    # part's SEAT point, so only the entry yaw changes, not the aim position.
-                    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-                    sp, _ = load_seat_pose_in_base(RUN_BASE['name'], kw['object_name'])
-                    Rb_ = R_.from_quat(oq); o_ = np.array([ox, oy, oz])
-                    seat_w = o_ + Rb_.apply(sp)
-                    Rd = R_.from_euler('z', dyaw_exp, degrees=True)
-                    o_new = seat_w + Rd.apply(o_ - seat_w)
-                    ox, oy = float(o_new[0]), float(o_new[1])
-                    oq = tuple((Rd * Rb_).as_quat())
-                    print(f"  [yaw-exp] {kw['object_name']}: insert yaw offset {dyaw_exp:+.2f} deg about the seat point", flush=True)
-                argv += ['--final-base-pos', f"{ox:.6f}", f"{oy:.6f}", f"{oz + dz:.6f}",
-                         '--final-base-orientation', *[f"{v:.6f}" for v in oq]]
+                # The aim (seams.aim, AR1): the measured base + follow / seat-history bias / yaw experiment; the
+                # per-part seat z rides in argv only (translate_object's convention). drive-mate takes state.aim.
+                obj_ = kw['object_name']
+                aim = aim_for_insert(obj_, RUN_BASE['name'], observed_base, load_facts())
+                for line in (*aim.notes, *(c.detail for c in aim.corrections)):
+                    print(line, flush=True)
+                if aim.shift('bias') != (0.0, 0.0):
+                    _APPLIED_BIAS[obj_] = aim.shift('bias')
+                state.aim = aim
+                px, py, pz = aim.argv_pos()
+                argv += ['--final-base-pos', f"{px:.6f}", f"{py:.6f}", f"{pz:.6f}",
+                         '--final-base-orientation', *[f"{v:.6f}" for v in aim.quat]]
                 argv = [a for a in argv if a != '--use-default-base-position']
                 return argv, 600
             if base_offset_xy is not None and (base_offset_xy[0] != 0.0 or base_offset_xy[1] != 0.0):
@@ -2768,6 +2614,7 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
         base[0] = res.get('observed_base') or base[0]
         say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ not in ('profile_mm', 'observed_base')})}")
         if res.get('ok'):
+            _record_seat_check_error(obj, res)     # attempt 23: only the first-pass and after-taps passes recorded it
             return True
         if _level_but_high(res) or abs(res.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:
             say(f"  [nudge] {obj}: level along it now but high/rolled - stop nudging, edge press next")
@@ -2816,6 +2663,8 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
     res = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
     say(f"  [seat-check] {obj} after the edge press: "
         f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
+    if res.get('ok'):
+        _record_seat_check_error(obj, res)
     return bool(res.get('ok'))
 
 
