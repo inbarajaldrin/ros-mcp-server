@@ -373,9 +373,11 @@ def held_outline_px(img, x_far=None, y_left=None):
     n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.erode(m8, K))
     H, W = mask.shape
     # the held part is the blob with the most pixels in the band between the fingers at the image bottom
-    band = lab[H - 140:H, int(0.44 * W):int(0.70 * W)]
+    # (rows from 0.64 H: the held part's front face sits just above the fingers - u_brown at rows 480-580 of 720 with the
+    # lights on, 10-22 04:22; the bottom band alone was fingers and the tool marker)
+    band = lab[int(0.64 * H):H, int(0.44 * W):int(0.70 * W)]
     ids, cnt = np.unique(band[band > 0], return_counts=True)
-    if not len(ids) or cnt.max() < 400:
+    if not len(ids) or cnt.max() < 300:
         return None
     best = int(ids[np.argmax(cnt)])
     blob = (cv2.dilate((lab == best).astype(np.uint8), K) > 0) & (m8 > 0)
