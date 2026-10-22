@@ -1981,6 +1981,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
     xy = st[:2].copy()
     yaw_total = 0.0
+    gain, last_move, last_d = 1.0, None, None
     for k in range(SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
         if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
@@ -2069,12 +2070,23 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             if _SAFETY_STOP:
                 return observed_base, held_q
             if turn_wrist(t):
+                last_move, last_d = None, None                      # a turn moves the reading too: re-learn the xy gain
                 yaw_total += t
                 held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
                 q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw') or q
                 say(f"  [servo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
             continue                                                # re-measure xy after the turn
-        xy = xy - np.asarray(d)
+        # learn the move->reading gain from the previous xy step (10-22 03:28: measured from the clear height a 2.1 mm
+        # move changed u_orange's reading by ~5 mm - the px->mm scale at the target depth was off ~2.4x - and the servo
+        # oscillated); clamp it to [0.4, 3]
+        dv = np.asarray(d, float)
+        if last_move is not None and last_d is not None:
+            m_ = np.asarray(last_move); resp = last_d - dv                    # how much the reading moved for that step
+            if np.dot(m_, m_) > 1e-8:
+                gain = float(np.clip(np.dot(resp, m_) / np.dot(m_, m_), 0.4, 3.0))
+        step = dv / gain
+        xy = xy - step
+        last_move, last_d = step, dv
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
