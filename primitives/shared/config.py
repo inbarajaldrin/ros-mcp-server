@@ -187,8 +187,23 @@ PER_OBJECT_BASE_OFFSET_M: dict = {
 
 
 def get_object_base_offset_m(object_name: str) -> tuple[float, float, float]:
-    """Per-object base-position offset (meters). Returns (0,0,0) if no entry."""
-    return tuple(PER_OBJECT_BASE_OFFSET_M.get(object_name, (0.0, 0.0, 0.0)))
+    """Per-object base-position offset (meters). Returns (0,0,0) if no entry.
+
+    The table was measured against the NOMINAL seat (the assembly file's pose, base1). Seat poses are the SEATED CAD now
+    (cad_lookup.load_seat_pose_in_base, 2026-10-22: each part dropped onto its support - yellow 6.0 mm, U parts 0.5,
+    line_green 1.05): the part's settle is added back to z so every tuned insert target stays where it was."""
+    off = PER_OBJECT_BASE_OFFSET_M.get(object_name)
+    if off is None:
+        return (0.0, 0.0, 0.0)
+    drop = 0.0
+    import os as _os_
+    if _os_.environ.get('SEAT_SETTLE', '1') == '1':
+        try:
+            from compliant_insertion_studio.wrapper.cad_lookup import _settle_drop
+            drop = float(_settle_drop('base1', object_name))
+        except Exception:
+            drop = 0.0
+    return (off[0], off[1], off[2] + drop)
 
 
 # Per-object SEAT classifier tolerance (meters). Used by both the contact
