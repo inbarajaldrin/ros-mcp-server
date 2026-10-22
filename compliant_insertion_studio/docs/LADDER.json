@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 10:20",
+ "updated": "2026-10-21 17:45",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -28,7 +28,7 @@
      "id": "M3a",
      "title": "Drive-mate action + lab surface",
      "status": "active",
-     "note": "FMB1 4/4 certified placed=true by ExecuteMate in one journal episode (seat errors vs the graph: -0.11 / -0.42 / -0.57 / +0.42 mm), every insert by drive-mate - but across resumed runs and one direct drive-mate insert. CLEARS AT: one uninterrupted FMB1 run with SEAMS_DRIVE=1 SEAMS_CERTIFY=1. Lessons: yellow keeps its tuned CAD seat (a CAD \"fix\" broke its insert); certification uses the graph's declared seats; servers re-read config per goal"
+     "note": "10-21 evening: replay runs one node (db9f5c8: base read once, parts read once at pick, drive-mate's at-rest result decides, no nudges/seat views after an insert, ExecuteMate certifies all mates once at the end). Blocked on u_brown: the side-lying U has no reliable pick measurement (depth fit slid 8.5 mm / turned 8-10 deg; marker views disagree 7 mm) and the fixed-path spiral (positions repeat to 0.1 mm) drags the free base (21 mm). Next: force-guided search. Cell halted 17:39 after an unexplained drift following stop_run - operator check pending. CLEARS AT: one uninterrupted FMB1 run with SEAMS_DRIVE=1 SEAMS_CERTIFY=1, ExecuteMate placed=true mate:00-03 in one journal episode."
     },
     {
      "id": "UNI",
@@ -63,7 +63,7 @@
      "id": "T1",
      "title": "Read once, no needless trips",
      "status": "active",
-     "note": "one survey window for all parts (49.0 s -> 4.7 s measured); pick check uses the known base read + parked region (was 64 s + 25 s per run); certify reads markers once; part tracker: a part seen in any view is never searched for blind"
+     "note": "one survey window (49.0 -> 4.7 s); per-step snapshots from one standing subscriber (3360af1); one-node mode drops the per-part base re-read, certify views, notch trip and U held-yaw read. State machine + ranked cuts: ASSEMBLY_STATE_MACHINE.md"
     },
     {
      "id": "T2",
