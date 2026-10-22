@@ -3969,7 +3969,8 @@ def main() -> int:
                         entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0,
                                                                            samples=s_)
                     else:
-                        note = "not seen from any view -> recorded sequence"
+                        note = "not seen from any view -> recorded sequence (re-planned when the arm looks straight at it)"
+                        entry['_planned_blind'] = (list(seq), bn)
                     msg = f"  [derive-sequence] {entry['object_name']} ({vname_}): {note}"
                     print(msg)
                     if log_fh: log_fh.write(msg + "\n")
@@ -4183,6 +4184,17 @@ def main() -> int:
                 if obj not in LAST_SEEN_XY and not _seen_here(obj) and not _part_view(obj, log_fh):
                     failed = obj
                     break
+            # planned blind (no planning view saw it): plan it now, with the camera above it - 10-22 attempt 20 ran the
+            # recorded 2 passes on an UPRIGHT yellow (1 pass), its extra set-down left it where the regrasp lost it
+            if entry.get('_planned_blind') and not args.dry_run and not _SAFETY_STOP:
+                seq0, bn0 = entry.pop('_planned_blind')
+                if _seen_here(obj, 8.0):
+                    entry['tool_sequence'], note = derive_sequence_for(obj, seq0, bn0, timeout_s=10.0)
+                    msg = f"  [derive-sequence] {obj} (re-planned from the view above it): {note}"
+                else:
+                    msg = f"  [derive-sequence] {obj}: still not seen above it - recorded sequence"
+                print(msg, flush=True)
+                if log_fh: log_fh.write(msg + "\n")
             ok = replay_object(entry, state, args, log_fh=log_fh, snap_fh=snap_fh)
             # Post-insert seat check (opt-in): the sequence ends at the post-release
             # safe-height pose, which is where the correct-seat references were recorded.
