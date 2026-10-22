@@ -243,8 +243,10 @@ def main():
             sz_ = seat_z()
             meta['seat_z_measured'] = sz_ if sz_ != float(seat[2]) else None
             meta['rim_measured_above_cad_mm'] = round(1000 * (best[0] - rim_z), 2)
-        start_z = min(start_z, best[0] + 0.0015)                      # lateral steps 1.5 mm over the measured rim
-        move([seat[0] + dx, seat[1] + dy, start_z], q_seat)            # retract before any sideways step
+        # lateral steps 1.5 mm over the lowest contact MEASURED - never below a contact (14:37: the first probe stopped on
+        # line_green's top at +50.3, the retract went to the planned +34.5 into it, protective stop), guarded
+        start_z = best[0] + 0.0015
+        move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=MAX_FORCE_N)   # retract before any sideways step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:
         z = probe(bx, by, dyaw)

@@ -2363,7 +2363,7 @@ def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
         out[obj] = o
         if o.get('placed'):
             led = _ledger()
-            led[obj] = dict(verified=True, t=time.time(), how='execute_mate',
+            led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
                             depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
             json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
         say(f"  [certify] {mate} ({obj}): placed={o.get('placed')} refusal={o.get('refusal')!r} "
@@ -2393,7 +2393,7 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
         say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
     if out.get('placed'):
         led = _ledger()
-        led[obj] = dict(verified=True, t=time.time(), how='execute_mate',
+        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
                         depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
         json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
@@ -4188,6 +4188,9 @@ def main() -> int:
             # recorded 2 passes on an UPRIGHT yellow (1 pass), its extra set-down left it where the regrasp lost it
             if entry.get('_planned_blind') and not args.dry_run and not _SAFETY_STOP:
                 seq0, bn0 = entry.pop('_planned_blind')
+                # look straight down at it first (14:33 the check ran from over the base, before the view above the part)
+                if not _seen_here(obj, 4.0):
+                    _part_view(obj, log_fh)
                 if _seen_here(obj, 8.0):
                     entry['tool_sequence'], note = derive_sequence_for(obj, seq0, bn0, timeout_s=10.0)
                     msg = f"  [derive-sequence] {obj} (re-planned from the view above it): {note}"
