@@ -350,6 +350,8 @@ class SearchDirector:
         self._theta = 0.0
         self.recentres.append((t, cx, cy, n))
         self.last_mode = "recentre_height_map"
+        print(f"[SEARCH] recentre on the rim height map's low point: centre {1000*(cx-ax):+.1f}, {1000*(cy-ay):+.1f} mm "
+              f"from the aim ({n} rim samples)", flush=True)
 
     def update(self, t: float, fz_smoothed_base: float,
                tcp_x_base: float, tcp_y_base: float, tcp_z_base: Optional[float] = None
@@ -2032,8 +2034,8 @@ class ContactSearchFSM:
                 f"R_max={1000*self.search_director.R_max:.1f}mm) — peg never crossed rim.")
             return action
 
-        # Per-tick spiral update (high-rate inner loop on the PD position-tracker)
-        Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+        # Per-tick spiral update (high-rate inner loop on the PD position-tracker); tcp_z feeds the rim height map
+        Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y, tcp_z)
         # Director self-aborted (spiral exhausted or stall)?
         if self.search_director.abort_reason is not None:
             action.kind = "exit_abort"
