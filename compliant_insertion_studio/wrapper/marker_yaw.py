@@ -434,11 +434,18 @@ def socket_shift_world(obj, base, base_pose_world, lift_m, outline, img=None, tc
     if len(dy) < 5 or len(dx) < 3:
         return None, {'error': 'silhouette edges out of range'}
     shift = np.array([np.median(dx), np.median(dy)]); Z = float(np.median(zs))
+    # yaw: the far edge's slope difference (real - target) across its x span = the in-plane rotation between them
+    fx = [x for x, y in outline['far'] if (np.abs(uv[:, 0] - x) < 2.5).sum() >= 3]
+    yaw_img = None
+    if len(fx) >= 8 and len(fx) == len(dy):
+        b = np.polyfit(np.asarray(fx, float), np.asarray(dy, float), 1)[0]   # d(dy)/dx in px/px
+        yaw_img = float(np.degrees(np.arctan(b)))
     d_cam = np.array([shift[0] * Z / K[0, 0], shift[1] * Z / K[1, 1], 0.0])
     d_world = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3] @ d_cam
     info = {'shift_px': [round(float(v), 1) for v in shift],
             'spread_px': [round(float(np.std(dx)), 1), round(float(np.std(dy)), 1)], 'depth_m': round(Z, 3),
-            'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]]}
+            'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]],
+            'yaw_img_deg': None if yaw_img is None else round(yaw_img, 2)}
     if debug_path:
         v = img.copy()
         for u_, w_ in uv[::4]:

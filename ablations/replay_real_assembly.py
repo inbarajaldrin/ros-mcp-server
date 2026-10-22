@@ -1873,6 +1873,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         say(f"  [servo] {obj}: held part not outlined over the table - aiming as read"); return observed_base, held_q
     say(f"  [servo] {obj}: held part outlined ({len(outline['far'])} far / {len(outline['left'])} left edge points)")
     xy = st[:2].copy()
+    yaw_total = 0.0
     for k in range(SERVO_ITERS + 1):
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{st[2] + HOVER_ALIGN_ABOVE_M:.5f}", '--quat', *[f"{v:.6f}" for v in q],
@@ -1886,20 +1887,43 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             _emitter(True)
         if d is None:
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
-        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket (shift {info['shift_px']} px, "
-            f"spread {info['spread_px']} px)")
-        if np.hypot(*d) <= SERVO_TOL_M or k == SERVO_ITERS:
+        yi = info.get('yaw_img_deg')
+        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
+            f"(shift {info['shift_px']} px, spread {info['spread_px']} px)")
+        yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG
+        if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or k == SERVO_ITERS:
             break
+        if not yaw_ok:
+            # image yaw of the far edge vs the socket's: +1 deg of wrist moves it by -1.14 deg (measured 10-21), so turn by
+            # yaw/1.14; the base-read yaw was ~3 deg off at a 23 deg base (CAD-fit yaw spread ~1 deg between views)
+            t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
+            if turn_wrist(t):
+                yaw_total += t
+                held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
+                q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw') or q
+                say(f"  [servo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
+            continue                                                # re-measure xy after the turn
         xy = xy - np.asarray(d)
     c = xy - st[:2]
     if np.hypot(*c) > SERVO_MAX_M:
         say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
         return observed_base, held_q
+    if yaw_total:
+        # the image yaw becomes the base's yaw for the insert, turned about the SEAT point (the pocket stays put): the
+        # insert's own yaw step (held part vs base x seat) then has nothing to undo
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        sp_, _ = load_seat_pose_in_base(base, obj)
+        Rb0 = R_.from_quat(bq); sw = np.array([bx, by, bz]) + Rb0.apply(sp_)
+        Rb1 = R_.from_euler('z', yaw_total, degrees=True) * Rb0
+        bx, by, bz = sw - Rb1.apply(sp_); bq = tuple(Rb1.as_quat())
+        say(f"  [servo] {obj}: base yaw for the insert turned {yaw_total:+.2f} deg about the seat (image)")
     say(f"  [servo] {obj}: aim moved by ({1000*c[0]:+.1f}, {1000*c[1]:+.1f}) mm")
     return ((bx + c[0], by + c[1], bz), bq), held_q
 
 
-SERVO_ITERS = 4
+SERVO_ITERS = 6
+SERVO_YAW_TOL_DEG = 0.3
+SERVO_YAW_GAIN = 1.14          # image-yaw change per +1 deg of wrist turn, sign included as -(-1.14) -> turn = yaw / 1.14
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
 
