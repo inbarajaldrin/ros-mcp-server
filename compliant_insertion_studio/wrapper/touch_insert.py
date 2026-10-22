@@ -36,15 +36,18 @@ sys.path[:0] = [str(REPO), str(REPO / 'ablations')]
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 MAX_FORCE_N = 4.0
 SPEED_M_S = 0.005
-ABOVE_RIM_M = 0.003          # first probe; later ones start 2 mm over the MEASURED rim (CAD rim read 1.3 mm low)
+ABOVE_RIM_M = 0.003          # first probe; later ones start 1.5 mm over the MEASURED rim (CAD rim read 1.3 mm low)
 SEATED_DZ_M = 0.003          # within this of the predicted seat = in
 ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = partly in the pocket
 # Probe grid (2026-10-21 23:10): a hexagonal lattice around the aim, nearest first. u_brown's pocket admits the part
 # within about +-1 x +-0.5 mm, so the lattice pitch (covering radius pitch/sqrt(3)) must stay ~1 mm; the old 2/4/6 mm
 # rings could step over it. The aim comes from the hover servo (repeats to ~0.5 mm across runs).
-GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '1.0')) / 1000.0
-GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '3.0')) / 1000.0
-YAWS_DEG = (0.6, -0.6, 1.2, -1.2)
+# 2026-10-21 23:50: with the aim from the hover servo on the SAME-FRAME marker pose (within ~0.5 mm / 0.5 deg) a 0.5 mm
+# lattice within 1.5 mm (19 dips, ~2.5 min) entered on dip 17; the 1 mm / 3 mm grid (41 dips) sat 4.9 mm from the
+# pocket and could not. Yaw dips are off by default: twisting a pressed part slips it in the pads (TOUCH_YAWS_DEG=0.5,-0.5).
+GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.5')) / 1000.0
+GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '1.5')) / 1000.0
+YAWS_DEG = tuple(float(v) for v in os.environ['TOUCH_YAWS_DEG'].split(',')) if os.environ.get('TOUCH_YAWS_DEG') else ()
 
 
 def hex_grid(pitch, rmax):
@@ -113,7 +116,8 @@ def main():
                                held_quat_xyzw=a.current_object_orientation, ee_orientation_xyzw=list(q0),
                                flange_offset_m=float(held_tool_offset_for(a.object_name)[2]))
     seat = np.array(pred['predicted_tcp_at_seat']['xyz_m'], float)
-    q_seat = np.array(pred['predicted_tcp_at_seat']['quat_xyzw'], float)
+    # the hover servo aligned the part to the pocket PHYSICALLY (image yaw); the chain's seat quat would turn it back
+    q_seat = np.array(pred['predicted_tcp_at_seat']['quat_xyzw'], float) if os.environ.get('TOUCH_USE_SEAT_QUAT') == '1' else np.asarray(q0, float)
     # rim contact height: the part's lowest point at the seat sits below the base top by (base top - seat bottom)
     from compliant_insertion_studio.wrapper.cad_geometry import expected_contact_tcp_z
     base_top_w = a.final_base_pos[2] + _load_base_top_z_local(a.base_name)
@@ -173,15 +177,19 @@ def main():
         if st == 'in':
             return finish(stem, meta, 'success')
         if st == 'entering':
-            # partly in the pocket: it is here - a second try from just above, then hand on to the judge
-            move([seat[0] + dx, seat[1] + dy, start_z], q_seat)
-            z2 = probe(dx, dy)
+            # in the pocket mouth: push on to the seat (6 N guard), then hand on to the judge
+            q = (R.from_euler('z', 0.0, degrees=True) * R.from_quat(q_seat)).as_quat()
+            r3 = move([seat[0] + dx, seat[1] + dy, seat[2] - 0.002], q, max_force=6.0, min_duration=8.0)
+            pz, _ = tcp_now(); z2 = float(pz[2])
+            meta['probes'].append({'dx_mm': round(1000 * dx, 2), 'dy_mm': round(1000 * dy, 2), 'dyaw_deg': 0.0, 'push': True,
+                                   'z_above_seat_mm': round(1000 * (z2 - seat[2]), 2), 'contact': bool(r3.get('contact')), 'error': r3.get('error')})
+            print(f"[touch] entered at ({1000*dx:+.1f}, {1000*dy:+.1f}) mm: pushed to {1000*(z2 - seat[2]):+.1f} mm above the seat", flush=True)
             return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
         if z is None:
             return finish(stem, meta, 'failure')
         if best is None or z < best[0]:
             best = (z, dx, dy)
-        start_z = min(start_z, best[0] + 0.002)                       # lateral steps 2 mm over the measured rim
+        start_z = min(start_z, best[0] + 0.0015)                      # lateral steps 1.5 mm over the measured rim
         move([seat[0] + dx, seat[1] + dy, start_z], q_seat)            # retract before any sideways step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:

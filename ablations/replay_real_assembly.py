@@ -1872,31 +1872,56 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [servo] {obj}: held part not outlined over the table - aiming as read"); return observed_base, held_q
     say(f"  [servo] {obj}: held part outlined ({len(outline['far'])} far / {len(outline['left'])} left edge points)")
+    # measure LOW, 2.5 mm over the rim: the target (part at its seat raised by the lift) is projected from the base
+    # pose read in the SAME frame, so what remains is the hand-eye's tilt error x the lift (at 0.10 m: 1 deg -> 1.7 mm;
+    # at 0.035 m: 0.6 mm). Lateral moves and wrist turns happen 12 mm over the rim.
+    try:
+        from compliant_insertion_studio.wrapper.cad_geometry import expected_contact_tcp_z, _load_base_top_z_local
+        rim_z = expected_contact_tcp_z(surface_world_z=bz + _load_base_top_z_local(base), object_name=obj, grasp_id=grasp_id,
+                                       R_grasp_quat_xyzw=held_q, predicted_tcp_z_at_seat=float(st[2]),
+                                       flange_offset_world_z=-float(held_tool_offset_for(obj)[2]))
+    except Exception:
+        rim_z = float(st[2]) + 0.031
+    z_meas, z_clear = rim_z + SERVO_MEAS_OVER_RIM_M, rim_z + SERVO_CLEAR_OVER_RIM_M
+    from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
     xy = st[:2].copy()
     yaw_total = 0.0
     for k in range(SERVO_ITERS + 1):
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                            f"{xy[1]:.5f}", f"{st[2] + HOVER_ALIGN_ABOVE_M:.5f}", '--quat', *[f"{v:.6f}" for v in q],
-                            '--min-z', '0.15'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
+                            f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                           label=f'servo clear {k}', timeout_s=60, log_fh=log_fh)
+        if r.get('result') != 'failure':
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                                f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
+                                '--max-force', '4', '--min-duration', '2'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
         if r.get('result') == 'failure':
             say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})"); break
         _emitter(False)
         try:
-            d, info = socket_shift_world(obj, base, observed_base, HOVER_ALIGN_ABOVE_M, outline)
+            img_, _ = still_frame(n_avg=4); tcp_now = (snapshot_robot_state().get('tcp') or {})
+            tp = (np.asarray(tcp_now['xyz']), np.asarray(tcp_now['quat_xyzw']))
+            base_sf, sfinfo = base_pose_same_frame(base, img_, tp, bq) if img_ is not None else (None, {'error': 'no frame'})
+            lift = float(tp[0][2] - st[2])
+            d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline, img=img_, tcp_pose=tp)
         finally:
             _emitter(True)
+        if base_sf is None:
+            say(f"  [servo] {obj} round {k}: base not read in the frame ({sfinfo.get('error')}) - projecting the base read")
         if d is None:
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
         yi = info.get('yaw_img_deg')
         say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
-            f"(shift {info['shift_px']} px, spread {info['spread_px']} px)")
+            f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
         yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG
         if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or k == SERVO_ITERS:
             break
         if not yaw_ok:
-            # image yaw of the far edge vs the socket's: +1 deg of wrist moves it by -1.14 deg (measured 10-21), so turn by
-            # yaw/1.14; the base-read yaw was ~3 deg off at a 23 deg base (CAD-fit yaw spread ~1 deg between views)
+            # image yaw of the far edge vs the socket's; the wrist turns about the TCP (0.5 mm of part per degree), xy is
+            # re-measured after it. Effective gain 0.7-1.1 deg of reading per degree of wrist (10-21): turn 1:1, iterate
             t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
+            run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                            f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                           label=f'servo clear for turn {k}', timeout_s=60, log_fh=log_fh)
             if turn_wrist(t):
                 yaw_total += t
                 held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
@@ -1904,6 +1929,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 say(f"  [servo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
             continue                                                # re-measure xy after the turn
         xy = xy - np.asarray(d)
+    run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                    f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                   label='servo done: clear', timeout_s=60, log_fh=log_fh)
     c = xy - st[:2]
     if np.hypot(*c) > SERVO_MAX_M:
         say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
@@ -1923,7 +1951,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
 
 SERVO_ITERS = 6
 SERVO_YAW_TOL_DEG = 0.3
-SERVO_YAW_GAIN = 1.14          # image-yaw change per +1 deg of wrist turn, sign included as -(-1.14) -> turn = yaw / 1.14
+SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
+SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
+SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
 

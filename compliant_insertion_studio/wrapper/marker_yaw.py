@@ -309,6 +309,53 @@ def socket_offset(obj, base, lift_m, img=None, tcp_pose=None, debug_path=None):
     return d_world[:2], info
 
 
+def base_pose_same_frame(base, img, tcp_pose, bq_chain, yaw_search_deg=6.0, step_deg=0.05):
+    """Base pose in the robot frame from its markers in THIS frame, for a target projected into the SAME frame: the
+    tilt comes from the chain's base quat, the in-plane yaw is searched +-yaw_search_deg and the translation solved
+    linearly from the marker corners (2026-10-21 23:xx: 2 visible markers, 1.6 px reprojection, repeats to 0.3 mm /
+    0.1 deg; a free 2-marker PnP cannot pin depth and rotation together: 8.8 px). Projecting the socket from THIS
+    pose cancels the hand-eye for the comparison; a pose read at another height carries the hand-eye's rotation error
+    x the height difference (the hover servo's bias: 0.1 mm reported with the part ~5 mm off).
+    Returns (((x, y, z), quat_xyzw), info) or (None, info)."""
+    import cv2
+    from seat_check import X_CAM
+    from handeye_icp_survey import T as _T
+    dict_name, lay = _layout(base)
+    corners, ids = _detect(img, dict_name)
+    det = {int(i): c.reshape(-1, 2) for c, i in zip(corners, ids)} if ids is not None else {}
+    bid = [i for i in det if i in lay]
+    if len(bid) < 2:
+        return None, {'error': f'{len(bid)} base markers'}
+    K, D = _intrinsics(); Twc = _T(tcp_pose[0], tcp_pose[1]) @ X_CAM; Tcw = np.linalg.inv(Twc)
+    pts = np.concatenate([_marker_corners(lay, i) for i in bid]); pix = np.concatenate([det[i] for i in bid])
+    nrm = cv2.undistortPoints(np.array(pix, np.float32).reshape(-1, 1, 2), K, D).reshape(-1, 2)
+    e = R.from_quat(bq_chain).as_euler('xyz'); tilt = R.from_euler('xyz', [e[0], e[1], 0.0])
+
+    def solve(Rc):
+        A, b = [], []
+        for X, (u, v) in zip(pts, nrm):
+            Xc = Rc @ X; A += [[1, 0, -u], [0, 1, -v]]; b += [u * Xc[2] - Xc[0], v * Xc[2] - Xc[1]]
+        t = np.linalg.lstsq(np.array(A), np.array(b), rcond=None)[0]
+        uv, _ = cv2.projectPoints(((Rc @ pts.T).T + t).astype(np.float32), np.zeros(3), np.zeros(3), K, D)
+        return t, float(np.linalg.norm(uv.reshape(-1, 2) - pix, axis=1).mean())
+    best = None
+    for dz in np.arange(-yaw_search_deg, yaw_search_deg + 1e-9, step_deg):
+        yaw = float(e[2] + np.radians(dz)); Rwb = R.from_euler('z', yaw) * tilt
+        t, rp = solve(Tcw[:3, :3] @ Rwb.as_matrix())
+        if best is None or rp < best[1]:
+            best = (t, rp, yaw, Rwb)
+    t, rp, yaw, Rwb = best
+    bw = Twc[:3, :3] @ t + Twc[:3, 3]
+    return ((float(bw[0]), float(bw[1]), float(bw[2])), tuple(float(v) for v in Rwb.as_quat())), \
+        {'markers': bid, 'reproj_px': round(rp, 2), 'yaw_deg': round(float(np.degrees(yaw)), 2),
+         'yaw_minus_chain_deg': round(float(np.degrees(yaw - e[2])), 2), 'xy_mm': [round(1000 * float(v), 1) for v in bw[:2]]}
+
+
+def _marker_corners(lay, i):
+    t, Rm, edge = lay[i]; h = edge / 2.0
+    return np.array([Rm @ np.array(lc) + t for lc in ([-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0])])
+
+
 def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
     """Held part's far (top) and left edges in the image, over BARE TABLE (maroon part vs black table segments cleanly;
     over the base the dark pocket and the dark part look alike). The camera is rigid with the gripper, so these pixels are
@@ -328,6 +375,10 @@ def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
         for i in range(len(row) - 4):
             if row[i:i + 4].all():
                 left.append((520 + i, y)); break
+    if len(far) >= 5:
+        my = np.median([y for _, y in far]); far = [(x, y) for x, y in far if abs(y - my) <= 6]   # base in view / marker
+    if len(left) >= 5:
+        mx = np.median([x for x, _ in left]); left = [(x, y) for x, y in left if abs(x - mx) <= 6]
     if len(far) < 10 or len(left) < 6:
         return None
     return {'far': far, 'left': left}
