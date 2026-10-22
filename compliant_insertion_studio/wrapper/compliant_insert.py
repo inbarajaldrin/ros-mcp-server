@@ -220,6 +220,9 @@ def _parse_args(argv=None):
                    help="Spiral pitch (radial growth per turn). Default 2 mm.")
     p.add_argument("--search-R-max-mm", type=float, default=8.0,
                    help="Spiral max radius (abort threshold). Default 8 mm.")
+    p.add_argument("--search-r0-mm", type=float, default=1.5,
+                   help="Spiral start radius. Default 1.5 mm (avoids a centre stall); an aim confirmed by vision wants less:"
+                        " the spot 1 mm off the aim is otherwise never visited (operator 10-21).")
     # Calibration provenance (passed through to meta JSON)
     p.add_argument("--cal-yaml", default=None,
                    help="path to foundational calibration YAML (recorded in meta JSON)")
@@ -1463,6 +1466,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 fsm_cfg['search_v_s_m_s'] = float(getattr(ep.args, 'search_v_s_mm_s', 5.0)) / 1000.0
                 fsm_cfg['search_pitch_m'] = float(getattr(ep.args, 'search_pitch_mm', 2.0)) / 1000.0
                 fsm_cfg['search_R_max_m'] = float(getattr(ep.args, 'search_R_max_mm', 8.0)) / 1000.0
+                fsm_cfg['search_r0_m'] = float(getattr(ep.args, 'search_r0_mm', 1.5)) / 1000.0
             # Pass hole_xy_prior as spiral origin override (cross-attempt learning).
             # If a previous run found the hole xy via z-drop detection, anchor
             # this spiral search there rather than peg's random contact xy.

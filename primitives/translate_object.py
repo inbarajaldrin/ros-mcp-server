@@ -408,7 +408,10 @@ def _subprocess_fast_path():
             # rim (< 2 mm per attempt); the aim now comes from the yaw turn + silhouette servo. LIGHT_SEARCH=1 keeps the light one.
             '--search-Fmax-N', ('8.0' if (_base_fixed() or os.environ.get('LIGHT_SEARCH', '0') != '1') else '2.5'),
             '--search-v-s-mm-s', '5.0',
-            '--search-pitch-mm', '2.0',
+            # aim confirmed by the silhouette servo (free base: the replay servos before every insert; or SERVO_AIMED=1): start the spiral at 0.3 mm with a 1 mm
+            # pitch - from r0 = 1.5 mm it never visited the spot ~1 mm off the aim where u_brown drops (operator 10-21)
+            '--search-r0-mm', ('0.3' if (os.environ.get('SERVO_AIMED') == '1' or not _base_fixed()) else '1.5'),
+            '--search-pitch-mm', ('1.0' if (os.environ.get('SERVO_AIMED') == '1' or not _base_fixed()) else '2.0'),
             '--search-R-max-mm', '8.0',
             '--search-max-duration-s', '60.0',
             '--timeout', '180',
