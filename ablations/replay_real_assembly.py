@@ -2010,8 +2010,14 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
                 say(f"  [dservo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
                 continue
-        if max(info['spread_px']) > SERVO_MAX_SPREAD_PX:
-            say(f"  [dservo] {obj}: fit spreads {info['spread_px']} px after the yaw - no xy step"); break
+        if info['spread_px'][1] > SERVO_MAX_SPREAD_PX:
+            say(f"  [dservo] {obj}: far edge spreads {info['spread_px']} px after the yaw - no xy step"); break
+        if info['spread_px'][0] > SERVO_MAX_SPREAD_PX:
+            # the far edge fits, the left one does not (13:13 yellow: left 45.5 px, far 1.2 px, far reading 7.8 then
+            # 8.3 mm): step along the far edge's component only, as the marker servo does
+            d = np.asarray(info['d_far_only_mm'], float) / 1000.0
+            say(f"  [dservo] {obj}: left edge spreads {info['spread_px'][0]} px - far-edge component only "
+                f"{info['d_far_only_mm']} mm")
         if np.hypot(*d) <= SERVO_TOL_M:
             xy = xy - np.asarray(d); ok = True; break
         xy = xy - np.asarray(d)
