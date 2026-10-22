@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 15:22",
+ "updated": "2026-10-22 16:00",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -47,6 +47,23 @@
      "title": "RL driver",
      "status": "next",
      "note": "admittance servo, Isaac ROS policy behind the same action"
+    }
+   ]
+  },
+  {
+   "name": "Architecture",
+   "rungs": [
+    {
+     "id": "AR0",
+     "title": "Architecture review: deepening candidates",
+     "status": "active",
+     "note": "10-22 operator: the last two days' bugs came from the code's shape (a ledger with several writers, an empty trace CSV recording nothing, two follow mechanisms, a per-process clock, servo state in globals). improve-codebase-architecture review in progress; each chosen candidate becomes an AR rung here"
+    },
+    {
+     "id": "AR-gate",
+     "title": "Refactors keep behaviour",
+     "status": "next",
+     "note": "no refactor while a run is on the arm (touch_insert loads fresh per insert); each lands with tests at its new interface on recorded logs, then one FMB1 run must match before the next rung"
     }
    ]
   },
