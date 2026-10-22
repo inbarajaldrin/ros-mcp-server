@@ -1254,6 +1254,9 @@ def reread_base(bname, prev, log_fh=None):
     return ob
 
 
+NOT_FROM_HOME: set = set()            # parts the startup could not see from home (staged elsewhere)
+
+
 def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0, samples=None):
     """Build the tool sequence from where the part is actually lying.
 
@@ -1796,7 +1799,10 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     if not tr:
         say(f"  [depth-pick] {obj}: no last sighting to look above - markers as before"); return None
     ok = False
-    for vz in DEPTH_VIEW_ZS:
+    cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
+    if cur and np.hypot(cur[0] - tr[0], cur[1] - tr[1]) < 0.005 and abs(cur[2] - DEPTH_VIEW_ZS[0]) < 0.005:
+        ok = True             # the part view just put the camera here (same pose: a 3.7 s move + settle saved)
+    for vz in ([] if ok else DEPTH_VIEW_ZS):
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                             f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{vz:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
                             '--min-z', '0.15'], label=f'depth-pick view above {obj} at {vz:.2f} m', timeout_s=90,
@@ -3091,6 +3097,8 @@ def main() -> int:
             todo = [e.get('object_name') for e in entries
                     if not ((args.only and e.get('object_name') != args.only) or e.get('object_name') in skip)]
             seen_here = observe_many(todo, timeout_s=6.0, n_samples=6) if todo else {}
+            if not getattr(args, 'skip_startup', False):
+                NOT_FROM_HOME.update(n for n in todo if not seen_here.get(n))      # home cannot see these
             for entry in entries:
                 obj = entry.get('object_name')
                 if (args.only and obj != args.only) or obj in skip:
@@ -3282,9 +3290,12 @@ def main() -> int:
                                                                 second_view=lambda: _home_view(log_fh)):
                         failed = seated_so_far[-1]
                         break
-                r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
-                                   label=f'between-parts move_home ({obj})', timeout_s=60,
-                                   log_fh=log_fh)
+                if obj in NOT_FROM_HOME:
+                    r = {'result': 'skipped'}       # home cannot see it: straight to the view above it (below)
+                else:
+                    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                                       label=f'between-parts move_home ({obj})', timeout_s=60,
+                                       log_fh=log_fh)
                 if r.get('result') == 'failure':
                     failed = obj
                     break
@@ -3311,7 +3322,7 @@ def main() -> int:
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
             if (not args.dry_run and not args.part_at_staging and not _SAFETY_STOP
-                    and not _seen_here(obj)):
+                    and (obj in NOT_FROM_HOME or not _seen_here(obj))):
                 msg = f"  [view] {obj}: not seen from home -> look above it"
                 print(msg, flush=True)
                 if log_fh: log_fh.write(msg + "\n")
