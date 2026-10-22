@@ -66,6 +66,7 @@ Reference: https://github.com/<repo>/blob/main/primitives/translate_object.py
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -100,6 +101,72 @@ def _resolve_assembly_path(base_name: str) -> Path:
 
 
 def load_seat_pose_in_base(base_name: str, object_name: str) -> tuple[np.ndarray, np.ndarray]:
+    """Seat pose in the base frame: the assembly file's pose, SETTLED by gravity - dropped along the base's z onto the base
+    and the parts seated before it (CAD). 2026-10-22: the file left inverted_u_yellow 4.95 mm above any support (u_brown /
+    u_orange / line_green 0.50-0.55 mm, the CAD fit gap); depth read the seated yellow 6.1-7.2 mm under its file pose
+    against line_green's 1.2-1.9 mm, since 10-20. SEAT_SETTLE=0 returns the file's pose."""
+    pos, quat = _file_seat_pose(base_name, object_name)
+    if os.environ.get('SEAT_SETTLE', '1') == '1':
+        try:
+            pos = pos - np.array([0.0, 0.0, _settle_drop(base_name, object_name)])
+        except Exception:
+            pass                                   # meshes or the order not found: the file's pose
+    return pos, quat
+
+
+_SETTLE_CACHE: dict = {}
+SETTLE_CELL_M = 0.0015
+MODELS_DIR = ASSEMBLY_INDEX_DIR / "models"
+
+
+def _surface_points(name: str, step: float = 0.0008) -> np.ndarray:
+    """Dense samples on every triangle of the CAD mesh (OBJ in cm -> m)."""
+    v, f = [], []
+    for line in open(MODELS_DIR / f"{name}.obj"):
+        if line.startswith('v '):
+            v.append([float(x) / 100.0 for x in line.split()[1:4]])
+        elif line.startswith('f '):
+            idx = [int(t.split('/')[0]) - 1 for t in line.split()[1:]]
+            f += [(idx[0], idx[k], idx[k + 1]) for k in range(1, len(idx) - 1)]
+    V = np.array(v); pts = [V]
+    for a, b, c in f:
+        A, B, C = V[a], V[b], V[c]
+        n = int(max(np.linalg.norm(B - A), np.linalg.norm(C - A), np.linalg.norm(C - B)) / step) + 1
+        u, w = np.meshgrid(np.linspace(0, 1, n + 1), np.linspace(0, 1, n + 1))
+        m = u + w <= 1
+        pts.append(A + np.outer(u[m], B - A) + np.outer(w[m], C - A))
+    return np.vstack(pts)
+
+
+def _settle_drop(base_name: str, object_name: str) -> float:
+    """How far the part at its file pose drops straight down before it rests on the base or on a part seated before it
+    (each of those settled first), metres >= 0. Height maps on a 1.5 mm grid: the part's underside vs the support's top."""
+    key = (base_name, object_name)
+    if key in _SETTLE_CACHE:
+        return _SETTLE_CACHE[key]
+    from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
+    support = [_surface_points(base_name)]
+    for o in get_seated_so_far(base_name, object_name):
+        p_, q_ = load_seat_pose_in_base(base_name, o)
+        support.append(R.from_quat(q_).apply(_surface_points(o)) + p_)
+    p0, q0 = _file_seat_pose(base_name, object_name)
+    part = R.from_quat(q0).apply(_surface_points(object_name)) + p0
+
+    def hmap(P, top):
+        ij = np.floor(P[:, :2] / SETTLE_CELL_M).astype(np.int64)
+        k = ij[:, 0] * 100003 + ij[:, 1]
+        order = np.argsort(k); k, z = k[order], P[order, 2]
+        uk, start = np.unique(k, return_index=True)
+        red = np.maximum.reduceat(z, start) if top else np.minimum.reduceat(z, start)
+        return dict(zip(uk.tolist(), red.tolist()))
+    sup, under = hmap(np.vstack(support), True), hmap(part, False)
+    gaps = [bz - sup[k] for k, bz in under.items() if k in sup and sup[k] <= bz + 1e-4]   # supports below the underside
+    drop = max(0.0, min(gaps)) if gaps else 0.0
+    _SETTLE_CACHE[key] = drop
+    return drop
+
+
+def _file_seat_pose(base_name: str, object_name: str) -> tuple[np.ndarray, np.ndarray]:
     path = _resolve_assembly_path(base_name)
     d = json.load(open(path))
     comp = next((c for c in d["components"] if c.get("name") == object_name), None)

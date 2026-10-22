@@ -93,11 +93,11 @@ def _load_assembly_seat_z_above_base(base_name: str, object_name: str) -> Option
         candidate = ASSEMBLY_INDEX_DIR / f"fmb_assembly{base_name[4:]}.json"
         if not candidate.exists():
             return None
-        d = json.load(open(candidate))
-        comp = next((c for c in d["components"] if c.get("name") == object_name), None)
-        if comp is None:
+        try:                                   # the SETTLED seat (cad_lookup: the file's pose dropped onto its support)
+            from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+            return float(load_seat_pose_in_base(base_name, object_name)[0][2])
+        except KeyError:
             return None
-        return float(comp["position"]["z"])
     return None
 
 
