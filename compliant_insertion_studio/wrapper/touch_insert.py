@@ -51,8 +51,8 @@ ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = p
 GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.6')) / 1000.0
 GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '2.5')) / 1000.0
 CORRIDOR_PITCH_M = 0.0005
-CORRIDOR_ALONG_M = 0.005
-CORRIDOR_ACROSS_M = 0.001
+CORRIDOR_ALONG_M = 0.003
+CORRIDOR_ACROSS_M = 0.0025      # retracts ride over the measured contact (guarded), so across steps are safe
 
 
 def corridor_grid(axis_xy, pitch, along, across):
