@@ -525,7 +525,7 @@ from builtin_interfaces.msg import Duration
 
 from primitives.shared.ik import (
     forward_kinematics, dh_params, compute_cartesian_waypoints_ik,
-    IKSolverConfig, IKSolver,
+    IKSolverConfig, IKSolver, nearest_joint_equivalent,
 )
 from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 from primitives.shared.config import (
@@ -1007,6 +1007,11 @@ class TranslateObject(Node):
             ik_result = self.compute_ik_with_current_seed(target_flange, target_quat)
             if ik_result is None:
                 self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
+                self.get_logger().error(self.error_message)
+                return False
+            ik_result, why_ = nearest_joint_equivalent(ik_result, self.current_joint_angles)   # raw = wrapped rank
+            if ik_result is None:
+                self.error_message = f"Motion planning failed: {why_}"
                 self.get_logger().error(self.error_message)
                 return False
 
