@@ -772,6 +772,7 @@ PART_VIEW_Z_FALLBACKS = (0.45, 0.38)
 
 
 PLACED_JSON = REPO_ROOT / 'ablations' / 'logs' / 'placed_parts.json'   # part -> where the ARM last set it down (any process)
+CLEAR_OCCUPIED_M = 0.09          # another part this close to the clear area blocks a set-down there (parts are <= 70 mm)
 
 
 def placed(obj):
@@ -2850,6 +2851,30 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             return TABLE_HEIGHT + 0.001 - (Rm @ np.array([0.0, 0.0, RG2_TIP_CLOSED_M]))[2]
         return TABLE_HEIGHT + TABLE_COLLISION_MARGIN_SIDEWAYS - (Rm @ GRIPPER_CENTER_TOOL_OFFSET)[2]
 
+    def _clear_area_occupant(held):
+        """Another part whose LATEST known position (tracker sighting or arm set-down, whichever is newer) lies within
+        CLEAR_OCCUPIED_M of the clear area, or None. 10-22 05:29: u_brown was set down onto line_green lying there - the
+        tracker had seen it there 9 minutes before."""
+        from primitives.shared.config import CLEAR_AREA_XY
+        latest = {}
+        try:
+            for k, v in json.load(open(TRACKER_JSON)).items():
+                latest[k] = (float(v['t']), float(v['xyz'][0]), float(v['xyz'][1]))
+        except Exception:
+            pass
+        try:
+            for k, v in json.load(open(PLACED_JSON)).items():
+                if k not in latest or float(v['t']) > latest[k][0]:
+                    latest[k] = (float(v['t']), float(v['xy'][0]), float(v['xy'][1]))
+        except Exception:
+            pass
+        for k, (t_, x_, y_) in latest.items():
+            if k == held or k.startswith('base') or time.time() - t_ > 3600:
+                continue
+            if np.hypot(x_ - CLEAR_AREA_XY[0], y_ - CLEAR_AREA_XY[1]) < CLEAR_OCCUPIED_M:
+                return k, (x_, y_), time.time() - t_
+        return None
+
     def _gentle_place_down(step_idx, tag):
         """translate_object --place-down with the disassembly's landing (disassemble.place_at): the same
         move_to_clear_area, then move_down to LAND_SLOW_ABOVE_M above the CAD touch height of the held
@@ -2857,6 +2882,11 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         the closed-tip floor, below a part held by its top: yellow held by the bridge (recovery set-down,
         2026-10-19) hit the table at 37 N, 60 N peak. Returns None (caller runs the plain primitive) when
         the touch height cannot be computed."""
+        occ = _clear_area_occupant(obj)
+        if occ is not None:
+            say(f"\n!!! clear area occupied: {occ[0]} last at ({1000*occ[1][0]:.0f}, {1000*occ[1][1]:.0f}) mm, {occ[2]:.0f} s ago "
+                f"- {obj} not set down there (fail closed)")
+            return {'result': 'failure', 'error': f'clear area occupied by {occ[0]}', 'movement_type': 'place_down'}
         off = os.environ.get('GRASP_TOOL_OFFSET_M')
         gid = state.last_grasp_id
         if state.held_quat is None or off is None or gid is None:
