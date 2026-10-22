@@ -1912,7 +1912,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         yi = info.get('yaw_img_deg')
         say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
-        yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG
+        # 10-22 00:12: four turns of -0.31..-0.35 deg left the reading at -0.3 (noise floor ~0.3 deg): a turn below
+        # SERVO_YAW_MIN_TURN_DEG is not worth a round
+        yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG or abs(yi / SERVO_YAW_GAIN) < SERVO_YAW_MIN_TURN_DEG
         if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or k == SERVO_ITERS:
             break
         if not yaw_ok:
@@ -1932,7 +1934,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
-    c = xy - st[:2]
+    c = xy - st[:2] + SERVO_BIAS_M
     if np.hypot(*c) > SERVO_MAX_M:
         say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
         return observed_base, held_q
@@ -1951,9 +1953,13 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
 
 SERVO_ITERS = 6
 SERVO_YAW_TOL_DEG = 0.3
+SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
 SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
 SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
+# the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
+# 10-22 00:13): the target's residual bias (hand-eye tilt x the 35 mm lift); the dip grid still covers +-1.5 mm around it
+SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5,0.9').split(',')]) / 1000.0
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
 
