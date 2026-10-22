@@ -1766,7 +1766,10 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
 
 
 DEPTH_VIEW_ZS = (0.52, 0.45)         # flange heights for the pre-pick depth read (the D415 returns no depth < ~0.45 m)
-DEPTH_PICK_MAX_MOVE_M = 0.010        # a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
+DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today moved <= 3.8 mm from the marker seed (12
+                                     # picks); u_brown lying on its side slid 8.5 mm along its uniform top face, was held
+                                     # 8.5 mm off and the 8 mm spiral missed its pocket twice (rim, +34 mm).
+                                     # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
 DEPTH_PICK_MIN_MATCHED = 0.30        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21)
 
 
