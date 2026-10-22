@@ -2010,6 +2010,27 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline, img=img_, tcp_pose=tp)
         finally:
             _emitter(True)
+        if base_sf is None and z_meas < z_clear - 0.01:
+            # the seat lies on the far side of the base for this view: from just over the rim the base fills the frame and
+            # its corner markers leave it (10-22 02:52: u_orange, 0 markers); from the clear height 2-3 are in view.
+            # Measure from there instead (the hand-eye tilt lever grows to ~1.7 mm/deg; the dip grid covers +-1.5 mm)
+            say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
+            z_meas = z_clear
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                                f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                               label=f'servo up to measure {k}', timeout_s=60, log_fh=log_fh)
+            if _SAFETY_STOP:
+                return observed_base, held_q
+            _emitter(False)
+            try:
+                img_, _ = still_frame(n_avg=4); tcp_now = (snapshot_robot_state().get('tcp') or {})
+                tp = (np.asarray(tcp_now['xyz']), np.asarray(tcp_now['quat_xyzw']))
+                base_sf, sfinfo = base_pose_same_frame(base, img_, tp, bq) if img_ is not None else (None, {'error': 'no frame'})
+                lift = float(tp[0][2] - st[2])
+                d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline,
+                                             img=img_, tcp_pose=tp)
+            finally:
+                _emitter(True)
         if base_sf is None:
             # fail closed (10-22 02:25: with 0-1 base markers in view the fallback projected the base read - the biased
             # path - and its 27-70 px-spread fits turned u_orange's wrist 6 x -5 deg = -30 deg into the insert)
