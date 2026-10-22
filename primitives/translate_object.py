@@ -328,7 +328,11 @@ def _subprocess_fast_path():
         # held part within ~1-2 mm of its chained pose and over the seat - u_brown's pocket admits it only within about
         # +-1 x +-0.5 mm, below what a probe grid (or any read: 2-5 mm view spread) hits. So the default stays the
         # sliding search (light on a free base); touch is opt-in (INSERT_MODE=touch).
-        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'compliant') == 'touch'
+        # 2026-10-21 23:10: touch is the free-base default again. A sliding search cannot work on an untaped base: at
+        # 9 N the part carried base1 (its edges static in the wrist camera through a 66 s spiral), at 1.5 N it slid
+        # 1.6 mm in a whole search. The aim now comes from the hover servo (repeats to ~0.5 mm) and the probes step a
+        # 1 mm hexagonal lattice (touch_insert.hex_grid). INSERT_MODE=compliant keeps the sliding search.
+        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'touch') == 'touch'
                 and args.final_base_pos is not None and args.final_base_orientation is not None
                 and args.current_object_orientation is not None):
             touch_argv = [sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.touch_insert',

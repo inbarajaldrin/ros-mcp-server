@@ -36,11 +36,26 @@ sys.path[:0] = [str(REPO), str(REPO / 'ablations')]
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 MAX_FORCE_N = 4.0
 SPEED_M_S = 0.005
-ABOVE_RIM_M = 0.003
+ABOVE_RIM_M = 0.003          # first probe; later ones start 2 mm over the MEASURED rim (CAD rim read 1.3 mm low)
 SEATED_DZ_M = 0.003          # within this of the predicted seat = in
 ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = partly in the pocket
-RINGS = ((0.002, 6), (0.004, 8), (0.006, 10))
-YAWS_DEG = (1.5, -1.5, 3.0, -3.0)
+# Probe grid (2026-10-21 23:10): a hexagonal lattice around the aim, nearest first. u_brown's pocket admits the part
+# within about +-1 x +-0.5 mm, so the lattice pitch (covering radius pitch/sqrt(3)) must stay ~1 mm; the old 2/4/6 mm
+# rings could step over it. The aim comes from the hover servo (repeats to ~0.5 mm across runs).
+GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '1.0')) / 1000.0
+GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '3.0')) / 1000.0
+YAWS_DEG = (0.6, -0.6, 1.2, -1.2)
+
+
+def hex_grid(pitch, rmax):
+    """(dx, dy) lattice points within rmax of the origin, nearest first."""
+    pts, n = [], int(math.ceil(rmax / pitch)) + 1
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            x, y = pitch * (i + 0.5 * j), pitch * (math.sqrt(3) / 2) * j
+            if math.hypot(x, y) <= rmax + 1e-9:
+                pts.append((x, y))
+    return sorted(pts, key=lambda p: (round(math.hypot(*p), 6), math.atan2(p[1], p[0])))
 
 
 def _env():
@@ -90,13 +105,13 @@ def main():
     a = ap.parse_args()
     from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
     from compliant_insertion_studio.wrapper.cad_geometry import _load_base_top_z_local
-    from primitives.shared.config import held_tool_offset
+    from primitives.shared.config import held_tool_offset_for
 
     p0, q0 = tcp_now()
     pred = predict_tcp_at_seat(base_name=a.base_name, object_name=a.object_name, grasp_id=a.grasp_id,
                                base_world_xyz=a.final_base_pos, base_world_quat_xyzw=a.final_base_orientation,
                                held_quat_xyzw=a.current_object_orientation, ee_orientation_xyzw=list(q0),
-                               flange_offset_m=float(held_tool_offset()[2]))
+                               flange_offset_m=float(held_tool_offset_for(a.object_name)[2]))
     seat = np.array(pred['predicted_tcp_at_seat']['xyz_m'], float)
     q_seat = np.array(pred['predicted_tcp_at_seat']['quat_xyzw'], float)
     # rim contact height: the part's lowest point at the seat sits below the base top by (base top - seat bottom)
@@ -106,7 +121,7 @@ def main():
         rim_z = expected_contact_tcp_z(surface_world_z=base_top_w, object_name=a.object_name, grasp_id=a.grasp_id,
                                        R_grasp_quat_xyzw=a.current_object_orientation,
                                        predicted_tcp_z_at_seat=float(seat[2]),
-                                       flange_offset_world_z=-float(held_tool_offset()[2]))
+                                       flange_offset_world_z=-float(held_tool_offset_for(a.object_name)[2]))
     except Exception:
         rim_z = float(seat[2]) + 0.031
     ts = time.strftime('%Y%m%d_%H%M%S'); stem = LOGS / f'insert_{a.object_name}_{ts}'
@@ -149,29 +164,25 @@ def main():
             return 'entering'
         return 'rim'
 
-    pts = [(0.0, 0.0)]
     best = None                                         # (z, dx, dy) lowest rim contact
-    centre = (0.0, 0.0)
-    tried = 0
-    for ring_i in range(len(RINGS) + 1):
-        if ring_i > 0:
-            rad, n = RINGS[ring_i - 1]
-            c = (best[1], best[2]) if (best is not None and ring_i > 1) else centre
-            pts = [(c[0] + rad * math.cos(2 * math.pi * k / n), c[1] + rad * math.sin(2 * math.pi * k / n)) for k in range(n)]
-        for dx, dy in pts:
-            z = probe(dx, dy); tried += 1
-            st = outcome(z)
-            if st == 'in':
-                return finish(stem, meta, 'success')
-            if st == 'entering':
-                # partly in the pocket: it is here - a lighter second try from just above, then hand on to the judge
-                z2 = probe(dx, dy)
-                return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
-            if st == 'rim' and (best is None or z < best[0]):
-                best = (z, dx, dy)
-            if z is None:
-                return finish(stem, meta, 'failure')
-            move([seat[0] + dx, seat[1] + dy, start_z], q_seat)        # retract before any sideways step
+    pts = hex_grid(GRID_PITCH_M, GRID_RMAX_M)
+    print(f"[touch] {len(pts)} probe points, pitch {1000*GRID_PITCH_M:.1f} mm, out to {1000*GRID_RMAX_M:.1f} mm", flush=True)
+    for dx, dy in pts:
+        z = probe(dx, dy)
+        st = outcome(z)
+        if st == 'in':
+            return finish(stem, meta, 'success')
+        if st == 'entering':
+            # partly in the pocket: it is here - a second try from just above, then hand on to the judge
+            move([seat[0] + dx, seat[1] + dy, start_z], q_seat)
+            z2 = probe(dx, dy)
+            return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
+        if z is None:
+            return finish(stem, meta, 'failure')
+        if best is None or z < best[0]:
+            best = (z, dx, dy)
+        start_z = min(start_z, best[0] + 0.002)                       # lateral steps 2 mm over the measured rim
+        move([seat[0] + dx, seat[1] + dy, start_z], q_seat)            # retract before any sideways step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:
         z = probe(bx, by, dyaw)
