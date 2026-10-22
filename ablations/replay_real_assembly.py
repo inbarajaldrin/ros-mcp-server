@@ -3351,7 +3351,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         if (result.get('result') == 'failure' and tool_name == 'translate_object'
                 and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES
-                and not _SAFETY_STOP):
+                and not _SAFETY_STOP and not one_node()):
+            # (rule 2, one-node mode: not seated -> drive-mate's own retry -> stop; no regrasp ladder - 10-22 06:52 it
+            # set line_green down and regrasped it after three failed attempts)
             # A missed insert means a bad grasp (the insert itself searches ~5 mm). Set the
             # part down at the staging area and take a fresh grasp from close above, then
             # insert again — the operator's recovery that seated yellow on 2026-10-14.
