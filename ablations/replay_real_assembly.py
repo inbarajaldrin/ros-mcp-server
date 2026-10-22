@@ -1995,9 +1995,15 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         finally:
             _emitter(True)
         if base_sf is None:
-            say(f"  [servo] {obj} round {k}: base not read in the frame ({sfinfo.get('error')}) - projecting the base read")
+            # fail closed (10-22 02:25: with 0-1 base markers in view the fallback projected the base read - the biased
+            # path - and its 27-70 px-spread fits turned u_orange's wrist 6 x -5 deg = -30 deg into the insert)
+            say(f"  [servo] {obj} round {k}: base not read in the frame ({sfinfo.get('error')}) - no correction, aiming as read")
+            break
         if d is None:
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
+        if max(info.get('spread_px') or [0]) > SERVO_MAX_SPREAD_PX:
+            say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SERVO_MAX_SPREAD_PX} - the outline does not "
+                f"match the target, no correction"); break
         yi = info.get('yaw_img_deg')
         say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
@@ -2010,6 +2016,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # image yaw of the far edge vs the socket's; the wrist turns about the TCP (0.5 mm of part per degree), xy is
             # re-measured after it. Effective gain 0.7-1.1 deg of reading per degree of wrist (10-21): turn 1:1, iterate
             t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
+            if abs(yaw_total + t) > SERVO_MAX_YAW_DEG:
+                say(f"  [servo] {obj}: image yaw {yi} deg would turn the wrist {yaw_total + t:+.1f} deg in all (> "
+                    f"{SERVO_MAX_YAW_DEG}) - more than the reads can be off, stopping the servo"); break
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                            label=f'servo up for turn {k}', timeout_s=60, log_fh=log_fh)   # vertical: xy is where we measured
@@ -2045,6 +2054,8 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
 SERVO_ITERS = 6
 SERVO_YAW_TOL_DEG = 0.3
 SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
+SERVO_MAX_SPREAD_PX = 12.0     # a fit whose edge residuals spread more than this does not match the part (good fits: 1-4 px)
+SERVO_MAX_YAW_DEG = 4.0        # the whole servo may turn the wrist this much; base and grasp reads are within ~3 deg
 SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
 SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
