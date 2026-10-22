@@ -367,7 +367,7 @@ def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
     # the grey fingers and the black/white markers fail the saturation test, the table fails the brightness test
     import cv2
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = ((Rc > Gc + 6) & (Rc > 14)) | ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 20))
+    mask = ((Rc > Gc + 6) & (Rc > 14)) | ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 35))   # dark-table noise is saturated at V < 20
     far, left = [], []
     for x in range(x_far[0], x_far[1], 8):
         col = mask[380:700, x]
@@ -380,9 +380,9 @@ def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
             if row[i:i + 4].all():
                 left.append((520 + i, y)); break
     if len(far) >= 5:
-        my = np.median([y for _, y in far]); far = [(x, y) for x, y in far if abs(y - my) <= 6]   # base in view / marker
+        my = np.median([y for _, y in far]); far = [(x, y) for x, y in far if abs(y - my) <= 8]   # base in view / marker
     if len(left) >= 5:
-        mx = np.median([x for x, _ in left]); left = [(x, y) for x, y in left if abs(x - mx) <= 6]
+        mx = np.median([x for x, _ in left]); left = [(x, y) for x, y in left if abs(x - mx) <= 8]
     if len(far) < 10 or len(left) < 6:
         return None
     return {'far': far, 'left': left}
