@@ -415,13 +415,39 @@ def socket_shift_world(obj, base, base_pose_world, lift_m, outline, img=None, tc
     Tcw = np.linalg.inv(_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)
     bp, bq = np.asarray(base_pose_world[0], float), base_pose_world[1]; Rb = R.from_quat(bq)
     sp, sq = load_seat_pose_in_base(base, obj)
-    V, F = load_mesh(obj); Pb = R.from_quat(sq).apply(surface_points(V, F, 0.002)) + sp
-    top = Pb[:, 2].max(); x0, x1, y0, y1 = Pb[:, 0].min(), Pb[:, 0].max(), Pb[:, 1].min(), Pb[:, 1].max()
-    cb = np.array([[x0, y0, top + lift_m], [x1, y0, top + lift_m], [x1, y1, top + lift_m], [x0, y1, top + lift_m]])
-    Pw = Rb.apply(cb) + bp
+    V, F = load_mesh(obj); Pb = R.from_quat(sq).apply(surface_points(V, F, 0.0015)) + sp
+    Pb = Pb + np.array([0.0, 0.0, lift_m])                           # the whole part at its seat, raised to now
+    # SILHOUETTE, not the top face: the camera looks at the part from up-left of it and sees its far and left SIDE
+    # faces, so the outermost dark edges are the part's bottom edges (10-21: top-face target -> servo converged off)
+    Pw = Rb.apply(Pb) + bp
     Pc = (Tcw[:3, :3] @ Pw.T).T + Tcw[:3, 3]
     uv, _ = cv2.projectPoints(Pc.astype(np.float32), np.zeros(3), np.zeros(3), K, D); uv = uv.reshape(-1, 2)
-    return _outline_vs_target(img, uv, Pc, outline, tcp_pose, K, debug_path)
+    dy, dx, zs = [], [], []
+    for x, y in outline['far']:
+        m = np.abs(uv[:, 0] - x) < 2.5
+        if m.sum() >= 3:
+            i = np.argmin(np.where(m, uv[:, 1], np.inf)); dy.append(y - uv[i, 1]); zs.append(Pc[i, 2])
+    for x, y in outline['left']:
+        m = np.abs(uv[:, 1] - y) < 2.5
+        if m.sum() >= 3:
+            i = np.argmin(np.where(m, uv[:, 0], np.inf)); dx.append(x - uv[i, 0]); zs.append(Pc[i, 2])
+    if len(dy) < 5 or len(dx) < 3:
+        return None, {'error': 'silhouette edges out of range'}
+    shift = np.array([np.median(dx), np.median(dy)]); Z = float(np.median(zs))
+    d_cam = np.array([shift[0] * Z / K[0, 0], shift[1] * Z / K[1, 1], 0.0])
+    d_world = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3] @ d_cam
+    info = {'shift_px': [round(float(v), 1) for v in shift],
+            'spread_px': [round(float(np.std(dx)), 1), round(float(np.std(dy)), 1)], 'depth_m': round(Z, 3),
+            'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]]}
+    if debug_path:
+        v = img.copy()
+        for u_, w_ in uv[::4]:
+            if 0 <= u_ < v.shape[1] and 0 <= w_ < v.shape[0]:
+                v[int(w_), int(u_)] = (0, 255, 0)
+        for x, y in outline['far'] + outline['left']:
+            cv2.circle(v, (int(x), int(y)), 3, (255, 0, 255), -1)
+        cv2.imwrite(debug_path, v)
+    return d_world[:2], info
 
 
 def _outline_vs_target(img, uv, Pc, outline, tcp_pose, K, debug_path=None):
