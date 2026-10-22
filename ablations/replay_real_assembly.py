@@ -598,6 +598,7 @@ def _staging_view(log_fh=None):
 
 
 LAST_SEEN_XY = {}                 # part -> (x, y) from its latest observation (derive step, view checks)
+PLACED_T = {}                     # part -> time it was last set down by the arm: older tracker sightings are stale
 PART_VIEW_Z = 0.52                # flange height for a look straight above one part (RGB only; depth not needed)
 PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer view (2026-10-20)
 
@@ -739,6 +740,8 @@ def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
     try:
         e = json.load(open(TRACKER_JSON)).get(obj)
         age = time.time() - float(e['t'])
+        if float(e['t']) < PLACED_T.get(obj, 0.0):
+            return None           # seen before the arm set it down somewhere else (10-22: regrasp looked at its pick spot)
         return (float(e['xyz'][0]), float(e['xyz'][1]), age) if age <= max_age_s else None
     except Exception:
         return None
@@ -2718,7 +2721,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             r = _gentle_place_down(step_idx, tag)
             if r is not None:
                 state.update_from_result(tool_name, r)
-                _record_snapshot(snap_fh, "after", f"{obj}#{step_idx}{tag} place_down", snapshot_robot_state())
+                snap_after = snapshot_robot_state()
+                _record_snapshot(snap_fh, "after", f"{obj}#{step_idx}{tag} place_down", snap_after)
+                xyz_ = (snap_after.get('tcp') or {}).get('xyz')
+                if r.get('result') != 'failure' and xyz_:
+                    # the part is where it was set down (2026-10-22: the regrasp's depth-pick view flew to u_orange's
+                    # pick spot 0.8 m away - the stale tracker sighting - saw nothing, and the run stopped)
+                    LAST_SEEN_XY[obj] = (float(xyz_[0]), float(xyz_[1])); PLACED_T[obj] = time.time()
+                    say(f"  [{step_idx}] place_down: {obj} now at ({1000*xyz_[0]:.0f}, {1000*xyz_[1]:.0f}) mm (where it was set down)")
                 return r
         if tool_name == 'move_to_grasp':
             age = camera_frame_age()
