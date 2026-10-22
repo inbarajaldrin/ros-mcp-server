@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 16:00",
+ "updated": "2026-10-22 16:25",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -56,8 +56,32 @@
     {
      "id": "AR0",
      "title": "Architecture review: deepening candidates",
+     "status": "done",
+     "note": "10-22 16:02: 5 agents mapped the code; report /tmp/architecture-review-20261022-160226.html. drive-mate is a pass-through: aim, servo, recovery and seat judging sit in the replay, so M3a passes the seam on paper only. 51 of 163 3-day fixes were handoff / duplication / silent failure; 0 offline tests"
+    },
+    {
+     "id": "AR1",
+     "title": "One aim module (seams.aim)",
      "status": "active",
-     "note": "10-22 operator: the last two days' bugs came from the code's shape (a ledger with several writers, an empty trace CSV recording nothing, two follow mechanisms, a per-process clock, servo state in globals). improve-codebase-architecture review in progress; each chosen candidate becomes an AR rung here"
+     "note": "5b94f9e: Aim = measured base + named corrections; 120 cases match build_argv. CLEARS AT: build_argv and insert_via_drive_mate use it (no argv round-trip, seat z in one place) and one FMB1 run aims the same"
+    },
+    {
+     "id": "AR2",
+     "title": "Insert outcome returned, not re-read",
+     "status": "next",
+     "note": "every route returns one outcome (predicted seat, rest TCP, aim, corrections, stage); trace files telemetry only; a missing outcome fails loudly. Primitive exit 0 with no result = failure"
+    },
+    {
+     "id": "AR3",
+     "title": "drive-mate owns the insert",
+     "status": "next",
+     "note": "servo, wrist turn, wedge recovery, retries and seat judging behind /ur5e/drive_mate; replay sends {mate, vision target + sigma, held}. Gate for M4 (RL driver behind the same action)"
+    },
+    {
+     "id": "AR4",
+     "title": "Seated-parts state, one owner",
+     "status": "next",
+     "note": "ledger + seated_offsets + history + placed/staged + journal behind one module: atomic, seat error with frame + source, one clock; folds in during AR1-AR3"
     },
     {
      "id": "AR-gate",
