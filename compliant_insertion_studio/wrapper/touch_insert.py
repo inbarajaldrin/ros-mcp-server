@@ -170,8 +170,8 @@ def main():
     def probe(dx, dy, dyaw_deg=0.0):
         q = (R.from_euler('z', dyaw_deg, degrees=True) * R.from_quat(q_seat)).as_quat()
         x, y = seat[0] + dx, seat[1] + dy
-        r1 = move([x, y, start_z], q)
-        if r1.get('result') == 'failure':
+        r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N)            # guarded: 13:39 an unguarded descent here put the
+        if r1.get('result') == 'failure' and not r1.get('contact'):       # yellow onto line_green's top (protective stop)
             return None
         dur = (start_z - (seat[2] - 0.002)) / SPEED_M_S
         r2 = move([x, y, seat[2] - 0.002], q, max_force=MAX_FORCE_N, min_duration=dur)

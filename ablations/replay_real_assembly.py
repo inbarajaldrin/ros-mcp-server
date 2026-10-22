@@ -2819,6 +2819,23 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
     return bool(res.get('ok'))
 
 
+def _record_seat_check_error(obj, res):
+    """A passed depth seat check measures where the part really sits ACROSS its slot (cross centre) and along it (axial
+    shift), base frame, mm: written to the verify ledger as rel_err_mm so the part threading over it next is aimed at it
+    (_follow_seated_general). 13:39/13:54 the yellow, aimed at its CAD seat, came down on line_green's top twice -
+    line_green sat 1.7 mm across from CAD (its check), the yellow straddles it with +-1 mm."""
+    try:
+        f = res.get('face') or {}
+        cross = float((res.get('cross') or {}).get('centre_mm'))
+        along = float((res.get('axial') or {}).get('shift_mm', 0.0))
+        e = [cross, along] if f.get('long_axis', 'y') == 'y' else [along, cross]
+        led = _ledger(); led.setdefault(obj, {})['rel_err_mm'] = e; led[obj]['t'] = time.time()
+        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        print(f"  [seat-check] {obj}: measured seat error {e} mm (base frame) recorded for the parts over it", flush=True)
+    except Exception as ex:
+        print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
+
+
 def seat_check_and_reseat(obj, state, args, say) -> bool:
     """The depth seat check (+ nudges / edge press); a pass is recorded in the verify ledger as a depth
     confirmation, which verify_seated accepts when the markers cannot see the part (2026-10-20: fork_orange,
@@ -2871,6 +2888,7 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             args.observed_base = ob
             continue
         if res.get('ok'):
+            _record_seat_check_error(obj, res)
             return True
         if res.get('mode', '').startswith('median height'):
             if res.get('ok'):
@@ -2905,6 +2923,8 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
                 say(f"  [seat-check] {obj} after the taps: {json.dumps({k: v for k, v in res2.items() if k not in ('profile_mm', 'observed_base')})}")
                 ok = bool(res2.get('ok'))
                 res = res2 if 'pitch_deg' in res2 else res
+                if ok:
+                    _record_seat_check_error(obj, res2)
             if not ok:
                 ok = nudge_into_slot(obj, ob, res, say, out_dir)      # the slow push as the fallback
             if not ok:
