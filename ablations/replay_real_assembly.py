@@ -3349,8 +3349,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         def _wedge_check():
             """None: not wedged. True/False: wedged; released and nudged -> seated or not. Called after EVERY failed
             attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
-            if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run) or one_node():
-                return None          # one node: the insert's own retry, then stop - no release-and-nudge
+            if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run):
+                return None          # (10-22: the release-and-nudge is a recovery - it runs in one-node mode too)
             w = _wedged_near_seat(obj, t_step)
             if w is None:
                 return None
@@ -3479,8 +3479,21 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # run_assembly_step's settle-window discipline).
         time.sleep(0.5)
 
-    if one_node():
-        pass        # drive-mate's at-rest result decided the insert; ExecuteMate certifies every mate once at the end
+    if one_node() and not args.dry_run:
+        # Operator 10-22: check EVERY seat right after its insert - drive-mate's at-rest TCP height cannot see a part
+        # pitched in the jaws (08:15 line_green +2.2 mm at the TCP, pitched; the yellow then went onto it). The depth
+        # seat check is the read that caught every tilted line_green on 10-14/15 (pitch 3.2-4.0 deg, one end +5.6..6.8
+        # mm); its nudge / edge press / reseat is the recovery (not part of the compliant insert). Then ExecuteMate
+        # certifies this mate from the seat view - mates are certified in order, one per seat.
+        if _seat_checked(obj) and getattr(args, 'seat_check', True):
+            if not seat_check_and_reseat(obj, state, args, say):
+                return False
+        if os.environ.get('SEAMS_CERTIFY') == '1':
+            out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
+                                           say, log_fh) or {}
+            if not out.get('placed'):
+                say(f"  [execute_mate] {obj}: {out.get('refusal') or 'no answer'} after the seat check - stopping")
+                return False
     elif os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
         # ExecuteMate is the authority (operator 2026-10-21: no diagnostics once the part is known seated). The
         # replay's own depth seat check and reseat run only as the recovery for a measured not_at_seat, or when no
@@ -3990,18 +4003,8 @@ def main() -> int:
         # follow-on motion).
         # Final check of the whole assembly from the base view (the between-parts checks covered
         # the earlier parts; this one adds the last part and re-checks the rest).
-        if (completed and not args.dry_run and not _SAFETY_STOP and one_node()
-                and getattr(args, 'observed_base', None) is not None and not _HOLDING_SEATED):
-            run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
-                           label='safe height before the certify view', timeout_s=60, log_fh=log_fh)
-            certs = certify_once_at_end([e_.get('object_name') for e_ in entries if e_.get('object_name') in completed],
-                                        bname, args.observed_base,
-                                        lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")), log_fh)
-            n_ok = sum(bool(o.get('placed')) for o in certs.values())
-            msg = (f"  [certify] {n_ok}/{len(completed)} placed=true from one view"
-                   + ("" if n_ok == len(completed) else " - flagged for the operator, nothing touched"))
-            print(msg, flush=True)
-            if log_fh: log_fh.write(msg + "\n")
+        if one_node():
+            pass        # one node: every seat was checked (depth) and certified (ExecuteMate) right after its insert
         elif (not failed and completed and not args.dry_run and not _SAFETY_STOP
                 and getattr(args, 'observed_base', None) is not None):
             args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
