@@ -192,7 +192,12 @@ def main():
             d = np.zeros(2); d[ax] = 1.0 if (e_b[ax] >= 0 or np.hypot(*e_b) <= a.tol_mm) else -1.0
             # a push along +d at a point offset +t from the face middle (t = d rotated +90) turns the base -z
             lever = -np.sign(eyaw) * LEVER_MM
-            step = float(np.clip(abs(eyaw) * 1.5 + 3, 4, STEP_MAX_MM))
+            if np.hypot(*e_b) <= a.tol_mm:
+                # pure turn = a couple (two pushes): 10-21 couples turned base1 0.65-1.3 deg per mm of step (7 mm ->
+                # 8.9 deg for a 2.4 deg error; 10 mm -> 6.5 deg for 4.5), so 1.5 mm/deg + 3 overshot every time
+                step = float(np.clip(abs(eyaw) * 0.8 + 1.5, 2, STEP_MAX_MM))
+            else:
+                step = float(np.clip(abs(eyaw) * 1.5 + 3, 4, STEP_MAX_MM))
         else:
             ax = int(np.argmax(np.abs(e_b)))
             d = np.zeros(2); d[ax] = float(np.sign(e_b[ax]))
