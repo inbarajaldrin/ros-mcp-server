@@ -3612,7 +3612,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # seat check is the read that caught every tilted line_green on 10-14/15 (pitch 3.2-4.0 deg, one end +5.6..6.8
         # mm); its nudge / edge press / reseat is the recovery (not part of the compliant insert). Then ExecuteMate
         # certifies this mate from the seat view - mates are certified in order, one per seat.
-        if _seat_checked(obj) and getattr(args, 'seat_check', True):
+        # ... only where a wedge is possible (CAD, cad_geometry.wedge_possible - operator 10-22: "reduce the unnecessary
+        # things when not required"): line_green's end can rest on the base top looking seated; a U part or the yellow off
+        # its pocket sits on the rim, far outside drive-mate's band. 11:47 a first-try seated u_orange (flat by touch:
+        # ends +0.1 / -0.2 mm) read +2.4 mm at one end by depth, was tapped (base dragged 2.5 mm) and refused.
+        from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
+        if _seat_checked(obj) and getattr(args, 'seat_check', True) and wedge_possible(RUN_BASE['name'], obj):
             if not seat_check_and_reseat(obj, state, args, say):
                 return False
         if os.environ.get('SEAMS_CERTIFY') == '1':

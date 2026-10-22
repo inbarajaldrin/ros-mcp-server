@@ -315,3 +315,45 @@ def seated_under(base_name: str, object_name: str, margin_m: float = 0.005) -> l
         if ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m:
             out.append(o)
     return out
+
+
+AT_REST_BAND_M = 0.005          # drive-mate's at-rest acceptance |dz| vs the seat
+_WEDGE_CACHE: dict = {}
+
+
+def wedge_possible(base_name: str, object_name: str, band_m: float = AT_REST_BAND_M) -> bool:
+    """Can the part rest stably OFF its seat yet look seated by its at-rest height? (operator 10-22: "every peg and
+    pocket gives you the relation to whether there is a wedge"). The part at its seated pose is shifted 1-12 mm along each
+    base axis and dropped onto the base + parts seated before it (1 mm height maps); a rest h above the seat, tilted with
+    one end down (h/2 at the grasp), inside the at-rest band = a wedge only a seat check can see. FMB1: line_green 7.0 mm
+    (its end on the base top past the pocket, h/2 = 3.5 mm) -> True; u_brown 29.1, u_orange / yellow 31.5 mm -> False
+    (out of the pocket they sit on the rim, far outside the band: the at-rest result decides)."""
+    key = (base_name, object_name, band_m)
+    if key in _WEDGE_CACHE:
+        return _WEDGE_CACHE[key]
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+    cell = 0.001
+
+    def hmap(X, top):
+        ij = np.floor(X[:, :2] / cell).astype(np.int64)
+        k = ij[:, 0] * 100003 + ij[:, 1]
+        o = np.argsort(k); k, z = k[o], X[o, 2]
+        u, s = np.unique(k, return_index=True)
+        return dict(zip(u.tolist(), (np.maximum if top else np.minimum).reduceat(z, s).tolist()))
+
+    def placed(o):
+        sp, sq = load_seat_pose_in_base(base_name, o)
+        return R.from_quat(sq).apply(_surface_points(o, 0.0008)) + sp
+    sup = hmap(np.vstack([_surface_points(base_name, 0.0008)] + [placed(p) for p in get_seated_so_far(base_name, object_name)]), True)
+    X = placed(object_name)
+    rests = []
+    for ax in (0, 1):
+        for d in (0.001, 0.002, 0.003, 0.005, 0.008, 0.012):
+            for sg in (-1.0, 1.0):
+                Y = X.copy(); Y[:, ax] += sg * d
+                h = max([sup[k] - z for k, z in hmap(Y, False).items() if k in sup] + [0.0])
+                if h > 0.0006:
+                    rests.append(h)
+    out = bool(rests) and min(rests) / 2.0 < band_m
+    _WEDGE_CACHE[key] = out
+    return out
