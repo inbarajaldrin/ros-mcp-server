@@ -314,7 +314,9 @@ def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
     over the base the dark pocket and the dark part look alike). The camera is rigid with the gripper, so these pixels are
     the part's place in every frame of this grasp. Returns {'far': [(x, y)...], 'left': [(x, y)...]} or None."""
     Rc, Gc, Bc = [img[:, :, k].astype(np.float32) for k in (2, 1, 0)]
-    mask = (Rc > 30) & (Rc > 1.5 * Gc) & (Rc > 1.5 * Bc)
+    # red clearly above green (the black table reads G >= R): in the dark the part's top face near its far edge is only
+    # R 20-25, which an absolute R > 30 missed - the edge came out 12-30 px late (servo 'converged' ~3 mm off, 10-21)
+    mask = (Rc > Gc + 6) & (Rc > 14)
     far, left = [], []
     for x in range(x_far[0], x_far[1], 8):
         col = mask[380:700, x]
