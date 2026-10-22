@@ -1043,6 +1043,8 @@ def main():
                      '--quat', '0', '1', '0', '0'), 'staging view (check the landings)', 90)
     if not ok_v:                       # fail closed (2026-10-20: a refused move "checked" nothing and passed)
         print("!!! staging view move failed - landings not checked"); return 1
+    from replay_real_assembly import ensure_exposure     # the room's light changes (10-22 04:10: dark room, nothing seen)
+    ensure_exposure(lambda m: print(m, flush=True))
     seen = observe_parts(RUN['parts'])
     if not seen:
         print("!!! no part seen from the staging view - landings not checked"); return 1
