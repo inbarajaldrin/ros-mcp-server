@@ -703,6 +703,12 @@ def main():
                          'height): place it as the saved layout (staging_layout.json) says, then take the '
                          'remaining parts out as planned')
     a = ap.parse_args()
+    if not a.dry_run:
+        try:
+            from replay_real_assembly import ensure_exposure   # the room's light changes between runs (10-22 night)
+            ensure_exposure(lambda m: print(m, flush=True))
+        except Exception as e:
+            print(f"  [camera] exposure not checked ({e})")
     if not a.dry_run:                    # Speed T0: the same timing rows + motion recorder as the replay
         import replay_real_assembly as _rr
         _ts = time.strftime('%Y%m%d_%H%M%S')
