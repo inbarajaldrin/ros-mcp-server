@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 16:40",
+ "updated": "2026-10-22 16:55",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -63,25 +63,25 @@
      "id": "AR1",
      "title": "One aim module (seams.aim)",
      "status": "active",
-     "note": "5b94f9e: Aim = measured base + named corrections; 120 cases match build_argv. CLEARS AT: build_argv and insert_via_drive_mate use it (no argv round-trip, seat z in one place) and one FMB1 run aims the same"
+     "note": "5b94f9e module, 2c5d602 wired (build_argv + drive-mate take the Aim; -134 replay lines; golden aims, 159 tests). Gate run attempt 24 running"
     },
     {
      "id": "AR2",
      "title": "Insert outcome returned, not re-read",
-     "status": "next",
-     "note": "every route returns one outcome (predicted seat, rest TCP, aim, corrections, stage); trace files telemetry only; a missing outcome fails loudly. Primitive exit 0 with no result = failure"
+     "status": "active",
+     "note": "2b3eb91 on branch ar2-insert-outcome: seams.insert_outcome (0 diffs over 400 recorded inserts), drive-mate judges the trace the insert named, replay records seats from drive-mate's result, primitives exit 0 without a result = failure. Merges after AR1's gate run"
     },
     {
      "id": "AR3",
      "title": "drive-mate owns the insert",
      "status": "next",
-     "note": "servo, wrist turn, wedge recovery, retries and seat judging behind /ur5e/drive_mate; replay sends {mate, vision target + sigma, held}. Gate for M4 (RL driver behind the same action)"
+     "note": "Decided 10-22 (operator ok, ARCHITECTURE_SEAMS.md): vision measures, drive-mate moves (asks the vision seam for held-vs-seat at its hover); recovery is a supervisor beside drive-mate. Replay then sends {mate, vision target + sigma, held}. Gate for M4"
     },
     {
      "id": "AR4",
      "title": "Seated-parts state, one owner",
-     "status": "next",
-     "note": "ledger + seated_offsets + history + placed/staged + journal behind one module: atomic, seat error with frame + source, one clock; folds in during AR1-AR3"
+     "status": "active",
+     "note": "44dce4c on branch (stacked on AR2): seams.seated_parts, the one writer of ledger + seated offsets + history; locked, atomic, per-part merge; seat error with its own time + source. Merges after AR2's gate"
     },
     {
      "id": "AR-gate",

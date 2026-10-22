@@ -43,6 +43,21 @@ A rule for FMB2/FMB3: nothing in drive-mate, vision or the supervisor may name a
 graph, stages from the seated meshes, symmetry from the symmetry data. Per-part knowledge is allowed only in the
 planner layer and in the experiments that populate sigmas.
 
+## Decision 2026-10-22: servo and recovery (operator, AR3)
+
+The architecture review (AR0) found drive-mate a pass-through: the replay ran the visual servo (camera loop over the
+seat with the part in hand), the wrist turn to the base yaw, wedge release + nudge, edge press and outer retries - the
+planner doing camera reads and contact recovery, the two things this table keeps out of it. Decided:
+
+- **Vision measures, drive-mate moves.** drive-mate may ask the vision seam for the held part relative to its seat
+  (a VisionPose with sigma) at its own hover and move on it, when the target's sigma exceeds the clearance. It never
+  touches the camera itself; an RL driver can call the same service or not. "camera reads" in drive-mate's
+  must-stay-out column means the camera, not the vision seam.
+- **Recovery is a supervisor beside drive-mate**, not insertion (operator 10-22: "nudge is not part of compliant
+  insertion, it is part of the recovery method"). drive-mate returns its stage (wedged / above / ...); the supervisor
+  runs the bounded recovery (release + nudge, edge press, re-aim) and asks vision / ExecuteMate to re-check. The planner
+  calls drive-mate, then the supervisor when needed, then ExecuteMate.
+
 ## Milestones (revised)
 
 | | gate |
