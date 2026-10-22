@@ -1025,6 +1025,12 @@ class PrismaticPegInsertion(Node):
                 # into the U channel on attempt 3 and this check pulled it straight out. Drift is
                 # only an exit while the part still rides on top of something.
                 in_slot = z_contact is not None and (z_contact - z) > DRIFT_EXEMPT_DROP_M
+                # or below the highest CAD first-contact surface: the part is already in a corridor stage (10-22 07:20:
+                # yellow's legs were astride line_green at +33 mm when force mode began, so its 'first contact' was that
+                # height and the compliance sliding along line_green tripped the 10 mm drift abort)
+                cand_ = [v for k_, v in (self.contact_candidates or {}).items() if k_ != 'SEAT']
+                if cand_ and z is not None and (max(cand_) - z) > DRIFT_EXEMPT_DROP_M:
+                    in_slot = True
                 if xy_dev > (SEATED_XY_ACCEPT_M if in_slot else retry_xy_tol):
                     self.get_logger().warn(
                         f"[XY_DRIFT] {xy_dev*1000:.1f}mm > tol {retry_xy_tol*1000:.1f}mm "
