@@ -2009,7 +2009,11 @@ class ContactSearchFSM:
         # Suppressed while the director unloads off a rim stall (staged/032): the
         # self-inflicted |fz| drop is v4's firing signature. Reset afterwards so it
         # needs a fresh rim-contact -> collapse cycle.
-        if t < getattr(self.search_director, 'v4_suppressed_until', float('-inf')):
+        if drop_m > 0:
+            # light press (z-drop trigger on): the APPROACH touchdown arms v4 above 4 N and the 1.5 N press then reads
+            # as a collapse - it fired 0.7 s into the first free-base search (10-21 22:56) and pressed 8 N on the rim
+            v4_fired_now = False
+        elif t < getattr(self.search_director, 'v4_suppressed_until', float('-inf')):
             v4_fired_now = False
             self._v4_suppressed_active = True
         else:
@@ -2230,8 +2234,9 @@ class ContactSearchFSM:
                     # the spiral expanding correctly, so re-tightening it only
                     # shrinks coverage. Lower press/lateral force reduces wedging
                     # risk during the continued search without discarding progress.
-                    self.search_director.F_press = 4.0    # was 9.0
-                    self.search_director.Fmax    = 3.0    # was 8.0
+                    # never harder than the search already was (free base: 1.5 / 1.5 N, 10-21)
+                    self.search_director.F_press = min(4.0, self.search_director.F_press)    # was 9.0
+                    self.search_director.Fmax    = min(3.0, self.search_director.Fmax)       # was 8.0
                     # Reduce damping so peg can move with light forces
                     self.search_director.Kd      = 10.0   # was 40
                     # Gradient thresholds left at defaults: loosening them made the
