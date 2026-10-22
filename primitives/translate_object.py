@@ -341,6 +341,26 @@ def _subprocess_fast_path():
             rt = subprocess.run(touch_argv, env=_make_env())
             sys.exit(rt.returncode)
 
+        # Yaw the held part to the MEASURED base before the compliant hover (2026-10-21, operator image: u_brown square to
+        # the table over a base at 9.4 deg). The compliant hover keeps the EE orientation of the reorient step, which
+        # squares the part to the world axes; the prismatic route has its own hover yaw fix, this route had none.
+        if (args.final_base_orientation is not None and args.current_object_orientation is not None
+                and os.environ.get('COMPLIANT_YAW_TO_BASE', '1') == '1'):
+            try:
+                from scipy.spatial.transform import Rotation as _R
+                from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+                err, _tilt = rel_yaw_error(args.object_name, args.base_name, _R.from_quat(args.final_base_orientation),
+                                           _R.from_quat(args.current_object_orientation))
+                if abs(err) > 0.3:
+                    print(f"[compliant yaw] turning the wrist {err:+.2f} deg about world z: held part vs base x seat", flush=True)
+                    if turn_wrist(err):
+                        args.current_object_orientation = list(
+                            (_R.from_euler('z', err, degrees=True) * _R.from_quat(args.current_object_orientation)).as_quat())
+                    else:
+                        print("[compliant yaw] wrist turn refused - inserting at the reorient yaw", flush=True)
+            except Exception as _e:
+                print(f"[compliant yaw] not applied ({_e})", flush=True)
+
         # Build wrapper argv. Hardcoded autonomous-search params match the
         # working production config validated against u_brown / u_orange runs
         # (see compliant_insertion_studio/scripts/loop_autonomous_insert.sh).
