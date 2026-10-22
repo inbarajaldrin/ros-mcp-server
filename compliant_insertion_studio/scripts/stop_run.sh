@@ -89,6 +89,12 @@ else
             wait_gone 15 && break
         done
         if [ -n "$(alive)" ]; then
+            # 2026-10-21: an interrupted compliant insert took ~2 min to exit after SIGTERM; give it that long
+            # before giving up (never SIGKILL), so step 2 still runs.
+            warn "still alive after SIGINT+SIGTERM - waiting up to 180 s for its cleanup (not SIGKILLing)"
+            wait_gone 180 && ok "all assembly processes exited (late)"
+        fi
+        if [ -n "$(alive)" ]; then
             warn "still alive after SIGINT+SIGTERM (not SIGKILLing):"
             ps -o pid=,args= -p "$(alive | tr '\n' ',' | sed 's/,$//')" | cut -c1-100 | sed 's/^/      /'
             exit 1
@@ -133,6 +139,30 @@ else
         || { warn "external-control program NOT running — check the pendant (Remote Control? protective stop?)"; exit 1; }
 fi
 
+# End force mode ON THE ROBOT before any position controller holds the arm (2026-10-21 17:35-17:39): the dashboard
+# stop killed the program mid force mode ("Script command interface is not running. Unable to end Force mode"); after
+# a program re-send force mode was still on and the arm drifted -x at ~1-2 mm/s with a part on the rim (joints 0 and 5
+# 0.2027 rad off), dragging the base 17 cm. Cycling force_mode_controller with the script interface running sends
+# end_force_mode on its deactivation.
+end_force_mode() {
+    local deact=""
+    [ "$(ctrl_state scaled_joint_trajectory_controller)" = "active" ] && deact="--deactivate scaled_joint_trajectory_controller"
+    timeout 15 ros2 control switch_controllers $deact --activate force_mode_controller >/dev/null 2>&1
+    timeout 15 ros2 control switch_controllers --deactivate force_mode_controller >/dev/null 2>&1
+    [ "$(ctrl_state force_mode_controller)" != "active" ]
+}
+tcp_xyz() { timeout 5 ros2 topic echo --once /tcp_pose_broadcaster/pose 2>/dev/null \
+            | awk '/position:/{p=1} p&&/[xyz]:/{printf "%s ", $2} /orientation:/{exit}'; }
+still_or_halt() {  # two reads 2 s apart; moving -> dashboard stop
+    local a b d; a="$(tcp_xyz)"; sleep 2; b="$(tcp_xyz)"
+    d=$(python3 -c "import sys;a=list(map(float,'$a'.split()));b=list(map(float,'$b'.split()));print(round(1000*sum((x-y)**2 for x,y in zip(a,b))**0.5,2))" 2>/dev/null || echo 999)
+    if python3 -c "import sys;sys.exit(0 if float('$d')<0.5 else 1)"; then ok "arm still (moved ${d} mm in 2 s)"; return 0; fi
+    if exec 3<>"/dev/tcp/$ROBOT_IP/29999" 2>/dev/null; then read -r -t 3 _g <&3; printf 'stop\n' >&3; exec 3>&- 3<&-; fi
+    warn "ARM MOVING (${d} mm in 2 s) after the restore - dashboard stop sent; check force mode / the pendant"; return 1
+}
+end_force_mode && ok "force mode ended on the robot (force_mode_controller cycled)" \
+    || warn "force_mode_controller still active - check the pendant"
+
 if restore_controllers; then
     ok "scaled_joint_trajectory_controller active, force/passthrough modes off"
 else
@@ -146,6 +176,8 @@ else
         exit 1
     fi
 fi
+
+still_or_halt || exit 1
 
 step 3/3 "Where the arm is"
 POSE="$(timeout 5 ros2 topic echo --once /tcp_pose_broadcaster/pose 2>/dev/null)"
