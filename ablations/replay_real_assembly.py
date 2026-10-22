@@ -2110,7 +2110,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
-    c = xy - st[:2] + SERVO_BIAS_M
+    # the residual bias differs by measuring height: from just over the rim (-0.5, +0.9) mm (u_brown, by hand and pipeline);
+    # from the clear height (+0.2, -2.1) and (-1.1, -1.8) mm (u_orange, 10-22 04:47 and 03:55) - hand-eye tilt x the lever
+    c = xy - st[:2] + (SERVO_BIAS_CLEAR_M if z_meas >= z_clear - 0.001 else SERVO_BIAS_M)
     if np.hypot(*c) > SERVO_MAX_M:
         say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
         return observed_base, held_q
@@ -2139,6 +2141,7 @@ SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
 # the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
 # 10-22 00:13): the target's residual bias (hand-eye tilt x the 35 mm lift); the dip grid still covers +-1.5 mm around it
 SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5,0.9').split(',')]) / 1000.0
+SERVO_BIAS_CLEAR_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_MM', '-0.5,-2.0').split(',')]) / 1000.0
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
 
