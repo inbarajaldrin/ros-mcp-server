@@ -1951,6 +1951,13 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [servo] {obj}: held part not outlined over the table - aiming as read"); return observed_base, held_q
     say(f"  [servo] {obj}: held part outlined ({len(outline['far'])} far / {len(outline['left'])} left edge points)")
+    # evidence for every servo: the outline, the table frame and each round's overlay (target green, outline magenta)
+    sv_stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"servo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
+    try:
+        import cv2 as _cv2
+        json.dump(outline, open(f"{sv_stem}_outline.json", 'w')); _cv2.imwrite(f"{sv_stem}_table.png", img_)
+    except Exception:
+        pass
     # measure LOW, 2.5 mm over the rim: the target (part at its seat raised by the lift) is projected from the base
     # pose read in the SAME frame, so what remains is the hand-eye's tilt error x the lift (at 0.10 m: 1 deg -> 1.7 mm;
     # at 0.035 m: 0.6 mm). Lateral moves and wrist turns happen 12 mm over the rim.
@@ -2008,7 +2015,8 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             tp = (np.asarray(tcp_now['xyz']), np.asarray(tcp_now['quat_xyzw']))
             base_sf, sfinfo = base_pose_same_frame(base, img_, tp, bq) if img_ is not None else (None, {'error': 'no frame'})
             lift = float(tp[0][2] - st[2])
-            d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline, img=img_, tcp_pose=tp)
+            d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline, img=img_,
+                                         tcp_pose=tp, debug_path=f"{sv_stem}_r{k}.png")
         finally:
             _emitter(True)
         if base_sf is None and z_meas < z_clear - 0.01:
@@ -2029,7 +2037,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 base_sf, sfinfo = base_pose_same_frame(base, img_, tp, bq) if img_ is not None else (None, {'error': 'no frame'})
                 lift = float(tp[0][2] - st[2])
                 d, info = socket_shift_world(obj, base, base_sf if base_sf is not None else observed_base, lift, outline,
-                                             img=img_, tcp_pose=tp)
+                                             img=img_, tcp_pose=tp, debug_path=f"{sv_stem}_r{k}_clear.png")
             finally:
                 _emitter(True)
         if base_sf is None:

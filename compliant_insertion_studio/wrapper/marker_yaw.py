@@ -375,7 +375,9 @@ def held_outline_px(img, x_far=None, y_left=None):
     # the held part is the blob with the most pixels in the band between the fingers at the image bottom
     # (rows from 0.64 H: the held part's front face sits just above the fingers - u_brown at rows 480-580 of 720 with the
     # lights on, 10-22 04:22; the bottom band alone was fingers and the tool marker)
-    band = lab[int(0.64 * H):H, int(0.44 * W):int(0.70 * W)]
+    # (columns 0.48-0.66 W: the gripper's centre, where only the held part can be - base1 beside the table view reached
+    # x 862 of the old 0.44-0.70 band and outvoted u_brown's front face, 10-22 04:30)
+    band = lab[int(0.64 * H):H, int(0.48 * W):int(0.66 * W)]
     ids, cnt = np.unique(band[band > 0], return_counts=True)
     if not len(ids) or cnt.max() < 300:
         return None
