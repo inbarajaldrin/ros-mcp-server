@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-21 17:45",
+ "updated": "2026-10-21 18:10",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -164,6 +164,12 @@
      "title": "Fused estimator INSIDE aruco_camera_localizer -> VisionPose",
      "status": "active",
      "note": "v1 in the localizer package (fused_estimator.py, af6c3a2+): base3 = 6-dof base read within 0.4 mm; loose parts refine at ~1.2 mm rms; seated parts rejected (joint multi-object fit next); per-part bias file + sigma from repeatability next; replay not consuming it yet"
+    },
+    {
+     "id": "DTILT",
+     "title": "Depth tilt bias in the seat views",
+     "status": "active",
+     "note": "10-21: top-down 0.56 m base views agree with the arm - table level (+0.10/+0.04 deg over 271 clouds), base1 top slopes -0.4..-0.5 deg toward +x, and the arm's own rim heights slope -0.34..-0.63 deg the same way. The ~3 mm end-height bias that called seated u_brown tilted comes from the close 25-deg tilted seat views, not the camera overall. Next: measure flat known tops in those views vs CAD and correct; until then depth certifies from the top-down view only. CLEARS AT: seated end heights within +-1 mm in every view."
     }
    ]
   }
