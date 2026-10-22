@@ -107,10 +107,15 @@ def load_seat_pose_in_base(base_name: str, object_name: str) -> tuple[np.ndarray
     against line_green's 1.2-1.9 mm, since 10-20. SEAT_SETTLE=0 returns the file's pose."""
     pos, quat = _file_seat_pose(base_name, object_name)
     if os.environ.get('SEAT_SETTLE', '1') == '1':
+        seated = _resolve_assembly_path(base_name)
+        seated = seated.with_name(seated.stem + '_seated.json')       # the written seated CAD (ablations/write_seated_cad.py)
         try:
+            if seated.exists():
+                comp = next(c for c in json.load(open(seated))['components'] if c.get('name') == object_name)
+                return np.array([comp['position'][k] for k in 'xyz'], float), quat
             pos = pos - np.array([0.0, 0.0, _settle_drop(base_name, object_name)])
         except Exception:
-            pass                                   # meshes or the order not found: the file's pose
+            pass                                   # meshes, the order or the part not found: the file's pose
     return pos, quat
 
 
