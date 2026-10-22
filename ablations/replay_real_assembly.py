@@ -606,6 +606,19 @@ PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer vie
 def _seen_here(obj, timeout_s=5.0) -> bool:
     obs = observe_object_orientation(obj, timeout_s, n_samples=2)
     ok = bool(obs.get('samples')) and not obs.get('error')
+    if not ok:
+        # dark room (10-22 01:49: brightness ~31): markers need the 0.40 m view - lower straight down (top-down camera,
+        # flange still 0.40 m over the table) and look again before declaring the part absent
+        b_ = camera_brightness(); cur = (snapshot_robot_state().get('tcp') or {})
+        xyz_, q_ = cur.get('xyz'), cur.get('quat_xyzw')
+        if (b_ is not None and 0 <= b_ < LOW_LIGHT_BRIGHTNESS and xyz_ and q_ and xyz_[2] > PART_VIEW_Z_LOW_LIGHT + 0.02
+                and abs(abs(q_[1]) - 1.0) < 0.02):
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{xyz_[0]:.4f}", f"{xyz_[1]:.4f}", f"{PART_VIEW_Z_LOW_LIGHT:.4f}", '--quat', '0.0', '1.0',
+                                '0.0', '0.0', '--min-z', '0.15'], label=f'low-light look for {obj} (0.40 m)', timeout_s=60)
+            if r.get('result') != 'failure':
+                obs = observe_object_orientation(obj, timeout_s, n_samples=2)
+                ok = bool(obs.get('samples')) and not obs.get('error')
     if ok:
         LAST_SEEN_XY[obj] = tuple(obs['samples'][-1]['xyz'][:2])
     return ok
@@ -735,16 +748,43 @@ TRACKER_TRUST_S = 900.0          # a sighting this recent is where the part is w
 PART_VIEW_Z_FALLBACKS = (0.45, 0.38)
 
 
-def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
-    """(x, y, age_s) of `obj`'s latest still-camera sighting from ANY view (ablations/part_tracker.py), or None."""
+PLACED_JSON = REPO_ROOT / 'ablations' / 'logs' / 'placed_parts.json'   # part -> where the ARM last set it down (any process)
+
+
+def placed(obj):
+    """(x, y, t) where the arm last set `obj` down (written by place_down in any replay process), or None."""
     try:
-        e = json.load(open(TRACKER_JSON)).get(obj)
-        age = time.time() - float(e['t'])
-        if float(e['t']) < PLACED_T.get(obj, 0.0):
-            return None           # seen before the arm set it down somewhere else (10-22: regrasp looked at its pick spot)
-        return (float(e['xyz'][0]), float(e['xyz'][1]), age) if age <= max_age_s else None
+        e = json.load(open(PLACED_JSON)).get(obj)
+        return (float(e['xy'][0]), float(e['xy'][1]), float(e['t']))
     except Exception:
         return None
+
+
+def record_placed(obj, xy):
+    try:
+        d = json.load(open(PLACED_JSON)) if PLACED_JSON.exists() else {}
+    except Exception:
+        d = {}
+    d[obj] = {'xy': [round(float(xy[0]), 4), round(float(xy[1]), 4)], 't': time.time()}
+    tmp = PLACED_JSON.with_suffix('.tmp'); json.dump(d, open(tmp, 'w'), indent=1); os.replace(tmp, PLACED_JSON)
+
+
+def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
+    """(x, y, age_s) of `obj`'s latest still-camera sighting from ANY view (ablations/part_tracker.py), or None.
+    A set-down by the arm newer than the sighting wins (10-22: the regrasp looked at the part's old pick spot twice -
+    in the run that placed it, and again in the next process)."""
+    pl = placed(obj)
+    try:
+        e = json.load(open(TRACKER_JSON)).get(obj)
+        t_seen = float(e['t'])
+    except Exception:
+        e, t_seen = None, 0.0
+    if pl is not None and pl[2] >= t_seen:
+        return (pl[0], pl[1], time.time() - pl[2])
+    if e is None:
+        return None
+    age = time.time() - t_seen
+    return (float(e['xyz'][0]), float(e['xyz'][1]), age) if age <= max_age_s else None
 
 
 def _part_view(obj, log_fh=None) -> bool:
@@ -2764,6 +2804,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     # the part is where it was set down (2026-10-22: the regrasp's depth-pick view flew to u_orange's
                     # pick spot 0.8 m away - the stale tracker sighting - saw nothing, and the run stopped)
                     LAST_SEEN_XY[obj] = (float(xyz_[0]), float(xyz_[1])); PLACED_T[obj] = time.time()
+                    record_placed(obj, xyz_)
                     say(f"  [{step_idx}] place_down: {obj} now at ({1000*xyz_[0]:.0f}, {1000*xyz_[1]:.0f}) mm (where it was set down)")
                 return r
         if tool_name == 'move_to_grasp':
