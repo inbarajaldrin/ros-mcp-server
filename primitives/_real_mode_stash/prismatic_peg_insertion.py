@@ -36,6 +36,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset
+BAR_ALONG_MAX_M = 0.030   # a bar may slide this far along its free axis while the compliance finds the slot
 from primitives.shared.ik import compute_cartesian_waypoints_ik
 from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 
@@ -304,6 +305,32 @@ def build_trapezoidal_trajectory(all_q, duration):
 
     return traj
 
+
+
+def bar_free_axis_world(object_name, base_name, base_quat_xyzw, ratio=2.0):
+    """Unit world xy vector along the seated part's footprint long axis if the footprint is a bar (long >= ratio x
+    short, from CAD), else None. Along it a bar slides freely in its slot - INSERT_GEOMETRY.md: line_green is
+    constrained +-1.1 mm across, free along (10-22: its compliance slid 10-13 mm along the bar to seat)."""
+    try:
+        repo = Path(__file__).resolve().parents[2]
+        for p_ in (str(repo), str(repo / 'ablations')):
+            if p_ not in sys.path:
+                sys.path.insert(0, p_)
+        from grasp_depth import load_mesh, surface_points
+        from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+        sp, sq = load_seat_pose_in_base(base_name, object_name)
+        V, F = load_mesh(object_name)
+        P = R.from_quat(sq).apply(surface_points(V, F, 0.003))[:, :2]
+        P = P - P.mean(0)
+        w, U = np.linalg.eigh(np.cov(P.T))
+        ext = [float(np.ptp(P @ U[:, k])) for k in (0, 1)]
+        if max(ext) < ratio * min(ext):
+            return None
+        ax_b = np.array([*U[:, int(np.argmax(ext))], 0.0])
+        ax_w = R.from_quat(base_quat_xyzw).apply(ax_b)[:2]
+        return ax_w / np.linalg.norm(ax_w)
+    except Exception:
+        return None
 
 class PrismaticPegInsertion(Node):
     """Prismatic peg-in-hole insertion with tilt-responsive descent."""
@@ -790,6 +817,10 @@ class PrismaticPegInsertion(Node):
             return None
 
         R_base = R.from_quat(base_ori_quat).as_matrix()
+        self._free_axis = bar_free_axis_world(self.object_name, self.base_name, base_ori_quat)
+        if self._free_axis is not None:
+            self.get_logger().info(f"[DRIFT] bar footprint: drift along {self._free_axis.round(3).tolist()} is free up to "
+                                   f"{1000*BAR_ALONG_MAX_M:.0f} mm, across it the usual tolerance")
         target_pos_world = base_pos + R_base @ target_pos_rel
         R_target_world = R_base @ R.from_quat(target_ori_rel).as_matrix()
 
@@ -982,8 +1013,13 @@ class PrismaticPegInsertion(Node):
 
             # XY deviation check (after grace period)
             if elapsed >= SETTLING_TIME + 2.0:
-                xy_dev = np.sqrt((self.ee_pose.position.x - self.target_xyz[0])**2
-                                 + (self.ee_pose.position.y - self.target_xyz[1])**2)
+                dxy_ = np.array([self.ee_pose.position.x - self.target_xyz[0], self.ee_pose.position.y - self.target_xyz[1]])
+                xy_dev = float(np.hypot(*dxy_))
+                if getattr(self, '_free_axis', None) is not None:
+                    # a bar: only drift ACROSS it is a miss; along it the compliance is finding the slot (<= 30 mm)
+                    along_ = float(abs(dxy_ @ self._free_axis))
+                    across_ = float(abs(dxy_[0] * self._free_axis[1] - dxy_[1] * self._free_axis[0]))
+                    xy_dev = across_ if along_ <= BAR_ALONG_MAX_M else max(across_, along_)
                 # Once the part has dropped below its first-contact height it is IN the slot and
                 # sideways motion is the compliance following it — 2026-10-15 line_green dropped
                 # into the U channel on attempt 3 and this check pulled it straight out. Drift is

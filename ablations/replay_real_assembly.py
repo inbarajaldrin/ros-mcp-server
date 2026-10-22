@@ -1795,7 +1795,7 @@ TRACK_VIEW_Z = 0.56            # flange height over the base for the in-hand rea
                                # base is beyond the D415's ~0.45 m depth minimum while the held part (~0.2 m) drops out
 
 
-def track_base_in_hand(base, observed_base, say, log_fh=None):
+def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
     """Free base (2026-10-21 19:31-19:35): two u_brown rim searches turned base1 from 0.19 to ~8.4 deg (8 N lateral
     search force on an untaped base) and the next attempt aimed at the startup read. With the part in hand, fly the
     camera over the base, read it from its corner markers by solvePnP (marker_yaw.base_pose_world: 2.4 px, repeats
@@ -1825,7 +1825,19 @@ def track_base_in_hand(base, observed_base, say, log_fh=None):
         seed, info = observed_base, dict(info, seed='previous read')
     try:
         from base_icp import read_icp
-        pose, icp = read_icp(base, seed)
+        # the parts seated before the held one are part of the rigid body being read (10-22 06:48: line_green aims at
+        # the U openings, which are where the U parts physically seated; the bare-base read is several mm off them -
+        # three attempts rode the U tops at +61 mm). They add tall, distinct geometry to the fit too.
+        seated_ = ()
+        if held_obj is not None:
+            try:
+                from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
+                seated_ = tuple(get_seated_so_far(base, held_obj))
+            except Exception:
+                seated_ = ()
+        pose, icp = read_icp(base, seed, seated=seated_)
+        if seated_:
+            icp = dict(icp, seated=list(seated_))
     except Exception as e:
         pose, icp = None, {'error': str(e)}
     info = dict(info, icp=icp)
@@ -1932,7 +1944,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         say(f"  [servo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
     # the base read again WITH the turned wrist: the servo projects it from the hover with this same orientation, so the
     # hand-eye's translation error cancels between the read and the projection
-    observed_base = track_base_in_hand(base, observed_base, say, log_fh)
+    observed_base = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)
     (bx, by, bz), bq = observed_base
     tcp = (snapshot_robot_state().get('tcp') or {})
     pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
@@ -2968,7 +2980,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if (tool_name == 'translate_object' and kw.get('action') == 'insert' and one_node() and not args.dry_run
                 and not BASE_FIXED_CFG()):
             args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
-                                                    say, log_fh)
+                                                    say, log_fh, held_obj=obj)
             try:
                 from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
             except Exception:
