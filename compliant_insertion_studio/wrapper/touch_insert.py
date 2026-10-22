@@ -45,8 +45,11 @@ ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = p
 # 2026-10-21 23:50: with the aim from the hover servo on the SAME-FRAME marker pose (within ~0.5 mm / 0.5 deg) a 0.5 mm
 # lattice within 1.5 mm (19 dips, ~2.5 min) entered on dip 17; the 1 mm / 3 mm grid (41 dips) sat 4.9 mm from the
 # pocket and could not. Yaw dips are off by default: twisting a pressed part slips it in the pads (TOUCH_YAWS_DEG=0.5,-0.5).
-GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.5')) / 1000.0
-GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '1.5')) / 1000.0
+# 10-22 03:55: measured from the clear height (seat on the far side of the base, markers out of view lower down) the
+# servo's aim for u_orange was 2.1 mm from the pocket - a 0.7 mm grid out to 3 mm entered at (-1.1, -1.8) mm on dip 31.
+# Out to 2.5 mm at 0.6 mm pitch (nearest first, so a close aim still enters early: u_brown on dips 0-17)
+GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.6')) / 1000.0
+GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '2.5')) / 1000.0
 YAWS_DEG = tuple(float(v) for v in os.environ['TOUCH_YAWS_DEG'].split(',')) if os.environ.get('TOUCH_YAWS_DEG') else ()
 
 
