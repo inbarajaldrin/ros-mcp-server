@@ -14,7 +14,7 @@ driver plugs in behind the same action later (M3b).
                     depth are read off it: the CAD grasp point that lies on the tool axis (<= HELD_AXIS_TOL_M off
                     it) is the grasp, its tool-z coordinate the depth (GRASP_TOOL_OFFSET_M of the insert)
   result  seated          never the FSM label: where the arm RESTS after the insert (TCP still < 0.5 mm over 0.5 s)
-                          with |tcp_z - predicted seat z| < SEATED_DZ_M. The trace alone cannot say it (its seat
+                          with |tcp_z - predicted seat z| < insert_outcome.SEATED_DZ_M. The trace alone cannot say it (its seat
                           detector ends logging on arrival, still descending); its own reading is kept as trace_stage
           stage_reached   seat | wedged (still, 0 < dz <= 7 mm, within 5 mm of the aim: on a channel edge) | above |
                           below | unsettled (the trace ends still moving) | no_trace.  Checked 2026-10-20 against the
@@ -31,7 +31,6 @@ U parts -> compliant spiral) and adds a per-part seat-z offset (PER_OBJECT_BASE_
 stages/routes come from CAD. Both live inside the primitive this server wraps; the next step is deriving the route
 from the CAD stages (insert_stages.py) instead.
 """
-import glob
 import json
 import os
 import signal
@@ -55,12 +54,11 @@ from fmb_seam_msgs.action import DriveMate
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from seams.insert_outcome import outcome_of  # noqa: E402
 ACTION = '/ur5e/drive_mate'
 B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 HELD_AXIS_TOL_M = 0.006          # a CAD grasp point this close to the tool axis is the grasp
-SEATED_DZ_M = 0.005              # CLAUDE.md: |tcp_z - predicted_seat| < 5 mm and motion stopped
-WEDGE_DZ_M, WEDGE_DXY_M = 0.007, 0.005
 REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert: < 0.5 mm over 0.5 s
 
 
@@ -104,63 +102,6 @@ def grasp_from_held(obj, p_fo, q_fo):
         if best is None or off < best[2]:
             best = (gid, float(f[2]), off)
     return best if best and best[2] <= HELD_AXIS_TOL_M else (None, None, best[2] if best else None)
-
-
-def trace_outcome(obj, since):
-    """Seat judged from the newest insert CSV written since `since` (the meta's predicted seat vs the end TCP)."""
-    import csv
-    metas = [m for m in glob.glob(str(LOGS / f'insert_{obj}_*.meta.json')) if os.path.getmtime(m) >= since - 1]
-    if not metas:
-        return {'stage_reached': 'no_trace'}
-    return outcome_from_meta(max(metas, key=os.path.getmtime))
-
-
-def outcome_from_meta(mp):
-    import csv
-    m = json.load(open(mp)); csv_path = mp.replace('.meta.json', '.csv')
-    rows = [x for x in csv.DictReader(open(csv_path)) if x.get('tcp_z') not in ('', 'nan', None)]
-    # the prismatic stash writes predicted_seat_xyz; the compliant FSM writes cad_prediction.predicted_tcp_at_seat
-    seat = m.get('predicted_seat_xyz') or ((m.get('cad_prediction') or {}).get('predicted_tcp_at_seat') or {}).get('xyz_m')
-    if not seat:
-        return {'stage_reached': 'no_trace', 'trace_path': csv_path}
-    if not rows:
-        # the insert's quickest success (straight to the seat on the trajectory) writes its meta but no CSV rows: the
-        # resting TCP decides (2026-10-21: line_green +2.3 mm, 0.3 mm in xy, reported no_trace)
-        return {'stage_reached': 'no_trace', 'trace_path': csv_path, 'seat_xyz': [float(v) for v in seat],
-                'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
-    P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
-    tgt = np.array(seat, float)
-    end = P[-1]; d = end - tgt; still = float(np.ptp(P[:, 2])) < 0.001
-    dxy = float(np.hypot(d[0], d[1]))
-    if still and abs(d[2]) < SEATED_DZ_M:
-        stage = 'seat'
-    elif still and 0 < d[2] <= WEDGE_DZ_M and dxy <= WEDGE_DXY_M:
-        stage = 'wedged'
-    elif not still:
-        stage = 'unsettled'                                    # trace ends still moving: no judgement
-    else:
-        stage = 'above' if d[2] > 0 else 'below'
-    return {'stage_reached': stage, 'seated': stage == 'seat', 'still': still, 'trace_path': csv_path,
-            'seat_xyz': [float(v) for v in tgt],
-            'slide': [float(d[0]), float(d[1])], 'measured_correction': [float(v) for v in d],
-            'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
-
-
-def judge_at_rest(out, rest):
-    """Seat judged where the arm came to rest after the insert (the decider); the trace's own reading is kept as
-    trace_stage. slide / measured_correction are the resting TCP vs the predicted seat."""
-    P, still = rest
-    tgt = np.array(out['seat_xyz']); d = np.asarray(P) - tgt; dxy = float(np.hypot(d[0], d[1]))
-    if not still:
-        stage = 'unsettled'
-    elif abs(d[2]) < SEATED_DZ_M:
-        stage = 'seat'
-    elif 0 < d[2] <= WEDGE_DZ_M and dxy <= WEDGE_DXY_M:
-        stage = 'wedged'
-    else:
-        stage = 'above' if d[2] > 0 else 'below'
-    return dict(out, trace_stage=out['stage_reached'], stage_reached=stage, seated=stage == 'seat', still=still,
-                judged_on='resting TCP', slide=[float(d[0]), float(d[1])], measured_correction=[float(v) for v in d])
 
 
 class DriveMateServer(Node):
@@ -265,8 +206,8 @@ class DriveMateServer(Node):
         self.get_logger().info(f'{g.mate_id}: {obj} into {base}, grasp {gid} at depth {1000 * depth:.1f} mm '
                                f'({1000 * off:.1f} mm off axis), in-hand yaw {held_yaw_off:+.2f} deg')
         t0 = time.time()
-        log = open(LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log', 'w') \
-            if LOGS.exists() else subprocess.DEVNULL
+        log_path = LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
+        log = open(log_path, 'w') if LOGS.exists() else subprocess.DEVNULL
         try:
             self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT)
         except Exception as e:
@@ -277,13 +218,18 @@ class DriveMateServer(Node):
             gh.publish_feedback(fb)
             time.sleep(0.5)
         rc = self.proc.returncode; self.proc = None
-        out = trace_outcome(obj, t0)
-        rest = self.resting_tcp()
-        if rest is not None and out.get('seat_xyz') is not None:
-            out = judge_at_rest(out, rest)
+        if log is not subprocess.DEVNULL:
+            log.close()
+        text = open(log_path).read() if LOGS.exists() else ''
+        # judged once, on the trace the insert named (seams.insert_outcome); judged where the arm came to rest
+        o = outcome_of(text, obj, t0, rest=self.resting_tcp())
+        if o.found_by != 'result':
+            self.get_logger().warn(f'{g.mate_id}: the insert named no trace - {o.found_by}'
+                                   + (f' (newest since the goal: {o.meta_path})' if o.meta_path else ''))
+        out = o.as_dict()
         res.stage_reached = out['stage_reached']; res.seated = bool(out.get('seated', False))
         res.trace_path = out.get('trace_path', '')
-        if 'slide' in out:
+        if out.get('slide') is not None:
             res.slide = out['slide']; res.measured_correction = out['measured_correction']
         res.refusal = ''
         self.get_logger().info(f'{g.mate_id}: rc={rc} stage={res.stage_reached} seated={res.seated} '

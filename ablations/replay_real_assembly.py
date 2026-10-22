@@ -1488,6 +1488,15 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
     text = ''.join(captured)
     rj = extract_result_json(text)
     if rj is None:
+        # A primitive that exits 0 without its result block crashed after the motion or printed it broken - not a
+        # success (AR2). Scripts outside primitives/ (nudge_part.py) report by exit code only and keep that.
+        m_ = argv[argv.index('-m') + 1] if '-m' in argv else ''
+        if proc.returncode == 0 and m_.startswith('primitives.'):
+            msg = f"  [{label}] {m_} exited 0 with no __RESULT_JSON__ block -> failure\n"
+            print(msg, end='', flush=True)
+            if log_fh:
+                log_fh.write(msg)
+            return {"result": "failure", "error": "exit 0 with no __RESULT_JSON__ block", "label": label, "returncode": 0}
         return {"result": "failure" if proc.returncode != 0 else "success",
                 "error": "no __RESULT_JSON__ block in output" if proc.returncode != 0 else None,
                 "label": label, "returncode": proc.returncode}
@@ -1564,17 +1573,24 @@ SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: sea
 # finds the U parts' offsets without any time window).
 
 
-def record_seat_offset(obj: str, since: float) -> None:
-    """Store `obj`'s seat offset from the insert log written since `since` (if the log has one)."""
+def record_seat_offset(obj: str, since: float, result=None) -> None:
+    """Store where `obj` seated vs the prediction: from the insert's own outcome when it returned one (drive-mate's
+    measured_correction, judged at rest - AR2), else from the insert log written since `since`. Says so when neither
+    has it (attempt 22: an empty touch CSV recorded nothing, silently, and line_green aimed at the bare base)."""
     try:
-        from fmb1_loop import insert_summary
-        rows = [r for r in insert_summary(since) if r.get('object') == obj and r.get('outcome') == 'success'
-                and r.get('seat_minus_pred_mm')]
-        if not rows:
-            return
+        if result is not None and result.get('measured_correction') is not None:
+            m = [round(1000 * float(v), 2) for v in result['measured_correction']]
+        else:
+            from fmb1_loop import insert_summary
+            rows = [r for r in insert_summary(since) if r.get('object') == obj and r.get('outcome') == 'success'
+                    and r.get('seat_minus_pred_mm')]
+            if not rows:
+                print(f"  [seated-offsets] {obj}: NOT recorded - the insert returned no outcome and no successful trace "
+                      f"since {time.strftime('%H:%M:%S', time.localtime(since))}", flush=True)
+                return
+            m = list(rows[-1]['seat_minus_pred_mm'])
         # Total offset vs the UNbiased prediction = measured (vs the biased aim) + the bias applied.
         bx, by = _APPLIED_BIAS.get(obj, (0.0, 0.0))
-        m = list(rows[-1]['seat_minus_pred_mm'])
         tot = [round(m[0] + 1000 * bx, 2), round(m[1] + 1000 * by, 2)] + m[2:]
         d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
         d[obj] = dict(seat_minus_pred_mm=tot, t=time.strftime('%Y-%m-%d %H:%M:%S'))
@@ -1582,6 +1598,7 @@ def record_seat_offset(obj: str, since: float) -> None:
         h = json.load(open(SEAT_HISTORY)) if SEAT_HISTORY.exists() else {}
         h.setdefault(obj, []).append(tot[:2]); h[obj] = h[obj][-20:]
         json.dump(h, open(SEAT_HISTORY, 'w'), indent=1)
+        print(f"  [seated-offsets] {obj}: seat - prediction {tot} mm recorded", flush=True)
     except Exception as e:
         print(f"  [seated-offsets] {obj}: not recorded ({e})")
 
@@ -2477,30 +2494,19 @@ def _is_bar(obj) -> bool:
         return False
 
 
-WEDGE_MAX_DZ_MM = 7.0       # stalled at most this far above the seat ...
-WEDGE_MAX_DXY_MM = 5.0      # ... and this close to the aim in x/y (cycle 3: 3.8-4.4 mm, 5 mm high = on the channel edge)
-
-
-def _wedged_near_seat(obj, since):
-    """The last insert's end state from its raw CSV (not the FSM label): {'dz_mm', 'dxy_mm'} if it ended still,
-    within WEDGE_MAX_DZ_MM above and WEDGE_MAX_DXY_MM of its predicted seat, else None."""
-    import csv as _csv, glob as _glob
-    metas = [m for m in _glob.glob(str(REPO_ROOT / f'compliant_insertion_studio/logs/insert_{obj}_*.meta.json'))
-             if os.path.getmtime(m) >= since - 1]
-    if not metas:
+def _wedged_near_seat(obj, since, result=None):
+    """{'dz_mm', 'dxy_mm'} if the last insert ended wedged (still, 0 < dz <= 7 mm over its predicted seat, within 5 mm
+    in xy: on a channel edge), else None. The insert's own outcome when it returned one (drive-mate: judged at rest),
+    else its trace judged by seams.insert_outcome (both meta schemas; the old reader saw only predicted_seat_xyz)."""
+    from seams.insert_outcome import outcome_of
+    if result is not None and result.get('stage_reached'):
+        o = dict(result)
+    else:
+        o = outcome_of('', obj, since).as_dict()
+    if o.get('stage_reached') != 'wedged' or o.get('measured_correction') is None:
         return None
-    mp = max(metas, key=os.path.getmtime)
-    try:
-        m = json.load(open(mp))
-        rows = [x for x in _csv.DictReader(open(mp.replace('.meta.json', '.csv'))) if x.get('tcp_z') not in ('', 'nan', None)]
-        P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
-        tgt = np.array(m['predicted_seat_xyz'])
-    except Exception:
-        return None
-    end = P[-1]; dz = 1000 * (end[2] - tgt[2]); dxy = 1000 * float(np.hypot(*(end[:2] - tgt[:2])))
-    if 0 < dz <= WEDGE_MAX_DZ_MM and dxy <= WEDGE_MAX_DXY_MM and 1000 * np.ptp(P[:, 2]) < 1.0:
-        return {'dz_mm': dz, 'dxy_mm': dxy}
-    return None
+    d = o['measured_correction']
+    return {'dz_mm': 1000 * float(d[2]), 'dxy_mm': 1000 * float(np.hypot(d[0], d[1]))}
 
 
 def cross_nudge_plan(res):
@@ -3394,12 +3400,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # x/y within 0.2 mm of the aim, four times - a ~0.7 deg yaw in the jaws on a zero-clearance channel): do not
         # pull it out and repeat; release it where it is and let the seat check's nudges/taps finish it (how wedged
         # bars were seated before).
-        def _wedge_check():
+        def _wedge_check(result):
             """None: not wedged. True/False: wedged; released and nudged -> seated or not. Called after EVERY failed
             attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
             if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run):
                 return None          # (10-22: the release-and-nudge is a recovery - it runs in one-node mode too)
-            w = _wedged_near_seat(obj, t_step)
+            w = _wedged_near_seat(obj, t_step, result)
             if w is None:
                 return None
             say(f"  [{step_idx}] {obj} wedged {w['dz_mm']:.1f} mm above its seat, {w['dxy_mm']:.1f} mm from the aim "
@@ -3418,7 +3424,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             say(f"  [{step_idx}] {obj}: stopped at the insert hover (STOP_AT_HOVER) - no descent")
             return False
         if result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert':
-            wc = _wedge_check()
+            wc = _wedge_check(result)
             if wc is not None:
                 if wc:
                     print(f"\n  ✓ {obj} complete")
@@ -3443,7 +3449,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     f"{1000*np.hypot(nb[0][0]-prev_ob[0][0], nb[0][1]-prev_ob[0][1]):.1f} mm since the attempt's aim")
             result = execute(step_idx, step, tool_name, kw, tag=f"try{k_try}") or result
             if result.get('result') == 'failure':
-                wc = _wedge_check()
+                wc = _wedge_check(result)
                 if wc is not None:
                     if wc:
                         print(f"\n  ✓ {obj} complete")
@@ -3486,7 +3492,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     continue
                 r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
                 if t_ == 'translate_object' and r_ is not None and r_.get('result') == 'failure':
-                    wc = _wedge_check()                    # never lift a held part out of a wedge
+                    wc = _wedge_check(r_)                  # never lift a held part out of a wedge
                     if wc is not None:
                         if wc:
                             print(f"\n  ✓ {obj} complete")
@@ -3520,7 +3526,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             return False
         seated_now = False
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
-            record_seat_offset(obj, t_step)
+            record_seat_offset(obj, t_step, result)
             seated_now = True
 
         # Tiny pause between primitives to let TF + topics settle (matches
