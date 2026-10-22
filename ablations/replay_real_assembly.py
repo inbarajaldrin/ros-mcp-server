@@ -2843,7 +2843,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
     ok = _seat_check_and_reseat(obj, state, args, say)
     if ok:
         led = _ledger()
-        led[obj] = dict(verified=True, t=time.time(), how='depth seat check')
+        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='depth seat check')   # keep rel_err_mm
         json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     return ok
 
@@ -2873,7 +2873,9 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             if attempt >= RESEAT_MAX:
                 say(f"\n!!! {obj} still not seated after the edge press"); return False
             continue
-        plan = cross_nudge_plan(res) if 'pitch_deg' in res else None
+        # a seat the check passes is not touched (operator 10-22: no nudges on a seated part; 14:02 the lip rule nudged an
+        # ok line_green sideways)
+        plan = cross_nudge_plan(res) if ('pitch_deg' in res and not res.get('ok')) else None
         if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
             plan = None        # shifted along its length: the axial nudge first (line_red 2026-10-20: -16 mm,
                                # the sideways taps did nothing, the axial push seated it)
