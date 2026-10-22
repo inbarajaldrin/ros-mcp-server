@@ -77,9 +77,10 @@ def test_replay_sends_the_aim(obj, rec, sw, tmp_path, monkeypatch):
     sys.argv = ['replay_real_assembly']
     import replay_real_assembly as rr
     off, led, hist = RECORDS[rec]
-    for name, data in (('SEATED_OFFSETS', off), ('ASSEMBLY_STATE', led), ('SEAT_HISTORY', hist)):
+    import seams.seated_parts as SP
+    for name, data in (('seated_offsets', off), ('assembly_state', led), ('seat_offset_history', hist)):
         (tmp_path / f'{name}.json').write_text(json.dumps(data))
-        monkeypatch.setattr(A, name, tmp_path / f'{name}.json')
+    monkeypatch.setattr(SP, 'LOGS', tmp_path)
     for k in ('SEAMS_DRIVE', 'FOLLOW_YAW', 'NO_AIM_BIAS', 'INSERT_YAW_OFFSET_DEG'):
         monkeypatch.delenv(k, raising=False)
     for k, v in SWITCHES[sw].items():

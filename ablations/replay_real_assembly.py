@@ -537,7 +537,6 @@ def observe_base_pose(base_name: str, timeout_s: float = 15.0):
 
 
 
-ASSEMBLY_STATE = REPO_ROOT / 'ablations/logs/assembly_state.json'   # {part: {verified, t, how}}
 # Parts a later part hides from the camera once seated (operator, 2026-10-17: after yellow, line_green
 # is not visible — accept it from the ledger if it was verified before yellow covered it).
 OCCLUDED_BY = {'line_green': ('inverted_u_yellow',)}
@@ -545,17 +544,16 @@ VERIFY_READS = 3                 # verify_assembly readings per part; majority (
 VERIFY_MAX_READS = 8             # "not detected" reads extend the window up to this many
 
 
+from seams.seated_parts import SeatedParts   # noqa: E402  (AR4: the one writer of the ledger + seat offsets)
+SEATED = SeatedParts()
+
+
 def _ledger():
-    try:
-        return json.load(open(ASSEMBLY_STATE))
-    except Exception:
-        return {}
+    return SEATED.ledger()
 
 
 def forget_verified(obj: str) -> None:
-    d = _ledger()
-    if d.pop(obj, None) is not None:
-        json.dump(d, open(ASSEMBLY_STATE, 'w'), indent=1)
+    SEATED.forget(obj, offset=False)
 
 
 VERIFY_TILT_MAX_DEG = 5.0        # a seated part cannot be tilted: a reading this tilted is a bad pose estimate
@@ -903,10 +901,10 @@ def verify_seated(objs, say, second_view=None) -> bool:
                 if second_view():
                     r = _read_part(o)
         if r.get('result') == 'success' and not _not_detected(r):
-            led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             e_ = r.get('position_error_m')
-            if isinstance(e_, dict) and 'x' in e_ and 'y' in e_:   # base-frame xy error: follow_seated_offset reads it
-                led[o]['rel_err_mm'] = [1000 * float(e_['x']), 1000 * float(e_['y'])]
+            if isinstance(e_, dict) and 'x' in e_ and 'y' in e_:   # base-frame xy error: the aim's follow reads it
+                SEATED.set_seat_error(o, [1000 * float(e_['x']), 1000 * float(e_['y'])], 'marker base view')
+            led[o] = SEATED.mark(o, True, how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
             continue
         prev = led.get(o) or {}
@@ -924,9 +922,8 @@ def verify_seated(objs, say, second_view=None) -> bool:
         else:
             say(f"\n!!! [verify] {o}: NOT in its assembly pose — xy error "
                 f"{1000 * float(r.get('position_error_judged_m') or 0):.1f} mm, orientation {r.get('orientation_error_deg')}")
-        led.setdefault(o, {})['verified'] = False
+        led[o] = SEATED.mark(o, False)
         ok_all = False
-    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     return ok_all
 
 
@@ -1243,6 +1240,7 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
                 nd = _notches(RUN_BASE['name'], observed_base, list(parts))
                 for p, v in (nd.items() if isinstance(nd, dict) else []):
                     if isinstance(v, dict) and 'dx_m' in v:
+                        SEATED.set_seat_error(p, [1000 * float(v['dx_m']), 0.0], 'notch depth')
                         led.setdefault(p, {})['rel_err_mm'] = [1000 * float(v['dx_m']), 0.0]
                         depth_done.add(p)
                         say(f"  [follow] {p}: gap {v['gap_mm']} mm vs CAD {v['cad_gap_mm']} (width {v['width_mm']}) -> "
@@ -1268,13 +1266,13 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
                 say(f"  [follow] {p}: not seen from {FOLLOW_READ_Z:.2f} m above its seat")
                 continue
             e = Rb.inv().apply(np.array(o[0]) - seat_w)
+            SEATED.set_seat_error(p, [1000 * float(e[0]), 1000 * float(e[1])], 'marker close read')
             led.setdefault(p, {})['rel_err_mm'] = [1000 * float(e[0]), 1000 * float(e[1])]
             say(f"  [follow] {p}: seen ({1000*e[0]:+.1f}, {1000*e[1]:+.1f}) mm from its CAD seat (base frame, close read)")
     for p in parts:
         if isinstance((led.get(p) or {}).get('rel_err_mm'), list):
             continue
         say(f"  [follow] {p}: no close read -> {obj} follows the insert-based offsets")
-    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     if observed_base is not None:
         # the reads left the arm above the base; the pick needs the camera on the part again
         # (2026-10-19 21:xx: line_green at the clear area was out of view -> pick failed)
@@ -1567,7 +1565,6 @@ class AssemblyState:
 # ---------------------------------------------------------------------------
 
 from seams.aim import FOLLOWS_SEATED, aim_for_insert, load_facts   # noqa: E402  (AR1: the aim rules live there)
-SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: seat - predicted TCP, mm}
 # Written after every successful insert, entry removed when disassemble.py pulls the part out:
 # it describes the parts seated NOW, whichever process seated them (a line_green-only retry
 # finds the U parts' offsets without any time window).
@@ -1592,27 +1589,16 @@ def record_seat_offset(obj: str, since: float, result=None) -> None:
         # Total offset vs the UNbiased prediction = measured (vs the biased aim) + the bias applied.
         bx, by = _APPLIED_BIAS.get(obj, (0.0, 0.0))
         tot = [round(m[0] + 1000 * bx, 2), round(m[1] + 1000 * by, 2)] + m[2:]
-        d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
-        d[obj] = dict(seat_minus_pred_mm=tot, t=time.strftime('%Y-%m-%d %H:%M:%S'))
-        json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
-        h = json.load(open(SEAT_HISTORY)) if SEAT_HISTORY.exists() else {}
-        h.setdefault(obj, []).append(tot[:2]); h[obj] = h[obj][-20:]
-        json.dump(h, open(SEAT_HISTORY, 'w'), indent=1)
+        SEATED.record_seat_offset(obj, tot)
         print(f"  [seated-offsets] {obj}: seat - prediction {tot} mm recorded", flush=True)
     except Exception as e:
         print(f"  [seated-offsets] {obj}: not recorded ({e})")
 
 
 def forget_seat_offset(obj: str) -> None:
-    try:
-        d = json.load(open(SEATED_OFFSETS))
-        if d.pop(obj, None) is not None:
-            json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
-    except Exception:
-        pass
+    SEATED.forget(obj, verdict=False)
 
 
-SEAT_HISTORY = REPO_ROOT / 'ablations/logs/seat_offset_history.json'   # {part: [[dx, dy] mm, ...]} - seams.aim's bias
 _APPLIED_BIAS = {}               # part -> (dx, dy) m seat-history bias in this run's insert aim (record_seat_offset)
 
 
@@ -2241,10 +2227,8 @@ def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
         o = _seam_call(['execute', '--mate', mate], 450)
         out[obj] = o
         if o.get('placed'):
-            led = _ledger()
-            led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
-                            depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
-            json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+            SEATED.mark(obj, True, how='execute_mate',
+                        depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
         say(f"  [certify] {mate} ({obj}): placed={o.get('placed')} refusal={o.get('refusal')!r} "
             f"{o.get('refusal_detail', '')} depth={o.get('engagement_depth_m')}")
     return out
@@ -2271,10 +2255,8 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     if out is None:
         say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
     if out.get('placed'):
-        led = _ledger()
-        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
-                        depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.mark(obj, True, how='execute_mate',
+                    depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
     say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
         f"{out.get('refusal_detail', '')} depth={out.get('engagement_depth_m')}")
     return out
@@ -2684,8 +2666,7 @@ def _record_seat_check_error(obj, res):
         cross = float((res.get('cross') or {}).get('centre_mm'))
         along = float((res.get('axial') or {}).get('shift_mm', 0.0))
         e = [cross, along] if f.get('long_axis', 'y') == 'y' else [along, cross]
-        led = _ledger(); led.setdefault(obj, {})['rel_err_mm'] = e; led[obj]['t'] = time.time()
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.set_seat_error(obj, e, 'depth seat check', touch_t=True)
         print(f"  [seat-check] {obj}: measured seat error {e} mm (base frame) recorded for the parts over it", flush=True)
     except Exception as ex:
         print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
@@ -2697,9 +2678,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
     depth -0.08 mm from its CAD height, failed the run on 'marker not detected')."""
     ok = _seat_check_and_reseat(obj, state, args, say)
     if ok:
-        led = _ledger()
-        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='depth seat check')   # keep rel_err_mm
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.mark(obj, True, how='depth seat check')                  # merged: keeps rel_err_mm
     return ok
 
 

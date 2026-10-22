@@ -76,8 +76,8 @@ def rr(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO / 'ablations'))
     sys.argv = ['replay_real_assembly']
     import replay_real_assembly as rr_
-    monkeypatch.setattr(rr_, 'SEATED_OFFSETS', tmp_path / 'seated_offsets.json')
-    monkeypatch.setattr(rr_, 'SEAT_HISTORY', tmp_path / 'seat_offset_history.json')
+    from seams.seated_parts import SeatedParts
+    monkeypatch.setattr(rr_, 'SEATED', SeatedParts(tmp_path))
     rr_._APPLIED_BIAS.clear()
     return rr_
 
@@ -93,11 +93,11 @@ def test_replay_records_the_seat_from_the_drive_mate_result(rr):
     """No log file read: the outcome drive-mate returned is the record (plus the bias the aim applied)."""
     rr._APPLIED_BIAS['u_orange'] = (0.001, -0.002)
     rr.record_seat_offset('u_orange', 1e12, dict(measured_correction=[-0.0007, -0.0005, 0.0002]))
-    d = json.load(open(rr.SEATED_OFFSETS))['u_orange']['seat_minus_pred_mm']
+    d = rr.SEATED.seated_offsets()['u_orange']['seat_minus_pred_mm']
     assert d == pytest.approx([0.3, -2.5, 0.2])
-    assert json.load(open(rr.SEAT_HISTORY))['u_orange'] == [pytest.approx([0.3, -2.5])]
+    assert rr.SEATED.seat_history()['u_orange'] == [pytest.approx([0.3, -2.5])]
 
 
 def test_replay_says_when_nothing_recorded(rr, capsys):
     rr.record_seat_offset('u_orange', 1e12, None)
-    assert 'NOT recorded' in capsys.readouterr().out and not rr.SEATED_OFFSETS.exists()
+    assert 'NOT recorded' in capsys.readouterr().out and rr.SEATED.seated_offsets() == {}
