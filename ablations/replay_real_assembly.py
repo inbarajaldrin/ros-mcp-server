@@ -2089,6 +2089,25 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     try:
         from part_depth import read as _read
         pose, info = _read(obj)
+        if pose is None and 'no marker read' in str(info.get('error', '')):
+            # dark room (10-22 01:46: brightness 31): markers need the 0.40 m view, depth needs >= 0.45 m. Seed from a
+            # marker read at 0.40 m straight below, then fit the depth from the depth height with that seed.
+            cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
+            seed = None
+            if cur:
+                r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                    f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{PART_VIEW_Z_LOW_LIGHT:.4f}", '--quat', '0.0', '1.0',
+                                    '0.0', '0.0', '--min-z', '0.15'], label=f'depth-pick seed view above {obj} (low light)',
+                                   timeout_s=60, log_fh=log_fh)
+                S_ = (observe_many([obj], 8.0, n_samples=8).get(obj) or []) if r.get('result') != 'failure' else []
+                if S_:
+                    seed = (tuple(np.median(np.array([s_['xyz'] for s_ in S_]), axis=0)), tuple(S_[-1]['quat_xyzw']))
+                    run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                    f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{cur[2]:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                    '--min-z', '0.15'], label=f'depth-pick view above {obj} (back up for depth)',
+                                   timeout_s=60, log_fh=log_fh)
+                    pose, info = _read(obj, seed=seed)
+                    info = dict(info, seed='marker read at 0.40 m (low light)')
     except Exception as e:
         pose, info = None, {'error': str(e)}
     say(f"  [depth-pick] {obj}: {json.dumps(info)}")
