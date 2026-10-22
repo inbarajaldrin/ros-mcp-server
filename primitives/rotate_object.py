@@ -70,6 +70,7 @@ def output_result(result):
 # Quaternion output precision — controls how many decimal places are reported to the LLM.
 # Set to 4 to avoid scientific notation (0.000001 → 0.0), or 6 for full precision (triggers SDK bug).
 QUAT_DECIMAL_PLACES = 4
+WRIST3_LIMIT_RAD = 4.0          # wrist_3 stays within +-4 rad (camera + gripper cables wind up, 10-20)
 
 # Configuration (auto-discovered)
 ASSEMBLY_DATA_DIR = str(get_assembly_data_dir())
@@ -1627,6 +1628,23 @@ class ReorientForAssembly(Node):
         # Also update the expected object orientation based on actual EE pose
         resulting_object_R = R_final_ee @ R_grasp
         best_quat = final_ee_quat  # Update for later use
+
+        # The candidates were ranked by WRAPPED joint change (_max_joint_change), but the controller drives the
+        # raw values: 2026-10-22 08:17 yellow's reorient chose wrist_3 -3.14 from +3.85 (the same pose as +3.14,
+        # 0.7 rad away), swung wrist_3 5.9 rad + wrist_2 3.6 rad and hit a protective stop. Execute the 2*pi
+        # equivalent nearest the current angle for the continuous joints (FK unchanged), wrist_3 within +-4 rad
+        # (cable wind-up).
+        joint_angles = np.array(joint_angles, dtype=float)
+        cur_ = np.array(self.current_joint_angles, dtype=float)
+        for i_, lim_ in ((0, 2 * np.pi), (3, 2 * np.pi), (4, 2 * np.pi), (5, WRIST3_LIMIT_RAD)):
+            opts_ = [joint_angles[i_] + k_ * 2 * np.pi for k_ in (-2, -1, 0, 1, 2)]
+            opts_ = [v_ for v_ in opts_ if abs(v_) <= lim_]
+            if not opts_:
+                self.error_message = (f"Motion planning failed: joint {i_} target {joint_angles[i_]:.2f} rad has no "
+                                      f"equivalent within +-{lim_:.2f} rad")
+                self.get_logger().error(self.error_message)
+                return False
+            joint_angles[i_] = min(opts_, key=lambda v_: abs(v_ - cur_[i_]))
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
