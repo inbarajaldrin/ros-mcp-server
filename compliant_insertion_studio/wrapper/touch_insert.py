@@ -50,7 +50,29 @@ ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = p
 # Out to 2.5 mm at 0.6 mm pitch (nearest first, so a close aim still enters early: u_brown on dips 0-17)
 GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.6')) / 1000.0
 GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '2.5')) / 1000.0
-CORRIDOR_RMAX_M = 0.0015
+CORRIDOR_PITCH_M = 0.0005
+CORRIDOR_ALONG_M = 0.005
+CORRIDOR_ACROSS_M = 0.001
+
+
+def corridor_grid(axis_xy, pitch, along, across):
+    """(dx, dy) points on a rectangle along/across a world unit axis, nearest first."""
+    u = np.asarray(axis_xy, float) / np.linalg.norm(axis_xy); v = np.array([-u[1], u[0]])
+    na, nc = int(round(along / pitch)), int(round(across / pitch))
+    pts = [tuple(i * pitch * u + j * pitch * v) for i in range(-na, na + 1) for j in range(-nc, nc + 1)]
+    return sorted(pts, key=lambda p: (round(math.hypot(*p), 6), math.atan2(p[1], p[0])))
+
+
+def _corridor_axis_world(base, over, base_quat):
+    """World xy direction of the long axis of the seated part(s) the held part threads over (CAD footprint)."""
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+    P = np.vstack([R.from_quat(load_seat_pose_in_base(base, o)[1]).apply(_surface_points(o, 0.003))
+                   + load_seat_pose_in_base(base, o)[0] for o in over])
+    ext = P[:, :2].max(0) - P[:, :2].min(0)
+    ax_b = np.array([1.0, 0.0, 0.0]) if ext[0] >= ext[1] else np.array([0.0, 1.0, 0.0])
+    return R.from_quat(base_quat).apply(ax_b)[:2]
+
+
 YAWS_DEG = tuple(float(v) for v in os.environ['TOUCH_YAWS_DEG'].split(',')) if os.environ.get('TOUCH_YAWS_DEG') else ()
 
 
@@ -189,12 +211,16 @@ def main():
     except Exception:
         over = []
     if over:
-        # threading over seated parts (CAD): the sideways steps happen with the part astride them (yellow over line_green:
-        # +-1 mm), so the lattice stays within CORRIDOR_RMAX_M - the depth servo's aim is within ~1 mm (10-22 11:20: in on
-        # dip 7 of a 1.5 mm lattice)
-        rmax = min(rmax, CORRIDOR_RMAX_M)
-        print(f"[touch] astride {over}: lattice out to {1000*rmax:.1f} mm", flush=True)
-    pts = hex_grid(GRID_PITCH_M if not over else min(GRID_PITCH_M, 0.0005), rmax)
+        # threading over seated parts (CAD): astride them the part is held to +-1 mm ACROSS their long axis, but free ALONG
+        # it - so the lattice runs CORRIDOR_ALONG_M along the corridor and CORRIDOR_ACROSS_M across (13:25 yellow: 37 probes
+        # within 1.5 mm all on the rim at +2.8 mm, legs astride line_green - the miss was along the bar)
+        ax = _corridor_axis_world(a.base_name, over, a.final_base_orientation)
+        pts = corridor_grid(ax, CORRIDOR_PITCH_M, CORRIDOR_ALONG_M, CORRIDOR_ACROSS_M)
+        rmax = CORRIDOR_ALONG_M
+        print(f"[touch] astride {over}: lattice +-{1000*CORRIDOR_ALONG_M:.1f} mm along the corridor "
+              f"({np.round(ax, 3).tolist()}), +-{1000*CORRIDOR_ACROSS_M:.1f} across", flush=True)
+    else:
+        pts = hex_grid(GRID_PITCH_M, rmax)
     print(f"[touch] {len(pts)} probe points, out to {1000*rmax:.1f} mm", flush=True)
     for dx, dy in pts:
         z = probe(dx, dy)
