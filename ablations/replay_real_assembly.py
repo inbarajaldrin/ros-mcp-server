@@ -2977,7 +2977,22 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
                 # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
                 # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
-                say(f"  [servo] {obj}: prismatic route - it searches itself, no servo")
+                say(f"  [servo] {obj}: prismatic route - it searches itself, no xy servo")
+                # but the wrist still turns to the base's yaw first: skipping the whole servo (9a19b76) skipped this turn and
+                # line_green arrived +13.2 deg off its slot (base1 at ~16 deg; the U openings it threads need < 1.3 deg) -
+                # jammed on the U tops at +61 mm, 10-22 06:27 (INSERT_GEOMETRY: the corridor stage is a yaw wedge)
+                try:
+                    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+                    if args.observed_base is not None and state.held_quat is not None:
+                        err_, _t = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
+                                                 R_.from_quat(state.held_quat))
+                        if abs(err_) > 0.3 and turn_wrist(err_):
+                            state.held_quat = list((R_.from_euler('z', err_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
+                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
+                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
+                            say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
+                except Exception as e_:
+                    say(f"  [servo] {obj}: yaw to base not applied ({e_})")
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
                 args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                       state.held_quat, state.last_grasp_id or 1, say, log_fh)
