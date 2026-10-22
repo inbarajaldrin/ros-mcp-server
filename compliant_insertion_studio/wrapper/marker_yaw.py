@@ -356,33 +356,72 @@ def _marker_corners(lay, i):
     return np.array([Rm @ np.array(lc) + t for lc in ([-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0])])
 
 
-def held_outline_px(img, x_far=(680, 880), y_left=(525, 605)):
-    """Held part's far (top) and left edges in the image, over BARE TABLE (maroon part vs black table segments cleanly;
-    over the base the dark pocket and the dark part look alike). The camera is rigid with the gripper, so these pixels are
-    the part's place in every frame of this grasp. Returns {'far': [(x, y)...], 'left': [(x, y)...]} or None."""
-    Rc, Gc, Bc = [img[:, :, k].astype(np.float32) for k in (2, 1, 0)]
-    # red clearly above green (the black table reads G >= R): in the dark the part's top face near its far edge is only
-    # R 20-25, which an absolute R > 30 missed - the edge came out 12-30 px late (servo 'converged' ~3 mm off, 10-21)
-    # any coloured part (10-22, the full run: line_green / inverted_u_yellow are not red): saturated and not black;
-    # the grey fingers and the black/white markers fail the saturation test, the table fails the brightness test
+def held_outline_px(img, x_far=None, y_left=None):
+    """Held part's far (top) and left edges in the image, over BARE TABLE (coloured part vs dark table). The camera is
+    rigid with the gripper, so these pixels are the part's place in every frame of this grasp. The part is found as its
+    own blob - the largest coloured region reaching the bottom of the image between the fingers - not in fixed windows
+    (10-22 03:15: the old windows were u_brown's place in the image; held u_orange reaches x 280, every left scan began
+    inside it at x 520 and the fit spread 25 px). Returns {'far': [(x, y)...], 'left': [(x, y)...]} or None."""
     import cv2
+    Rc, Gc, Bc = [img[:, :, k].astype(np.float32) for k in (2, 1, 0)]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = ((Rc > Gc + 6) & (Rc > 14)) | ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 35))   # dark-table noise is saturated at V < 20
+    m8 = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # a part touching another coloured thing in the image (the base beside the table view) merges with it: cut thin
+    # bridges by eroding before choosing, then grow the chosen blob back inside the mask
+    K = np.ones((15, 15), np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.erode(m8, K))
+    H, W = mask.shape
+    # the held part is the blob with the most pixels in the band between the fingers at the image bottom
+    band = lab[H - 140:H, int(0.44 * W):int(0.70 * W)]
+    ids, cnt = np.unique(band[band > 0], return_counts=True)
+    if not len(ids) or cnt.max() < 400:
+        return None
+    best = int(ids[np.argmax(cnt)])
+    blob = (cv2.dilate((lab == best).astype(np.uint8), K) > 0) & (m8 > 0)
+    cols = np.nonzero(blob.any(0))[0]
     far, left = [], []
-    for x in range(x_far[0], x_far[1], 8):
-        col = mask[380:700, x]
-        for i in range(len(col) - 4):
-            if col[i:i + 4].all():
-                far.append((x, 380 + i)); break
-    for y in range(y_left[0], y_left[1], 6):
-        row = mask[y, 520:900]
-        for i in range(len(row) - 4):
-            if row[i:i + 4].all():
-                left.append((520 + i, y)); break
+    for x in range(int(cols.min()) + 12, int(cols.max()) - 12, 8):
+        ys = np.nonzero(blob[:, x])[0]
+        if len(ys):
+            far.append((x, int(ys.min())))
     if len(far) >= 5:
-        my = np.median([y for _, y in far]); far = [(x, y) for x, y in far if abs(y - my) <= 8]   # base in view / marker
+        # the far edge is the MOST COMMON top row (the side face's slant and the marker strip are fewer columns)
+        ys_ = np.array([y for _, y in far]); h_, e_ = np.histogram(ys_, bins=np.arange(ys_.min(), ys_.max() + 4, 3))
+        mode = e_[np.argmax(h_)] + 1.5
+        far = [(x, y) for x, y in far if abs(y - mode) <= 6]
+    if len(far) < 5:
+        return None
+    # the left SILHOUETTE: from inside the part (just right of the far edge's left end) walk left along the row through
+    # the part, gaps <= 3 px, to its last pixel - the side face the camera sees counts (10-22 03:25: a window around the
+    # far edge's end found u_orange's top-face corner, 96 px inside its silhouette)
+    fx0, top = int(far[0][0]), int(np.median([y for _, y in far]))
+    for y in range(top + 8, min(H - 1, top + 8 + 120), 6):
+        row = m8[y] > 0
+        x = min(W - 1, fx0 + 6)
+        if not row[x]:
+            continue
+        gap = 0; last = x
+        while x > 0 and gap <= 3:
+            x -= 1
+            if row[x]:
+                last = x; gap = 0
+            else:
+                gap += 1
+        left.append((last, y))
     if len(left) >= 5:
-        mx = np.median([x for x, _ in left]); left = [(x, y) for x, y in left if abs(x - mx) <= 8]
+        # the left silhouette may slant (a visible side face): keep the points within 4 px of a robust line x = a*y + b
+        # (rows that cross a marker stop at it and fall off the line)
+        L = np.array(left, float); best_in = None
+        for i in range(len(L)):
+            for j in range(i + 1, len(L)):
+                if L[j, 1] == L[i, 1]:
+                    continue
+                a_ = (L[j, 0] - L[i, 0]) / (L[j, 1] - L[i, 1]); b_ = L[i, 0] - a_ * L[i, 1]
+                inl = np.abs(L[:, 0] - (a_ * L[:, 1] + b_)) <= 4
+                if best_in is None or inl.sum() > best_in.sum():
+                    best_in = inl
+        left = [tuple(int(v) for v in L[k]) for k in range(len(L)) if best_in is not None and best_in[k]]
     if len(far) < 10 or len(left) < 6:
         return None
     return {'far': far, 'left': left}
@@ -496,8 +535,11 @@ def socket_shift_world(obj, base, base_pose_world, lift_m, outline, img=None, tc
         b = np.polyfit(np.asarray(fx, float), np.asarray(dy, float), 1)[0]   # d(dy)/dx in px/px
         yaw_img = float(np.degrees(np.arctan(b)))
     d_cam = np.array([shift[0] * Z / K[0, 0], shift[1] * Z / K[1, 1], 0.0])
-    d_world = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3] @ d_cam
-    info = {'shift_px': [round(float(v), 1) for v in shift],
+    Rwc = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3]
+    d_world = Rwc @ d_cam
+    d_far_only = Rwc @ np.array([0.0, shift[1] * Z / K[1, 1], 0.0])    # the far edge's (image-y) component alone
+    info = {'d_far_only_mm': [round(1000 * float(v), 1) for v in d_far_only[:2]],
+            'shift_px': [round(float(v), 1) for v in shift],
             'spread_px': [round(float(np.std(dx)), 1), round(float(np.std(dy)), 1)], 'depth_m': round(Z, 3),
             'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]],
             'yaw_img_deg': None if yaw_img is None else round(yaw_img, 2)}

@@ -2038,9 +2038,16 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             break
         if d is None:
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
-        if max(info.get('spread_px') or [0]) > SERVO_MAX_SPREAD_PX:
+        sp_x, sp_y = (info.get('spread_px') or [0, 0])[:2]
+        if sp_y > SERVO_MAX_SPREAD_PX:
             say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SERVO_MAX_SPREAD_PX} - the outline does not "
                 f"match the target, no correction"); break
+        if sp_x > SERVO_MAX_SPREAD_PX:
+            # the far edge fits, the left one does not (u_orange's slanted side face, 10-22): correct along the far edge's
+            # image-y only; the other axis stays as read (the dip grid covers +-1.5 mm)
+            d = np.asarray(info['d_far_only_mm'], float) / 1000.0
+            say(f"  [servo] {obj} round {k}: left-edge spread {sp_x} px > {SERVO_MAX_SPREAD_PX} - far-edge component only "
+                f"{info['d_far_only_mm']} mm")
         yi = info.get('yaw_img_deg')
         say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
