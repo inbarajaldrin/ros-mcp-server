@@ -481,6 +481,28 @@ while 'c' not in g and time.time() - t < 3: rclpy.spin_once(n, timeout_sec=0.1)
 print(float(np.frombuffer(g['c'].data, np.uint8).mean()) if 'c' in g else -1)
 """
 LOW_LIGHT_BRIGHTNESS = 40.0      # below: markers need close views (0.40 m saw line_red 5/5 at brightness ~5)
+SATURATED_BRIGHTNESS = 230.0     # above: the frame is blown out (10-22 01:55: room lights on with the dark-room manual
+                                 # exposure still set - brightness 254, no marker anywhere, the yellow 'not found')
+DARK_EXPOSURE = ('8000', '128')  # manual exposure, gain that restore marker reads with the lights off (dim-light memo)
+
+
+def ensure_exposure(say=print):
+    """Keep the D415 colour exposure usable: blown out -> auto exposure; very dark under auto -> the dark-room manual
+    exposure. Returns the brightness after any change (None if no frame)."""
+    b = camera_brightness()
+    if b is None or b < 0:
+        return b
+    def _set(*kv):
+        for k, v in kv:
+            subprocess.run(['ros2', 'param', 'set', '/camera/camera', k, v], capture_output=True, timeout=10, env=make_env())
+    if b > SATURATED_BRIGHTNESS:
+        _set(('rgb_camera.enable_auto_exposure', 'true')); time.sleep(1.5)
+        b2 = camera_brightness(); say(f"  [camera] frame blown out ({b:.0f}) -> auto exposure ({b2})"); return b2
+    if b < 12:
+        _set(('rgb_camera.enable_auto_exposure', 'false'), ('rgb_camera.exposure', DARK_EXPOSURE[0]),
+             ('rgb_camera.gain', DARK_EXPOSURE[1])); time.sleep(1.5)
+        b2 = camera_brightness(); say(f"  [camera] very dark ({b:.0f}) -> manual exposure {DARK_EXPOSURE[0]} / gain {DARK_EXPOSURE[1]} ({b2})"); return b2
+    return b
 
 
 def observe_base_pose(base_name: str, timeout_s: float = 15.0):
@@ -604,6 +626,7 @@ PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer vie
 
 
 def _seen_here(obj, timeout_s=5.0) -> bool:
+    ensure_exposure(lambda m: print(m, flush=True))
     obs = observe_object_orientation(obj, timeout_s, n_samples=2)
     ok = bool(obs.get('samples')) and not obs.get('error')
     if not ok:
@@ -798,7 +821,7 @@ def _part_view(obj, log_fh=None) -> bool:
         print(f"  [view] {obj}: last seen by the tracker at ({1000*tr[0]:.0f}, {1000*tr[1]:.0f}) mm "
               f"{tr[2]:.0f} s ago -> look there", flush=True)
         xy = (tr[0], tr[1])
-    b_ = camera_brightness()
+    b_ = ensure_exposure(lambda m: print(m, flush=True))
     vz = PART_VIEW_Z_LOW_LIGHT if (b_ is not None and 0 <= b_ < LOW_LIGHT_BRIGHTNESS) else PART_VIEW_Z
     if vz != PART_VIEW_Z:
         print(f"  [view] low light (brightness {b_:.0f}) -> view {obj} from {vz:.2f} m", flush=True)
@@ -3330,6 +3353,8 @@ def main() -> int:
     args = p.parse_args()
     if os.nice(0) < 5:                     # the UR driver has no RT priority here: run below it
         os.nice(5 - os.nice(0))
+    if not args.dry_run:
+        ensure_exposure(lambda m: print(m, flush=True))   # the room's light may have changed since the last run
 
     # Install SIGINT handler so Ctrl-C kills the active subprocess tree
     # immediately instead of letting it run to completion (which previously
