@@ -3151,8 +3151,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 return {'result': 'failure', 'error': msg}
         if (tool_name == 'translate_object' and kw.get('action') == 'insert' and one_node() and not args.dry_run
                 and not BASE_FIXED_CFG()):
+            # the servos fold one part's grip error (xy, image yaw) into the base pose they return - that is this insert's
+            # AIM, not the base. Start every insert from the last MEASURED base (10-22 13:04: the in-hand re-read failed
+            # as a partial view, line_green inherited u_orange's aim - its yaw 2.4 deg off - and wedged in the U openings)
+            if getattr(args, 'measured_base', None) is not None:
+                args.observed_base = args.measured_base
             args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                                     say, log_fh, held_obj=obj)
+            args.measured_base = args.observed_base
             try:
                 from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
             except Exception:
@@ -3184,6 +3190,16 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 try:
                     args.observed_base = close_base_read(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                          state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                    args.measured_base = args.observed_base                 # a measurement too (markers, one close frame)
+                    # the wrist turned to the base yaw BEFORE this read: turn again to the closer read's yaw if they differ
+                    if args.observed_base is not None and state.held_quat is not None:
+                        err2_, _t2 = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
+                                                   R_.from_quat(state.held_quat))
+                        if abs(err2_) > 0.3 and turn_wrist(err2_):
+                            state.held_quat = list((R_.from_euler('z', err2_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
+                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
+                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
+                            say(f"  [servo] {obj}: wrist turned {err2_:+.2f} deg to the close read's base yaw")
                 except Exception as e_:
                     say(f"  [servo] {obj}: close base read not applied ({e_})")
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and seated_under(base_name or RUN_BASE['name'], obj):
