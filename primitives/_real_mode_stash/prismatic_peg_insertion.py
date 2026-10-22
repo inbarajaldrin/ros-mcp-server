@@ -35,7 +35,7 @@ _project_root = str(Path(__file__).parent.parent.parent)  # primitives/_real_mod
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset
+from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset, held_tool_offset_for
 BAR_ALONG_MAX_M = 0.030   # a bar may slide this far along its free axis while the compliance finds the slot
 from primitives.shared.ik import compute_cartesian_waypoints_ik
 from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
@@ -852,7 +852,7 @@ class PrismaticPegInsertion(Node):
             ee_quat = np.array([self.ee_pose.orientation.x, self.ee_pose.orientation.y,
                                self.ee_pose.orientation.z, self.ee_pose.orientation.w])
             R_ee = R.from_quat(ee_quat).as_matrix()
-            ee_target -= R_ee @ held_tool_offset()   # as this part was actually grasped
+            ee_target -= R_ee @ held_tool_offset_for(self.object_name)   # as this part was actually grasped
 
         self.get_logger().info(f"Target XYZ: [{ee_target[0]:.4f}, {ee_target[1]:.4f}, {ee_target[2]:.4f}]")
         return tuple(ee_target)
@@ -1371,7 +1371,7 @@ class PrismaticPegInsertion(Node):
                 base_world_z=float(base_pos[2]), R_grasp_quat_xyzw=list(self.object_orientation),
                 predicted_tcp_z_at_seat=float(self.target_z),
                 seated_objects=get_seated_so_far(self.base_name, self.object_name),
-                flange_offset_world_z=-float(held_tool_offset()[2]))
+                flange_offset_world_z=-float(held_tool_offset_for(self.object_name)[2]))
             self.get_logger().info("Contact candidates (CAD-derived): " + ", ".join(f"{k}={1000*v:.1f}mm" for k, v in c.items()))
             return c
         except Exception as e:
