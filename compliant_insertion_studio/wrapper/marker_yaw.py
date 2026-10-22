@@ -186,7 +186,7 @@ def held_offset(obj, base, held_q, grasp_id=1, img=None, tcp_pose=None, debug_pa
     from handeye_icp_survey import T as _T
     from grasp_depth import load_mesh, surface_points
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, predict_tcp_at_seat
-    from primitives.shared.config import held_tool_offset
+    from primitives.shared.config import held_tool_offset, held_tool_offset_for
     if img is None:
         img, _ = still_frame(n_avg=3); tcp_pose = _tcp_pose_now()
     if img is None or tcp_pose is None:
@@ -200,7 +200,7 @@ def held_offset(obj, base, held_q, grasp_id=1, img=None, tcp_pose=None, debug_pa
     Tcw = np.linalg.inv(_T(p_now, q_now) @ X_CAM)
     pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=bp,
                                base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=list(q_now),
-                               flange_offset_m=float(held_tool_offset()[2]))
+                               flange_offset_m=float(held_tool_offset_for(obj)[2]))
     st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); dR = R.from_quat(q_now) * R.from_quat(pred['predicted_tcp_at_seat']['quat_xyzw']).inv()
     sp, sq = load_seat_pose_in_base(base, obj)
     V, F = load_mesh(obj); Pb = R.from_quat(sq).apply(surface_points(V, F, 0.002)) + sp

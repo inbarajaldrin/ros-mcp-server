@@ -60,6 +60,22 @@ def pad_center_offset_m(gap_mm: float) -> float:
     return rg2_tip_length_m(gap_mm) - RG2_PAD_HALF_M
 
 
+def held_tool_offset_for(object_name: str) -> np.ndarray:
+    """held_tool_offset() for a named part when the environment does not carry it: the depth move_to_grasp last
+    executed for that part (ablations/logs/grasp_tool_offsets.json). 2026-10-21: in-process measurements (hover
+    align, face touch) fell back to the nominal 228.6 mm while u_brown was held at 216.25 - a 12.4 mm error that
+    moved every projected/predicted held-part pose."""
+    import json, os
+    if os.environ.get('GRASP_TOOL_OFFSET_M'):
+        return held_tool_offset()
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'ablations', 'logs', 'grasp_tool_offsets.json')
+    try:
+        v = json.load(open(p))[object_name]['grasp_tool_offset_m']
+        return np.array([0.0, 0.0, float(v)])
+    except Exception:
+        return held_tool_offset()
+
+
 def held_tool_offset() -> np.ndarray:
     """Flange -> held part's grasp point in the tool frame, for every step that predicts where a
     HELD part is (insert hover, seat prediction, contact candidates, prismatic target).

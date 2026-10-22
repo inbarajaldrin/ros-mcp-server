@@ -936,7 +936,7 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
     try:
         from held_clear_read import held_in_flange, score_views, camera_K, COVER_OK
         from base_depth import VIEW_FLANGE_Z, measure as _depth
-        from primitives.shared.config import held_tool_offset
+        from primitives.shared.config import held_tool_offset, held_tool_offset_for
         bname = args_base_name(args)
         snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
         if not tcp.get('xyz'):
@@ -1792,14 +1792,14 @@ def hover_align(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         return observed_base
     from compliant_insertion_studio.wrapper.marker_yaw import held_offset
     from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
-    from primitives.shared.config import held_tool_offset
+    from primitives.shared.config import held_tool_offset, held_tool_offset_for
     snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
     if not tcp.get('quat_xyzw'):
         return observed_base
     (bx, by, bz), bq = observed_base
     pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
                                base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=tcp['quat_xyzw'],
-                               flange_offset_m=float(held_tool_offset()[2]))
+                               flange_offset_m=float(held_tool_offset_for(obj)[2]))
     st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); sq = pred['predicted_tcp_at_seat']['quat_xyzw']
     # The measured offset is the part's error IN THE HAND (real - chained, relative to the flange): moving the arm does
     # not change it (10-21: four rounds read (1.0,-4.8) (1.2,-6.0) (1.2,-4.5) (1.4,-6.3) mm). Measure it a few times
