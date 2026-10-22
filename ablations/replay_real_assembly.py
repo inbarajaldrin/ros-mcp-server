@@ -1998,8 +1998,8 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         rounds.append({'k': k, 'tcp': [tp[0].tolist(), tp[1].tolist()], 'seat_tcp': st.tolist(), 'info': info})
         say(f"  [dservo] {obj} round {k}: {info.get('dxy_mm')} mm, yaw {info.get('yaw_img_deg')} deg, spread "
             f"{info.get('spread_px')} px" + (f" ({info.get('error')})" if d is None else ""))
-        if d is None or max(info['spread_px']) > DSERVO_SPREAD_YAW_PX:
-            break
+        if d is None or info['spread_px'][1] > DSERVO_SPREAD_YAW_PX:
+            break                                                    # the far edge decides; a spread left edge is handled below
         yi = info.get('yaw_img_deg') or 0.0
         if abs(yi) > SERVO_YAW_MIN_TURN_DEG:
             t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
