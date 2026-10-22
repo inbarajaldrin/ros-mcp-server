@@ -504,6 +504,30 @@ def _translated_to(name, pose, gid, flange_xy):
     return (float(p[0] + t[0]), float(p[1] + t[1]), float(p[2])), tuple(float(v) for v in q)
 
 
+def _staging_view_projector():
+    """f(outline_xy) -> True when the whole outline (at table height) projects inside the staging view's image,
+    VIEW_MARGIN_PX off the sides and top and above the FINGER_BAND_PX bottom band. None when the camera model is missing."""
+    try:
+        from staging_layout import STAGING_VIEW, TOP_DOWN_Q
+        from seat_check import X_CAM
+        from handeye_icp_survey import T as _T
+        from compliant_insertion_studio.wrapper.marker_yaw import _intrinsics
+        from primitives.shared.config import TABLE_HEIGHT
+        K, _D = _intrinsics()
+        Tcw = np.linalg.inv(_T(np.asarray(STAGING_VIEW, float), np.asarray(TOP_DOWN_Q, float)) @ X_CAM)
+        W, H = 2 * K[0, 2], 2 * K[1, 2]
+    except Exception:
+        return None
+
+    def f(P2):
+        Pw = np.c_[P2, np.full(len(P2), float(TABLE_HEIGHT))]
+        Pc = Pw @ Tcw[:3, :3].T + Tcw[:3, 3]
+        u = K[0, 0] * Pc[:, 0] / Pc[:, 2] + K[0, 2]; v = K[1, 1] * Pc[:, 1] / Pc[:, 2] + K[1, 2]
+        return bool((u.min() >= VIEW_MARGIN_PX) and (u.max() <= W - VIEW_MARGIN_PX) and (v.min() >= VIEW_MARGIN_PX)
+                    and (v.max() <= H - FINGER_BAND_PX))
+    return f
+
+
 def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
     """Where to set `name` down in the staging region, carried as it lies now (stance kept): the
     translation of its CAD outline that is farthest from base1 and every other part (>= 25 mm), with
@@ -520,6 +544,7 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
     obst = [base_outline(base_pose)] + [np.asarray(outline(n, seen[n]))[:, :2] for n in seen if n != name]
     c0 = (P.min(0) + P.max(0)) / 2
     best = (None, None, 0.0)
+    seen_in_view = _staging_view_projector()
     for cx in np.arange(REGION['x'][0], REGION['x'][1] + 1e-9, step):
         for cy in np.arange(REGION['y'][0], REGION['y'][1] + 1e-9, step):
             t = np.array([cx, cy]) - c0
@@ -529,6 +554,10 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
                 continue
             if np.hypot(grip[0] + t[0], grip[1] + t[1]) > SPOT_RING_M[1]:
                 continue                                       # the set-down must be reachable (and the pick after)
+            if seen_in_view is not None and not seen_in_view(P2):
+                continue                                       # the staging view must see it (10-22 11:30: the yellow at
+                                                               # (560, -280) lay under the fingers' band, unseen by the
+                                                               # planner -> recorded 2 passes on an upright part -> lost)
             gap = min(gap_mm(P2, o) for o in obst)
             if gap < 1000 * CLEARANCE_M or gap <= best[2]:
                 continue
