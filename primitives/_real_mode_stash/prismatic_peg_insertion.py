@@ -111,7 +111,7 @@ EXIT_SUSTAINED_TIME = 1.0       # seconds - Z at target + low avg torques must h
 # 2026-10-14: 1.0 -> 2.5 mm. inverted_u_yellow sat seated and still at +0.99..+1.03 mm for two
 # 60 s attempts (the 1 s hold reset each time noise crossed 1.0 mm); u_orange seated at +0.84.
 # Good seats land within +-1.7 mm (CLAUDE.md); a part on the rim sits many mm higher.
-EXIT_GEOMETRIC_Z_TOL_ABOVE_M = 0.0025  # above predicted (rim contact = false success)
+EXIT_GEOMETRIC_Z_TOL_ABOVE_M = 0.0040  # above predicted: rim contacts sit >= 25 mm up (CAD); yellow settled +2.9 mm in its pockets and timed out at 2.5 (10-22 07:30); drive-mate judges |dz| < 5 mm
 EXIT_GEOMETRIC_Z_TOL_BELOW_M = 0.0080  # 8 mm below predicted (going deeper = real seat)
 EXIT_GEOMETRIC_FZ_MAX_N      = 4.0     # |Fz| must be light (no hard wedge)
 EXIT_GEOMETRIC_DZ_DT_MAX     = 0.0005  # 0.5 mm/s — z-velocity ≈ 0 (stopped descending)
