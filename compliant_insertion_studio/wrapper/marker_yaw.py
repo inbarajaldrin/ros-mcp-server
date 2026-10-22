@@ -396,6 +396,67 @@ def socket_shift(obj, base, lift_m, outline, img=None, tcp_pose=None, debug_path
     return d_world[:2], info
 
 
+def socket_shift_world(obj, base, base_pose_world, lift_m, outline, img=None, tcp_pose=None, debug_path=None):
+    """socket_shift with the base from a WORLD pose (the 6-dof CAD fit read with the wrist in the SAME orientation as
+    now) projected into this frame through the hand-eye: with equal wrist orientations the mount's translation error
+    enters the read and the projection identically and cancels (only the arm's exact relative motion remains). From the
+    hover the held part hides two of the base's four markers, and a base pose solved from the remaining two jittered the
+    projected socket by tens of px (servo oscillated +-5 mm, 10-21)."""
+    import cv2
+    from seat_check import X_CAM
+    from handeye_icp_survey import T as _T
+    from grasp_depth import load_mesh, surface_points
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    if img is None:
+        img, _ = still_frame(n_avg=3); tcp_pose = _tcp_pose_now()
+    K, D = _intrinsics()
+    Tcw = np.linalg.inv(_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)
+    bp, bq = np.asarray(base_pose_world[0], float), base_pose_world[1]; Rb = R.from_quat(bq)
+    sp, sq = load_seat_pose_in_base(base, obj)
+    V, F = load_mesh(obj); Pb = R.from_quat(sq).apply(surface_points(V, F, 0.002)) + sp
+    top = Pb[:, 2].max(); x0, x1, y0, y1 = Pb[:, 0].min(), Pb[:, 0].max(), Pb[:, 1].min(), Pb[:, 1].max()
+    cb = np.array([[x0, y0, top + lift_m], [x1, y0, top + lift_m], [x1, y1, top + lift_m], [x0, y1, top + lift_m]])
+    Pw = Rb.apply(cb) + bp
+    Pc = (Tcw[:3, :3] @ Pw.T).T + Tcw[:3, 3]
+    uv, _ = cv2.projectPoints(Pc.astype(np.float32), np.zeros(3), np.zeros(3), K, D); uv = uv.reshape(-1, 2)
+    return _outline_vs_target(img, uv, Pc, outline, tcp_pose, K, debug_path)
+
+
+def _outline_vs_target(img, uv, Pc, outline, tcp_pose, K, debug_path=None):
+    import cv2
+    from seat_check import X_CAM
+    from handeye_icp_survey import T as _T
+    edges = [(uv[k], uv[(k + 1) % 4]) for k in range(4)]
+    top_e = min(edges, key=lambda e: (e[0][1] + e[1][1]) / 2)
+    left_e = min(edges, key=lambda e: (e[0][0] + e[1][0]) / 2)
+
+    def y_at(e, x):
+        (xa, ya), (xb, yb) = e
+        return ya + (yb - ya) * (x - xa) / (xb - xa) if abs(xb - xa) > 1e-6 else None
+
+    def x_at(e, y):
+        (xa, ya), (xb, yb) = e
+        return xa + (xb - xa) * (y - ya) / (yb - ya) if abs(yb - ya) > 1e-6 else None
+    dy = [y - y_at(top_e, x) for x, y in outline['far'] if y_at(top_e, x) is not None]
+    dx = [x - x_at(left_e, y) for x, y in outline['left'] if x_at(left_e, y) is not None]
+    if len(dy) < 5 or len(dx) < 3:
+        return None, {'error': 'target edges out of range'}
+    shift = np.array([np.median(dx), np.median(dy)])
+    Z = float(Pc[:, 2].mean())
+    d_cam = np.array([shift[0] * Z / K[0, 0], shift[1] * Z / K[1, 1], 0.0])
+    d_world = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3] @ d_cam
+    info = {'shift_px': [round(float(v), 1) for v in shift],
+            'spread_px': [round(float(np.std(dx)), 1), round(float(np.std(dy)), 1)], 'depth_m': round(Z, 3),
+            'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]]}
+    if debug_path:
+        v = img.copy()
+        cv2.polylines(v, [np.round(uv).astype(np.int32).reshape(-1, 1, 2)], True, (0, 255, 0), 2)
+        for x, y in outline['far'] + outline['left']:
+            cv2.circle(v, (int(x), int(y)), 3, (255, 0, 255), -1)
+        cv2.imwrite(debug_path, v)
+    return d_world[:2], info
+
+
 def _edge_shift(img, uv):
     """Image shift (px) that moves the outline `uv` onto the real dark-part -> red-base edges, (shift, n, resid)."""
     Rch = img[:, :, 2].astype(np.float32); H, Wd = Rch.shape; cen = uv.mean(0)

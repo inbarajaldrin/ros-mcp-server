@@ -1841,7 +1841,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     total move, held quat after the yaw turn)."""
     if observed_base is None or held_q is None:
         return observed_base, held_q
-    from compliant_insertion_studio.wrapper.marker_yaw import socket_shift, held_outline_px, still_frame
+    from compliant_insertion_studio.wrapper.marker_yaw import socket_shift_world, held_outline_px, still_frame
     from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
     from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
     from primitives.shared.config import held_tool_offset_for
@@ -1850,6 +1850,10 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if abs(err) > 0.3 and turn_wrist(err):
         held_q = list((R_.from_euler('z', err, degrees=True) * R_.from_quat(held_q)).as_quat())
         say(f"  [servo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
+    # the base read again WITH the turned wrist: the servo projects it from the hover with this same orientation, so the
+    # hand-eye's translation error cancels between the read and the projection
+    observed_base = track_base_in_hand(base, observed_base, say, log_fh)
+    (bx, by, bz), bq = observed_base
     tcp = (snapshot_robot_state().get('tcp') or {})
     pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
                                base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=tcp['quat_xyzw'],
@@ -1877,7 +1881,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})"); break
         _emitter(False)
         try:
-            d, info = socket_shift(obj, base, HOVER_ALIGN_ABOVE_M, outline)
+            d, info = socket_shift_world(obj, base, observed_base, HOVER_ALIGN_ABOVE_M, outline)
         finally:
             _emitter(True)
         if d is None:
