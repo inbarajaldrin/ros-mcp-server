@@ -1942,12 +1942,20 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     # pose read in the SAME frame, so what remains is the hand-eye's tilt error x the lift (at 0.10 m: 1 deg -> 1.7 mm;
     # at 0.035 m: 0.6 mm). Lateral moves and wrist turns happen 12 mm over the rim.
     try:
-        from compliant_insertion_studio.wrapper.cad_geometry import expected_contact_tcp_z, _load_base_top_z_local
-        rim_z = expected_contact_tcp_z(surface_world_z=bz + _load_base_top_z_local(base), object_name=obj, grasp_id=grasp_id,
-                                       R_grasp_quat_xyzw=held_q, predicted_tcp_z_at_seat=float(st[2]),
-                                       flange_offset_world_z=-float(held_tool_offset_for(obj)[2]))
-    except Exception:
+        # the FIRST surface the held part can meet: the base top or the top of any part seated before it (10-22 01:59:
+        # inverted_u_yellow nests over the seated parts; measuring 2.5 mm over the base top hit them, 4 N guard)
+        from compliant_insertion_studio.wrapper.cad_geometry import build_contact_candidates, get_seated_so_far
+        cands = build_contact_candidates(target_object=obj, target_grasp_id=int(grasp_id), base_name=base,
+                                         base_world_z=float(bz), R_grasp_quat_xyzw=held_q,
+                                         predicted_tcp_z_at_seat=float(st[2]),
+                                         seated_objects=get_seated_so_far(base, obj),
+                                         flange_offset_world_z=-float(held_tool_offset_for(obj)[2]))
+        rim_z = max(v for k, v in cands.items() if k != 'SEAT')
+        say(f"  [servo] {obj}: first contact {1000*(rim_z - st[2]):+.1f} mm over the seat "
+            f"({', '.join(f'{k} {1000*(v - st[2]):+.1f}' for k, v in cands.items() if k != 'SEAT')})")
+    except Exception as e:
         rim_z = float(st[2]) + 0.031
+        say(f"  [servo] {obj}: no CAD contact candidates ({e}) - first contact assumed 31 mm over the seat")
     z_meas = rim_z + SERVO_MEAS_OVER_RIM_M
     # lateral moves and wrist turns happen at the old hover height (100 mm over the seat): parts already seated stand up
     # to ~40 mm over the base top, and a held bar reaches far beyond the fingers (10-22 01:18: a diagonal move from the
