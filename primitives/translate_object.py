@@ -44,6 +44,11 @@ import logging
 # we skip ~2-3s of import overhead.
 # ---------------------------------------------------------------------------
 
+
+# Parts routed to the prismatic insertion (its own search/recovery ladder) - part-name routing that rung UNI replaces with a
+# CAD-stage rule. Exported so callers (the replay's hover servo) follow the same decision instead of keeping their own list.
+PRISMATIC_ROUTE_OBJECTS = ('line_green', 'inverted_u_yellow', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow')
+
 def _base_fixed() -> bool:
     try:
         from primitives.shared.config import BASE_FIXED
@@ -236,7 +241,7 @@ def _subprocess_fast_path():
         # u_brown / u_orange keep the validated compliant_insert path.
         # FMB3 (2026-10-20): the lines are line_green's bar; the forks straddle both lines like yellow over
         # line_green -> prismatic for both. To be replaced by a CAD-stage rule (no per-part routing).
-        if args.object_name in ('line_green', 'inverted_u_yellow', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow'):
+        if args.object_name in PRISMATIC_ROUTE_OBJECTS:
             # Per-object base offset already applied above (one branch handles
             # all objects). Continue with hover + prismatic dispatch.
 

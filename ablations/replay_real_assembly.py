@@ -2936,7 +2936,16 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 and not BASE_FIXED_CFG()):
             args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                                     say, log_fh)
-            if os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
+            try:
+                from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
+            except Exception:
+                _PRISM = ()
+            if os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and obj in _PRISM:
+                # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
+                # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
+                # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
+                say(f"  [servo] {obj}: prismatic route - it searches itself, no servo")
+            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
                 args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                       state.held_quat, state.last_grasp_id or 1, say, log_fh)
                 if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
