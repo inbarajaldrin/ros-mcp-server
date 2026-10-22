@@ -168,7 +168,28 @@ class SearchDirector:
                  # alignment respect the compliance instead of the spiral.
                  gradient_d_fz_dt_thresh: float = -3.0,   # N/s (soft: -1.0)
                  gradient_fz_thresh: float = 6.0,         # N    (soft: 5.0)
-                 gradient_v_thresh: float = 5e-4):       # m/s  (soft: 1e-4)
+                 gradient_v_thresh: float = 5e-4,        # m/s  (soft: 1e-4)
+                 # Height-map recentring (2026-10-21, analysis in the 10-21 session: 81 rim-search-then-seat
+                 # inserts). Pressed at F_press, the TCP sits 0.08-0.11 mm (u_brown) / 0.20-0.26 mm (u_orange)
+                 # lower within ~2.5 mm of the pocket. The centroid of the lowest 2 % of rim heights (after a
+                 # z = a + b*t drift fit) points at the pocket within 27 deg after 10 s, 16 deg over a full search
+                 # (89 % within +-45 deg); lateral force / moments while sliding do not (81-95 deg, chance).
+                 recentre: bool = True,
+                 recentre_period_s: float = 5.0,
+                 recentre_min_shift_m: float = 0.001,
+                 recentre_lowest_frac: float = 0.02,
+                 recentre_min_samples: int = 200,
+                 excursion_max_m: float = 0.015):
+        self.recentre = bool(recentre)
+        self.recentre_period_s = float(recentre_period_s)
+        self.recentre_min_shift_m = float(recentre_min_shift_m)
+        self.recentre_lowest_frac = float(recentre_lowest_frac)
+        self.recentre_min_samples = int(recentre_min_samples)
+        self.excursion_max_m = float(excursion_max_m)
+        self._rim_z = []                  # (t, x, y, z) while pressed on the rim
+        self._aim_xy: Optional[tuple[float, float]] = None
+        self._t_last_recentre: Optional[float] = None
+        self.recentres: list = []         # telemetry: (t, cx, cy, n_samples)
         self.r0 = float(r0_m)
         self.pitch = float(pitch_m)
         self.v_s = float(v_s_m_s)
@@ -230,6 +251,9 @@ class SearchDirector:
     def set_center(self, center_xy_base: tuple[float, float]) -> None:
         """FSM calls this on first SEARCH tick with current TCP xy as spiral origin."""
         self._center_xy = (float(center_xy_base[0]), float(center_xy_base[1]))
+        self._aim_xy = self._center_xy
+        self._rim_z = []
+        self._t_last_recentre = None
         self._theta = 0.0
         self._spiral_path_len = 0.0
         self._t_stall_start = None
@@ -300,8 +324,35 @@ class SearchDirector:
             return 0.0, 0.0
         return (tcp_x - x0) / dt, (tcp_y - y0) / dt
 
+    def _maybe_recentre(self, t: float) -> None:
+        """Move the spiral centre to the low point of the rim height map (see __init__), restart the spiral
+        there at r0. Only toward a point within excursion_max of the original aim."""
+        if self._t_last_recentre is None:
+            self._t_last_recentre = t
+            return
+        if t - self._t_last_recentre < self.recentre_period_s or len(self._rim_z) < self.recentre_min_samples:
+            return
+        self._t_last_recentre = t
+        T = [p[0] for p in self._rim_z]; Z = [p[3] for p in self._rim_z]
+        n = len(T); mt = sum(T) / n; mz = sum(Z) / n
+        stt = sum((ti - mt) ** 2 for ti in T)
+        b = sum((ti - mt) * (zi - mz) for ti, zi in zip(T, Z)) / stt if stt > 1e-12 else 0.0
+        res = sorted(((zi - (mz + b * (ti - mt))), i) for i, (ti, zi) in enumerate(zip(T, Z)))
+        k = max(10, int(self.recentre_lowest_frac * n))
+        low = [self._rim_z[i] for _, i in res[:k]]
+        cx = sum(p[1] for p in low) / len(low); cy = sum(p[2] for p in low) / len(low)
+        ax, ay = self._aim_xy
+        if math.hypot(cx - ax, cy - ay) > self.excursion_max_m - self.r0:
+            return
+        if math.hypot(cx - self._center_xy[0], cy - self._center_xy[1]) < self.recentre_min_shift_m:
+            return
+        self._center_xy = (cx, cy)
+        self._theta = 0.0
+        self.recentres.append((t, cx, cy, n))
+        self.last_mode = "recentre_height_map"
+
     def update(self, t: float, fz_smoothed_base: float,
-               tcp_x_base: float, tcp_y_base: float
+               tcp_x_base: float, tcp_y_base: float, tcp_z_base: Optional[float] = None
                ) -> tuple[float, float, float]:
         """Returns (Fx_cmd, Fy_cmd, Fz_cmd) in base_link frame, or sets
         self.abort_reason if the search should be aborted."""
@@ -409,6 +460,10 @@ class SearchDirector:
                 unloading = True
                 self.last_unloading = True
                 Fz_cmd = -self.unload_press
+
+        if self.recentre and tcp_z_base is not None and not in_unload_window:
+            self._rim_z.append((t, tcp_x_base, tcp_y_base, tcp_z_base))
+            self._maybe_recentre(t)
 
         new_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
         self.last_radius_m = new_r
@@ -754,6 +809,8 @@ class ContactSearchFSM:
             # outer bound.
             stall_progress_ratio = float(self.cfg.get("search_stall_progress_ratio", 0.02)),
             stall_window_s       = float(self.cfg.get("search_stall_window_s",       2.0)),
+            recentre             = bool(self.cfg.get("search_recentre", True)),
+            excursion_max_m      = float(self.cfg.get("search_excursion_max_m", 0.015)),
         )
         # Seeded by FSM at SEARCH entry (predicted_tcp_xy from CAD prior).
         # SearchDirector's bootstrap mode drives toward this xy until |F_lat|
@@ -1877,7 +1934,7 @@ class ContactSearchFSM:
                 self._search_total_start_t = t
                 sd = self.search_director
                 self._search_total_max_s = spiral_sweep_seconds(
-                    sd.r0, sd.R_max, sd.pitch)
+                    sd.r0, sd.R_max, sd.pitch) + (30.0 if sd.recentre else 0.0)   # room for one restarted spiral
             if self._search_resuming:
                 # Resuming after a rejected v4 — keep the existing center/theta.
                 self._search_resuming = False
@@ -1885,7 +1942,7 @@ class ContactSearchFSM:
                 self.search_director.set_center(self.predicted_tcp_xy)
             else:
                 self.search_director.set_center((tcp_x, tcp_y))
-            Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+            Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y, tcp_z)
             wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
             # Rotation LOCKED in SEARCH. This is deliberate and empirically required,
             # despite SKILL.md section 10 stating all-True as a hard rule:
