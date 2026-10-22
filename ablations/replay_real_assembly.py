@@ -1629,7 +1629,9 @@ def follow_seated_offset(obj: str, base_quat) -> Tuple[float, float, float]:
         (pa, pb) = parts
         led = _ledger()
         cam = {p: (led.get(p) or {}).get('rel_err_mm') for p in parts}
-        if all(isinstance(v, list) and len(v) == 2 for v in cam.values()):
+        if all(isinstance(v, list) and len(v) == 2 for v in cam.values()) and not one_node():
+            # one node: no follow reads this run - the ledger's camera reads would be stale; the U parts' own inserts
+            # (where compliance found their seats, record_seat_offset) are this run's measurement
             da, db = (np.array(cam[p], dtype=float) for p in parts)           # mm, base frame (camera)
             src, cap = 'camera', MAX_FOLLOW_YAW_DEG
         else:
@@ -1692,6 +1694,45 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     ok = bool(out.get('seated'))
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
                 error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
+
+
+def one_node() -> bool:
+    """Operator 2026-10-21 ('calibrate parts once, then assemble; compliant insertion takes the remaining error as one
+    node; nudge is not part of compliant insertion'): with drive-mate inserting (SEAMS_DRIVE=1) the base is read once
+    at startup, each part once at its pick, drive-mate's at-rest result decides each insert, nothing touches a part
+    after its insert, and ExecuteMate certifies every mate once at the end from one view (report only)."""
+    return os.environ.get('SEAMS_DRIVE') == '1'
+
+
+def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
+    """ExecuteMate for every mate in assembly order from ONE top-down view over the base (no motion between calls,
+    nothing moved on a refusal). Returns {obj: execute_mate output}."""
+    from seams.client import mate_for
+    from base_depth import VIEW_FLANGE_Z as _VZ
+    (bx, by, _), _ = observed_base
+    out = {}
+    for q in (('0', '1', '0', '0'), ('1', '0', '0', '0')):    # top-down, or pi-turned if wrist_3 would wind past 4 rad
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx:.4f}",
+                            f"{by:.4f}", f"{_VZ:.2f}", '--quat', *q], label='certify view (one, over the base)',
+                           timeout_s=60, log_fh=log_fh)
+        if r.get('result') != 'failure':
+            break
+    else:
+        say("  [certify] the view over the base was not reached - nothing certified"); return out
+    for obj in objs:
+        mate = mate_for(obj, base)
+        if mate is None:
+            continue
+        o = _seam_call(['execute', '--mate', mate], 450)
+        out[obj] = o
+        if o.get('placed'):
+            led = _ledger()
+            led[obj] = dict(verified=True, t=time.time(), how='execute_mate',
+                            depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
+            json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        say(f"  [certify] {mate} ({obj}): placed={o.get('placed')} refusal={o.get('refusal')!r} "
+            f"{o.get('refusal_detail', '')} depth={o.get('engagement_depth_m')}")
+    return out
 
 
 def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
@@ -2580,7 +2621,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         t_step = time.time()                       # insert logs written from here belong to this step
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not _SAFETY_STOP:
             pre_insert_base_read(obj, state, args, say, log_fh)  # fresh base read from the hover (base not fixed)
-            held_yaw_calibration(obj, state, say, log_fh)      # one read where the arm is; no extra moves
+            if not one_node():       # one node: the align funnel at the hover measures the held part where it matters
+                held_yaw_calibration(obj, state, say, log_fh)  # one read where the arm is; no extra moves
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
@@ -2684,8 +2726,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         def _wedge_check():
             """None: not wedged. True/False: wedged; released and nudged -> seated or not. Called after EVERY failed
             attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
-            if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run):
-                return None
+            if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run) or one_node():
+                return None          # one node: the insert's own retry, then stop - no release-and-nudge
             w = _wedged_near_seat(obj, t_step)
             if w is None:
                 return None
@@ -2812,7 +2854,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # run_assembly_step's settle-window discipline).
         time.sleep(0.5)
 
-    if os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
+    if one_node():
+        pass        # drive-mate's at-rest result decided the insert; ExecuteMate certifies every mate once at the end
+    elif os.environ.get('SEAMS_CERTIFY') == '1' and not args.dry_run:
         # ExecuteMate is the authority (operator 2026-10-21: no diagnostics once the part is known seated). The
         # replay's own depth seat check and reseat run only as the recovery for a measured not_at_seat, or when no
         # view could measure the seat.
@@ -3124,6 +3168,9 @@ def main() -> int:
                                     timeout_s=90, log_fh=log_fh)
                 if r_.get('result') == 'failure':
                     print("\n!!! base-view return FAILED — stopping"); return 1
+            if ob is None and one_node():
+                print(f"\n!!! {bname} not observed - drive-mate aims at a measured base only; stopping before any pick")
+                return 1
             if ob is None:
                 msg = f"  [base] {bname} not observed -> DEFAULT_BASE_POSITION + per-object offsets"
             else:
@@ -3198,7 +3245,7 @@ def main() -> int:
                 hdr = f"\n  BETWEEN PARTS: re-read the base, then move_home before {obj} (camera view of the table)\n"
                 print(hdr, end='')
                 if log_fh: log_fh.write(hdr)
-                if getattr(args, 'observed_base', None) is not None:
+                if getattr(args, 'observed_base', None) is not None and not one_node():
                     args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
                     # Arm is above the base: confirm every part seated so far really is.
                     seated_so_far = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
@@ -3213,7 +3260,7 @@ def main() -> int:
                     failed = obj
                     break
             first_object = False
-            if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED:
+            if not args.dry_run and not _SAFETY_STOP and obj in FOLLOWS_SEATED and not one_node():
                 record_follow_reads(obj, lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")),
                                     getattr(args, 'observed_base', None), log_fh, bool(args.part_at_staging))
             # --part-at-staging is a claim, not a fact (2026-10-20: line_brown was 38 cm away, in plain view from
@@ -3283,7 +3330,19 @@ def main() -> int:
         # follow-on motion).
         # Final check of the whole assembly from the base view (the between-parts checks covered
         # the earlier parts; this one adds the last part and re-checks the rest).
-        if (not failed and completed and not args.dry_run and not _SAFETY_STOP
+        if (completed and not args.dry_run and not _SAFETY_STOP and one_node()
+                and getattr(args, 'observed_base', None) is not None and not _HOLDING_SEATED):
+            run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
+                           label='safe height before the certify view', timeout_s=60, log_fh=log_fh)
+            certs = certify_once_at_end([e_.get('object_name') for e_ in entries if e_.get('object_name') in completed],
+                                        bname, args.observed_base,
+                                        lambda m: (print(m, flush=True), log_fh and log_fh.write(m + "\n")), log_fh)
+            n_ok = sum(bool(o.get('placed')) for o in certs.values())
+            msg = (f"  [certify] {n_ok}/{len(completed)} placed=true from one view"
+                   + ("" if n_ok == len(completed) else " - flagged for the operator, nothing touched"))
+            print(msg, flush=True)
+            if log_fh: log_fh.write(msg + "\n")
+        elif (not failed and completed and not args.dry_run and not _SAFETY_STOP
                 and getattr(args, 'observed_base', None) is not None):
             args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
             seated_all = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
