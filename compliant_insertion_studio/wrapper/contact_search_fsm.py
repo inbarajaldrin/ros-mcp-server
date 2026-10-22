@@ -800,7 +800,9 @@ class ContactSearchFSM:
             Kd_xy_N_per_m_per_s = float(self.cfg.get("search_Kd_N_s_m",  40.0)),
             Fmax_N            = float(self.cfg.get("search_Fmax_N",      3.0)),
             F_press_N         = float(self.cfg.get("search_F_press_N",   9.0)),
-            fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",   3.0)),
+            # on the rim = |fz| above half the press, at most 3 N (a 1.5 N free-base press otherwise reads 'off rim')
+            fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",
+                                                   min(3.0, 0.5 * float(self.cfg.get("search_F_press_N", 9.0))))),
             # 2026-05-07: relax stall detection. Original (0.15, 1.0s) fires
             # at 15% progress in 1s — too aggressive when peg lands wedged
             # at slot rim and needs a few seconds + lateral force to break
@@ -1974,6 +1976,31 @@ class ContactSearchFSM:
                           f"Fmax={self.search_director.Fmax:.1f}N "
                           f"first_cmd=({Fx:+.2f},{Fy:+.2f},{Fz:+.2f})N")
             self._search_last_cmd_t = t
+            return action
+
+        # z-drop trigger (free base, 2026-10-21): pressed lightly so the part slides over an untaped base instead of
+        # carrying it (at 9 N the base moved with the TCP: its edges stayed within 1 px in the wrist camera through a
+        # 66 s spiral), |fz| never exceeds the v4 detector's 4 N arm level. The TCP sinking below the rim contact
+        # height for 0.15 s is the part starting into its pocket.
+        drop_m = float(self.cfg.get("search_drop_m", 0.0) or 0.0)
+        if drop_m > 0 and self.surface_z is not None and self.surface_z - tcp_z > drop_m:
+            if getattr(self, '_search_drop_t', None) is None:
+                self._search_drop_t = t
+        else:
+            self._search_drop_t = None
+        if getattr(self, '_search_drop_t', None) is not None and t - self._search_drop_t >= 0.15:
+            self.hole_observed_xy = (float(tcp_x), float(tcp_y))
+            self.hole_observed_z  = float(tcp_z)
+            self.hole_observed_t  = float(t)
+            self.state = self.INSERT_DESCENT
+            action.transitioned = True
+            action.new_state = self.INSERT_DESCENT
+            action.transition_msg = (
+                f"z-drop in SEARCH at t={t:.2f}s xy=({tcp_x:+.4f},{tcp_y:+.4f}): "
+                f"{1000*(self.surface_z - tcp_z):.1f} mm below the rim contact "
+                f"after {t-self._search_start_t:.2f}s of search → INSERT_DESCENT"
+            )
+            action.state = self.INSERT_DESCENT
             return action
 
         # v4 detector — fires on rim-cross. SEARCH always autofires (v4 is the

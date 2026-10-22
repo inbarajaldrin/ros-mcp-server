@@ -223,6 +223,9 @@ def _parse_args(argv=None):
     p.add_argument("--search-r0-mm", type=float, default=1.5,
                    help="Spiral start radius. Default 1.5 mm (avoids a centre stall); an aim confirmed by vision wants less:"
                         " the spot 1 mm off the aim is otherwise never visited (operator 10-21).")
+    p.add_argument("--search-drop-mm", type=float, default=0.0,
+                   help="SEARCH -> INSERT_DESCENT when the TCP sinks this far below the rim contact height (0 = off). For a"
+                        " light press the |fz| rim-cross detector (arms above 4 N) never arms (free base, 10-21).")
     # Calibration provenance (passed through to meta JSON)
     p.add_argument("--cal-yaml", default=None,
                    help="path to foundational calibration YAML (recorded in meta JSON)")
@@ -1467,6 +1470,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 fsm_cfg['search_pitch_m'] = float(getattr(ep.args, 'search_pitch_mm', 2.0)) / 1000.0
                 fsm_cfg['search_R_max_m'] = float(getattr(ep.args, 'search_R_max_mm', 8.0)) / 1000.0
                 fsm_cfg['search_r0_m'] = float(getattr(ep.args, 'search_r0_mm', 1.5)) / 1000.0
+                fsm_cfg['search_drop_m'] = float(getattr(ep.args, 'search_drop_mm', 0.0)) / 1000.0
             # Pass hole_xy_prior as spiral origin override (cross-attempt learning).
             # If a previous run found the hole xy via z-drop detection, anchor
             # this spiral search there rather than peg's random contact xy.
