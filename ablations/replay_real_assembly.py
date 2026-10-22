@@ -2479,6 +2479,7 @@ BAR_RATIO = 4.0                           # top face this much longer than wide 
 CROSS_END_DIFF_MM = 1.5                   # one end this much higher than the other ...
 CROSS_EDGE_DIFF_MM = 0.8                  # ... and at that end one long edge this much higher: riding a channel lip
 CROSS_NUDGE_AT_MM = 12.0                  # push this far in from the high end (line_brown 2026-10-20: -58 of 70)
+CROSS_LOW_EDGE_MAX_MM = 3.0               # ... and its other edge still near the seat (a lip carries one edge only)
 
 
 def _seat_checked(obj) -> bool:
@@ -2539,6 +2540,11 @@ def cross_nudge_plan(res):
         return None
     lo_edge, hi_edge = per[hi]
     if abs(hi_edge - lo_edge) < CROSS_EDGE_DIFF_MM:
+        return None
+    if min(lo_edge, hi_edge) > CROSS_LOW_EDGE_MAX_MM:
+        # both edges up: the whole end rests on the base top past its pocket - the axial push (10-14 line_green fix),
+        # not a lip. 10-22 09:35: edges +7.1/+8.9 called a lip, the sideways nudge lowered onto the seated U part
+        # beside line_green twice (7.9 / 7.7 N, stopped)
         return None
     cross_ax = 'x' if f['long_axis'] == 'y' else 'y'
     toward = ('+' if lo_edge > hi_edge else '-') + cross_ax      # away from the high edge
