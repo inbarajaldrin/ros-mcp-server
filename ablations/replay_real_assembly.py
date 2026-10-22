@@ -1924,6 +1924,49 @@ def _footprints_overlap(base, a, b, margin_m=0.005):
     return ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m
 
 
+def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
+    """Base pose from its markers in one frame over obj's seat at the clear height (tilt from the chain, yaw searched,
+    translation solved: marker_yaw.base_pose_same_frame). Returns the new ((x, y, z), quat) (z kept) or the old one."""
+    if observed_base is None or held_q is None:
+        return observed_base
+    from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame, still_frame
+    from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
+    from primitives.shared.config import held_tool_offset_for
+    (bx, by, bz), bq = observed_base
+    tcp = (snapshot_robot_state().get('tcp') or {})
+    pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
+                               base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=tcp['quat_xyzw'],
+                               flange_offset_m=float(held_tool_offset_for(obj)[2]))
+    st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); q = tcp['quat_xyzw']
+    z_view = float(st[2]) + HOVER_ALIGN_ABOVE_M
+    cur = tcp.get('xyz')
+    if cur and cur[2] < z_view - 0.002:
+        run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{cur[0]:.5f}",
+                        f"{cur[1]:.5f}", f"{z_view:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                       label='close base read: up', timeout_s=60, log_fh=log_fh)
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{st[0]:.5f}",
+                        f"{st[1]:.5f}", f"{z_view:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                       label='close base read view', timeout_s=60, log_fh=log_fh)
+    if r.get('result') == 'failure' or _SAFETY_STOP:
+        return observed_base
+    _emitter(False)
+    try:
+        img_, _ = still_frame(n_avg=6); tc = (snapshot_robot_state().get('tcp') or {})
+        pose, info = base_pose_same_frame(base, img_, (np.asarray(tc['xyz']), np.asarray(tc['quat_xyzw'])), bq) \
+            if img_ is not None else (None, {'error': 'no frame'})
+    finally:
+        _emitter(True)
+    if pose is None or info.get('reproj_px', 99) > 3.0:
+        say(f"  [close-base] {base}: not read over {obj}'s seat ({info}) - aiming at the base read")
+        return observed_base
+    d_mm = 1000 * np.hypot(pose[0][0] - bx, pose[0][1] - by)
+    if d_mm > 15.0:
+        say(f"  [close-base] {base}: close read {d_mm:.1f} mm from the base read - more than the read can be off, not used")
+        return observed_base
+    say(f"  [close-base] {base} over {obj}'s seat: {d_mm:.1f} mm from the 0.56 m read ({json.dumps(info)})")
+    return ((pose[0][0], pose[0][1], bz), tuple(pose[1]))
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -3005,6 +3048,15 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                             say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
                 except Exception as e_:
                     say(f"  [servo] {obj}: yaw to base not applied ({e_})")
+                # and the base is re-read from its markers in a CLOSE frame over the seat (no xy servo): the 0.56 m CAD
+                # fit carries the hand-eye rotation error x ~0.5 m of lever (several mm); line_green needs +-1.1 mm across
+                # the U openings. Bare and seated-assembly fits agreed to 0.4 mm (10-22 07:00), so the U parts are not the
+                # offset - the read height is. From the clear height (~0.17 m over the base top) the lever is ~1/3.
+                try:
+                    args.observed_base = close_base_read(obj, base_name or RUN_BASE['name'], args.observed_base,
+                                                         state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                except Exception as e_:
+                    say(f"  [servo] {obj}: close base read not applied ({e_})")
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
                 args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                       state.held_quat, state.last_grasp_id or 1, say, log_fh)
