@@ -244,11 +244,22 @@ rclpy.shutdown()
 """
 
 
+STATE_TAP_JSON = REPO_ROOT / 'ablations' / 'logs' / 'robot_state_latest.json'
+STATE_TAP_FRESH_S = 0.3
+
+
 def snapshot_robot_state(timeout_s: float = 2.0) -> dict:
-    """Grab a single sample of /joint_states + /tcp_pose_broadcaster/pose by
-    spawning a tiny rclpy subscriber subprocess. Returns {joints: ..., tcp: ...}
-    or {error: ...} on failure. Out-of-process so we don't conflict with any
+    """Grab a single sample of /joint_states + /tcp_pose_broadcaster/pose. From the standing state tap
+    (ablations/state_tap.py, rewritten at 20 Hz) when its file is fresh; otherwise by spawning a tiny rclpy
+    subscriber subprocess (~0.8-1 s, twice per step - the median 2.24 s between steps, 2026-10-21). Returns
+    {joints: ..., tcp: ...} or {error: ...} on failure. Out-of-process so we don't conflict with any
     long-running rclpy contexts in the orchestrator."""
+    try:
+        d = json.loads(STATE_TAP_JSON.read_text())
+        if time.time() - float(d.get('t', 0)) <= STATE_TAP_FRESH_S and d.get('joints') and d.get('tcp'):
+            return {'joints': d['joints'], 'tcp': d['tcp']}
+    except Exception:
+        pass
     try:
         proc = subprocess.run(
             ['python3', '-c', _SNAPSHOT_HELPER],
@@ -3432,12 +3443,20 @@ def _start_timing(timing_path, motion_path):
                                               env=make_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+    try:
+        _sn = 'state_' + 'tap.py'                        # one standing subscriber for the per-step snapshots
+        if subprocess.run(['pgrep', '-f', _sn], capture_output=True).returncode != 0:
+            _TIMING['tap'] = subprocess.Popen(['python3', '-u', str(REPO_ROOT / 'ablations' / 'state_tap.py'),
+                                               '--out', str(STATE_TAP_JSON)], env=make_env(),
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
     print(f"  [timing] {timing_path}", flush=True)
     atexit.register(_stop_timing)
 
 
 def _stop_timing():
-    for k in ('rec', 'tracker'):
+    for k in ('rec', 'tracker', 'tap'):
         r = _TIMING.get(k)
         if r is not None and r.poll() is None:
             r.send_signal(signal.SIGINT)
