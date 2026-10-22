@@ -72,7 +72,7 @@ def main():
     sp = ap.add_subparsers(dest='op', required=True)
     d = sp.add_parser('drive'); d.add_argument('--mate', required=True)
     d.add_argument('--target', type=float, nargs=7, required=True); d.add_argument('--held', type=float, nargs=7, required=True)
-    d.add_argument('--timeout', type=float, default=650.0)
+    d.add_argument('--timeout', type=float, default=1200.0)   # a full touch lattice (61 dips) takes ~11 min (10-22)
     e = sp.add_parser('execute'); e.add_argument('--mate', required=True); e.add_argument('--timeout', type=float, default=400.0)
     p = sp.add_parser('pose'); p.add_argument('--name', required=True); p.add_argument('--kind', default='base')
     p.add_argument('--timeout', type=float, default=15.0)

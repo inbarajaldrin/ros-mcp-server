@@ -1771,7 +1771,7 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
         held_q = list((R_.from_euler('z', off_, degrees=True) * R_.from_quat(held_q)).as_quat())   # the measured part
     hp, hq = held_pose(obj, gid, held_q, tq, float(np.asarray(held_tool_offset())[2]))
     say(f"  [drive_mate] {mate}: target ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}")
-    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 700)
+    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 1260)
     say(f"  [drive_mate] {mate}: {json.dumps(out)}")
     ok = bool(out.get('seated'))
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
