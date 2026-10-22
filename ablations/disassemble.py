@@ -395,6 +395,17 @@ def observe_base(base_name=None):
         return None
     ob = observe_base_pose(base_name)
     if ob is None:
+        # dark room (10-22 06:12: brightness 40 on the dark exposure): the markers read from 0.40 m, not from the base
+        # view. Seed from there, then back up to the base view for the depth outline (no depth below ~0.45 m).
+        from replay_real_assembly import camera_brightness, LOW_LIGHT_BRIGHTNESS, PART_VIEW_Z_LOW_LIGHT
+        b_ = camera_brightness()
+        if b_ is not None and 0 <= b_ < LOW_LIGHT_BRIGHTNESS:
+            ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",
+                           f"{PART_VIEW_Z_LOW_LIGHT:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view (low light, 0.40 m)', 60)
+            ob = observe_base_pose(base_name) if ok else None
+            run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",
+                   f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view (back up for depth)', 60)
+    if ob is None:
         return None
     time.sleep(1.0)                                            # settle before the depth frames
     ob_d, info = measure(ob, base_name)                        # x, y, yaw from the depth outline
