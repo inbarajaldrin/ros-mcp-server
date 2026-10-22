@@ -400,11 +400,13 @@ def _subprocess_fast_path():
             # free base (2026-10-21 19:56): with the lateral force capped at 2.5 N the 9 N press pinned u_brown on the
             # rim (spiral 3 mm in 45 s, 2 mm lag). Pressed at 4.5 N the rim friction is below the lateral command,
             # the base still does not slide (its weight adds to its own table friction), and parts stay <= 5 N.
-            '--search-F-press-N', ('9.0' if _base_fixed() else '4.5'),
+            '--search-F-press-N', ('9.0' if (_base_fixed() or os.environ.get('LIGHT_SEARCH', '0') != '1') else '4.5'),
             # 2026-10-21: on a base that is NOT fixed (cell_layout base_fixed: false) 8 N lateral turned base1 from
             # 0.19 to ~8.4 deg over two u_brown searches (the yaw the operator saw "move away"); an untaped base
             # slides at a few N, so the lateral search force stays below that and the aim comes from vision instead
-            '--search-Fmax-N', ('8.0' if _base_fixed() else '2.5'),
+            # 2026-10-21 22:00 (operator): back to the tuned 9 / 8 N by default - at 4.5 / 2.5 N the part barely slid on the
+            # rim (< 2 mm per attempt); the aim now comes from the yaw turn + silhouette servo. LIGHT_SEARCH=1 keeps the light one.
+            '--search-Fmax-N', ('8.0' if (_base_fixed() or os.environ.get('LIGHT_SEARCH', '0') != '1') else '2.5'),
             '--search-v-s-mm-s', '5.0',
             '--search-pitch-mm', '2.0',
             '--search-R-max-mm', '8.0',
