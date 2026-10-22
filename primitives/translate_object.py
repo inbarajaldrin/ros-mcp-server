@@ -35,6 +35,7 @@ import re
 import time
 
 import logging
+import signal
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,44 @@ import logging
 # inverted_u_yellow left 10-22: on a free base it seats by the depth servo + vertical touch lattice (in on dip 7), the
 # prismatic search slid it 14-19 mm along line_green at up to 20 N (9 of 10 attempts). UNI replaces this table.
 PRISMATIC_ROUTE_OBJECTS = ('line_green', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow')
+
+CHILD_CLEANUP_S = 30.0   # a force-mode child's own cleanup gets this long before SIGTERM; never SIGKILL (CLAUDE.md)
+
+
+def _settle_child(proc, forward_sigint=True):
+    """Let an insert/motion child finish its own cleanup: SIGINT it (once more if it is still running 2 s on - its
+    handler is idempotent, it may not have got ours), wait CHILD_CLEANUP_S, then SIGTERM and wait. Never SIGKILL: a
+    force-mode child killed mid-search leaves the arm in force mode (10-22: subprocess.run SIGKILLed touch_insert 0.25 s
+    after drive-mate's cancel; the compliant route's timeout called proc.kill())."""
+    try:
+        proc.wait(timeout=2.0)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        pass
+    if forward_sigint:
+        proc.send_signal(signal.SIGINT)
+    try:
+        return proc.wait(timeout=CHILD_CLEANUP_S)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        return proc.wait()
+
+
+def _run_child(argv, timeout=None, **kw):
+    """subprocess.run without its SIGKILL: on Ctrl-C / a cancel, or a timeout, the child ends through _settle_child.
+    Returns a CompletedProcess-like object with returncode (None never: the child is waited for)."""
+    proc = subprocess.Popen(argv, **kw)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(signal.SIGINT)
+        _settle_child(proc, forward_sigint=False)
+        raise
+    except KeyboardInterrupt:
+        _settle_child(proc)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode)
+
 
 def _base_fixed() -> bool:
     try:
@@ -265,7 +304,7 @@ def _subprocess_fast_path():
                 hover_argv += ['--final-base-orientation',
                                *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[line_green route] hover: {' '.join(hover_argv)}", flush=True)
-            r = subprocess.run(hover_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            r = _run_child(hover_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             if r.returncode != 0:
                 _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
                          "object_name": args.object_name,
@@ -317,7 +356,7 @@ def _subprocess_fast_path():
                 prism_argv += ['--final-base-orientation',
                                *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[line_green route] prismatic: {' '.join(prism_argv)}", flush=True)
-            r = subprocess.run(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            r = _run_child(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             success = (r.returncode == 0)
             _output({
                 "result": "success" if success else "failure",
@@ -349,7 +388,7 @@ def _subprocess_fast_path():
                           '--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos],
                           '--final-base-orientation', *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[touch route] {' '.join(touch_argv[2:])}", flush=True)
-            rt = subprocess.run(touch_argv, env=_make_env())
+            rt = _run_child(touch_argv, env=_make_env())
             sys.exit(rt.returncode)
 
         # Yaw the held part to the MEASURED base before the compliant hover (2026-10-21, operator image: u_brown square to
@@ -468,11 +507,16 @@ def _subprocess_fast_path():
             rc = proc.wait(timeout=300)
             t.join(timeout=1.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.send_signal(signal.SIGINT)                    # its handler ends the episode + force-mode cleanup
+            _settle_child(proc, forward_sigint=False)
             t.join(timeout=1.0)
             _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
                      "error": "compliant_insert wrapper timed out (300s)"})
             sys.exit(1)
+        except KeyboardInterrupt:
+            _settle_child(proc)
+            t.join(timeout=1.0)
+            raise
         out_text = '\n'.join(lines)
         rj = _extract_json(out_text)
         if rj is None:

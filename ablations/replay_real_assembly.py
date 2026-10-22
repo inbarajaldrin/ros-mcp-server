@@ -1603,10 +1603,21 @@ _APPLIED_BIAS = {}               # part -> (dx, dy) m seat-history bias in this 
 
 
 def _seam_call(args_, timeout_s):
-    p = subprocess.run(['python3', '-u', '-m', 'seams.client', *args_], capture_output=True, text=True,
-                       timeout=timeout_s, env=make_env(), cwd=str(REPO_ROOT))
-    line = next((l for l in reversed(p.stdout.splitlines()) if l.startswith('__SEAM__ ')), None)
-    return json.loads(line[len('__SEAM__ '):]) if line else {'error': (p.stderr.strip().splitlines() or ['no answer'])[-1]}
+    p = subprocess.Popen(['python3', '-u', '-m', 'seams.client', *args_], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=make_env(), cwd=str(REPO_ROOT))
+    try:
+        out, err = p.communicate(timeout=timeout_s)
+    except (KeyboardInterrupt, subprocess.TimeoutExpired):
+        # let the client cancel its goal (the server then SIGINTs the insert's process group); subprocess.run SIGKILLed
+        # it 0.25 s after Ctrl-C, before the cancel went out (AR3 review 10-22)
+        p.send_signal(signal.SIGINT)
+        try:
+            p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.terminate()
+        raise
+    line = next((l for l in reversed(out.splitlines()) if l.startswith('__SEAM__ ')), None)
+    return json.loads(line[len('__SEAM__ '):]) if line else {'error': (err.strip().splitlines() or ['no answer'])[-1]}
 
 
 def insert_via_drive_mate(obj, base, argv, snap, say):

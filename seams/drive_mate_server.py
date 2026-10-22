@@ -136,7 +136,9 @@ class DriveMateServer(Node):
     def on_cancel(self, gh):
         p = self.proc
         if p is not None and p.poll() is None:
-            p.send_signal(signal.SIGINT)                       # the insert's own force-mode cleanup
+            # the whole insert process group, as a Ctrl-C would: the force-mode wrapper / touch_insert get it directly
+            # (10-22: SIGINT to translate_object alone ended in its subprocess.run SIGKILLing the child 0.25 s later)
+            os.killpg(p.pid, signal.SIGINT)
             threading.Thread(target=self._term_later, args=(p,), daemon=True).start()
         return CancelResponse.ACCEPT
 
@@ -145,7 +147,7 @@ class DriveMateServer(Node):
         try:
             p.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            p.terminate()                                      # never SIGKILL in force mode
+            os.killpg(p.pid, signal.SIGTERM)                  # never SIGKILL in force mode
 
     def execute(self, gh):
         with self.busy:
@@ -209,7 +211,8 @@ class DriveMateServer(Node):
         log_path = LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
         log = open(log_path, 'w') if LOGS.exists() else subprocess.DEVNULL
         try:
-            self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT)
+            self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT,
+                                         start_new_session=True)       # its own group: on_cancel signals all of it
         except Exception as e:
             return refuse('insert_failed_to_start', str(e))
         fb = DriveMate.Feedback(); fb.stage = 'inserting'

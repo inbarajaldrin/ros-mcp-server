@@ -53,9 +53,17 @@ def _action(node, ActionT, name, goal, timeout):
     gh = f.result()
     if gh is None or not gh.accepted:
         return None, f'{name}: goal rejected'
-    r = gh.get_result_async(); rclpy.spin_until_future_complete(node, r, timeout_sec=timeout)
+    r = gh.get_result_async()
+    try:
+        rclpy.spin_until_future_complete(node, r, timeout_sec=timeout)
+    except KeyboardInterrupt:
+        # the caller stopped (stop_run.sh, Ctrl-C): cancel the goal - the server SIGINTs the insert's process group and
+        # its force-mode cleanup runs; before, the client died and the arm went on (AR3 review 10-22)
+        c = gh.cancel_goal_async(); rclpy.spin_until_future_complete(node, c, timeout_sec=5.0)
+        raise
     if r.result() is None:
-        return None, f'{name}: no result in {timeout:.0f} s'
+        c = gh.cancel_goal_async(); rclpy.spin_until_future_complete(node, c, timeout_sec=5.0)
+        return None, f'{name}: no result in {timeout:.0f} s - goal cancelled'
     return r.result().result, ''
 
 
