@@ -1254,14 +1254,15 @@ def reread_base(bname, prev, log_fh=None):
     return ob
 
 
-def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0):
+def derive_sequence_for(obj: str, recorded: list, base_name: str, timeout_s: float = 30.0, samples=None):
     """Build the tool sequence from where the part is actually lying.
 
     Returns (sequence, note). Falls back to the recorded sequence, unchanged, if the
     part cannot be observed or the planner cannot answer — deriving is an improvement
     on the recording, never a new way to fail.
     """
-    obs = observe_object_orientation(obj, timeout_s)
+    # samples from a shared still window (observe_many) when the caller already looked; else observe here
+    obs = {'samples': samples} if samples else observe_object_orientation(obj, timeout_s)
     if obs.get('error') or not obs.get('samples'):
         return recorded, f"observe failed ({obs.get('error', 'no samples')}) -> recorded sequence"
     LAST_SEEN_XY[obj] = tuple(obs['samples'][-1]['xyz'][:2])
@@ -3085,6 +3086,11 @@ def main() -> int:
             names = [e.get('object_name') for e in entries]
             skip = set(names[:names.index(args.start_from)]) if getattr(args, 'start_from', None) in names else set()
             unseen_home = []
+            # ONE still window for every part from here (Speed T1: one-by-one observes waited 10.8 s for each part
+            # home cannot see - 32-53 s per run, ASSEMBLY_STATE_MACHINE.md item 2)
+            todo = [e.get('object_name') for e in entries
+                    if not ((args.only and e.get('object_name') != args.only) or e.get('object_name') in skip)]
+            seen_here = observe_many(todo, timeout_s=6.0, n_samples=6) if todo else {}
             for entry in entries:
                 obj = entry.get('object_name')
                 if (args.only and obj != args.only) or obj in skip:
@@ -3096,7 +3102,9 @@ def main() -> int:
                         bn = parse_tool_call(s_)[1].get('base_name') or bn
                     except Exception:
                         pass
-                entry['tool_sequence'], note = derive_sequence_for(obj, seq, bn, timeout_s=10.0)
+                if not seen_here.get(obj):
+                    unseen_home.append((entry, seq, bn)); continue        # not in this view: no 10 s wait
+                entry['tool_sequence'], note = derive_sequence_for(obj, seq, bn, samples=seen_here[obj])
                 if note.startswith('observe failed'):
                     unseen_home.append((entry, seq, bn))          # not where we usually keep it
                     continue
@@ -3115,13 +3123,18 @@ def main() -> int:
                     return r_.get('result') != 'failure'
                 return _staging_view(log_fh)
             if unseen_home and _unseen_view():
+                seen_there = observe_many([e['object_name'] for e, _, _ in unseen_home], timeout_s=8.0, n_samples=6)
                 for entry, seq, bn in unseen_home:
-                    entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0)
+                    entry['tool_sequence'], note = derive_sequence_for(entry['object_name'], seq, bn, timeout_s=15.0,
+                                                                       samples=seen_there.get(entry['object_name']))
                     msg = f"  [derive-sequence] {entry['object_name']} (staging view): {note}"
                     print(msg)
                     if log_fh: log_fh.write(msg + "\n")
-                run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
-                               label='back home after the staging view', timeout_s=60, log_fh=log_fh)
+                if not getattr(args, 'base_from_camera', False):
+                    # the base view comes next when the base is read from the camera: it is a straight high move
+                    # from the staging view, home in between was a 4 s stop (ASSEMBLY_STATE_MACHINE.md item 7)
+                    run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                                   label='back home after the staging view', timeout_s=60, log_fh=log_fh)
 
         # Base pose for the inserts: read here (startup view), re-read between parts (reread_base).
         args.observed_base = None
