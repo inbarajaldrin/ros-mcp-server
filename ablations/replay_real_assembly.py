@@ -1724,7 +1724,8 @@ def one_node() -> bool:
     return os.environ.get('SEAMS_DRIVE') == '1'
 
 
-TRACK_VIEW_Z = 0.40            # flange height over the base for the in-hand marker read (part bottom ~0.18 m above it)
+TRACK_VIEW_Z = 0.56            # flange height over the base for the in-hand read: the startup base view's height, so the
+                               # base is beyond the D415's ~0.45 m depth minimum while the held part (~0.2 m) drops out
 
 
 def track_base_in_hand(base, observed_base, say, log_fh=None):
@@ -1750,14 +1751,24 @@ def track_base_in_hand(base, observed_base, say, log_fh=None):
                         '--min-z', '0.15'], label=f'base track view (part in hand)', timeout_s=60, log_fh=log_fh)
     if r.get('result') == 'failure':
         say(f"  [base-track] view not reached ({r.get('error', '')}) - aiming at the previous read"); return observed_base
-    pose, info = base_pose_world(base)
+    # The pose comes from the 6-dof CAD fit to the depth cloud (operator 10-21: depth + CAD carry far more than the
+    # markers; the localizer/markers only say which object is roughly where = the seed). Markers seed it.
+    seed, info = base_pose_world(base)
+    if seed is None:
+        seed, info = observed_base, dict(info, seed='previous read')
+    try:
+        from base_icp import read_icp
+        pose, icp = read_icp(base, seed)
+    except Exception as e:
+        pose, icp = None, {'error': str(e)}
+    info = dict(info, icp=icp)
     if pose is None:
-        say(f"  [base-track] {base} not read in hand: {info} - aiming at the previous read"); return observed_base
+        say(f"  [base-track] {base}: CAD fit failed in hand ({icp}) - aiming at the previous read"); return observed_base
     (ox, oy, oz), oq = observed_base
     dyaw = float(np.degrees((R_.from_quat(pose[1]) * R_.from_quat(oq).inv()).as_rotvec()[2]))
     dxy = 1000 * np.hypot(pose[0][0] - ox, pose[0][1] - oy)
-    say(f"  [base-track] {base} from its markers (part in hand): moved {dxy:.1f} mm, turned {dyaw:+.2f} deg since "
-        f"the aim {info}")
+    say(f"  [base-track] {base} from the CAD fit to depth (part in hand): moved {dxy:.1f} mm, turned {dyaw:+.2f} deg "
+        f"since the aim {json.dumps(info, default=str)}")
     # keep the measured z of the CAD fit (markers sit on the top face; their z carries the depth of the top plane)
     yaw_only = R_.from_euler('z', float(R_.from_quat(pose[1]).as_euler('xyz')[2]))
     tilt = R_.from_quat(oq) * R_.from_euler('z', float(R_.from_quat(oq).as_euler('xyz')[2])).inv()
