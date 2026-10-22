@@ -163,10 +163,19 @@ def main():
               f"{rec['z_above_seat_mm']:+.1f} mm above the seat" + (" (contact)" if rec['contact'] else ""), flush=True)
         return z
 
+    def seat_z():
+        # The rim contacts MEASURE the grasp depth: the part meets the rim where the chain says (rim - seat) above the
+        # seat, so a rim read higher/lower than CAD moves the seat with it (10-22 12:25: u_orange's rim read +34.2 vs
+        # CAD +31.5 - held 2.7 mm lower in the jaws; it seated at +5.0 against the uncorrected seat and was called
+        # 'entering'). Within -3..+6 mm; the corrected seat goes to the meta for drive-mate's at-rest judge.
+        if best is not None and -0.003 <= best[0] - rim_z <= 0.006:
+            return float(seat[2] + (best[0] - rim_z))
+        return float(seat[2])
+
     def outcome(z):
         if z is None:
             return 'error'
-        if z - seat[2] <= SEATED_DZ_M:
+        if z - seat_z() <= SEATED_DZ_M:
             return 'in'
         if z < rim_z - ENTER_DZ_M:
             return 'entering'
@@ -205,6 +214,9 @@ def main():
             return finish(stem, meta, 'failure')
         if best is None or z < best[0]:
             best = (z, dx, dy)
+            sz_ = seat_z()
+            meta['seat_z_measured'] = sz_ if sz_ != float(seat[2]) else None
+            meta['rim_measured_above_cad_mm'] = round(1000 * (best[0] - rim_z), 2)
         start_z = min(start_z, best[0] + 0.0015)                      # lateral steps 1.5 mm over the measured rim
         move([seat[0] + dx, seat[1] + dy, start_z], q_seat)            # retract before any sideways step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
@@ -218,6 +230,9 @@ def main():
 
 def finish(stem, meta, result):
     meta['outcome'] = result
+    if meta.get('seat_z_measured') is not None:              # the seat corrected by the measured rim (grasp depth)
+        meta['predicted_seat_xyz_chain'] = list(meta['predicted_seat_xyz'])
+        meta['predicted_seat_xyz'] = meta['predicted_seat_xyz'][:2] + [meta['seat_z_measured']]
     json.dump(meta, open(str(stem) + '.meta.json', 'w'), indent=1)
     print('__RESULT_JSON__'); print(json.dumps({'result': 'success' if result == 'success' else 'failure',
                                                 'touch_outcome': result, 'n_probes': len(meta['probes']),

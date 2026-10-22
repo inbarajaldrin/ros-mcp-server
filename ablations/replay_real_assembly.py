@@ -2166,6 +2166,18 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                                 f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
                                 '--max-force', '4', '--min-duration', '2'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
+        if r.get('result') == 'failure' and r.get('contact') and not _SAFETY_STOP:
+            # touched down before the measuring height (10-22 12:05, u_orange twice at ~4.5 N: the grasp left it hanging
+            # lower than the chain) - the image comparison projects the target at whatever height we are, so measure
+            # from 2 mm over the contact instead of giving up (attempt 17 measured 4.5 mm and corrected it; 18 did not)
+            cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
+            if cur:
+                z_meas = float(cur[2]) + 0.002
+                r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                    f"{xy[0]:.5f}", f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q],
+                                    '--min-z', '0.15'], label=f'servo off the contact {k}', timeout_s=60, log_fh=log_fh)
+                say(f"  [servo] {obj}: touched down {1000*(z_meas - 0.002 - rim_z):+.1f} mm over the CAD rim - measuring "
+                    f"from 2 mm above the contact")
         if r.get('result') == 'failure':
             say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})")
             if _SAFETY_STOP:
@@ -3185,8 +3197,16 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
                                                    (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
-                args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                      state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                # the depth-frame servo first for every part (10-22 12:22 u_orange: the marker servo read 0-1 base markers
+                # over its far-side seat and could not measure; the depth servo converged and it went in on the lattice);
+                # the marker servo when the depth servo cannot measure
+                ds = depth_servo(obj, base_name or RUN_BASE['name'], args.observed_base, state.held_quat,
+                                 state.last_grasp_id or 1, say, log_fh)
+                if ds is not None:
+                    args.observed_base, hq_ = ds
+                else:
+                    args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
+                                                          state.held_quat, state.last_grasp_id or 1, say, log_fh)
                 if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
                     state.held_quat = hq_                           # the wrist turned: the chained held pose turns with it
                     STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
