@@ -1885,11 +1885,23 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                                        flange_offset_world_z=-float(held_tool_offset_for(obj)[2]))
     except Exception:
         rim_z = float(st[2]) + 0.031
-    z_meas, z_clear = rim_z + SERVO_MEAS_OVER_RIM_M, rim_z + SERVO_CLEAR_OVER_RIM_M
+    z_meas = rim_z + SERVO_MEAS_OVER_RIM_M
+    # lateral moves and wrist turns happen at the old hover height (100 mm over the seat): parts already seated stand up
+    # to ~40 mm over the base top, and a held bar reaches far beyond the fingers (10-22 01:18: a diagonal move from the
+    # table view down to 12 mm over the rim drove line_green into the seated U parts - protective stop). Only the last
+    # leg to the measuring height is vertical, at 4 N guard.
+    z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
     xy = st[:2].copy()
     yaw_total = 0.0
     for k in range(SERVO_ITERS + 1):
+        cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
+        if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
+            run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{cur[0]:.5f}",
+                            f"{cur[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                           label=f'servo up {k}', timeout_s=60, log_fh=log_fh)
+            if _SAFETY_STOP:
+                return observed_base, held_q
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                            label=f'servo clear {k}', timeout_s=60, log_fh=log_fh)
@@ -1898,7 +1910,10 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                                 f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
                                 '--max-force', '4', '--min-duration', '2'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
         if r.get('result') == 'failure':
-            say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})"); break
+            say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})")
+            if _SAFETY_STOP:
+                return observed_base, held_q                            # nothing more is sent on a stopped robot
+            break
         _emitter(False)
         try:
             img_, _ = still_frame(n_avg=4); tcp_now = (snapshot_robot_state().get('tcp') or {})
@@ -1926,7 +1941,9 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                           label=f'servo clear for turn {k}', timeout_s=60, log_fh=log_fh)
+                           label=f'servo up for turn {k}', timeout_s=60, log_fh=log_fh)   # vertical: xy is where we measured
+            if _SAFETY_STOP:
+                return observed_base, held_q
             if turn_wrist(t):
                 yaw_total += t
                 held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
@@ -2751,6 +2768,11 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             elif os.environ.get('HOVER_ALIGN') == '1':
                 args.observed_base = hover_align(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                  state.held_quat, state.last_grasp_id or 1, say, log_fh)
+        if _SAFETY_STOP:
+            # 10-22 01:18: a protective stop inside hover_servo did not stop the run - drive-mate was called on a stopped arm
+            # and waited 650 s. Nothing more is sent once the robot has left NORMAL safety.
+            say(f"\n!!! robot {_SAFETY_STOP} - {tool_name} not started")
+            return {'result': 'failure', 'error': f'robot {_SAFETY_STOP}'}
         try:
             argv, timeout_s = build_argv(tool_name, kw, state,
                                          base_offset_xy=args.base_offset_xy,
