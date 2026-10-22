@@ -297,3 +297,21 @@ def classify_contact(
             "surface": surface_tolerance_m,
         },
     }
+
+
+def seated_under(base_name: str, object_name: str, margin_m: float = 0.005) -> list[str]:
+    """Parts seated before object_name whose seated CAD footprint (base-frame xy box) overlaps its own: it threads over
+    them before it meets the base (a corridor stage - inverted_u_yellow astride line_green)."""
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+
+    def box(o):
+        sp, sq = load_seat_pose_in_base(base_name, o)
+        P = R.from_quat(sq).apply(_surface_points(o, 0.003)) + sp
+        return P[:, 0].min(), P[:, 0].max(), P[:, 1].min(), P[:, 1].max()
+    ax0, ax1, ay0, ay1 = box(object_name)
+    out = []
+    for o in get_seated_so_far(base_name, object_name):
+        bx0, bx1, by0, by1 = box(o)
+        if ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m:
+            out.append(o)
+    return out

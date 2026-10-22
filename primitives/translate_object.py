@@ -47,7 +47,9 @@ import logging
 
 # Parts routed to the prismatic insertion (its own search/recovery ladder) - part-name routing that rung UNI replaces with a
 # CAD-stage rule. Exported so callers (the replay's hover servo) follow the same decision instead of keeping their own list.
-PRISMATIC_ROUTE_OBJECTS = ('line_green', 'inverted_u_yellow', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow')
+# inverted_u_yellow left 10-22: on a free base it seats by the depth servo + vertical touch lattice (in on dip 7), the
+# prismatic search slid it 14-19 mm along line_green at up to 20 N (9 of 10 attempts). UNI replaces this table.
+PRISMATIC_ROUTE_OBJECTS = ('line_green', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow')
 
 def _base_fixed() -> bool:
     try:

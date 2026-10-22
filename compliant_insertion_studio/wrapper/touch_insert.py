@@ -50,6 +50,7 @@ ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = p
 # Out to 2.5 mm at 0.6 mm pitch (nearest first, so a close aim still enters early: u_brown on dips 0-17)
 GRID_PITCH_M = float(os.environ.get('TOUCH_PITCH_MM', '0.6')) / 1000.0
 GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '2.5')) / 1000.0
+CORRIDOR_RMAX_M = 0.0015
 YAWS_DEG = tuple(float(v) for v in os.environ['TOUCH_YAWS_DEG'].split(',')) if os.environ.get('TOUCH_YAWS_DEG') else ()
 
 
@@ -172,8 +173,20 @@ def main():
         return 'rim'
 
     best = None                                         # (z, dx, dy) lowest rim contact
-    pts = hex_grid(GRID_PITCH_M, GRID_RMAX_M)
-    print(f"[touch] {len(pts)} probe points, pitch {1000*GRID_PITCH_M:.1f} mm, out to {1000*GRID_RMAX_M:.1f} mm", flush=True)
+    rmax = GRID_RMAX_M
+    try:
+        from compliant_insertion_studio.wrapper.cad_geometry import seated_under
+        over = seated_under(a.base_name, a.object_name)
+    except Exception:
+        over = []
+    if over:
+        # threading over seated parts (CAD): the sideways steps happen with the part astride them (yellow over line_green:
+        # +-1 mm), so the lattice stays within CORRIDOR_RMAX_M - the depth servo's aim is within ~1 mm (10-22 11:20: in on
+        # dip 7 of a 1.5 mm lattice)
+        rmax = min(rmax, CORRIDOR_RMAX_M)
+        print(f"[touch] astride {over}: lattice out to {1000*rmax:.1f} mm", flush=True)
+    pts = hex_grid(GRID_PITCH_M if not over else min(GRID_PITCH_M, 0.0005), rmax)
+    print(f"[touch] {len(pts)} probe points, out to {1000*rmax:.1f} mm", flush=True)
     for dx, dy in pts:
         z = probe(dx, dy)
         st = outcome(z)

@@ -1924,6 +1924,112 @@ def _footprints_overlap(base, a, b, margin_m=0.005):
     return ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m
 
 
+def seated_under(base, obj):
+    """Parts seated before obj whose CAD footprint overlaps obj's: it threads over them first (a corridor stage - yellow
+    over line_green) rather than meeting the base rim (cad_geometry.seated_under, shared with touch_insert)."""
+    from compliant_insertion_studio.wrapper.cad_geometry import seated_under as _su
+    return _su(base, obj)
+
+
+DSERVO_SPREAD_YAW_PX = 20.0     # a yaw slopes the far edge and spreads the fit: up to this the yaw is turned out first
+DSERVO_ITERS = 6
+
+
+def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
+    """Observe -> move -> observe with the target in the SAME frame as the image (10-22 11:16, the yellow seated by it):
+    (1) wrist to the base yaw, (2) the held part's outline over bare table, (3) base1 fitted to depth with the camera
+    centred over it (track_base_in_hand, seated parts in the fit), (4) the TCP translated straight over the predicted
+    seat at that height - the hand-eye error cancels but for its rotation x the ~5 cm move (~0.4 mm) - then rounds:
+    socket_shift_world; a yaw over 0.4 deg is turned out first (it alone spread the yellow's fit to 12 px: 2 px after),
+    then xy steps by -d until < 1 mm. Returns (base pose shifted so its seat lies under the aim, held quat) or None when
+    it cannot measure (outline, base read or fit) - the caller keeps its own aim."""
+    if observed_base is None or held_q is None:
+        return None
+    from compliant_insertion_studio.wrapper.marker_yaw import socket_shift_world, held_outline_px, still_frame, _tcp_pose_now
+    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+    from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
+    from primitives.shared.config import held_tool_offset_for
+    (bx, by, bz), bq = observed_base
+    err, _t = rel_yaw_error(obj, base, R_.from_quat(bq), R_.from_quat(held_q))
+    if abs(err) > 0.3 and turn_wrist(err):
+        held_q = list((R_.from_euler('z', err, degrees=True) * R_.from_quat(held_q)).as_quat())
+        say(f"  [dservo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
+    q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx + 0.17:.5f}",
+                        f"{by:.5f}", '0.32000', '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                       label='dservo: outline view over table', timeout_s=60, log_fh=log_fh)
+    _emitter(False)
+    try:
+        img_, _ = still_frame(n_avg=4)
+    finally:
+        _emitter(True)
+    outline = held_outline_px(img_) if (img_ is not None and r.get('result') != 'failure') else None
+    if outline is None:
+        say(f"  [dservo] {obj}: held part not outlined over the table"); return None
+    stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"dservo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
+    ob = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)   # depth fit, camera over the base
+    if ob is None or ob is observed_base:
+        say(f"  [dservo] {obj}: base not re-read in hand"); return None
+    (bx, by, bz), bq = ob
+    off = float(held_tool_offset_for(obj)[2])
+
+    def seat_tcp(q_ee, hq):
+        pr = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
+                                 base_world_quat_xyzw=list(bq), held_quat_xyzw=list(hq), ee_orientation_xyzw=list(q_ee),
+                                 flange_offset_m=off)
+        return np.array(pr['predicted_tcp_at_seat']['xyz_m'])
+    z = TRACK_VIEW_Z
+    xy = seat_tcp(_tcp_pose_now()[1], held_q)[:2].copy()
+    yaw_total, rounds, ok = 0.0, [], False
+    for k in range(DSERVO_ITERS):
+        rr_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                              f"{xy[1]:.5f}", f"{z:.5f}", '--keep-orientation', '--min-z', '0.15'],
+                             label=f'dservo round {k}: over the aim', timeout_s=60, log_fh=log_fh)
+        if rr_.get('result') == 'failure' or _SAFETY_STOP:
+            break
+        _emitter(False)
+        try:
+            img_, _ = still_frame(n_avg=4); tp = _tcp_pose_now(); tp = (np.asarray(tp[0]), np.asarray(tp[1]))
+        finally:
+            _emitter(True)
+        st = seat_tcp(tp[1], held_q)
+        d, info = socket_shift_world(obj, base, ob, float(tp[0][2] - st[2]), outline, img=img_, tcp_pose=tp,
+                                     debug_path=f"{stem}_r{k}.png")
+        rounds.append({'k': k, 'tcp': [tp[0].tolist(), tp[1].tolist()], 'seat_tcp': st.tolist(), 'info': info})
+        say(f"  [dservo] {obj} round {k}: {info.get('dxy_mm')} mm, yaw {info.get('yaw_img_deg')} deg, spread "
+            f"{info.get('spread_px')} px" + (f" ({info.get('error')})" if d is None else ""))
+        if d is None or max(info['spread_px']) > DSERVO_SPREAD_YAW_PX:
+            break
+        yi = info.get('yaw_img_deg') or 0.0
+        if abs(yi) > SERVO_YAW_MIN_TURN_DEG:
+            t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
+            if abs(yaw_total + t) > SERVO_MAX_YAW_DEG:
+                say(f"  [dservo] {obj}: yaw {yaw_total + t:+.1f} deg in all is more than the reads can be off - stopping"); break
+            if turn_wrist(t):
+                yaw_total += t
+                held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
+                say(f"  [dservo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
+                continue
+        if max(info['spread_px']) > SERVO_MAX_SPREAD_PX:
+            say(f"  [dservo] {obj}: fit spreads {info['spread_px']} px after the yaw - no xy step"); break
+        if np.hypot(*d) <= SERVO_TOL_M:
+            xy = xy - np.asarray(d); ok = True; break
+        xy = xy - np.asarray(d)
+    try:
+        json.dump({'rounds': rounds, 'held_q': list(held_q), 'base': [list(ob[0]), list(ob[1])], 'aim': list(xy), 'ok': ok},
+                  open(f"{stem}.json", 'w'), indent=1)
+    except Exception:
+        pass
+    if not ok:
+        say(f"  [dservo] {obj}: not converged - caller keeps its aim"); return None
+    st = seat_tcp((snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'), held_q)
+    c = np.asarray(xy) - st[:2]
+    if np.hypot(*c) > SERVO_MAX_M:
+        say(f"  [dservo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied"); return None
+    say(f"  [dservo] {obj}: converged, aim {1000*c[0]:+.1f} / {1000*c[1]:+.1f} mm from the predicted seat")
+    return ((bx + c[0], by + c[1], bz), bq), held_q
+
+
 def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Base pose from its markers in one frame over obj's seat at the clear height (tilt from the chain, yaw searched,
     translation solved: marker_yaw.base_pose_same_frame). Returns the new ((x, y, z), quat) (z kept) or the old one."""
@@ -3063,6 +3169,21 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                                                          state.held_quat, state.last_grasp_id or 1, say, log_fh)
                 except Exception as e_:
                     say(f"  [servo] {obj}: close base read not applied ({e_})")
+            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and seated_under(base_name or RUN_BASE['name'], obj):
+                # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
+                # marker read as the fallback when it cannot measure
+                bn_ = base_name or RUN_BASE['name']
+                ds = depth_servo(obj, bn_, args.observed_base, state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                if ds is not None:
+                    args.observed_base, state.held_quat = ds
+                else:
+                    try:
+                        args.observed_base = close_base_read(obj, bn_, args.observed_base, state.held_quat,
+                                                             state.last_grasp_id or 1, say, log_fh)
+                    except Exception as e_:
+                        say(f"  [dservo] {obj}: close base read not applied ({e_})")
+                STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
+                                                   (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
                 args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                       state.held_quat, state.last_grasp_id or 1, say, log_fh)
