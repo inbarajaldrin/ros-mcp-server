@@ -367,6 +367,19 @@ def held_outline_px(img, x_far=None, y_left=None):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = ((Rc > Gc + 6) & (Rc > 14)) | ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 35))   # dark-table noise is saturated at V < 20
     m8 = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # the held part's own colour: the median of the coloured pixels between the fingers. Pixels unlike it (base1 beside
+    # the table view - bright orange-red against maroon u_brown, overlapping it in the image 10-22 07:00) are dropped
+    # before the blob is chosen (erosion alone did not cut the wide overlap)
+    H0, W0 = mask.shape
+    bs = m8[int(0.64 * H0):H0, int(0.48 * W0):int(0.66 * W0)] > 0
+    if bs.sum() >= 300:
+        hb = hsv[int(0.64 * H0):H0, int(0.48 * W0):int(0.66 * W0)][bs].astype(np.float32)
+        hb = hb[hb[:, 2] >= max(40.0, float(np.percentile(hb[:, 2], 50)))]   # the part, not the dark finger pixels
+        hs, vs = float(np.median(hb[:, 0])), float(np.median(hb[:, 2]))
+        dh = np.abs(hsv[:, :, 0].astype(np.float32) - hs); dh = np.minimum(dh, 180 - dh)
+        like = (dh <= 12) & (np.abs(hsv[:, :, 2].astype(np.float32) - vs) <= max(35.0, 0.65 * vs))   # side faces are darker
+        m8 = (m8 > 0) & like
+        m8 = cv2.morphologyEx(m8.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     # a part touching another coloured thing in the image (the base beside the table view) merges with it: cut thin
     # bridges by eroding before choosing, then grow the chosen blob back inside the mask
     K = np.ones((15, 15), np.uint8)
