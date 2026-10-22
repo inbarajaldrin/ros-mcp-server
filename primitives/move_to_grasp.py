@@ -2428,6 +2428,17 @@ class DirectObjectMove(Node):
                     self.should_exit = True
                     self.get_logger().info("Movement completed successfully")
                     return
+                if self.target_xyz is not None:
+                    # An explicit target (the replay's depth CAD fit, ~1 mm) is the trusted measurement: step 3's fresh
+                    # low-hover MARKER grasp point (no pad-centre depth) replaced it on 2026-10-22 02:13 - xy (-5.7,
+                    # -2.4) mm off and 33 mm deeper, clamped 2 mm over the table - and drove a finger onto u_orange at
+                    # 81.6 N. The marker read from the low hover is the one known 9-10 mm off (depth-pick memo).
+                    self.get_logger().info("Step 2 completed. Skipping step 3 (explicit --target-xyz from the depth fit)")
+                    self._print_final_object_pose()
+                    self.movement_completed = True
+                    self.should_exit = True
+                    self.get_logger().info("Movement completed successfully")
+                    return
                 self.get_logger().info("Step 2 completed. Attempting Step 3: final fine positioning")
                 # Don't exit yet - let timer callback attempt step 3
                 return
