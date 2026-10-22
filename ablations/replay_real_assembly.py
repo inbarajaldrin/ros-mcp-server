@@ -1898,6 +1898,19 @@ def hover_align(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     return ((bx - total[0], by - total[1], bz), bq)
 
 
+def _footprints_overlap(base, a, b, margin_m=0.005):
+    """Do the seated CAD footprints (base-frame xy boxes) of parts a and b overlap, within margin_m?"""
+    from grasp_depth import load_mesh, surface_points
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+    box = []
+    for o in (a, b):
+        sp_, sq_ = load_seat_pose_in_base(base, o); V_, F_ = load_mesh(o)
+        P_ = R_.from_quat(sq_).apply(surface_points(V_, F_, 0.003)) + sp_
+        box.append((P_[:, 0].min(), P_[:, 0].max(), P_[:, 1].min(), P_[:, 1].max()))
+    (ax0, ax1, ay0, ay1), (bx0, bx1, by0, by1) = box
+    return ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -1945,10 +1958,13 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         # the FIRST surface the held part can meet: the base top or the top of any part seated before it (10-22 01:59:
         # inverted_u_yellow nests over the seated parts; measuring 2.5 mm over the base top hit them, 4 N guard)
         from compliant_insertion_studio.wrapper.cad_geometry import build_contact_candidates, get_seated_so_far
+        # only parts seated UNDER the held part's footprint can meet it (10-22 02:36: u_orange's footprint does not
+        # overlap u_brown's, yet u_brown's top set the measuring height 70 mm up and the base markers left the view)
+        under = [o for o in get_seated_so_far(base, obj) if _footprints_overlap(base, obj, o)]
         cands = build_contact_candidates(target_object=obj, target_grasp_id=int(grasp_id), base_name=base,
                                          base_world_z=float(bz), R_grasp_quat_xyzw=held_q,
                                          predicted_tcp_z_at_seat=float(st[2]),
-                                         seated_objects=get_seated_so_far(base, obj),
+                                         seated_objects=under,
                                          flange_offset_world_z=-float(held_tool_offset_for(obj)[2]))
         rim_z = max(v for k, v in cands.items() if k != 'SEAT')
         say(f"  [servo] {obj}: first contact {1000*(rim_z - st[2]):+.1f} mm over the seat "
