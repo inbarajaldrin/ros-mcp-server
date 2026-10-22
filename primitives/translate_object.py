@@ -44,6 +44,14 @@ import logging
 # we skip ~2-3s of import overhead.
 # ---------------------------------------------------------------------------
 
+def _base_fixed() -> bool:
+    try:
+        from primitives.shared.config import BASE_FIXED
+        return bool(BASE_FIXED)
+    except Exception:
+        return True
+
+
 def _subprocess_fast_path():
     """Exit early for subprocess-only invocations (before heavy imports)."""
     pre = argparse.ArgumentParser(add_help=False)
@@ -351,7 +359,10 @@ def _subprocess_fast_path():
             # friction. With 9N press + 8N lateral, the same insert seated within
             # 1.7s of SEARCH. Real crashes are still well-bounded by --override-fz-cap.
             '--search-F-press-N', '9.0',
-            '--search-Fmax-N', '8.0',
+            # 2026-10-21: on a base that is NOT fixed (cell_layout base_fixed: false) 8 N lateral turned base1 from
+            # 0.19 to ~8.4 deg over two u_brown searches (the yaw the operator saw "move away"); an untaped base
+            # slides at a few N, so the lateral search force stays below that and the aim comes from vision instead
+            '--search-Fmax-N', ('8.0' if _base_fixed() else '2.5'),
             '--search-v-s-mm-s', '5.0',
             '--search-pitch-mm', '2.0',
             '--search-R-max-mm', '8.0',

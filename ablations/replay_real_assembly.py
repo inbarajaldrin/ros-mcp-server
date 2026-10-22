@@ -1711,12 +1711,57 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
                 error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
 
 
+def BASE_FIXED_CFG() -> bool:
+    from primitives.shared.config import BASE_FIXED
+    return bool(BASE_FIXED)
+
+
 def one_node() -> bool:
     """Operator 2026-10-21 ('calibrate parts once, then assemble; compliant insertion takes the remaining error as one
     node; nudge is not part of compliant insertion'): with drive-mate inserting (SEAMS_DRIVE=1) the base is read once
     at startup, each part once at its pick, drive-mate's at-rest result decides each insert, nothing touches a part
     after its insert, and ExecuteMate certifies every mate once at the end from one view (report only)."""
     return os.environ.get('SEAMS_DRIVE') == '1'
+
+
+TRACK_VIEW_Z = 0.40            # flange height over the base for the in-hand marker read (part bottom ~0.18 m above it)
+
+
+def track_base_in_hand(base, observed_base, say, log_fh=None):
+    """Free base (2026-10-21 19:31-19:35): two u_brown rim searches turned base1 from 0.19 to ~8.4 deg (8 N lateral
+    search force on an untaped base) and the next attempt aimed at the startup read. With the part in hand, fly the
+    camera over the base, read it from its corner markers by solvePnP (marker_yaw.base_pose_world: 2.4 px, repeats
+    to 0.1 mm / 0.03 deg; the localizer drops frames with a held part in them) and return the base pose to aim at.
+    Rule 1: re-read only after something pushed it - every insert attempt touches the base. Returns the new
+    ((x, y, z), quat) or the old one when not read."""
+    if observed_base is None:
+        return observed_base
+    from compliant_insertion_studio.wrapper.marker_yaw import base_pose_world
+    from seat_check import X_CAM
+    snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
+    if not tcp.get('quat_xyzw'):
+        return observed_base
+    (bx, by, _), _ = observed_base
+    Rt = R_.from_quat(tcp['quat_xyzw']).as_matrix()
+    cam = Rt @ np.asarray(X_CAM)[:3, 3]                            # camera offset from the flange, world frame
+    tx, ty = bx - cam[0], by - cam[1]                               # camera straight over the base centre
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tx:.4f}",
+                        f"{ty:.4f}", f"{TRACK_VIEW_Z:.3f}", '--quat', *[f"{v:.6f}" for v in tcp['quat_xyzw']],
+                        '--min-z', '0.15'], label=f'base track view (part in hand)', timeout_s=60, log_fh=log_fh)
+    if r.get('result') == 'failure':
+        say(f"  [base-track] view not reached ({r.get('error', '')}) - aiming at the previous read"); return observed_base
+    pose, info = base_pose_world(base)
+    if pose is None:
+        say(f"  [base-track] {base} not read in hand: {info} - aiming at the previous read"); return observed_base
+    (ox, oy, oz), oq = observed_base
+    dyaw = float(np.degrees((R_.from_quat(pose[1]) * R_.from_quat(oq).inv()).as_rotvec()[2]))
+    dxy = 1000 * np.hypot(pose[0][0] - ox, pose[0][1] - oy)
+    say(f"  [base-track] {base} from its markers (part in hand): moved {dxy:.1f} mm, turned {dyaw:+.2f} deg since "
+        f"the aim {info}")
+    # keep the measured z of the CAD fit (markers sit on the top face; their z carries the depth of the top plane)
+    yaw_only = R_.from_euler('z', float(R_.from_quat(pose[1]).as_euler('xyz')[2]))
+    tilt = R_.from_quat(oq) * R_.from_euler('z', float(R_.from_quat(oq).as_euler('xyz')[2])).inv()
+    return ((pose[0][0], pose[0][1], oz), tuple(float(v) for v in (tilt * yaw_only).as_quat()))
 
 
 def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
@@ -2472,6 +2517,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                        " - check the D415 USB link (dmesg), restart realsense2_camera + localizer")
                 say(f"\n!!! {msg}")
                 return {'result': 'failure', 'error': msg}
+        if (tool_name == 'translate_object' and kw.get('action') == 'insert' and one_node() and not args.dry_run
+                and not BASE_FIXED_CFG()):
+            args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
+                                                    say, log_fh)
         try:
             argv, timeout_s = build_argv(tool_name, kw, state,
                                          base_offset_xy=args.base_offset_xy,
