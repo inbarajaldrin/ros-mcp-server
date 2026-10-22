@@ -1832,6 +1832,74 @@ def hover_align(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     return ((bx - total[0], by - total[1], bz), bq)
 
 
+def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
+    """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
+    the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
+    hover 0.10 m over the predicted seat, then marker_yaw.socket_offset: the part's real top-face edges vs its CAD top
+    face at the seat raised to the current height, placed by the base's own markers in the same frame (no hand-eye,
+    no held-pose chain); move by minus it, repeat (<= 4) until < 1 mm. Returns (base pose to aim at = shifted by the
+    total move, held quat after the yaw turn)."""
+    if observed_base is None or held_q is None:
+        return observed_base, held_q
+    from compliant_insertion_studio.wrapper.marker_yaw import socket_shift, held_outline_px, still_frame
+    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+    from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
+    from primitives.shared.config import held_tool_offset_for
+    (bx, by, bz), bq = observed_base
+    err, _t = rel_yaw_error(obj, base, R_.from_quat(bq), R_.from_quat(held_q))
+    if abs(err) > 0.3 and turn_wrist(err):
+        held_q = list((R_.from_euler('z', err, degrees=True) * R_.from_quat(held_q)).as_quat())
+        say(f"  [servo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
+    tcp = (snapshot_robot_state().get('tcp') or {})
+    pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
+                               base_world_quat_xyzw=bq, held_quat_xyzw=held_q, ee_orientation_xyzw=tcp['quat_xyzw'],
+                               flange_offset_m=float(held_tool_offset_for(obj)[2]))
+    st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); q = tcp['quat_xyzw']
+    # the held part's place in the image, once per grasp, over bare table beside the base (camera rigid with the gripper)
+    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx + 0.17:.5f}",
+                        f"{by:.5f}", '0.32000', '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
+                       label='servo: outline view over table', timeout_s=60, log_fh=log_fh)
+    _emitter(False)
+    try:
+        img_, _ = still_frame(n_avg=4)
+    finally:
+        _emitter(True)
+    outline = held_outline_px(img_) if (img_ is not None and r.get('result') != 'failure') else None
+    if outline is None:
+        say(f"  [servo] {obj}: held part not outlined over the table - aiming as read"); return observed_base, held_q
+    say(f"  [servo] {obj}: held part outlined ({len(outline['far'])} far / {len(outline['left'])} left edge points)")
+    xy = st[:2].copy()
+    for k in range(SERVO_ITERS + 1):
+        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                            f"{xy[1]:.5f}", f"{st[2] + HOVER_ALIGN_ABOVE_M:.5f}", '--quat', *[f"{v:.6f}" for v in q],
+                            '--min-z', '0.15'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
+        if r.get('result') == 'failure':
+            say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})"); break
+        _emitter(False)
+        try:
+            d, info = socket_shift(obj, base, HOVER_ALIGN_ABOVE_M, outline)
+        finally:
+            _emitter(True)
+        if d is None:
+            say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
+        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket (shift {info['shift_px']} px, "
+            f"spread {info['spread_px']} px)")
+        if np.hypot(*d) <= SERVO_TOL_M or k == SERVO_ITERS:
+            break
+        xy = xy - np.asarray(d)
+    c = xy - st[:2]
+    if np.hypot(*c) > SERVO_MAX_M:
+        say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
+        return observed_base, held_q
+    say(f"  [servo] {obj}: aim moved by ({1000*c[0]:+.1f}, {1000*c[1]:+.1f}) mm")
+    return ((bx + c[0], by + c[1], bz), bq), held_q
+
+
+SERVO_ITERS = 4
+SERVO_TOL_M = 0.001
+SERVO_MAX_M = 0.015
+
+
 def _emitter(on):
     """The D415 projector's dots swamp the colour image in a dark room (10-21): off for colour-only reads."""
     try:
@@ -2599,7 +2667,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 and not BASE_FIXED_CFG()):
             args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                                     say, log_fh)
-            if os.environ.get('HOVER_ALIGN', '1') == '1':
+            if os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
+                args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
+                                                      state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
+                    state.held_quat = hq_                           # the wrist turned: the chained held pose turns with it
+                    STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
+                                                       (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
+            elif os.environ.get('HOVER_ALIGN') == '1':
                 args.observed_base = hover_align(obj, base_name or RUN_BASE['name'], args.observed_base,
                                                  state.held_quat, state.last_grasp_id or 1, say, log_fh)
         try:
