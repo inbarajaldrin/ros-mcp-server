@@ -2073,13 +2073,17 @@ def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None
     return ((pose[0][0], pose[0][1], bz), tuple(pose[1]))
 
 
+SERVO_MEASURED: dict = {}         # obj -> did the last hover_servo take a reading
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
     hover 0.10 m over the predicted seat, then marker_yaw.socket_offset: the part's real top-face edges vs its CAD top
     face at the seat raised to the current height, placed by the base's own markers in the same frame (no hand-eye,
     no held-pose chain); move by minus it, repeat (<= 4) until < 1 mm. Returns (base pose to aim at = shifted by the
-    total move, held quat after the yaw turn)."""
+    total move, held quat after the yaw turn). SERVO_MEASURED[obj] says whether a reading was taken (else only the bias)."""
+    SERVO_MEASURED[obj] = False
     if observed_base is None or held_q is None:
         return observed_base, held_q
     from compliant_insertion_studio.wrapper.marker_yaw import socket_shift_world, held_outline_px, still_frame
@@ -2285,6 +2289,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
     # the residual bias differs by measuring height: from just over the rim (-0.5, +0.9) mm (u_brown, by hand and pipeline);
     # from the clear height (+0.2, -2.1) and (-1.1, -1.8) mm (u_orange, 10-22 04:47 and 03:55) - hand-eye tilt x the lever
+    SERVO_MEASURED[obj] = final_reading is not None
     c = xy - st[:2] + (SERVO_BIAS_CLEAR_M if z_meas >= z_clear - 0.001 else SERVO_BIAS_M)
     if np.hypot(*c) > SERVO_MAX_M:
         say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
@@ -3197,16 +3202,19 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
                                                    (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
             elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
-                # the depth-frame servo first for every part (10-22 12:22 u_orange: the marker servo read 0-1 base markers
-                # over its far-side seat and could not measure; the depth servo converged and it went in on the lattice);
-                # the marker servo when the depth servo cannot measure
-                ds = depth_servo(obj, base_name or RUN_BASE['name'], args.observed_base, state.held_quat,
-                                 state.last_grasp_id or 1, say, log_fh)
-                if ds is not None:
-                    args.observed_base, hq_ = ds
-                else:
-                    args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                          state.held_quat, state.last_grasp_id or 1, say, log_fh)
+                # the marker servo first (u_brown seated first try with it in attempts 16-18; the depth servo's clean,
+                # converged reading put u_brown 6 mm off at 12:39 - not yet understood), the depth-frame servo when the
+                # marker servo took no reading (12:05/12:22 u_orange: 0-1 base markers over its far-side seat; the depth
+                # servo converged and it entered on the lattice)
+                ob0_, hq0_ = args.observed_base, state.held_quat
+                args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], ob0_, hq0_,
+                                                      state.last_grasp_id or 1, say, log_fh)
+                if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
+                    say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
+                    ds = depth_servo(obj, base_name or RUN_BASE['name'], ob0_, hq_ if hq_ is not None else hq0_,
+                                     state.last_grasp_id or 1, say, log_fh)
+                    if ds is not None:
+                        args.observed_base, hq_ = ds
                 if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
                     state.held_quat = hq_                           # the wrist turned: the chained held pose turns with it
                     STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
