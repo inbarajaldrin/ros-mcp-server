@@ -39,7 +39,7 @@ END_IN_M = 0.010             # end taps this far in from the CAD top-face ends: 
                              # part's opening, where the 20 mm finger block lands on the U arm beside the bar (+10.6 mm,
                              # 10-23 00:08); 25 mm still leaves a 45 mm lever for the pitch
 MAX_PRESSES = 6
-TAP_FAST = __import__('os').environ.get('TAP_FAST', '0') == '1'   # travel timed by distance (bench before default)
+TAP_FAST = __import__('os').environ.get('TAP_FAST', '1') == '1'   # travel timed by distance (benched 10-23: 9.9 -> 6.9 s a tap)
 FAST_UP_M_S, FAST_ACROSS_M_S, FAST_DOWN_M_S = 0.020, 0.030, 0.012  # lift unguarded; across and down guarded at TAP_N
 CLEAR_M = 0.025              # sideways travel between tap points happens this far over the part's seated top: its
                              # neighbours stand up to +19.6 mm over line_green's (10-22: travel 3-7 mm over it ran the tips
