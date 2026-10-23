@@ -752,7 +752,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--assembly-json', required=True)
     ap.add_argument('--dry-run', action='store_true', help='plan spots and print steps; no motion')
-    ap.add_argument('--only', default=None)
+    ap.add_argument('--only', default=None, help='a part, or a comma list of parts (taken out in reverse assembly order)')
     ap.add_argument('--relocate', default=None, metavar='PART',
                     help='pick PART off the table (move_to_grasp) and set it down at a free, '
                          'properly spaced spot; for parts lying too close to each other')
@@ -858,7 +858,10 @@ def main():
         return rc
     order = json.load(open(REPO / f"ablations/eval_resources/fmb{RUN['base'][4:]}_assembly.json"))['assembly_order']
     sel = a.relocate or a.only
-    parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sel or o['object_name'] == sel]
+    # --only takes a comma list: one process for several parts (purpose map 10-23: one process per part re-homed,
+    # re-opened and re-read an unchanged scene, ~60-80 s a reset)
+    sels = set(sel.split(',')) if sel else None
+    parts = [o for o in sorted(order, key=lambda o: -o['position']) if not sels or o['object_name'] in sels]
     from primitives.shared.config import DEFAULT_BASE_POSITION
     if a.resume_held and not verify_held(a.resume_held):
         print(f"verify_grasp: {a.resume_held} not held — not resuming"); return 1
