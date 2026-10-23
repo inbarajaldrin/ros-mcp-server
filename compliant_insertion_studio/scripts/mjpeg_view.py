@@ -128,7 +128,7 @@ PAGE_SPLIT = """<html><head><title>FMB1 cell</title><meta name='viewport' conten
   --me:#3a3936;--metext:#ecebe6;--tool:#8f8c83;--event:#e3a98c;--eventbg:#33281f;--code:#33322f;--pre:#1c1b1a;--views:#1a1918}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 ui-sans-serif,-apple-system,'Segoe UI',sans-serif;display:flex;height:100vh;overflow:hidden}
-#chat{flex:1 1 45%;display:flex;flex-direction:column;background:var(--chat);border-right:1px solid var(--line);min-width:0}
+#chat{flex:1 1 auto;display:flex;flex-direction:column;background:var(--chat);border-right:1px solid var(--line);min-width:0}
 #chat header{padding:12px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;font-weight:600}
 #chat header .mark{width:22px;height:22px;color:var(--accent)}
 #chat header small{color:var(--muted);font-weight:400}
@@ -157,11 +157,13 @@ details.tools div{padding:1px 0 1px 16px;white-space:pre-wrap;overflow-wrap:anyw
 .md th,.md td{border:1px solid var(--line);padding:4px 9px;text-align:left}
 .md a{color:var(--accent)}.md blockquote{margin:.5em 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
 .md strong{font-weight:650}
-#views{flex:1 1 55%;display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0;background:var(--views)}
-#views figure{margin:0;flex:1 1 50%;min-height:0;display:flex;flex-direction:column}
-#views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0;border-radius:8px}
+/* the views column is as wide as two 16:9 frames stacked in the window's height allow (no letterbox), the chat takes the rest */
+#views{flex:0 0 auto;width:min(62vw,calc((100vh - 76px) / 2 * 16 / 9 + 16px));display:flex;flex-direction:column;justify-content:center;
+  gap:8px;padding:8px;background:var(--views);overflow:hidden}
+#views figure{margin:0;display:flex;flex-direction:column}
+#views img{width:100%;height:auto;aspect-ratio:16/9;object-fit:contain;background:#000;border-radius:8px}
 figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
-@media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#chat{height:60vh}}
+@media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#chat{height:60vh}#views{width:auto}}
 </style></head><body>
 <div id='chat'><header><svg class='mark' viewBox='0 0 24 24' fill='currentColor'><path d='M12 2l1.6 6.9L20 6l-4.6 5.1L22 12l-6.6.9L20 18l-6.4-2.9L12 22l-1.6-6.9L4 18l4.6-5.1L2 12l6.6-.9L4 6l6.4 2.9z'/></svg>Claude <small>FMB1 cell session</small></header><div id='log'></div></div>
 <div id='views'>__FIGS__</div>
