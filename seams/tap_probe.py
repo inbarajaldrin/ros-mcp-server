@@ -208,10 +208,23 @@ def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None
         close_node()
 
 
+def close_fingers():
+    """Taps and presses are made with the fingers CLOSED (one 20 mm tip block). Run 29d / 30: the pipeline tapped right
+    after the release, fingers at the release width - they straddled the bar (middle 'missed'), the end taps landed on
+    the U parts beside it (+12 mm). The standalone tap scripts closed the gripper first and hit every point."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    subprocess.run([sys.executable, '-u', '-m', 'primitives.control_gripper', 'close', '--mode', 'real'], cwd=str(repo),
+                   capture_output=True, timeout=30)
+
+
 def tap_recover_(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None):
     """Map the top, press the highest point not yet blocked twice, re-tap it, repeat; True when every point is inside
     the band. False with the map when presses no longer move it (the caller's other recoveries: nudge, reseat)."""
     tp = tapper or Tapper.for_part(obj, base_pose, base)
+    close_fingers()
     t0 = time.time()
     m = tp.map()
     say(f"  [taps] {obj}: map {m} mm (band +-{1000 * tp.band_m:.1f})")
