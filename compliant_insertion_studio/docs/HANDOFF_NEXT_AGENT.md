@@ -21,12 +21,12 @@ drive_mate_server, execute_mate_server, `python3 -u -m seams.<name>`, logs /tmp/
 ```bash
 export FMB_LAYOUT=fmb1_home_2026_10_21 BASE_FROM=icp NO_AIM_BIAS=1 PRE_INSERT_READ=off FOLLOW_YAW=0
 J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
-for p in inverted_u_yellow line_green u_orange; do python3 -u ablations/disassemble.py --assembly-json $J --only $p --to-free-spot; done
-python3 -u ablations/disassemble.py --assembly-json $J --only u_brown --to-staging
+python3 -u ablations/disassemble.py --assembly-json $J --only inverted_u_yellow,line_green,u_orange,u_brown --to-free-spot
 python3 -u ablations/move_base.py --base base1 --to 141 -482 19 --max-pushes 10
-SEAMS_DRIVE=1 SEAMS_CERTIFY=1 python3 -u ablations/replay_real_assembly.py --assembly-json $J --part-at-staging
+SEAMS_DRIVE=1 SEAMS_CERTIFY=1 python3 -u ablations/replay_real_assembly.py --assembly-json $J
 ```
-(the replay with `--part-at-staging` expects `ablations/logs/placed_parts.json` to name u_brown at (-0.32, -0.5)).
+(10-23 operator: every part goes to a free spot in the staging region; the clear area is for set-downs to regrasp, not
+for parking u_brown - the old recipe sent it there with `--to-staging` and started the replay with `--part-at-staging`).
 
 **What changed (see `git log` 10-22..23 for the evidence in each message):**
 - u_orange's clear-height servo: a measured 2x2 response matrix (`seams/servo_law.py`), 6 rounds -> 2.
