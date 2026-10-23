@@ -7,6 +7,8 @@
 #   ... --topic T        camera panel shows image topic T
 #   ... --split 0.4      camera gets 40% of the width (default 0.5)
 #   ... --camera-left    camera on the left, robot on the right
+#   ... --depth          a depth panel under the camera: /depth_view (height above the table in colour,
+#                        compliant_insertion_studio/scripts/depth_view.py - started here if it is not running)
 #
 # Left half: UR5e + RG2 models from the live driver, plus /grasp_points_real.
 # Right half: the D415 image (marker detections drawn by aruco_camera_localizer).
@@ -27,7 +29,7 @@ RVIZ_DIR="$REPO/compliant_insertion_studio/rviz"
 RUN_DIR=/tmp/fmb1_rviz
 mkdir -p "$RUN_DIR"
 
-FG=false; TOPIC=/annotated_stream; SPLIT=0.5; SIDE=right
+FG=false; TOPIC=/annotated_stream; SPLIT=0.5; SIDE=right; DEPTH=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fg) FG=true; shift ;;
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --topic) TOPIC="$2"; shift 2 ;;
         --split) SPLIT="$2"; shift 2 ;;
         --camera-left) SIDE=left; shift ;;
+        --depth) DEPTH=true; shift ;;
         -h|--help) sed -n '2,22p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -73,8 +76,25 @@ fi
 
 CFG="$RUN_DIR/fmb1_demo_runtime.rviz"
 sed "s|Value: /annotated_stream|Value: $TOPIC|" "$RVIZ_DIR/fmb1_demo.rviz" > "$RUN_DIR/fmb1_demo_topic.rviz"
+SECOND=()
+if [[ "$DEPTH" == true ]]; then
+    D=depth_view
+    if ! pgrep -f "${D}.py" >/dev/null 2>&1; then
+        nohup python3 -u "$REPO/compliant_insertion_studio/scripts/depth_view.py" >/tmp/depth_view.log 2>&1 &
+        ok "started depth_view.py (log /tmp/depth_view.log)"
+    fi
+    python3 - "$RUN_DIR/fmb1_demo_topic.rviz" <<'PY'
+import sys, yaml
+p = sys.argv[1]; cfg = yaml.safe_load(open(p))
+cam = next(d for d in cfg['Visualization Manager']['Displays'] if d.get('Name') == 'Camera')
+dep = dict(cam, Name='Depth', Topic=dict(cam['Topic'], Value='/depth_view'))
+cfg['Visualization Manager']['Displays'].append(dep)
+yaml.safe_dump(cfg, open(p, 'w'), sort_keys=False, width=1000)
+PY
+    SECOND=(--second-dock Depth)
+fi
 LAYOUT="$(python3 "$RVIZ_DIR/make_split_layout.py" "$RUN_DIR/fmb1_demo_topic.rviz" "$CFG" \
-        --image-dock Camera --split "$SPLIT" --camera-side "$SIDE" 2>"$RUN_DIR/layout.err")" \
+        --image-dock Camera --split "$SPLIT" --camera-side "$SIDE" "${SECOND[@]}" 2>"$RUN_DIR/layout.err")" \
     || { cat "$RUN_DIR/layout.err" >&2; die "could not build the split layout" 3; }
 ok "layout ${LAYOUT#*: }, camera topic $TOPIC"
 

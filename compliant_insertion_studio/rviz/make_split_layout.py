@@ -10,7 +10,7 @@ display's own panel, after the display ("Camera").
 
 Usage:
     make_split_layout.py TEMPLATE.rviz OUT.rviz [--image-dock NAME] [--split 0.5]
-                         [--camera-side right|left]
+                         [--camera-side right|left] [--second-dock NAME]   # NAME stacked under the camera
                          [--width W --height H]   # default: primary screen size
 
 Panels listed in the template (Displays, Views, ...) are not placed here: the demo
@@ -21,7 +21,7 @@ import sys
 
 import yaml
 
-def build_state(width, height, image_dock, split, side):
+def build_state(width, height, image_dock, split, side, second=None):
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt5.QtCore import Qt
@@ -44,6 +44,8 @@ def build_state(width, height, image_dock, split, side):
 
     area = Qt.RightDockWidgetArea if side == "right" else Qt.LeftDockWidgetArea
     img = dock(image_dock, area)
+    if second:
+        win.splitDockWidget(img, dock(second, area), Qt.Vertical)
 
     win.show()
     app.processEvents()
@@ -72,6 +74,7 @@ def main():
     p.add_argument("--split", type=float, default=0.5,
                    help="Fraction of the window width given to the camera.")
     p.add_argument("--camera-side", choices=("right", "left"), default="right")
+    p.add_argument("--second-dock", help="Name of a second Image display, stacked under the first.")
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
     a = p.parse_args()
@@ -91,7 +94,10 @@ def main():
     if a.image_dock not in names:
         sys.exit(f"template has no display named {a.image_dock!r} (has {names})")
 
-    state = build_state(w, h, a.image_dock, a.split, a.camera_side)
+    for n in [a.second_dock] if a.second_dock else []:
+        if n not in names:
+            sys.exit(f"template has no display named {n!r} (has {names})")
+    state = build_state(w, h, a.image_dock, a.split, a.camera_side, a.second_dock)
     geo = cfg.setdefault("Window Geometry", {})
     geo.update({
         "Width": w, "Height": h, "X": 0, "Y": 0,
@@ -99,6 +105,8 @@ def main():
         "QMainWindow State": state,
     })
     geo.setdefault(a.image_dock, {"collapsed": False})
+    if a.second_dock:
+        geo.setdefault(a.second_dock, {"collapsed": False})
 
     with open(a.out, "w") as fh:
         yaml.safe_dump(cfg, fh, sort_keys=False, width=1000)
