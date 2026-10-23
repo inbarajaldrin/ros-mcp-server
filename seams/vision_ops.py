@@ -290,7 +290,7 @@ def certify_many(mates):
             from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
             from seams.acceptance import seat_inside          # the same rule the planner's seat recovery stops on
             ev['ends_judged'] = wedge_possible(base, obj)
-            inside, ev['why'] = seat_inside(base, obj, z_err, ends)
+            inside, ev['why'] = seat_inside(base, obj, z_err, ends, ends_by_contact=te is not None)
             method = 'both' if xy_seen else 'depth_seat_check'
             ev['verdict'] = ('inside' if inside else 'outside') + f" (xy implied by seat depth): {ev['why']}"
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],

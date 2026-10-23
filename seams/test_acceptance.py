@@ -30,3 +30,11 @@ def test_ends_judged_only_where_the_part_can_wedge():
     """u_orange cannot wedge looking seated (CAD): its noisy end heights are reported, not judged."""
     assert seat_inside('base1', 'u_orange', 0.0005, [2.4, -1.8], margin=margin_m())[0]
     assert not seat_inside('base1', 'u_orange', 0.0026, [], margin=0.0)[0]
+
+
+def test_tap_ends_judged_against_the_seat():
+    """run 52: taps read the ends -1.40 / -1.45 mm (true heights), depth read the centre +1.20 (the view's bias) - a
+    seated bar; contact ends are judged on the band itself, not against the biased centre."""
+    assert seat_inside('base1', 'line_green', 0.0012, [-1.40, -1.45], ends_by_contact=True)[0]
+    ok, why = seat_inside('base1', 'line_green', 0.0012, [-1.40, 4.5], ends_by_contact=True)
+    assert not ok and 'end' in why
