@@ -1873,7 +1873,7 @@ def held_axial_correction(obj, grasp_id, held_q, outline, tcp_pose, say):
         say(f"  [held-axial] {obj}: not measured ({e})"); return None
 
 
-DSERVO_ROBUST = os.environ.get('DSERVO_ROBUST', '0') == '1'   # far edge by its median when only its std is spread (trial)
+DSERVO_ROBUST = os.environ.get('DSERVO_ROBUST', '1') == '1'   # far edge by its median when only its std is spread (38b: converged, seated)
 
 
 def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
@@ -2967,6 +2967,17 @@ def _seat_by_taps(obj, args, say):
     say(f"  [seat-check] {obj} (depth, for the base and the across error): "
         f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
     ends_ = res.get('end_heights_mm') or []
+    if res.get('height_err_mm') is not None:
+        from seams.acceptance import seat_inside
+        inside_, why_ = seat_inside(RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0, ends_)
+        if inside_:
+            # depth already passes it by the certifier's own rule: the taps would only confirm a seat (run 38b: line_green
+            # seated from the insert, ends +1.5 / -0.2 mm, 49 s of taps) - ExecuteMate measures it next anyway
+            say(f"  [seat-check] {obj}: depth passes it ({why_}) - no taps")
+            if (res.get('cross') or {}).get('centre_mm') is not None:
+                _record_seat_check_error(obj, res)
+            SEATED.mark(obj, True, how='depth seat check')
+            return True
     from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
     if wedge_possible(RUN_BASE['name'], obj) and ends_ and max(ends_) > NUDGE_FIRST_END_MM and (res.get('axial') or {}).get('extent_mm'):
         # an end this high is a wedge depth cannot mistake (runs 31/32 after the insert: +7.7 / +8.1 mm; seated bars read
