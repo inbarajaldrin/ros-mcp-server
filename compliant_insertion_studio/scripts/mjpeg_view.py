@@ -129,7 +129,16 @@ body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-syste
 #views figure{margin:0;flex:1 1 50%;min-height:0;display:flex;flex-direction:column}
 #views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0}
 figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
-.e{margin:0 0 10px;white-space:pre-wrap;word-wrap:break-word}
+.e{margin:0 0 12px;word-wrap:break-word}
+.e.tool,.e.event{white-space:pre-wrap}
+.md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
+.md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}.md li{margin:.15em 0}
+.md h1,.md h2,.md h3{font-size:15px;margin:.6em 0 .3em}
+.md code{font:12.5px ui-monospace,Menlo,monospace;background:#262a30;padding:1px 4px;border-radius:3px}
+.md pre{background:#0d0f12;border:1px solid var(--line);padding:8px;border-radius:4px;overflow-x:auto}
+.md pre code{background:none;padding:0}
+.md table{border-collapse:collapse;margin:.4em 0;font-size:13px}.md th,.md td{border:1px solid var(--line);padding:3px 8px;text-align:left}
+.md a{color:#8ab4ff}.md blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid var(--line);color:var(--muted)}
 .e .t{color:var(--muted);font-size:11px;margin-right:6px;font-variant-numeric:tabular-nums}
 .user{color:var(--user);border-left:3px solid var(--user);padding-left:8px}
 .claude{color:var(--claude)}
@@ -139,8 +148,11 @@ figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
 </style></head><body>
 <div id='log'></div>
 <div id='views'>__FIGS__</div>
+<script src='https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js'></script>
+<script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
 <script>
-let since=-1;const log=document.getElementById('log');
+let since=-1;
+function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}const log=document.getElementById('log');
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 async function poll(){
   try{
@@ -148,7 +160,9 @@ async function poll(){
     const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
     for(const e of j.entries){const d=document.createElement('div');d.className='e '+e.k;
       const who={user:'you',claude:'claude',tool:'·',event:'⚑'}[e.k];
-      d.innerHTML="<span class='t'>"+e.t+" "+who+"</span>"+esc(e.x);log.appendChild(d)}
+      const head="<span class='t'>"+e.t+" "+who+"</span>";
+      d.innerHTML=(e.k==='claude'||e.k==='user')?head+"<div class='md'>"+md(e.x)+"</div>":head+esc(e.x);
+      log.appendChild(d)}
     while(log.children.length>600)log.removeChild(log.firstChild);
     since=j.next;if(atBottom||j.first)log.scrollTop=log.scrollHeight;
   }catch(err){}
