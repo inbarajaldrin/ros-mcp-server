@@ -2072,7 +2072,8 @@ GRASP_DEPTH_MEAS_MAX_M = 0.012   # ... and up to this (more is a part on somethi
 GRASP_DEPTH_FIX = {}             # obj -> depth correction (m) measured this grasp; drive_align reports it to drive-mate
 
 
-SERVO_INPROC = os.environ.get('SERVO_INPROC', '0') == '1'   # servo moves in process (bench with nothing gripped first)
+SERVO_INPROC = os.environ.get('SERVO_INPROC', '1') == '1'   # servo moves in process (benched empty 10-23: 2.1 s a move vs 4.6)
+SERVO_SHORT_M, SERVO_SHORT_SPEED_M_S, SERVO_SHORT_MIN_S = 0.020, 0.015, 1.0   # in process: <= 20 mm timed by distance
 
 
 def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
@@ -2088,8 +2089,13 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
         # context): run 33's servo moves were ~4 s each, ~1.5 s of it a process start (u_brown: 8 moves / 99 s align)
         from compliant_insertion_studio.wrapper.touch_insert import move as _tmove, close_node as _close
         t0 = time.time()
+        d_ = (float(np.linalg.norm(np.asarray(tcp['xyz']) - np.asarray(xyz, float)))
+              if tcp.get('xyz') and abs(float(np.dot(tcp.get('quat_xyzw') or [0, 0, 0, 0], q))) > 0.9999 else 1.0)
         try:
-            r = _tmove(list(map(float, xyz)), list(map(float, q)), min_z=0.15)
+            # short moves (the servo's 3-15 mm steps) timed by distance, as the touch probes' are: the planner's floor
+            # held them at ~2.5 s (bench, nothing gripped: 3.5 s a move in process vs 4.6 s by subprocess)
+            r = _tmove(list(map(float, xyz)), list(map(float, q)), min_z=0.15,
+                       duration=max(SERVO_SHORT_MIN_S, d_ / SERVO_SHORT_SPEED_M_S) if d_ <= SERVO_SHORT_M else None)
         finally:
             _close()
         fh = _TIMING.get('fh')
