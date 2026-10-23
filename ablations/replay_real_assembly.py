@@ -2370,13 +2370,28 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     if mate is None or observed_base is None:
         return None
     out = None
-    for side in _sc.VIEW_SIDES:                     # vision does no motion: the planner tries views until it measures
+    # the view that measured this mate last time first (runs 32b/33b: the yellow's outer view read an end below the floor
+    # both times, ~25 s each) - learned from results, not a per-part table
+    vfile = REPO_ROOT / 'ablations' / 'logs' / 'certify_views.json'
+    try:
+        last_side = json.load(open(vfile)).get(mate)
+    except Exception:
+        last_side = None
+    sides = ([last_side] if last_side in _sc.VIEW_SIDES else []) + [v for v in _sc.VIEW_SIDES if v != last_side]
+    for side in sides:                              # vision does no motion: the planner tries views until it measures
         r = run_subprocess(_sc.view_pose(obj, observed_base, base, side), label=f'execute_mate: seat view ({obj}, {side})',
                            timeout_s=90, log_fh=log_fh)
         if r.get('result') == 'failure':
             continue
         out = _seam_call(['execute', '--mate', mate], 450)
         if out.get('refusal') != 'engagement_invalid':
+            if out.get('engagement_depth_m') is not None:
+                try:
+                    d_ = json.load(open(vfile)) if vfile.exists() else {}
+                    d_[mate] = side
+                    json.dump(d_, open(vfile, 'w'), indent=1)
+                except Exception:
+                    pass
             break
         say(f"  [execute_mate] {mate}: not measurable from the {side} view ({out.get('refusal_detail', '')}) - next view")
     if out is None:
