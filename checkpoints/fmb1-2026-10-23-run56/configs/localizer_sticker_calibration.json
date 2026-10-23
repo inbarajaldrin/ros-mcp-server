@@ -1,0 +1,50 @@
+{
+ "_doc": "Per-sticker calibration (pose6d-ios ADR 0010 model + printed edge). Solved 2026-10-14 from a 72-frame survey of the seated FMB1 assembly, base1 stickers as the fixture (scratchpad solve_stickers.py). dx/dy/dtheta in the sticker's own frame (m, rad), edge = black square (m). Assumes parts sit at their CAD seat (+-0.5-1 mm).",
+ "stickers": {
+  "6": {
+   "part": "inverted_u_yellow",
+   "face": "back",
+   "dx": -0.00021510456560550693,
+   "dy": -0.00018754380852570727,
+   "dtheta": -0.018614158077739144,
+   "edge": 0.01814474520549127,
+   "sd": [
+    0.00021657411149921638,
+    0.00017352909502831062,
+    0.007207565516761415,
+    0.00013015632839347415
+   ],
+   "n": 68
+  },
+  "18": {
+   "part": "u_brown",
+   "face": "back",
+   "dx": 0.001068469026083633,
+   "dy": 0.001269060799176753,
+   "dtheta": 0.004142678089983517,
+   "edge": 0.01906613719105963,
+   "sd": [
+    0.00019127954106722397,
+    0.00015978795931883628,
+    0.005841089638293299,
+    0.0001259376076760313
+   ],
+   "n": 72
+  },
+  "24": {
+   "part": "u_orange",
+   "face": "back",
+   "dx": -0.0014745286053215693,
+   "dy": -0.00021584524601940685,
+   "dtheta": 0.004622487180061827,
+   "edge": 0.018538237630030513,
+   "sd": [
+    0.00019908314099890604,
+    0.000150614217473767,
+    0.006843422990281767,
+    0.00013312857873139095
+   ],
+   "n": 69
+  }
+ }
+}
