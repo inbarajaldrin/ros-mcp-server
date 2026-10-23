@@ -63,6 +63,35 @@ WEDGE_ALONG_PITCH_M = 0.002
 WEDGE_ALONG_M = 0.006
 
 
+
+ENTRY_PRIOR_N, ENTRY_PRIOR_MIN, ENTRY_PRIOR_MAD_M = 6, 3, 0.001
+
+
+def _entry_prior(obj):
+    """(dx, dy) m: the median entry offset of this part's last successful inserts (their 'push' probe), when there are
+    at least ENTRY_PRIOR_MIN and they agree (MAD <= 1 mm on each axis); else None."""
+    import glob as _g
+    offs = []
+    for f in sorted(_g.glob(str(LOGS / f'insert_{obj}_*.meta.json')), key=os.path.getmtime, reverse=True):
+        try:
+            m = json.load(open(f))
+        except Exception:
+            continue
+        if m.get('outcome') != 'success':
+            continue
+        ent = [p_ for p_ in m.get('probes', []) if p_.get('push')]
+        if ent:
+            offs.append((ent[-1]['dx_mm'] / 1000.0, ent[-1]['dy_mm'] / 1000.0))
+        if len(offs) >= ENTRY_PRIOR_N:
+            break
+    if len(offs) < ENTRY_PRIOR_MIN:
+        return None
+    A = np.asarray(offs)
+    med = np.median(A, axis=0)
+    if np.any(np.median(np.abs(A - med), axis=0) > ENTRY_PRIOR_MAD_M) or np.hypot(*med) < 0.0003:
+        return None
+    return float(med[0]), float(med[1])
+
 def corridor_grid(axis_xy, pitch, along, across):
     """(dx, dy) points on a rectangle along/across a world unit axis, nearest first."""
     u = np.asarray(axis_xy, float) / np.linalg.norm(axis_xy); v = np.array([-u[1], u[0]])
@@ -313,6 +342,17 @@ def main():
         rmax = WEDGE_ALONG_M
         print(f"[touch] can wedge (CAD): along its own axis {np.round(ax, 3).tolist()} +-{1000*WEDGE_ALONG_M:.0f} mm "
               f"every {1000*WEDGE_ALONG_PITCH_M:.0f} mm, each probe pushed to the seat", flush=True)
+    prior = _entry_prior(a.object_name)
+    if prior is not None:
+        # the search starts where this part's recent inserts entered (a measured prior, not a per-part constant: the
+        # lattice is the same, re-centred and re-ordered; the points around the aim stay in it). line_green 10-23: entries
+        # 0.5-2.7 mm off the aim, median (-1.9, -0.7) mm, and the lattice spiralled out from the aim (52 probes in run 49)
+        px, py = prior
+        shifted = [(px + dx, py + dy) for dx, dy in pts]
+        rest = [q for q in pts if min(np.hypot(q[0] - s_[0], q[1] - s_[1]) for s_ in shifted) > 0.00025]
+        pts = sorted(shifted + rest, key=lambda q: np.hypot(q[0] - px, q[1] - py))
+        print(f"[touch] entry prior ({1000*px:+.1f}, {1000*py:+.1f}) mm from the last inserts - the search starts there",
+              flush=True)
     print(f"[touch] {len(pts)} probe points, out to {1000*rmax:.1f} mm", flush=True)
     pushes = []                                         # (z after the entering push, dx, dy) - the wedge search's fallback
     for dx, dy in pts:
