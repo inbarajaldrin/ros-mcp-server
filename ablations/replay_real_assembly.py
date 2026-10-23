@@ -2216,7 +2216,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # Measure from there instead (the hand-eye tilt lever grows to ~1.7 mm/deg; the dip grid covers +-1.5 mm)
             say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
             z_meas = z_clear
-            law.measuring_from_clear()                 # the reading moves ~2.4 mm per mm of step from there
+            law.measuring_from_clear(float(R_.from_quat(bq).as_euler('xyz', degrees=True)[2]))   # the 2x2 response, at this base yaw
             r = _move_unless_there((xy[0], xy[1], z_clear), q, f'servo up to measure {k}', log_fh)
             if _SAFETY_STOP:
                 return observed_base, held_q

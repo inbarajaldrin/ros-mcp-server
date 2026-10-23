@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO))
 from seams import servo_law as L  # noqa: E402
 
 L.TURN_AND_STEP = False          # the logs were made by the law without it
+L.GAIN_MATRIX = False            # ...and with the scalar clear-height gain
 L.SERVO_MAX_YAW_DEG = 4.0        # ...and with the 4 deg yaw cap (6 since run 28)
 
 import re  # noqa: E402
@@ -99,3 +100,32 @@ def test_turn_and_step_steps_with_the_turn(monkeypatch):
     assert isinstance(act2, L.Converged)
     out = law.finish()
     assert np.allclose(out.dxy, np.array([-0.0075, -0.0005]) + L.SERVO_BIAS_M)
+
+
+def test_matrix_law_converges_from_clear(monkeypatch):
+    """The 2x2 clear-height law on its own model (seat at the origin, part held off by e0): the reading is
+    G @ (xy - pocket) + turn effect; it ends within 0.5 mm of the pocket in <= 3 readings for the logged first readings."""
+    monkeypatch.setattr(L, 'GAIN_MATRIX', True)
+    monkeypatch.setattr(L, 'TURN_AND_STEP', True)
+    import numpy as np
+    G = L.SERVO_G_CLEAR
+    for pocket_mm, yaw0 in [((1.2, -2.0), -3.3), ((-3.0, 1.0), 0.0), ((2.5, 2.5), 1.5), ((-0.4, -0.3), 0.0)]:
+        pocket = np.array(pocket_mm) / 1000.0
+        law = L.HoverServoLaw((0.0, 0.0))
+        law.measuring_from_clear(L.SERVO_G_YAW_DEG)
+        yaw_left, n = yaw0, 0
+        while True:
+            d = G @ (law.xy - pocket)
+            n += 1
+            act = law.reading(d, {'yaw_img_deg': yaw_left, 'spread_px': [2.0, 1.0]})
+            if isinstance(act, L.Converged):
+                break
+            assert not isinstance(act, L.Stop), act
+            if isinstance(act, L.Turn):
+                law.turned(act.deg); yaw_left -= act.deg
+                pocket = pocket - L.SERVO_TURN_READ_CLEAR * act.deg @ np.linalg.inv(G).T   # the turn moves the reading
+            law.next_round()
+        out = law.finish()
+        assert isinstance(out, L.Aim)
+        assert n <= 3, (pocket_mm, n)
+        assert np.hypot(*(np.array(out.dxy) - L.SERVO_BIAS_CLEAR_G_M - pocket)) < 0.0005

@@ -29,13 +29,24 @@ SERVO_MAX_YAW_DEG = 6.0        # the whole servo may turn the wrist this much. W
 # run 28 (10-22 21:46, 21:50): u_brown held -3.0 deg in the jaws, the base read turned +1.8 deg between reads, and the
 # image read -4.47 / -4.2 deg with the part over its socket - twice the cap stopped the turn and 61 + 61 probes sat on
 # the rim
-SERVO_GAIN_CLEAR = 2.4         # reading change per mm of xy step when measured from the clear height (measured twice)
+SERVO_GAIN_CLEAR = 2.4         # scalar: only with SERVO_GAIN_MATRIX=0 (the law the 10-21/22 logs were made with)
+# From the clear height the reading is NOT a scaled step (u_orange, 79 step pairs / 24 sessions 10-22..23): change = G @ step,
+# residual 0.39/0.20 mm (any scalar: 1.55/1.15); singular values 2.38/0.59 - a y step moves the x reading -1.44 mm/mm, and the
+# scalar law's relearned gain (0.04..2.5) made it swing: 5.8 readings a session, 36% hit the cap; G in 2 (sim 2.0-2.7).
+# Bootstrap sd <= 0.03. World frame at base yaw SERVO_G_YAW_DEG; another yaw rotates it (the camera turns with the wrist).
+SERVO_G_CLEAR = np.array([[1.89, -1.44], [0.32, 0.50]])
+SERVO_TURN_READ_CLEAR = np.array([-1.28, -0.16]) / 1000.0    # reading change per +1 deg wrist turn (29 turns, sd 0.5/0.2 mm)
+SERVO_G_YAW_DEG = 19.5                                       # base yaw of the sessions G was fitted on (16-23 deg)
+SERVO_TOL_CLEAR_M = 0.001                                    # TCP error |G^-1 d| under this: aim through it
+GAIN_MATRIX = os.environ.get('SERVO_GAIN_MATRIX', '1') == '1'
 SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
 # the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
 # 10-22 00:13): the target's residual bias (hand-eye tilt x the 35 mm lift); the dip grid still covers +-1.5 mm around it.
 # From the clear height (+0.2, -2.1) and (-1.1, -1.8) mm (u_orange, 10-22 04:47 and 03:55) - hand-eye tilt x the lever
 SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5,0.9').split(',')]) / 1000.0
 SERVO_BIAS_CLEAR_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_MM', '-0.5,-2.0').split(',')]) / 1000.0
+# with the matrix law: 15 pocket entries 10-22 06:00..10-23 00:47 sat (-0.5, -0.2) mm from the aim on mean, x <= 0 in 14/15
+SERVO_BIAS_CLEAR_G_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_G_MM', '-1.0,-2.2').split(',')]) / 1000.0
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
 # A wrist turn about the tool axis barely moves the part in xy (10-22: u_brown read 7.5 / 7.6 / 7.7 / 7.9 mm across three
@@ -86,16 +97,25 @@ class HoverServoLaw:
     best: Optional[Tuple[np.ndarray, np.ndarray]] = None
     final_reading: Optional[np.ndarray] = None
     notes: list = field(default_factory=list)
+    G: Optional[np.ndarray] = None            # set by measuring_from_clear with the matrix law
+    turn_read: Optional[np.ndarray] = None
+    bias_clear: Optional[np.ndarray] = None
+    matrix_aimed: bool = False
 
     def __post_init__(self):
         self.seat_xy = np.asarray(self.seat_xy, float)
         self.xy = self.seat_xy.copy() if self.xy is None else np.asarray(self.xy, float)
 
-    def measuring_from_clear(self):
+    def measuring_from_clear(self, base_yaw_deg: Optional[float] = None):
         """The base's markers leave the frame over the rim: measure from the clear height, where a step moves the
-        reading ~2.4x (u_orange 10-22 03:28 / 04:39: a 1:1 first step overshot 7.6 -> -10.3 mm)."""
+        reading through SERVO_G_CLEAR (or ~2.4x with the scalar law; u_orange 10-22 03:28: a 1:1 step overshot)."""
         self.from_clear = True
         self.gain = SERVO_GAIN_CLEAR
+        if GAIN_MATRIX:
+            a = np.radians((base_yaw_deg if base_yaw_deg is not None else SERVO_G_YAW_DEG) - SERVO_G_YAW_DEG)
+            Rz = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+            self.G = Rz @ SERVO_G_CLEAR @ Rz.T
+            self.turn_read, self.bias_clear = Rz @ SERVO_TURN_READ_CLEAR, Rz @ SERVO_BIAS_CLEAR_G_M
 
     def measuring_low(self):
         """Touched down before the measuring height: measured from 2 mm over the contact (the rim bias applies)."""
@@ -122,6 +142,8 @@ class HoverServoLaw:
         if self.best is None or np.hypot(*d) < np.hypot(*self.best[1]):
             self.best = (self.xy.copy(), d.copy())
         yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG or abs(yi / SERVO_YAW_GAIN) < SERVO_YAW_MIN_TURN_DEG
+        if self.G is not None and self.from_clear and sp_x <= SERVO_MAX_SPREAD_PX:   # far-edge-only rounds: scalar path
+            return self._reading_matrix(d, yi, yaw_ok)
         if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or self.k == SERVO_ITERS:
             return Converged()
         if not yaw_ok:
@@ -142,6 +164,22 @@ class HoverServoLaw:
         self.last_move, self.last_d = step, d
         return Step((float(self.xy[0]), float(self.xy[1])))
 
+    def _reading_matrix(self, d, yi, yaw_ok):
+        e = np.linalg.solve(self.G, d)                            # TCP error (m); fixed G, nothing relearned
+        if (np.hypot(*e) <= SERVO_TOL_CLEAR_M and yaw_ok) or self.k == SERVO_ITERS:
+            self.xy = self.xy - e                                 # aim through the reading (its zero repeats to ~0.2 mm)
+            self.matrix_aimed = True
+            return Converged()
+        if not yaw_ok:
+            t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
+            if abs(self.yaw_total + t) > SERVO_MAX_YAW_DEG:
+                return Stop(f"image yaw {yi} deg would turn the wrist {self.yaw_total + t:+.1f} deg in all "
+                            f"(> {SERVO_MAX_YAW_DEG})")
+            self.xy = self.xy - np.linalg.solve(self.G, d + self.turn_read * t)   # step out the turn's own shift too
+            return Turn(t, (float(self.xy[0]), float(self.xy[1])))
+        self.xy = self.xy - e
+        return Step((float(self.xy[0]), float(self.xy[1])))
+
     def turned(self, deg: float):
         """The wrist turn succeeded: it moves the reading too - re-learn the xy gain."""
         self.last_move, self.last_d = None, None
@@ -152,6 +190,11 @@ class HoverServoLaw:
 
     def finish(self):
         overshot = None
+        if self.matrix_aimed:
+            c = self.xy - self.seat_xy + self.bias_clear              # aimed through the last reading: no best-of
+            if np.hypot(*c) > SERVO_MAX_M:
+                return Stop(f"correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off")
+            return Aim((float(c[0]), float(c[1])), self.yaw_total, True, None)
         if (self.best is not None and self.final_reading is not None
                 and np.hypot(*self.final_reading) > np.hypot(*self.best[1]) + 0.0005):
             # the last step made the reading worse (an overshoot): aim from the best measurement with the learned gain
