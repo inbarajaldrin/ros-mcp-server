@@ -38,3 +38,9 @@ blocks by time with the arm still (top 15):
   Completed: ['u_brown', 'u_orange', 'line_green', 'inverted_u_yellow']
 RUN EXIT 0 10:53:05
 ```
+
+## Note
+Run 48 = one uninterrupted cycle: reset (four disassemble calls, base push) + assembly, 4/4 certified, rc 0. line_green's
+certify refusal (an end read +2.39 mm by depth) was recovered automatically by taps + re-certify. The tag also contains
+c3d8b9a (disassemble --only accepts a comma list), committed after the run started and not exercised by it (the reset
+used one part per call).
