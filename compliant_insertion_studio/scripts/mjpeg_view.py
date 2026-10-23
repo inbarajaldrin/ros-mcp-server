@@ -122,49 +122,66 @@ def log_entries(since):
 
 PAGE_SPLIT = """<html><head><title>FMB1 cell</title><meta name='viewport' content='width=device-width'>
 <style>
-:root{--bg:#121417;--panel:#1a1d21;--line:#2a2e34;--text:#d7dbe0;--muted:#8a919a;--user:#7fb3ff;--claude:#e8eaed;--tool:#9aa3ad;--event:#c9a86a}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;height:100vh;overflow:hidden}
-#log{flex:1 1 45%;overflow-y:auto;padding:12px 16px;border-right:1px solid var(--line);background:var(--panel)}
-#views{flex:1 1 55%;display:flex;flex-direction:column;gap:6px;padding:6px;min-width:0}
-#views figure{margin:0;flex:1 1 50%;min-height:0;display:flex;flex-direction:column}
-#views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0}
-figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
-.e{margin:0 0 12px;word-wrap:break-word}
-.e.tool,.e.event{white-space:pre-wrap}
+:root{--bg:#0f1113;--chat:#16191c;--line:#262a2f;--text:#e3e6ea;--muted:#8a919a;--me:#2f6fd6;--bot:#22262b;--tool:#7d858f;--event:#c9a86a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;height:100vh;overflow:hidden}
+#chat{flex:1 1 45%;display:flex;flex-direction:column;background:var(--chat);border-right:1px solid var(--line);min-width:0}
+#chat header{padding:10px 16px;border-bottom:1px solid var(--line);font-weight:600;display:flex;align-items:center;gap:8px}
+#chat header .dot{width:8px;height:8px;border-radius:50%;background:#3fb950}
+#chat header small{color:var(--muted);font-weight:400}
+#log{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;flex-direction:column;max-width:88%}
+.row.user{align-self:flex-end;align-items:flex-end}
+.row.claude{align-self:flex-start;align-items:flex-start}
+.bubble{padding:8px 12px;border-radius:14px;word-wrap:break-word;overflow-wrap:anywhere}
+.user .bubble{background:var(--me);color:#fff;border-bottom-right-radius:4px}
+.claude .bubble{background:var(--bot);border-bottom-left-radius:4px}
+.ts{color:var(--muted);font-size:11px;margin:2px 6px 0;font-variant-numeric:tabular-nums}
+details.tools{align-self:flex-start;color:var(--tool);font:12px/1.4 ui-monospace,Menlo,monospace;margin-left:4px;max-width:88%}
+details.tools summary{cursor:pointer;list-style:none;opacity:.85}
+details.tools summary::before{content:'▸ ';}details.tools[open] summary::before{content:'▾ ';}
+details.tools div{padding:1px 0 1px 14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.event{align-self:center;color:var(--event);background:#2a2418;border:1px solid #3d3322;border-radius:10px;padding:3px 10px;
+  font:12px/1.4 ui-monospace,Menlo,monospace;max-width:92%;overflow-wrap:anywhere;white-space:pre-wrap}
+.event .ts{margin-left:6px}
 .md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}.md li{margin:.15em 0}
 .md h1,.md h2,.md h3{font-size:15px;margin:.6em 0 .3em}
-.md code{font:12.5px ui-monospace,Menlo,monospace;background:#262a30;padding:1px 4px;border-radius:3px}
-.md pre{background:#0d0f12;border:1px solid var(--line);padding:8px;border-radius:4px;overflow-x:auto}
+.md code{font:12.5px ui-monospace,Menlo,monospace;background:rgba(0,0,0,.28);padding:1px 4px;border-radius:3px}
+.md pre{background:#0b0d10;border:1px solid var(--line);padding:8px;border-radius:6px;overflow-x:auto}
 .md pre code{background:none;padding:0}
-.md table{border-collapse:collapse;margin:.4em 0;font-size:13px}.md th,.md td{border:1px solid var(--line);padding:3px 8px;text-align:left}
-.md a{color:#8ab4ff}.md blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid var(--line);color:var(--muted)}
-.e .t{color:var(--muted);font-size:11px;margin-left:6px;font-variant-numeric:tabular-nums}
-.e .ts{text-align:right;margin-top:2px}
-.user{color:var(--user);border-left:3px solid var(--user);padding-left:8px}
-.claude{color:var(--claude)}
-.tool{color:var(--tool);font:12px/1.35 ui-monospace,Menlo,monospace;margin-bottom:4px}
-.event{color:var(--event);font:12px/1.35 ui-monospace,Menlo,monospace;margin-bottom:4px}
-@media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#log{max-height:50vh}}
+.md table{border-collapse:collapse;margin:.4em 0;font-size:13px}.md th,.md td{border:1px solid #3a3f46;padding:3px 8px;text-align:left}
+.md a{color:#9cc2ff}.user .md a{color:#fff}.md blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid #3a3f46;color:var(--muted)}
+#views{flex:1 1 55%;display:flex;flex-direction:column;gap:6px;padding:6px;min-width:0}
+#views figure{margin:0;flex:1 1 50%;min-height:0;display:flex;flex-direction:column}
+#views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0;border-radius:4px}
+figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
+@media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#chat{height:60vh}}
 </style></head><body>
-<div id='log'></div>
+<div id='chat'><header><span class='dot'></span>Claude <small>FMB1 cell session</small></header><div id='log'></div></div>
 <div id='views'>__FIGS__</div>
 <script src='https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js'></script>
 <script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
 <script>
-let since=-1;
-function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}const log=document.getElementById('log');
+let since=-1;const log=document.getElementById('log');
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}
+function add(e){
+  if(e.k==='tool'){
+    let g=log.lastElementChild;
+    if(!g||g.tagName!=='DETAILS'){g=document.createElement('details');g.className='tools';g.innerHTML='<summary></summary>';g.n=0;log.appendChild(g)}
+    const d=document.createElement('div');d.textContent=e.x;g.appendChild(d);g.n++;
+    g.querySelector('summary').textContent=g.n+(g.n===1?' step':' steps')+' - '+e.x.slice(0,70);return}
+  if(e.k==='event'){const d=document.createElement('div');d.className='event';
+    d.innerHTML=esc(e.x)+"<span class='ts'>"+e.t+"</span>";log.appendChild(d);return}
+  const r=document.createElement('div');r.className='row '+e.k;
+  r.innerHTML="<div class='bubble md'>"+md(e.x)+"</div><div class='ts'>"+e.t+"</div>";log.appendChild(r)}
 async function poll(){
   try{
     const r=await fetch('/log?since='+since);const j=await r.json();
     const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
-    for(const e of j.entries){const d=document.createElement('div');d.className='e '+e.k;
-      const who={user:'you',claude:'claude',tool:'·',event:'⚑'}[e.k];
-      const stamp="<span class='t'>"+who+" "+e.t+"</span>";
-      d.innerHTML=(e.k==='claude'||e.k==='user')?"<div class='md'>"+md(e.x)+"</div><div class='ts'>"+stamp+"</div>":esc(e.x)+(e.k==='event'?" "+stamp:"");
-      log.appendChild(d)}
-    while(log.children.length>600)log.removeChild(log.firstChild);
+    j.entries.forEach(add);
+    while(log.children.length>500)log.removeChild(log.firstChild);
     since=j.next;if(atBottom||j.first)log.scrollTop=log.scrollHeight;
   }catch(err){}
   setTimeout(poll,2000)}
@@ -221,4 +238,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(page)
 
 
+import os as _os  # noqa: E402
+import signal as _signal  # noqa: E402
+for _sg in (_signal.SIGTERM, _signal.SIGINT):
+    _signal.signal(_sg, lambda *_: _os._exit(0))   # open streams and the rclpy thread kept SIGTERM from ending it
 ThreadingHTTPServer((a.bind, a.port), H).serve_forever()
