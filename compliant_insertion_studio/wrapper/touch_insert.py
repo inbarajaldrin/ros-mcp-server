@@ -36,6 +36,8 @@ sys.path[:0] = [str(REPO), str(REPO / 'ablations')]
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 MAX_FORCE_N = 4.0
 SPEED_M_S = 0.005
+PUSH_SPEED_M_S = 0.008       # the entering push to the seat, guarded at 6 N (was a fixed 8 s)
+PUSH_MIN_S = 2.0
 ABOVE_RIM_M = 0.003          # first probe; later ones start 1.5 mm over the MEASURED rim (CAD rim read 1.3 mm low)
 SEATED_DZ_M = 0.003          # within this of the predicted seat = in
 ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = partly in the pocket
@@ -308,7 +310,10 @@ def main():
         if st == 'entering':
             # in the pocket mouth: push on to the seat (6 N guard), then hand on to the judge
             q = (R.from_euler('z', 0.0, degrees=True) * R.from_quat(q_seat)).as_quat()
-            r3 = move([seat[0] + dx, seat[1] + dy, seat[2] - 0.002], q, max_force=6.0, min_duration=8.0)
+            # timed by its distance (run 43: a fixed 8 s for ~28 mm, 3.5 mm/s); the 6 N guard still stops it on the floor
+            cz_ = float(tcp_now()[0][2]) if IN_PROCESS else float(seat[2]) + 0.03
+            r3 = move([seat[0] + dx, seat[1] + dy, seat[2] - 0.002], q, max_force=6.0,
+                      min_duration=max(PUSH_MIN_S, (cz_ - float(seat[2]) + 0.002) / PUSH_SPEED_M_S))
             pz, _ = tcp_now(); z2 = float(pz[2])
             meta['probes'].append({'dx_mm': round(1000 * dx, 2), 'dy_mm': round(1000 * dy, 2), 'dyaw_deg': 0.0, 'push': True,
                                    'z_above_seat_mm': round(1000 * (z2 - seat[2]), 2), 'contact': bool(r3.get('contact')), 'error': r3.get('error')})
