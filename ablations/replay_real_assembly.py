@@ -1866,6 +1866,14 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [dservo] {obj}: held part not outlined over the table"); return None
     stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"dservo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
+    try:
+        # the held part over bare table, every grasp: where it sits in the hand (camera rigid with the gripper) - the
+        # data for measuring a bar's axial grasp error without the base (line_green: 2-4 mm toward -y, 16/19 inserts)
+        import cv2 as _cv2
+        json.dump({'outline': outline, 'tcp': [list(map(float, v)) for v in _tcp_pose_now()], 'held_q': list(held_q)},
+                  open(f"{stem}_outline.json", 'w')); _cv2.imwrite(f"{stem}_table.png", img_)
+    except Exception:
+        pass
     ob = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)   # depth fit, camera over the base
     if ob is None or ob is observed_base:
         say(f"  [dservo] {obj}: base not re-read in hand"); return None
