@@ -139,7 +139,8 @@ figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
 .md pre code{background:none;padding:0}
 .md table{border-collapse:collapse;margin:.4em 0;font-size:13px}.md th,.md td{border:1px solid var(--line);padding:3px 8px;text-align:left}
 .md a{color:#8ab4ff}.md blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid var(--line);color:var(--muted)}
-.e .t{color:var(--muted);font-size:11px;margin-right:6px;font-variant-numeric:tabular-nums}
+.e .t{color:var(--muted);font-size:11px;margin-left:6px;font-variant-numeric:tabular-nums}
+.e .ts{text-align:right;margin-top:2px}
 .user{color:var(--user);border-left:3px solid var(--user);padding-left:8px}
 .claude{color:var(--claude)}
 .tool{color:var(--tool);font:12px/1.35 ui-monospace,Menlo,monospace;margin-bottom:4px}
@@ -160,8 +161,8 @@ async function poll(){
     const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
     for(const e of j.entries){const d=document.createElement('div');d.className='e '+e.k;
       const who={user:'you',claude:'claude',tool:'·',event:'⚑'}[e.k];
-      const head="<span class='t'>"+e.t+" "+who+"</span>";
-      d.innerHTML=(e.k==='claude'||e.k==='user')?head+"<div class='md'>"+md(e.x)+"</div>":head+esc(e.x);
+      const stamp="<span class='t'>"+who+" "+e.t+"</span>";
+      d.innerHTML=(e.k==='claude'||e.k==='user')?"<div class='md'>"+md(e.x)+"</div><div class='ts'>"+stamp+"</div>":esc(e.x)+(e.k==='event'?" "+stamp:"");
       log.appendChild(d)}
     while(log.children.length>600)log.removeChild(log.firstChild);
     since=j.next;if(atBottom||j.first)log.scrollTop=log.scrollHeight;
