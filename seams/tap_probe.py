@@ -26,7 +26,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 TAP_N = 3.0                  # a measuring tap: contact, not a push (3 N did not move a wedged bar, 10-20)
-PRESS_N = 4.5                # the guard trips past it; the peak stays under the operator's 5 N (bench: 5.0 -> 5.12 N)
+PRESS_N = 4.0                # the guard trips past it; peaks overshoot it by up to 0.7 N (run 32: 4.5 -> 5.2 N, bench 5.0 -> 5.12):
+                             # 4.0 keeps the peak under the operator's 5 N
 OVER_M = 0.003               # the tip waits this far over the highest height seen
 SPEED_M_S = 0.004            # descent speed of taps and presses
 PRESS_BELOW_M = 0.0015       # a press may go this far under the seated top (a cocked part rolls down past it)
