@@ -16,6 +16,7 @@ Prints __RESULT_JSON__ {result, iterations, final_err_deg}.
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -356,6 +357,9 @@ def _marker_corners(lay, i):
     return np.array([Rm @ np.array(lc) + t for lc in ([-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0])])
 
 
+HELD_OUTLINE_UNION = os.environ.get('HELD_OUTLINE_UNION', '1') == '1'
+
+
 def held_outline_px(img, x_far=None, y_left=None):
     """Held part's far (top) and left edges in the image, over BARE TABLE (coloured part vs dark table). The camera is
     rigid with the gripper, so these pixels are the part's place in every frame of this grasp. The part is found as its
@@ -395,7 +399,14 @@ def held_outline_px(img, x_far=None, y_left=None):
     if not len(ids) or cnt.max() < 300:
         return None
     best = int(ids[np.argmax(cnt)])
-    blob = (cv2.dilate((lab == best).astype(np.uint8), K) > 0) & (m8 > 0)
+    keep = [best]
+    if HELD_OUTLINE_UNION:
+        # every blob of the held part's colour in the band is the held part: a marker sticker across a bar splits it in
+        # two once eroded (its side strips are thinner than K) and the piece between sticker and fingers outvoted the
+        # rest - its top, the sticker's lower edge, was read as the bar's far end (10-23 run 52: y 656 for 125, an aim
+        # 73 mm off; also 09:12 / 09:45). Specks under 300 px in the band are not.
+        keep = [int(i) for i, c in zip(ids, cnt) if c >= 300]
+    blob = (cv2.dilate(np.isin(lab, keep).astype(np.uint8), K) > 0) & (m8 > 0)
     cols = np.nonzero(blob.any(0))[0]
     far, left = [], []
     for x in range(int(cols.min()) + 12, int(cols.max()) - 12, 8):
