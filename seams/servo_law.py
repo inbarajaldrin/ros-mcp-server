@@ -25,7 +25,10 @@ SERVO_ITERS = 6
 SERVO_YAW_TOL_DEG = 0.3
 SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
 SERVO_MAX_SPREAD_PX = 12.0     # a fit whose edge residuals spread more than this does not match the part (good fits: 1-4 px)
-SERVO_MAX_YAW_DEG = 4.0        # the whole servo may turn the wrist this much; base and grasp reads are within ~3 deg
+SERVO_MAX_YAW_DEG = 6.0        # the whole servo may turn the wrist this much. Was 4.0 ("base and grasp reads are within ~3 deg");
+# run 28 (10-22 21:46, 21:50): u_brown held -3.0 deg in the jaws, the base read turned +1.8 deg between reads, and the
+# image read -4.47 / -4.2 deg with the part over its socket - twice the cap stopped the turn and 61 + 61 probes sat on
+# the rim
 SERVO_GAIN_CLEAR = 2.4         # reading change per mm of xy step when measured from the clear height (measured twice)
 SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
 # the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
