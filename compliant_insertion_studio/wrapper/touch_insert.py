@@ -293,8 +293,12 @@ def main():
         start_z = best[0] + 0.0015
         cur, _ = tcp_now() if IN_PROCESS else (None, None)
         d_ = abs(float(cur[2]) - start_z) if cur is not None else 1.0
-        move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=MAX_FORCE_N,   # retract before any sideways step
-             duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)
+        # straight UP off a contact needs no guard - and a guard cannot work there: its reference is taken while the
+        # part still presses at ~4 N, lifting off unloads it and trips it at once (probe bench 10-22: the retract moved
+        # 0.2 mm). A retract that is not upward stays guarded (14:37: one went below a contact on line_green's top).
+        up = cur is not None and start_z > float(cur[2])
+        move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None if up else MAX_FORCE_N,
+             duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)   # retract before any step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:
         z = probe(bx, by, dyaw)

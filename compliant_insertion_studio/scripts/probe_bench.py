@@ -24,8 +24,11 @@ sys.path[:0] = [str(REPO), str(REPO / 'ablations')]
 
 
 def gripper_holding():
+    import re
     p = subprocess.run(['ros2', 'topic', 'echo', '--once', '/gripper_status'], capture_output=True, text=True, timeout=15)
-    return 'Grasp:True' in p.stdout, p.stdout.strip().splitlines()[:1]
+    w = re.search(r'Width:([\d.]+)mm', p.stdout)
+    # the RG2 reports Grasp:True fully closed on nothing (9.7 mm): a part is held only above that
+    return ('Grasp:True' in p.stdout and (w is None or float(w.group(1)) > 11.0)), p.stdout.strip().splitlines()[:1]
 
 
 def main():
@@ -58,7 +61,7 @@ def main():
         r1 = T.move([x0 + dx, y0 + dy, start_z], q, max_force=T.MAX_FORCE_N,
                     duration=max(T.SHORT_MIN_S, d_ / T.SHORT_SPEED_M_S) if (T.IN_PROCESS and d_ <= T.SHORT_MOVE_M) else None)
         t1 = time.time()
-        z_end = (first - 0.009) if first is not None else 0.150
+        z_end = max(0.1502, first - 0.009) if first is not None else 0.150
         dur = (start_z - z_end) / T.SPEED_M_S
         r2 = T.move([x0 + dx, y0 + dy, z_end], q, max_force=T.MAX_FORCE_N, min_duration=dur,
                     duration=dur if T.IN_PROCESS else None)
@@ -69,7 +72,7 @@ def main():
         first = z if first is None else first
         start_z = z + 0.0015
         cur, _ = T.tcp_now()
-        r3 = T.move([x0 + dx, y0 + dy, start_z], q, max_force=T.MAX_FORCE_N,
+        r3 = T.move([x0 + dx, y0 + dy, start_z], q, max_force=None if start_z > float(cur[2]) else T.MAX_FORCE_N,
                     duration=max(T.SHORT_MIN_S, abs(float(cur[2]) - start_z) / T.SHORT_SPEED_M_S) if T.IN_PROCESS else None)
         t3 = time.time()
         rows.append(dict(k=k, step_s=round(t1 - t0, 2), descend_s=round(t2 - t1, 2), retract_s=round(t3 - t2, 2),
