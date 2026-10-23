@@ -450,6 +450,7 @@ def observe_base(base_name=None):
     return choose_base_read(base_name, ob, ob_d, lambda m: print(m, flush=True))
 
 
+SPURIOUS_STOP_ABOVE_M = 0.030   # a seat-grasp descent stopped higher than this over its target touched nothing
 LAND_SLOW_ABOVE_M = 0.015        # last stretch before the expected touch: slow, guarded
 LAND_SPEED_M_S = 0.004           # ~ the nudge's speed, where a 4 N guard stopped at 4.0-4.1 N
 LAND_FORCE_N = 5.0               # operator's limit for forces on parts
@@ -1104,6 +1105,15 @@ def main():
         ]
         for argv, label, t in steps:
             ok, res = run(argv, label, t)
+            if (not ok and label == 'descend onto the seated grasp' and res.get('contact')
+                    and (res.get('stopped_at') or [0, 0, 0])[2] > tcp[2] + SPURIOUS_STOP_ABOVE_M):
+                # a guarded stop this far above the grasp touches nothing (run 47: u_orange's descent stopped 83 mm above
+                # it - fingertips ~46 mm over the U walls - on a 7.3 N change 1.5 s after the gripper opened: the
+                # ~100 ms wrench glitch or the fingers settling). Same guarded move once more, fresh baseline.
+                print(f"    [seat-grasp] stop at z {res['stopped_at'][2]:.3f} is "
+                      f"{1000 * (res['stopped_at'][2] - tcp[2]):.0f} mm above the grasp - nothing there; once more", flush=True)
+                time.sleep(1.0)
+                ok, res = run(argv, label + ' (again)', t)
             if not ok: return 1
             # The grip must hold through the pull-out: 2026-10-15 line_green came out of the jaws
             # on the way up, fell beside base1, and every later step reported ok (the gripper
