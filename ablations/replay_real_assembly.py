@@ -1878,9 +1878,11 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     xy = seat_tcp(_tcp_pose_now()[1], held_q)[:2].copy()
     yaw_total, rounds, ok = 0.0, [], False
     for k in range(DSERVO_ITERS):
-        rr_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                              f"{xy[1]:.5f}", f"{z:.5f}", '--keep-orientation', '--min-z', '0.15'],
-                             label=f'dservo round {k}: over the aim', timeout_s=60, log_fh=log_fh)
+        q_now = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')      # keep the orientation, in process
+        rr_ = (_move_unless_there((xy[0], xy[1], z), q_now, f'dservo round {k}: over the aim', log_fh) if q_now else
+               run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
+                               f"{xy[1]:.5f}", f"{z:.5f}", '--keep-orientation', '--min-z', '0.15'],
+                              label=f'dservo round {k}: over the aim', timeout_s=60, log_fh=log_fh))
         if rr_.get('result') == 'failure' or _SAFETY_STOP:
             break
         _emitter(False)
