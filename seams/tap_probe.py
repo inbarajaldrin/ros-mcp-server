@@ -33,7 +33,9 @@ PRESS_BELOW_M = 0.0015       # a press may go this far under the seated top (a c
 MOVED_MIN_M = 0.0005         # a press that travelled this far after first contact moved the part
 CONTACT_N = 1.0              # first contact in the force record
 EDGE_IN_M = 0.004            # edge taps this far in from the CAD top-face edge
-END_IN_M = 0.008             # end taps this far in from the CAD top-face ends
+END_IN_M = 0.025             # end taps this far in from the CAD top-face ends: 8 mm put line_green's end tap inside the U
+                             # part's opening, where the 20 mm finger block lands on the U arm beside the bar (+10.6 mm,
+                             # 10-23 00:08); 25 mm still leaves a 45 mm lever for the pitch
 MAX_PRESSES = 6
 CLEAR_M = 0.025              # sideways travel between tap points happens this far over the part's seated top: its
                              # neighbours stand up to +19.6 mm over line_green's (10-22: travel 3-7 mm over it ran the tips
