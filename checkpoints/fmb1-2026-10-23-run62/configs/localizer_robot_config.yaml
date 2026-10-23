@@ -1,0 +1,44 @@
+# Robot & Camera Configuration
+# Edit this file and restart the node — no rebuild needed
+
+# Camera offset from EE (in EE frame, meters)
+# 2026-10-13 hand-eye from a ChArUco board at 3 table locations (326 frames, ~1 mm held-out
+# consistency). Previous hand-set values:
+#   cam_offset_position: [-0.015, -0.037, 0.07]
+#   cam_offset_quat: [0.0, 0.0, 0.0, 1.0]
+# 2026-10-13 (ChArUco, 3 spots): cam_offset_position: [-0.01446, -0.04424, 0.07317]
+cam_offset_position: [-0.01573, -0.04201, 0.07153]   # 2026-10-20 base1 24-view survey (ablations/handeye_from_survey.py): spread 2.8->1.2 mm median, 7.3->3.5 max
+# 2026-10-13: cam_offset_quat: [-0.0238, -0.00386, -0.01645, 0.99957]
+cam_offset_quat: [-0.01298, -0.00391, -0.0098, 0.99986]
+
+# Camera intrinsics
+camera_width: 1280
+camera_height: 720
+camera_hfov: 69.4   # degrees (used only if camera_matrix is not set)
+camera_vfov: 42.5   # degrees (used only if camera_matrix is not set)
+# Calibrated camera matrix [fx, fy, cx, cy] — overrides hfov/vfov computation
+camera_matrix: [910.13, 911.16, 619.57, 349.15]
+distortion_coeffs: [0.130074, -0.439479, -0.001453, -0.000549, 0.369498]
+
+# Camera hardware settings (real camera only)
+# Modes: 'auto' = auto-adjust then lock on startup, 'manual' = use values below
+exposure_mode: auto
+white_balance_mode: auto
+white_balance_temp: 4600.0   # used when white_balance_mode is 'manual'
+exposure: 166.0            # used when exposure_mode is 'manual'
+
+# Camera identity — used to auto-detect /dev/videoN by USB identity (survives reboots/replug).
+# Probe walks /sys/class/video4linux/, filters by name/VID/PID, then picks the stream
+# offering camera_prefer_format. Falls back to interactive scan if no match.
+# Override these on a per-machine basis if you swap to a different camera.
+camera_match_name: Intel(R) RealSense   # substring match against /sys/class/video4linux/*/name
+camera_match_vendor_id: '8086'          # USB vendor id, hex without 0x. 8086 = Intel. null = any.
+camera_match_product_id: null           # null = any RealSense model. e.g. '0ad3' = D435, '0b3a' = D435i
+camera_prefer_format: YUYV              # YUYV (RGB color) skips Z16 (depth) and GREY (IR) streams
+camera_serial: null                     # set if you have multiple identical cameras plugged in
+
+# ROS2 topics
+ee_pose_topic: /tcp_pose_broadcaster/pose
+
+# Table height in robot base frame (meters)
+table_z: -0.08
