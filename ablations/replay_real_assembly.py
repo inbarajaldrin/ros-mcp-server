@@ -1863,9 +1863,21 @@ def held_axial_correction(obj, grasp_id, held_q, outline, tcp_pose, say):
         if len(dy) < 8:
             say(f"  [held-axial] {obj}: far edge out of the projection ({len(dy)} columns)"); return None
         dy = np.asarray(dy); med = float(np.median(dy)); mad = float(1.4826 * np.median(np.abs(dy - med)))
-        d = Twc[:3, :3] @ np.array([0.0, med * float(np.median(zs)) / K[1, 1], 0.0])     # part - CAD grasp, world
-        say(f"  [held-axial] {obj}: far edge {med:+.1f} px (MAD {mad:.1f}, {len(dy)} columns) from the CAD grasp = "
-            f"({1000*d[0]:+.1f}, {1000*d[1]:+.1f}) mm")
+        Z = float(np.median(zs))
+        # the left edge (image-x: across a bar) the same way: runs 37/38b/39 read -2.1 / -1.9 / -2.2 mm (MAD 0.1-0.2 px)
+        # where the probe lattice then found the pocket 2.0-2.5 mm across (50 probes in run 39)
+        dx = []
+        for x, y in outline.get('left') or []:
+            m = np.abs(uv[:, 1] - y) < 2.5
+            if m.sum() >= 3:
+                i = np.argmin(np.where(m, uv[:, 0], np.inf)); dx.append(x - uv[i, 0])
+        dx = np.asarray(dx); medx = float(np.median(dx)) if len(dx) >= 5 else 0.0
+        madx = float(1.4826 * np.median(np.abs(dx - medx))) if len(dx) >= 5 else float('inf')
+        if madx > HELD_AXIAL_MAD_PX:
+            medx = 0.0                                           # the left edge does not fit: along the far edge only
+        d = Twc[:3, :3] @ np.array([medx * Z / K[0, 0], med * Z / K[1, 1], 0.0])     # part - CAD grasp, world
+        say(f"  [held-axial] {obj}: far edge {med:+.1f} px (MAD {mad:.1f}, {len(dy)} columns), left edge {medx:+.1f} px "
+            f"(MAD {madx:.1f}, {len(dx)} rows) from the CAD grasp = ({1000*d[0]:+.1f}, {1000*d[1]:+.1f}) mm")
         if mad > HELD_AXIAL_MAD_PX or np.hypot(d[0], d[1]) > HELD_AXIAL_MAX_M:
             say(f"  [held-axial] {obj}: not used (MAD > {HELD_AXIAL_MAD_PX} px or > {1000*HELD_AXIAL_MAX_M:.0f} mm)"); return None
         return np.array([-d[0], -d[1]])
