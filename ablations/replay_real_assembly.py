@@ -3111,6 +3111,14 @@ def _taps_mark(obj, args, say) -> bool:
         return False
     say(f"  [taps] {obj}: the certifier read an end over its band - contact measures the ends")
     ok, tp = tap_recover(obj, ob_, RUN_BASE['name'], say)
+    if not ok and (tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed()))):
+        # taps beside the part: the base read they were placed from is stale by mm (run 50: end- and edge+ missed on a
+        # bar depth read seated, ends +1.55 / +0.13 mm) - read the base where it is now and map once more
+        ob2 = observe_base_pose(RUN_BASE['name'])
+        if ob2 is not None:
+            say(f"  [taps] {obj}: taps off/beside the part {tp.off_part() or tp.missed()} - base re-read, mapping again")
+            args.observed_base = args.measured_base = ob2
+            ok, tp = tap_recover(obj, ob2, RUN_BASE['name'], say)
     if ok:
         SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points},
                     tap_t=time.time(), tap_along_mm={p.name: round(1000 * p.along_m, 1) for p in tp.points})
