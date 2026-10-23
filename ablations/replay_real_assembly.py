@@ -2084,7 +2084,11 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
     if (tcp.get('xyz') and tcp.get('quat_xyzw') and np.linalg.norm(np.asarray(tcp['xyz']) - np.asarray(xyz, float)) < 0.0003
             and abs(float(np.dot(tcp['quat_xyzw'], q))) > 0.99999):
         return {'result': 'success', 'skipped': 'already there'}
-    if SERVO_INPROC and not extra:
+    kw = {}
+    ex = list(extra)
+    while ex[:1] and ex[0] in ('--max-force', '--min-duration') and len(ex) >= 2:   # the guarded hover: same guard in process
+        kw['max_force' if ex[0] == '--max-force' else 'min_duration'] = float(ex[1]); ex = ex[2:]
+    if SERVO_INPROC and not ex:
         # the same plan_move the CLI runs, on one node, released before the next camera read (which starts its own
         # context): run 33's servo moves were ~4 s each, ~1.5 s of it a process start (u_brown: 8 moves / 99 s align)
         from compliant_insertion_studio.wrapper.touch_insert import move as _tmove, close_node as _close
@@ -2094,8 +2098,9 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
         try:
             # short moves (the servo's 3-15 mm steps) timed by distance, as the touch probes' are: the planner's floor
             # held them at ~2.5 s (bench, nothing gripped: 3.5 s a move in process vs 4.6 s by subprocess)
+            short = d_ <= SERVO_SHORT_M and 'min_duration' not in kw
             r = _tmove(list(map(float, xyz)), list(map(float, q)), min_z=0.15,
-                       duration=max(SERVO_SHORT_MIN_S, d_ / SERVO_SHORT_SPEED_M_S) if d_ <= SERVO_SHORT_M else None)
+                       duration=max(SERVO_SHORT_MIN_S, d_ / SERVO_SHORT_SPEED_M_S) if short else None, **kw)
         finally:
             _close()
         fh = _TIMING.get('fh')
