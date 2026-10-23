@@ -142,6 +142,46 @@ def certify(mate):
     return certify_many([mate])[0]
 
 
+TAP_MAX_AGE_S = 1800.0
+
+
+def tap_ends(obj, base):
+    """The mover's end heights (mm vs the seated CAD top face, at the CAD ends) from its last tap map, or (None, why).
+    Used only while nothing can have moved it since: no insert and no verdict on any part after the taps. Why: depth
+    fits a plane to the visible top face and extrapolates it to the ends - on line_green (10-23, runs 31/32) it read
+    +2.2 mm over contact at the centre and tilted -0.9 deg on a bar five taps put flat to 0.06 mm, so a seated bar's
+    end read +2.47 mm against the +-2.0 band. Contact carries the smaller error; depth still judges the centre."""
+    from datetime import datetime
+    from seams.seated_parts import SeatedParts
+    S = SeatedParts()
+    e = S.entry(obj)
+    t, m, al = e.get('tap_t'), e.get('tap_map_mm') or {}, e.get('tap_along_mm') or {}
+    if t is None or not al:
+        return None, 'no timed tap map'
+    if time.time() - t > TAP_MAX_AGE_S:
+        return None, f'tap map {time.time() - t:.0f} s old'
+    later = [p for p, v in S.ledger().items() if p != obj and (v.get('t') or 0) > t]
+    for p, v in S.seated_offsets().items():
+        try:
+            if datetime.strptime(v['t'], '%Y-%m-%d %H:%M:%S').timestamp() > t + 1.0:
+                later.append(f'{p} inserted')
+        except Exception:
+            pass
+    if later:
+        return None, f'parts touched since the taps: {later}'
+    pts = [(float(al[k]), float(m[k])) for k in ('mid', 'end-', 'end+')
+           if isinstance(m.get(k), (int, float)) and k in al]
+    if len(pts) < 3:
+        return None, 'tap map lacks mid and both ends'
+    import sys as _s
+    _s.path.insert(0, str(REPO / 'ablations'))
+    from seat_check import TOP_FACE
+    hl = 1000 * float(TOP_FACE[(obj, base)]['half_long_m'])
+    a = np.array(pts)
+    c1, c0 = np.polyfit(a[:, 0], a[:, 1], 1)
+    return [round(float(c0 - c1 * hl), 2), round(float(c0 + c1 * hl), 2)], f"taps {time.time() - t:.0f} s ago {m}"
+
+
 def certify_many(mates):
     """Each mover's pose relative to its declared seat, from where the camera is: one base read and one still depth
     capture shared by all (execute_mate re-reads every predecessor NOW). z and the long-axis tilt from the depth seat
@@ -207,6 +247,12 @@ def certify_many(mates):
                                               'tilt angle and marker xy: reported only (no stated sigma)'}
         xy_seen = math.isfinite(ex)
         ends = (ev.get('depth') or {}).get('end_heights_mm') or []
+        te, why = tap_ends(obj, base)
+        if te is not None and math.isfinite(z_err):
+            ends = te                                  # contact, while nothing has moved the part since
+            ev['ends_from'] = f'{why} -> ends {te} mm (depth read {ev["depth"].get("end_heights_mm")})'
+        else:
+            ev['ends_from'] = f'depth ({why})'
         if math.isfinite(z_err) and ends and min(ends) / 1000.0 < -lim_z:
             # the pocket floor stops the part: an end read below the seat by more than the band is the view, not
             # the part (2026-10-21: u_brown seen across the base read -2.29 mm at one end) -> not measured

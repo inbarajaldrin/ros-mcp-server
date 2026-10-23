@@ -54,6 +54,7 @@ class Point:
     err_m: Optional[float] = None
     blocked: int = 0
     missed: bool = False         # the descent went to its floor without contact: the tip was not over the part
+    along_m: float = 0.0         # along the long axis from the CAD top-face centre (the certifier extrapolates the ends)
 
 
 @dataclass
@@ -115,7 +116,7 @@ class Tapper:
 
         def w(dx, dy):
             return np.array([bx, by, bz]) + Rb.apply([dx, dy, f['z']])
-        P = [Point(n, w(*b_xy(a_, c_))) for n, a_, c_ in pts]
+        P = [Point(n, w(*b_xy(a_, c_)), along_m=float(a_)) for n, a_, c_ in pts]
         if band_m is None:
             lim = lim_z_m(base)
             band_m = (lim - margin_m()) if lim is not None else 0.0015

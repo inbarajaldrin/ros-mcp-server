@@ -2860,7 +2860,10 @@ def _seat_by_taps(obj, args, say):
     if ok and (res.get('cross') or {}).get('centre_mm') is not None:
         _record_seat_check_error(obj, res)                   # the across error the parts over it follow
     if ok:
-        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points})
+        # with its own time and the points' places along the bar: ExecuteMate judges the ends from it while nothing has
+        # moved since (seams.vision_ops.tap_ends)
+        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points},
+                    tap_t=time.time(), tap_along_mm={p.name: round(1000 * p.along_m, 1) for p in tp.points})
     return ok
 
 
