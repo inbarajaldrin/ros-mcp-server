@@ -40,6 +40,9 @@ def main():
     import time as _t
     rr._TIMING['fh'] = open(REPO / 'compliant_insertion_studio' / 'logs' /
                             f"drive_align_{a.obj}_{_t.strftime('%Y%m%d_%H%M%S')}.timing.jsonl", 'a', buffering=1)
+    import compliant_insertion_studio.wrapper.marker_yaw as _my    # the servo's camera reads, timed (logging only)
+    for _fn in ('still_frame', 'base_pose_same_frame', 'socket_shift_world', 'held_outline_px'):
+        setattr(_my, _fn, rr._timed(getattr(_my, _fn), 'camera', lambda a_, k_, n_=_fn: n_))
     os.environ.setdefault('SEAMS_DRIVE', '1')
     measured = (tuple(a.measured[:3]), tuple(a.measured[3:]))
 
