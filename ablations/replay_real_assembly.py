@@ -1958,6 +1958,95 @@ def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None
 SERVO_MEASURED: dict = {}         # obj -> did the last hover_servo take a reading
 
 
+def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=None):
+    """Free base, one-node: bring the held part over its seat before the insert (AR3: the call drive-mate's align step
+    makes). From the last MEASURED base: the in-hand base re-read, then by route - a prismatic part turns to the base
+    yaw and re-reads the base close (it searches itself); a part threading over seated parts (CAD) runs the depth-frame
+    servo (close read as fallback); any other the marker servo (depth-frame servo when it took no reading).
+    Returns {aim_base, measured_base, held_quat, tcp_quat (the flange after a wrist turn, else None), route}."""
+    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+    out = dict(aim_base=None, measured_base=None, held_quat=held_quat, tcp_quat=None, route='')
+    ob = track_base_in_hand(base, measured_base, say, log_fh, held_obj=obj)
+    out['measured_base'] = ob
+
+    def _tcp_q():
+        return (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
+    try:
+        from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
+    except Exception:
+        _PRISM = ()
+    mode = os.environ.get('HOVER_ALIGN', 'servo')
+    if mode == 'servo' and obj in _PRISM:
+        # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
+        # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
+        # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
+        out['route'] = 'prismatic: yaw + close read'
+        say(f"  [servo] {obj}: prismatic route - it searches itself, no xy servo")
+        # but the wrist still turns to the base's yaw first: skipping the whole servo (9a19b76) skipped this turn and
+        # line_green arrived +13.2 deg off its slot (base1 at ~16 deg; the U openings it threads need < 1.3 deg) -
+        # jammed on the U tops at +61 mm, 10-22 06:27 (INSERT_GEOMETRY: the corridor stage is a yaw wedge)
+        try:
+            if ob is not None and held_quat is not None:
+                err_, _t = rel_yaw_error(obj, base, R_.from_quat(ob[1]), R_.from_quat(held_quat))
+                if abs(err_) > 0.3 and turn_wrist(err_):
+                    held_quat = list((R_.from_euler('z', err_, degrees=True) * R_.from_quat(held_quat)).as_quat())
+                    out['tcp_quat'] = _tcp_q()
+                    say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
+        except Exception as e_:
+            say(f"  [servo] {obj}: yaw to base not applied ({e_})")
+        # and the base is re-read from its markers in a CLOSE frame over the seat (no xy servo): the 0.56 m CAD
+        # fit carries the hand-eye rotation error x ~0.5 m of lever (several mm); line_green needs +-1.1 mm across
+        # the U openings. Bare and seated-assembly fits agreed to 0.4 mm (10-22 07:00), so the U parts are not the
+        # offset - the read height is. From the clear height (~0.17 m over the base top) the lever is ~1/3.
+        try:
+            ob = close_base_read(obj, base, ob, held_quat, grasp_id, say, log_fh)
+            out['measured_base'] = ob                                # a measurement too (markers, one close frame)
+            # the wrist turned to the base yaw BEFORE this read: turn again to the closer read's yaw if they differ
+            if ob is not None and held_quat is not None:
+                err2_, _t2 = rel_yaw_error(obj, base, R_.from_quat(ob[1]), R_.from_quat(held_quat))
+                if abs(err2_) > 0.3 and turn_wrist(err2_):
+                    held_quat = list((R_.from_euler('z', err2_, degrees=True) * R_.from_quat(held_quat)).as_quat())
+                    out['tcp_quat'] = _tcp_q()
+                    say(f"  [servo] {obj}: wrist turned {err2_:+.2f} deg to the close read's base yaw")
+        except Exception as e_:
+            say(f"  [servo] {obj}: close base read not applied ({e_})")
+    elif mode == 'servo' and seated_under(base, obj):
+        # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
+        # marker read as the fallback when it cannot measure
+        out['route'] = 'depth servo'
+        ds = depth_servo(obj, base, ob, held_quat, grasp_id, say, log_fh)
+        if ds is not None:
+            ob, held_quat = ds
+        else:
+            try:
+                ob = close_base_read(obj, base, ob, held_quat, grasp_id, say, log_fh)
+            except Exception as e_:
+                say(f"  [dservo] {obj}: close base read not applied ({e_})")
+        out['tcp_quat'] = _tcp_q()
+    elif mode == 'servo':
+        # the marker servo first (u_brown seated first try with it in attempts 16-18; the depth servo's clean,
+        # converged reading put u_brown 6 mm off at 12:39 - not yet understood), the depth-frame servo when the
+        # marker servo took no reading (12:05/12:22 u_orange: 0-1 base markers over its far-side seat; the depth
+        # servo converged and it entered on the lattice)
+        out['route'] = 'marker servo'
+        ob0_, hq0_ = ob, held_quat
+        ob, hq_ = hover_servo(obj, base, ob0_, hq0_, grasp_id, say, log_fh)
+        if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
+            out['route'] = 'marker servo -> depth servo'
+            say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
+            ds = depth_servo(obj, base, ob0_, hq_ if hq_ is not None else hq0_, grasp_id, say, log_fh)
+            if ds is not None:
+                ob, hq_ = ds
+        if hq_ is not None and held_quat is not None and hq_ is not held_quat:
+            held_quat = hq_                                          # the wrist turned: the chained held pose turns with it
+            out['tcp_quat'] = _tcp_q()
+    elif mode == '1':
+        out['route'] = 'hover align'
+        ob = hover_align(obj, base, ob, held_quat, grasp_id, say, log_fh)
+    out['aim_base'], out['held_quat'] = ob, held_quat
+    return out
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -2991,90 +3080,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             # the servos fold one part's grip error (xy, image yaw) into the base pose they return - that is this insert's
             # AIM, not the base. Start every insert from the last MEASURED base (10-22 13:04: the in-hand re-read failed
             # as a partial view, line_green inherited u_orange's aim - its yaw 2.4 deg off - and wedged in the U openings)
-            if getattr(args, 'measured_base', None) is not None:
-                args.observed_base = args.measured_base
-            args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
-                                                    say, log_fh, held_obj=obj)
-            args.measured_base = args.observed_base
-            try:
-                from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
-            except Exception:
-                _PRISM = ()
-            if os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and obj in _PRISM:
-                # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
-                # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
-                # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
-                say(f"  [servo] {obj}: prismatic route - it searches itself, no xy servo")
-                # but the wrist still turns to the base's yaw first: skipping the whole servo (9a19b76) skipped this turn and
-                # line_green arrived +13.2 deg off its slot (base1 at ~16 deg; the U openings it threads need < 1.3 deg) -
-                # jammed on the U tops at +61 mm, 10-22 06:27 (INSERT_GEOMETRY: the corridor stage is a yaw wedge)
-                try:
-                    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
-                    if args.observed_base is not None and state.held_quat is not None:
-                        err_, _t = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
-                                                 R_.from_quat(state.held_quat))
-                        if abs(err_) > 0.3 and turn_wrist(err_):
-                            state.held_quat = list((R_.from_euler('z', err_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
-                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-                            say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
-                except Exception as e_:
-                    say(f"  [servo] {obj}: yaw to base not applied ({e_})")
-                # and the base is re-read from its markers in a CLOSE frame over the seat (no xy servo): the 0.56 m CAD
-                # fit carries the hand-eye rotation error x ~0.5 m of lever (several mm); line_green needs +-1.1 mm across
-                # the U openings. Bare and seated-assembly fits agreed to 0.4 mm (10-22 07:00), so the U parts are not the
-                # offset - the read height is. From the clear height (~0.17 m over the base top) the lever is ~1/3.
-                try:
-                    args.observed_base = close_base_read(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                         state.held_quat, state.last_grasp_id or 1, say, log_fh)
-                    args.measured_base = args.observed_base                 # a measurement too (markers, one close frame)
-                    # the wrist turned to the base yaw BEFORE this read: turn again to the closer read's yaw if they differ
-                    if args.observed_base is not None and state.held_quat is not None:
-                        err2_, _t2 = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
-                                                   R_.from_quat(state.held_quat))
-                        if abs(err2_) > 0.3 and turn_wrist(err2_):
-                            state.held_quat = list((R_.from_euler('z', err2_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
-                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-                            say(f"  [servo] {obj}: wrist turned {err2_:+.2f} deg to the close read's base yaw")
-                except Exception as e_:
-                    say(f"  [servo] {obj}: close base read not applied ({e_})")
-            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and seated_under(base_name or RUN_BASE['name'], obj):
-                # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
-                # marker read as the fallback when it cannot measure
-                bn_ = base_name or RUN_BASE['name']
-                ds = depth_servo(obj, bn_, args.observed_base, state.held_quat, state.last_grasp_id or 1, say, log_fh)
-                if ds is not None:
-                    args.observed_base, state.held_quat = ds
-                else:
-                    try:
-                        args.observed_base = close_base_read(obj, bn_, args.observed_base, state.held_quat,
-                                                             state.last_grasp_id or 1, say, log_fh)
-                    except Exception as e_:
-                        say(f"  [dservo] {obj}: close base read not applied ({e_})")
-                STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                   (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
-                # the marker servo first (u_brown seated first try with it in attempts 16-18; the depth servo's clean,
-                # converged reading put u_brown 6 mm off at 12:39 - not yet understood), the depth-frame servo when the
-                # marker servo took no reading (12:05/12:22 u_orange: 0-1 base markers over its far-side seat; the depth
-                # servo converged and it entered on the lattice)
-                ob0_, hq0_ = args.observed_base, state.held_quat
-                args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], ob0_, hq0_,
-                                                      state.last_grasp_id or 1, say, log_fh)
-                if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
-                    say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
-                    ds = depth_servo(obj, base_name or RUN_BASE['name'], ob0_, hq_ if hq_ is not None else hq0_,
-                                     state.last_grasp_id or 1, say, log_fh)
-                    if ds is not None:
-                        args.observed_base, hq_ = ds
-                if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
-                    state.held_quat = hq_                           # the wrist turned: the chained held pose turns with it
-                    STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                       (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-            elif os.environ.get('HOVER_ALIGN') == '1':
-                args.observed_base = hover_align(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                 state.held_quat, state.last_grasp_id or 1, say, log_fh)
+            mb_ = args.measured_base if getattr(args, 'measured_base', None) is not None else getattr(args, 'observed_base', None)
+            al = align_for_insert(obj, base_name or RUN_BASE['name'], mb_, state.held_quat, state.last_grasp_id or 1,
+                                  say, log_fh)
+            args.observed_base, args.measured_base = al['aim_base'], al['measured_base']
+            if al['held_quat'] is not state.held_quat:
+                state.held_quat = al['held_quat']                  # the wrist turned: the chained held pose turns with it
+            if al['tcp_quat'] is not None and STATE_REF.get('state'):
+                STATE_REF['state'].held_tcp_quat = al['tcp_quat']
         if _SAFETY_STOP:
             # 10-22 01:18: a protective stop inside hover_servo did not stop the run - drive-mate was called on a stopped arm
             # and waited 650 s. Nothing more is sent once the robot has left NORMAL safety.
