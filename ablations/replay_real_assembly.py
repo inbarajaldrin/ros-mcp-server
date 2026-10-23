@@ -809,6 +809,9 @@ def tracked(obj, max_age_s=TRACKER_MAX_AGE_S):
     return (float(e['xyz'][0]), float(e['xyz'][1]), age) if age <= max_age_s else None
 
 
+PART_AWAY_FROM_CLEAR_M = 0.08   # a last sighting this far from the clear area: the part is not there
+
+
 def _part_view(obj, log_fh=None) -> bool:
     """Camera straight above `obj`'s last-seen position (centred, closer) — the staging view at 0.62 m
     sees the whole region but detected a standing yellow only intermittently (2026-10-19: seen by the
@@ -4110,7 +4113,23 @@ def main() -> int:
             # --part-at-staging is a claim, not a fact (2026-10-20: line_brown was 38 cm away, in plain view from
             # home, and move_to_grasp gave up after 40 tries at the clear area): not seen there -> home, then above
             # its last position / the staging view.
-            if (not args.dry_run and args.part_at_staging and not _SAFETY_STOP and not _seen_here(obj)):
+            # A part the up-front observe saw away from the clear area is not looked for there nor from home: straight
+            # above its last sighting (run 31: line_green paid clear-area 6 s + home 4 s + 10 s wait, then this view)
+            from primitives.shared.config import CLEAR_AREA_XY as _CA
+            _ls = LAST_SEEN_XY.get(obj)
+            if (not args.dry_run and args.part_at_staging and not _SAFETY_STOP and _ls is not None
+                    and np.hypot(_ls[0] - _CA[0], _ls[1] - _CA[1]) > PART_AWAY_FROM_CLEAR_M):
+                msg = (f"  [view] {obj}: last seen at ({1000 * _ls[0]:.0f}, {1000 * _ls[1]:.0f}) mm, away from the clear "
+                       f"area -> look above it")
+                print(msg, flush=True)
+                if log_fh: log_fh.write(msg + "\n")
+                if not _part_view(obj, log_fh):
+                    msg = f"\n!!! {obj}: not seen from above its last position nor from the staging view"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
+                    failed = obj
+                    break
+            elif (not args.dry_run and args.part_at_staging and not _SAFETY_STOP and not _seen_here(obj)):
                 msg = f"  [view] {obj}: not at the clear area -> look from home, then the staging view"
                 print(msg, flush=True)
                 if log_fh: log_fh.write(msg + "\n")
