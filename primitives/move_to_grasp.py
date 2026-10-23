@@ -998,14 +998,26 @@ class DirectObjectMove(Node):
         # width is set by the restore hook right before the step-2 descent.
         if (not self.gripper_check_done and self.pre_grasp_width is not None
                 and self.current_gripper_width is not None):
-            if self.current_gripper_width < self.GRIPPER_FULLY_OPEN_WIDTH:
+            explicit = self.target_xyz is not None
+            if explicit:
+                # An explicit target (the replay's depth fit) needs no view of the part: no open for a view, and the
+                # pre-grasp width is set once before the descent only if the fingers are narrower than it or > 3 mm
+                # wider (10-23: open + restore were two control_gripper processes, ~4.7 s of a ~14 s grasp)
+                w, pg = float(self.current_gripper_width), float(self.pre_grasp_width)
+                self.gripper_needs_restore = not (pg <= w <= pg + 3.0)
                 self.get_logger().info(
-                    f"Gripper at {self.current_gripper_width:.0f}mm — opening for a clear view "
-                    f"(pre-grasp {self.pre_grasp_width:.0f}mm is set before the descent)")
-                self._run_control_gripper("open")
+                    f"Gripper at {w:.0f}mm, pre-grasp {pg:.0f}mm, explicit target: "
+                    + ("set before the descent" if self.gripper_needs_restore else "already there - no gripper call"))
+                self.gripper_open_check_done = False      # not opened: an occlusion still gets the open-and-look path
+            else:
+                if self.current_gripper_width < self.GRIPPER_FULLY_OPEN_WIDTH:
+                    self.get_logger().info(
+                        f"Gripper at {self.current_gripper_width:.0f}mm — opening for a clear view "
+                        f"(pre-grasp {self.pre_grasp_width:.0f}mm is set before the descent)")
+                    self._run_control_gripper("open")
+                self.gripper_needs_restore = True
+                self.gripper_open_check_done = True  # already open: occlusion handling goes to retreat
             self.initial_gripper_width = float(self.pre_grasp_width)
-            self.gripper_needs_restore = True
-            self.gripper_open_check_done = True  # already open: occlusion handling goes to retreat
             self.gripper_check_done = True
 
         # Pre-grasp gripper check (once before step 1)
