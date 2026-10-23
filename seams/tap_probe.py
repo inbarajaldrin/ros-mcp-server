@@ -30,7 +30,9 @@ PRESS_N = 4.0                # the guard trips past it; peaks overshoot it by up
                              # 4.0 keeps the peak under the operator's 5 N
 OVER_M = 0.003               # the tip waits this far over the highest height seen
 SPEED_M_S = 0.004            # descent speed of taps and presses
-PRESS_BELOW_M = 0.0015       # a press may go this far under the seated top (a cocked part rolls down past it)
+PRESS_BELOW_M = 0.003        # taps and presses may go this far under the seated top: a seated line_green sits at
+                             # -1.28 mm and a 1.5 mm floor left ~0.2 mm to build contact - 'missed' taps on a seated
+                             # bar (runs 50 / 50b). The 3 N tap / 4 N press guards still stop each at contact
 MOVED_MIN_M = 0.0005         # a press that travelled this far after first contact moved the part
 CONTACT_N = 1.0              # first contact in the force record
 EDGE_IN_M = 0.004            # edge taps this far in from the CAD top-face edge
