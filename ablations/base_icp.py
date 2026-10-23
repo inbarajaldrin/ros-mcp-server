@@ -148,6 +148,11 @@ if __name__ == '__main__':
 COVERAGE_MIN = 0.85     # matched points must span this fraction of the base in x and in y
 
 
+TILT_MAX_DEG = 2.5            # a clean fit reads ~0.4 / 1.0 deg (the base is flat on the table)
+Z_OFF_MAX_M = 0.003           # from the table-snapped marker height
+N_MIN = 4000                  # clean fits match ~7800 of 8000 sampled points
+
+
 def read_icp(base, ob, seated=(), n_points=8000):
     """((x, y, z_marker), quat_yaw), info from one still capture where the arm is; z is the marker read's
     (table-snapped, like every base read). None + info on failure."""
@@ -193,4 +198,13 @@ def read_icp(base, ob, seated=(), n_points=8000):
         return None, dict(info, error='fit too loose')
     if (cov < COVERAGE_MIN).any():
         return None, dict(info, error=f'partial view: matched points span {np.round(cov, 2).tolist()} of the base')
+    # the base lies flat on the table: a fit tilted or lifted off it locked onto something else (10-22 base-read audit:
+    # in-hand fits with line_green held - roll/pitch ~4/11 deg, z -50..-54 mm vs -62.5, n 816-2300 - landed 7.6-13.7 mm
+    # off the markers; two passed rms + coverage and seeded the next reads)
+    if max(abs(e[0]), abs(e[1])) > TILT_MAX_DEG:
+        return None, dict(info, error=f'tilted fit (roll/pitch {e[0]:+.1f}/{e[1]:+.1f} deg) - the base lies flat')
+    if abs(Bw[2, 3] - bz) > Z_OFF_MAX_M:
+        return None, dict(info, error=f'fit {1000 * (Bw[2, 3] - bz):+.1f} mm off the table height')
+    if n < N_MIN:
+        return None, dict(info, error=f'only {n} matched points')
     return ((float(Bw[0, 3]), float(Bw[1, 3]), float(bz)), R.from_euler('z', yaw, degrees=True).as_quat()), info
