@@ -53,9 +53,17 @@ def _action(node, ActionT, name, goal, timeout):
     gh = f.result()
     if gh is None or not gh.accepted:
         return None, f'{name}: goal rejected'
-    r = gh.get_result_async(); rclpy.spin_until_future_complete(node, r, timeout_sec=timeout)
+    r = gh.get_result_async()
+    try:
+        rclpy.spin_until_future_complete(node, r, timeout_sec=timeout)
+    except KeyboardInterrupt:
+        # the caller stopped (stop_run.sh, Ctrl-C): cancel the goal - the server SIGINTs the insert's process group and
+        # its force-mode cleanup runs; before, the client died and the arm went on (AR3 review 10-22)
+        c = gh.cancel_goal_async(); rclpy.spin_until_future_complete(node, c, timeout_sec=5.0)
+        raise
     if r.result() is None:
-        return None, f'{name}: no result in {timeout:.0f} s'
+        c = gh.cancel_goal_async(); rclpy.spin_until_future_complete(node, c, timeout_sec=5.0)
+        return None, f'{name}: no result in {timeout:.0f} s - goal cancelled'
     return r.result().result, ''
 
 
@@ -72,7 +80,8 @@ def main():
     sp = ap.add_subparsers(dest='op', required=True)
     d = sp.add_parser('drive'); d.add_argument('--mate', required=True)
     d.add_argument('--target', type=float, nargs=7, required=True); d.add_argument('--held', type=float, nargs=7, required=True)
-    d.add_argument('--timeout', type=float, default=1200.0)   # a full touch lattice (61 dips) takes ~11 min (10-22)
+    d.add_argument('--corrections', default='', help="the planner's aim corrections (seams.aim.corrections_json)")
+    d.add_argument('--timeout', type=float, default=1800.0)   # a full touch lattice ~11 min (10-22) + drive-mate's align
     e = sp.add_parser('execute'); e.add_argument('--mate', required=True); e.add_argument('--timeout', type=float, default=400.0)
     p = sp.add_parser('pose'); p.add_argument('--name', required=True); p.add_argument('--kind', default='base')
     p.add_argument('--timeout', type=float, default=15.0)
@@ -91,11 +100,17 @@ def main():
             goal = DriveMate.Goal(); goal.mate_id = a.mate
             goal.target = _vp(VisionPose, 'base', a.target[:3], a.target[3:])
             goal.held = _vp(VisionPose, 'tool0', a.held[:3], a.held[3:])
+            goal.corrections_json = a.corrections
             r, err = _action(node, DriveMate, '/ur5e/drive_mate', goal, a.timeout)
             out = {'error': err} if r is None else {
                 'seated': r.seated, 'stage_reached': r.stage_reached, 'slide': [_nan(v) for v in r.slide],
                 'measured_correction': [_nan(v) for v in r.measured_correction], 'trace_path': r.trace_path,
-                'refusal': r.refusal}
+                'refusal': r.refusal, 'align': json.loads(r.align_json) if r.align_json else {},
+                'base_measured': ([[r.base_measured.pose.position.x, r.base_measured.pose.position.y,
+                                    r.base_measured.pose.position.z],
+                                   [r.base_measured.pose.orientation.x, r.base_measured.pose.orientation.y,
+                                    r.base_measured.pose.orientation.z, r.base_measured.pose.orientation.w]]
+                                  if r.base_measured.header.frame_id == 'base' else None)}
         elif a.op == 'execute':
             from pa_assembly_msgs.action import ExecuteMate
             goal = ExecuteMate.Goal(); goal.mate = a.mate

@@ -22,21 +22,16 @@ Known debt kept visible: FOLLOWS_SEATED and AIM_BIAS_PARTS name parts; the two f
 """
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence, Tuple
+from typing import Mapping, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R_
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOGS = REPO_ROOT / 'ablations/logs'
-SEATED_OFFSETS = LOGS / 'seated_offsets.json'       # {part: {seat_minus_pred_mm: [dx, dy, dz] world, t}}
-SEAT_HISTORY = LOGS / 'seat_offset_history.json'    # {part: [[dx, dy] mm, ...]}
-ASSEMBLY_STATE = LOGS / 'assembly_state.json'       # ledger {part: {verified, t, how, rel_err_mm?}}
 
 # line_green drops between the arms of BOTH seated U parts (CAD: u_brown at base y -47.5 mm,
 # u_orange at +48.5, line_green centred between them), so its slot is the line through where the
@@ -77,6 +72,8 @@ class Correction:
     dyaw_rad: float                # turn of the aimed base frame
     about: str                     # base_origin | seat
     detail: str                    # the log line (same text the replay printed before)
+    dxy_base_m: Optional[Tuple[float, float]] = None   # the same shift in the base frame, when it was made there (follow):
+    #                                 re-applied on a base read later (drive-mate's servo) it turns with that base
 
 
 @dataclass(frozen=True)
@@ -110,18 +107,12 @@ class AimFacts:
     now: float = 0.0
 
 
-def _read(p):
-    try:
-        return json.load(open(p))
-    except Exception:
-        return {}
-
-
-def load_facts(env: Optional[Mapping] = None, now: Optional[float] = None) -> AimFacts:
-    """The records as they are now (the only I/O in this module)."""
+def load_facts(env: Optional[Mapping] = None, now: Optional[float] = None, seated=None) -> AimFacts:
+    """The records as they are now (the only I/O in this module), through seams.seated_parts."""
+    from seams.seated_parts import SeatedParts
     env = os.environ if env is None else env
-    return AimFacts(seated_offsets=_read(SEATED_OFFSETS) if SEATED_OFFSETS.exists() else {},
-                    ledger=_read(ASSEMBLY_STATE), seat_history=_read(SEAT_HISTORY),
+    seated = seated or SeatedParts()
+    return AimFacts(seated_offsets=seated.seated_offsets(), ledger=seated.ledger(), seat_history=seated.seat_history(),
                     one_node=env.get('SEAMS_DRIVE') == '1', no_aim_bias=bool(env.get('NO_AIM_BIAS')),
                     follow_yaw=env.get('FOLLOW_YAW', '1') != '0',
                     yaw_exp_deg=float(env.get('INSERT_YAW_OFFSET_DEG', '0') or 0),
@@ -175,7 +166,8 @@ def _follow_general(obj, base, base_quat, f: AimFacts, cad: Cad):
         return None, None
     led = f.ledger
     errs = [np.array(led[p]['rel_err_mm'], dtype=float) for p in parts
-            if isinstance((led.get(p) or {}).get('rel_err_mm'), list) and f.now - led[p].get('t', 0) < FOLLOW_GENERAL_MAX_AGE_S]
+            if isinstance((led.get(p) or {}).get('rel_err_mm'), list)
+            and f.now - led[p].get('rel_err_t', led[p].get('t', 0)) < FOLLOW_GENERAL_MAX_AGE_S]
     if len(errs) < len(parts):
         return None, f"  [follow] {obj}: measured seat errors of {parts} not all recorded -> aim at the base"
     E = np.full((len(errs), 2), np.nan)
@@ -191,14 +183,15 @@ def _follow_general(obj, base, base_quat, f: AimFacts, cad: Cad):
     dw = R_.from_quat(base_quat).as_matrix()[:2, :2] @ m
     line = (f"  [follow] {obj}: interlocks with {parts} -> aim shifted ({m[0]:+.1f}, {m[1]:+.1f}) mm (base frame, mean of "
             f"their measured seat errors {[np.round(e, 1).tolist() for e in errs]})")
-    return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), 0.0, 'base_origin', line), None
+    return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), 0.0, 'base_origin', line,
+                      (float(m[0]) / 1000, float(m[1]) / 1000)), None
 
 
 def _follow_named(obj, base, base_quat, parts, f: AimFacts, cad: Cad):
     try:
         last = {k: v['seat_minus_pred_mm'] for k, v in f.seated_offsets.items()}
         if not all(p in last for p in parts):
-            return None, (f"  [follow] {obj}: seat offsets of {parts} not all recorded ({SEATED_OFFSETS.name}) "
+            return None, (f"  [follow] {obj}: seat offsets of {parts} not all recorded (seated_offsets.json) "
                           f"-> aim at the base")
         Rb = R_.from_quat(base_quat).as_matrix()[:2, :2]
         (pa, pb) = parts
@@ -219,7 +212,8 @@ def _follow_named(obj, base, base_quat, parts, f: AimFacts, cad: Cad):
         dw = Rb @ np.array([dx_b, 0.0])
         line = (f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame, from the {src}"
                 f", cap {cap:g} deg) — " + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))))
-        return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), dyaw, 'base_origin', line), note
+        return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), dyaw, 'base_origin', line,
+                          (dx_b / 1000, 0.0)), note
     except Exception as e:
         return None, f"  [follow] {obj}: {e} -> aim at the base"
 
@@ -275,3 +269,38 @@ def aim_for_insert(obj: str, base: str, measured: Pose, f: AimFacts, cad: Option
         oq = tuple((Rd * Rb_).as_quat())
     return Aim(obj=obj, pos=(float(ox), float(oy), float(oz)), quat=tuple(float(v) for v in oq),
                seat_dz_m=cad.seat_dz(obj), measured=measured, corrections=tuple(corr), notes=tuple(notes))
+
+
+def corrections_json(aim: Aim) -> str:
+    """The planner's corrections for drive-mate (DriveMate goal corrections_json)."""
+    import json
+    return json.dumps([dict(name=c.name, dxy_m=list(c.dxy_m), dyaw_rad=c.dyaw_rad, about=c.about,
+                            dxy_base_m=None if c.dxy_base_m is None else list(c.dxy_base_m)) for c in aim.corrections])
+
+
+def apply_corrections(base: Pose, corrections, seat_in_base=None) -> Pose:
+    """The aim from a base pose and corrections made for another read of it (drive-mate: the planner's corrections on
+    the base its own alignment arrived at), in aim_for_insert's order: follow / bias shifts (a follow made in the base
+    frame turns with this base), the follow's yaw about the base origin, the yaw experiment about the part's seat."""
+    (ox, oy, oz), oq = base
+    oq = tuple(float(v) for v in oq)
+    cs = [c if isinstance(c, dict) else dict(name=c.name, dxy_m=c.dxy_m, dyaw_rad=c.dyaw_rad, about=c.about,
+                                             dxy_base_m=c.dxy_base_m) for c in corrections]
+    Rb = R_.from_quat(oq).as_matrix()[:2, :2]
+    for c in cs:
+        if c['name'] == 'yaw_exp':
+            continue
+        d = Rb @ np.asarray(c['dxy_base_m'], float) if c.get('dxy_base_m') is not None else np.asarray(c['dxy_m'], float)
+        ox, oy = ox + float(d[0]), oy + float(d[1])
+    for c in cs:
+        if c['name'] != 'yaw_exp' and c.get('dyaw_rad'):
+            oq = tuple((R_.from_euler('z', c['dyaw_rad']) * R_.from_quat(oq)).as_quat())
+    for c in cs:
+        if c['name'] == 'yaw_exp' and c.get('dyaw_rad'):
+            Rb_ = R_.from_quat(oq); o_ = np.array([ox, oy, oz])
+            seat_w = o_ + Rb_.apply(np.asarray(seat_in_base, float))
+            Rd = R_.from_euler('z', c['dyaw_rad'])
+            o_new = seat_w + Rd.apply(o_ - seat_w)
+            ox, oy = float(o_new[0]), float(o_new[1])
+            oq = tuple((Rd * Rb_).as_quat())
+    return (float(ox), float(oy), float(oz)), oq

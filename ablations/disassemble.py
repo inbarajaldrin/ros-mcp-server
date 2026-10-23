@@ -367,7 +367,8 @@ def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
         # fingers on it (6.5 N). Not applied.
         return tcp
     try:
-        d = json.load(open(REPO / 'ablations/logs/seated_offsets.json')).get(name)
+        from seams.seated_parts import SeatedParts
+        d = SeatedParts().seated_offsets().get(name)
         if d and d.get('seat_minus_pred_mm'):
             dx, dy = (float(v) / 1000 for v in d['seat_minus_pred_mm'][:2])
             if max(abs(dx), abs(dy)) <= SEAT_OFFSET_MAX_M:

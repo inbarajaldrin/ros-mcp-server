@@ -537,7 +537,6 @@ def observe_base_pose(base_name: str, timeout_s: float = 15.0):
 
 
 
-ASSEMBLY_STATE = REPO_ROOT / 'ablations/logs/assembly_state.json'   # {part: {verified, t, how}}
 # Parts a later part hides from the camera once seated (operator, 2026-10-17: after yellow, line_green
 # is not visible — accept it from the ledger if it was verified before yellow covered it).
 OCCLUDED_BY = {'line_green': ('inverted_u_yellow',)}
@@ -545,17 +544,16 @@ VERIFY_READS = 3                 # verify_assembly readings per part; majority (
 VERIFY_MAX_READS = 8             # "not detected" reads extend the window up to this many
 
 
+from seams.seated_parts import SeatedParts   # noqa: E402  (AR4: the one writer of the ledger + seat offsets)
+SEATED = SeatedParts()
+
+
 def _ledger():
-    try:
-        return json.load(open(ASSEMBLY_STATE))
-    except Exception:
-        return {}
+    return SEATED.ledger()
 
 
 def forget_verified(obj: str) -> None:
-    d = _ledger()
-    if d.pop(obj, None) is not None:
-        json.dump(d, open(ASSEMBLY_STATE, 'w'), indent=1)
+    SEATED.forget(obj, offset=False)
 
 
 VERIFY_TILT_MAX_DEG = 5.0        # a seated part cannot be tilted: a reading this tilted is a bad pose estimate
@@ -903,10 +901,10 @@ def verify_seated(objs, say, second_view=None) -> bool:
                 if second_view():
                     r = _read_part(o)
         if r.get('result') == 'success' and not _not_detected(r):
-            led[o] = dict(verified=True, t=time.time(), how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             e_ = r.get('position_error_m')
-            if isinstance(e_, dict) and 'x' in e_ and 'y' in e_:   # base-frame xy error: follow_seated_offset reads it
-                led[o]['rel_err_mm'] = [1000 * float(e_['x']), 1000 * float(e_['y'])]
+            if isinstance(e_, dict) and 'x' in e_ and 'y' in e_:   # base-frame xy error: the aim's follow reads it
+                SEATED.set_seat_error(o, [1000 * float(e_['x']), 1000 * float(e_['y'])], 'marker base view')
+            led[o] = SEATED.mark(o, True, how='marker xy %.1f mm' % (1000 * r.get('position_error_judged_m', 0)))
             say(f"  [verify] {o}: OK ({led[o]['how']}, yaw err {(r.get('orientation_error_deg') or {}).get('yaw')} deg)")
             continue
         prev = led.get(o) or {}
@@ -924,9 +922,8 @@ def verify_seated(objs, say, second_view=None) -> bool:
         else:
             say(f"\n!!! [verify] {o}: NOT in its assembly pose — xy error "
                 f"{1000 * float(r.get('position_error_judged_m') or 0):.1f} mm, orientation {r.get('orientation_error_deg')}")
-        led.setdefault(o, {})['verified'] = False
+        led[o] = SEATED.mark(o, False)
         ok_all = False
-    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     return ok_all
 
 
@@ -1243,6 +1240,7 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
                 nd = _notches(RUN_BASE['name'], observed_base, list(parts))
                 for p, v in (nd.items() if isinstance(nd, dict) else []):
                     if isinstance(v, dict) and 'dx_m' in v:
+                        SEATED.set_seat_error(p, [1000 * float(v['dx_m']), 0.0], 'notch depth')
                         led.setdefault(p, {})['rel_err_mm'] = [1000 * float(v['dx_m']), 0.0]
                         depth_done.add(p)
                         say(f"  [follow] {p}: gap {v['gap_mm']} mm vs CAD {v['cad_gap_mm']} (width {v['width_mm']}) -> "
@@ -1268,13 +1266,13 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
                 say(f"  [follow] {p}: not seen from {FOLLOW_READ_Z:.2f} m above its seat")
                 continue
             e = Rb.inv().apply(np.array(o[0]) - seat_w)
+            SEATED.set_seat_error(p, [1000 * float(e[0]), 1000 * float(e[1])], 'marker close read')
             led.setdefault(p, {})['rel_err_mm'] = [1000 * float(e[0]), 1000 * float(e[1])]
             say(f"  [follow] {p}: seen ({1000*e[0]:+.1f}, {1000*e[1]:+.1f}) mm from its CAD seat (base frame, close read)")
     for p in parts:
         if isinstance((led.get(p) or {}).get('rel_err_mm'), list):
             continue
         say(f"  [follow] {p}: no close read -> {obj} follows the insert-based offsets")
-    json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
     if observed_base is not None:
         # the reads left the arm above the base; the pick needs the camera on the part again
         # (2026-10-19 21:xx: line_green at the clear area was out of view -> pick failed)
@@ -1488,6 +1486,15 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
     text = ''.join(captured)
     rj = extract_result_json(text)
     if rj is None:
+        # A primitive that exits 0 without its result block crashed after the motion or printed it broken - not a
+        # success (AR2). Scripts outside primitives/ (nudge_part.py) report by exit code only and keep that.
+        m_ = argv[argv.index('-m') + 1] if '-m' in argv else ''
+        if proc.returncode == 0 and m_.startswith('primitives.'):
+            msg = f"  [{label}] {m_} exited 0 with no __RESULT_JSON__ block -> failure\n"
+            print(msg, end='', flush=True)
+            if log_fh:
+                log_fh.write(msg)
+            return {"result": "failure", "error": "exit 0 with no __RESULT_JSON__ block", "label": label, "returncode": 0}
         return {"result": "failure" if proc.returncode != 0 else "success",
                 "error": "no __RESULT_JSON__ block in output" if proc.returncode != 0 else None,
                 "label": label, "returncode": proc.returncode}
@@ -1558,52 +1565,59 @@ class AssemblyState:
 # ---------------------------------------------------------------------------
 
 from seams.aim import FOLLOWS_SEATED, aim_for_insert, load_facts   # noqa: E402  (AR1: the aim rules live there)
-SEATED_OFFSETS = REPO_ROOT / 'ablations/logs/seated_offsets.json'   # {part: seat - predicted TCP, mm}
 # Written after every successful insert, entry removed when disassemble.py pulls the part out:
 # it describes the parts seated NOW, whichever process seated them (a line_green-only retry
 # finds the U parts' offsets without any time window).
 
 
-def record_seat_offset(obj: str, since: float) -> None:
-    """Store `obj`'s seat offset from the insert log written since `since` (if the log has one)."""
+def record_seat_offset(obj: str, since: float, result=None) -> None:
+    """Store where `obj` seated vs the prediction: from the insert's own outcome when it returned one (drive-mate's
+    measured_correction, judged at rest - AR2), else from the insert log written since `since`. Says so when neither
+    has it (attempt 22: an empty touch CSV recorded nothing, silently, and line_green aimed at the bare base)."""
     try:
-        from fmb1_loop import insert_summary
-        rows = [r for r in insert_summary(since) if r.get('object') == obj and r.get('outcome') == 'success'
-                and r.get('seat_minus_pred_mm')]
-        if not rows:
-            return
+        if result is not None and result.get('measured_correction') is not None:
+            m = [round(1000 * float(v), 2) for v in result['measured_correction']]
+        else:
+            from fmb1_loop import insert_summary
+            rows = [r for r in insert_summary(since) if r.get('object') == obj and r.get('outcome') == 'success'
+                    and r.get('seat_minus_pred_mm')]
+            if not rows:
+                print(f"  [seated-offsets] {obj}: NOT recorded - the insert returned no outcome and no successful trace "
+                      f"since {time.strftime('%H:%M:%S', time.localtime(since))}", flush=True)
+                return
+            m = list(rows[-1]['seat_minus_pred_mm'])
         # Total offset vs the UNbiased prediction = measured (vs the biased aim) + the bias applied.
         bx, by = _APPLIED_BIAS.get(obj, (0.0, 0.0))
-        m = list(rows[-1]['seat_minus_pred_mm'])
         tot = [round(m[0] + 1000 * bx, 2), round(m[1] + 1000 * by, 2)] + m[2:]
-        d = json.load(open(SEATED_OFFSETS)) if SEATED_OFFSETS.exists() else {}
-        d[obj] = dict(seat_minus_pred_mm=tot, t=time.strftime('%Y-%m-%d %H:%M:%S'))
-        json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
-        h = json.load(open(SEAT_HISTORY)) if SEAT_HISTORY.exists() else {}
-        h.setdefault(obj, []).append(tot[:2]); h[obj] = h[obj][-20:]
-        json.dump(h, open(SEAT_HISTORY, 'w'), indent=1)
+        SEATED.record_seat_offset(obj, tot)
+        print(f"  [seated-offsets] {obj}: seat - prediction {tot} mm recorded", flush=True)
     except Exception as e:
         print(f"  [seated-offsets] {obj}: not recorded ({e})")
 
 
 def forget_seat_offset(obj: str) -> None:
-    try:
-        d = json.load(open(SEATED_OFFSETS))
-        if d.pop(obj, None) is not None:
-            json.dump(d, open(SEATED_OFFSETS, 'w'), indent=1)
-    except Exception:
-        pass
+    SEATED.forget(obj, verdict=False)
 
 
-SEAT_HISTORY = REPO_ROOT / 'ablations/logs/seat_offset_history.json'   # {part: [[dx, dy] mm, ...]} - seams.aim's bias
 _APPLIED_BIAS = {}               # part -> (dx, dy) m seat-history bias in this run's insert aim (record_seat_offset)
 
 
 def _seam_call(args_, timeout_s):
-    p = subprocess.run(['python3', '-u', '-m', 'seams.client', *args_], capture_output=True, text=True,
-                       timeout=timeout_s, env=make_env(), cwd=str(REPO_ROOT))
-    line = next((l for l in reversed(p.stdout.splitlines()) if l.startswith('__SEAM__ ')), None)
-    return json.loads(line[len('__SEAM__ '):]) if line else {'error': (p.stderr.strip().splitlines() or ['no answer'])[-1]}
+    p = subprocess.Popen(['python3', '-u', '-m', 'seams.client', *args_], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=make_env(), cwd=str(REPO_ROOT))
+    try:
+        out, err = p.communicate(timeout=timeout_s)
+    except (KeyboardInterrupt, subprocess.TimeoutExpired):
+        # let the client cancel its goal (the server then SIGINTs the insert's process group); subprocess.run SIGKILLed
+        # it 0.25 s after Ctrl-C, before the cancel went out (AR3 review 10-22)
+        p.send_signal(signal.SIGINT)
+        try:
+            p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.terminate()
+        raise
+    line = next((l for l in reversed(out.splitlines()) if l.startswith('__SEAM__ ')), None)
+    return json.loads(line[len('__SEAM__ '):]) if line else {'error': (err.strip().splitlines() or ['no answer'])[-1]}
 
 
 def insert_via_drive_mate(obj, base, argv, snap, say):
@@ -1626,15 +1640,25 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     aim = getattr(STATE_REF.get('state'), 'aim', None)
     if '--final-base-pos' not in argv or aim is None or aim.obj != obj:   # the seam takes a VisionPose, never a default
         return {'result': 'failure', 'error': f'drive_mate: no observed {base} pose to aim at'}
-    pos, q = list(aim.pos), list(aim.quat)       # seam terms: no per-part seat z (the server adds it)
+    # the MEASURED base: drive-mate aligns on it and applies the corrections itself (AR3) - sending the aim would apply
+    # them twice. Seam terms: no per-part seat z (the server adds it)
+    pos, q = list(aim.measured[0]), list(aim.measured[1])
     gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
     off_ = float(getattr(STATE_REF.get('state'), 'held_yaw_offset', 0.0) or 0.0)
     if off_:
         held_q = list((R_.from_euler('z', off_, degrees=True) * R_.from_quat(held_q)).as_quat())   # the measured part
     hp, hq = held_pose(obj, gid, held_q, tq, float(np.asarray(held_tool_offset())[2]))
-    say(f"  [drive_mate] {mate}: target ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}")
-    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 1260)
+    from seams.aim import corrections_json
+    say(f"  [drive_mate] {mate}: measured base ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}, corrections "
+        f"{[c.name for c in aim.corrections]}")
+    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq),
+                      '--corrections', corrections_json(aim)], 1860)
+    al_ = out.pop('align', None) or {}
+    say(f"  [drive_mate] {mate}: aligned by {al_.get('route')} (log {al_.get('log')}), aim "
+        f"{[round(1000 * v, 1) for v in (al_.get('aim') or [[float('nan')] * 3])[0][:2]]} mm")
     say(f"  [drive_mate] {mate}: {json.dumps(out)}")
+    if out.get('base_measured') and STATE_REF.get('args') is not None:
+        STATE_REF['args'].measured_base = (tuple(out['base_measured'][0]), tuple(out['base_measured'][1]))
     ok = bool(out.get('seated'))
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
                 error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
@@ -1944,6 +1968,95 @@ def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None
 SERVO_MEASURED: dict = {}         # obj -> did the last hover_servo take a reading
 
 
+def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=None):
+    """Free base, one-node: bring the held part over its seat before the insert (AR3: the call drive-mate's align step
+    makes). From the last MEASURED base: the in-hand base re-read, then by route - a prismatic part turns to the base
+    yaw and re-reads the base close (it searches itself); a part threading over seated parts (CAD) runs the depth-frame
+    servo (close read as fallback); any other the marker servo (depth-frame servo when it took no reading).
+    Returns {aim_base, measured_base, held_quat, tcp_quat (the flange after a wrist turn, else None), route}."""
+    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+    out = dict(aim_base=None, measured_base=None, held_quat=held_quat, tcp_quat=None, route='')
+    ob = track_base_in_hand(base, measured_base, say, log_fh, held_obj=obj)
+    out['measured_base'] = ob
+
+    def _tcp_q():
+        return (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
+    try:
+        from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
+    except Exception:
+        _PRISM = ()
+    mode = os.environ.get('HOVER_ALIGN', 'servo')
+    if mode == 'servo' and obj in _PRISM:
+        # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
+        # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
+        # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
+        out['route'] = 'prismatic: yaw + close read'
+        say(f"  [servo] {obj}: prismatic route - it searches itself, no xy servo")
+        # but the wrist still turns to the base's yaw first: skipping the whole servo (9a19b76) skipped this turn and
+        # line_green arrived +13.2 deg off its slot (base1 at ~16 deg; the U openings it threads need < 1.3 deg) -
+        # jammed on the U tops at +61 mm, 10-22 06:27 (INSERT_GEOMETRY: the corridor stage is a yaw wedge)
+        try:
+            if ob is not None and held_quat is not None:
+                err_, _t = rel_yaw_error(obj, base, R_.from_quat(ob[1]), R_.from_quat(held_quat))
+                if abs(err_) > 0.3 and turn_wrist(err_):
+                    held_quat = list((R_.from_euler('z', err_, degrees=True) * R_.from_quat(held_quat)).as_quat())
+                    out['tcp_quat'] = _tcp_q()
+                    say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
+        except Exception as e_:
+            say(f"  [servo] {obj}: yaw to base not applied ({e_})")
+        # and the base is re-read from its markers in a CLOSE frame over the seat (no xy servo): the 0.56 m CAD
+        # fit carries the hand-eye rotation error x ~0.5 m of lever (several mm); line_green needs +-1.1 mm across
+        # the U openings. Bare and seated-assembly fits agreed to 0.4 mm (10-22 07:00), so the U parts are not the
+        # offset - the read height is. From the clear height (~0.17 m over the base top) the lever is ~1/3.
+        try:
+            ob = close_base_read(obj, base, ob, held_quat, grasp_id, say, log_fh)
+            out['measured_base'] = ob                                # a measurement too (markers, one close frame)
+            # the wrist turned to the base yaw BEFORE this read: turn again to the closer read's yaw if they differ
+            if ob is not None and held_quat is not None:
+                err2_, _t2 = rel_yaw_error(obj, base, R_.from_quat(ob[1]), R_.from_quat(held_quat))
+                if abs(err2_) > 0.3 and turn_wrist(err2_):
+                    held_quat = list((R_.from_euler('z', err2_, degrees=True) * R_.from_quat(held_quat)).as_quat())
+                    out['tcp_quat'] = _tcp_q()
+                    say(f"  [servo] {obj}: wrist turned {err2_:+.2f} deg to the close read's base yaw")
+        except Exception as e_:
+            say(f"  [servo] {obj}: close base read not applied ({e_})")
+    elif mode == 'servo' and seated_under(base, obj):
+        # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
+        # marker read as the fallback when it cannot measure
+        out['route'] = 'depth servo'
+        ds = depth_servo(obj, base, ob, held_quat, grasp_id, say, log_fh)
+        if ds is not None:
+            ob, held_quat = ds
+        else:
+            try:
+                ob = close_base_read(obj, base, ob, held_quat, grasp_id, say, log_fh)
+            except Exception as e_:
+                say(f"  [dservo] {obj}: close base read not applied ({e_})")
+        out['tcp_quat'] = _tcp_q()
+    elif mode == 'servo':
+        # the marker servo first (u_brown seated first try with it in attempts 16-18; the depth servo's clean,
+        # converged reading put u_brown 6 mm off at 12:39 - not yet understood), the depth-frame servo when the
+        # marker servo took no reading (12:05/12:22 u_orange: 0-1 base markers over its far-side seat; the depth
+        # servo converged and it entered on the lattice)
+        out['route'] = 'marker servo'
+        ob0_, hq0_ = ob, held_quat
+        ob, hq_ = hover_servo(obj, base, ob0_, hq0_, grasp_id, say, log_fh)
+        if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
+            out['route'] = 'marker servo -> depth servo'
+            say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
+            ds = depth_servo(obj, base, ob0_, hq_ if hq_ is not None else hq0_, grasp_id, say, log_fh)
+            if ds is not None:
+                ob, hq_ = ds
+        if hq_ is not None and held_quat is not None and hq_ is not held_quat:
+            held_quat = hq_                                          # the wrist turned: the chained held pose turns with it
+            out['tcp_quat'] = _tcp_q()
+    elif mode == '1':
+        out['route'] = 'hover align'
+        ob = hover_align(obj, base, ob, held_quat, grasp_id, say, log_fh)
+    out['aim_base'], out['held_quat'] = ob, held_quat
+    return out
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -2020,10 +2133,10 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     # leg to the measuring height is vertical, at 4 N guard.
     z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
-    xy = st[:2].copy()
-    yaw_total = 0.0
-    gain, last_move, last_d, best_meas, final_reading = 1.0, None, None, None, None
-    for k in range(SERVO_ITERS + 1):
+    from seams import servo_law as SL
+    law = SL.HoverServoLaw(st[:2])              # the decisions (AR3 step 1); this function moves and reads
+    xy = law.xy
+    for k in range(SL.SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
         if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{cur[0]:.5f}",
@@ -2048,6 +2161,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                                     f"{xy[0]:.5f}", f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q],
                                     '--min-z', '0.15'], label=f'servo off the contact {k}', timeout_s=60, log_fh=log_fh)
+                law.measuring_low()
                 say(f"  [servo] {obj}: touched down {1000*(z_meas - 0.002 - rim_z):+.1f} mm over the CAD rim - measuring "
                     f"from 2 mm above the contact")
         if r.get('result') == 'failure':
@@ -2071,9 +2185,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # Measure from there instead (the hand-eye tilt lever grows to ~1.7 mm/deg; the dip grid covers +-1.5 mm)
             say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
             z_meas = z_clear
-            # from the clear height the reading moves ~2.4 mm per mm of step (u_orange twice, 10-22 03:28 and 04:39: a 1:1
-            # first step overshot 7.6 -> -10.3 mm); start the gain there and keep learning it
-            gain = SERVO_GAIN_CLEAR
+            law.measuring_from_clear()                 # the reading moves ~2.4 mm per mm of step from there
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                                 f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                                label=f'servo up to measure {k}', timeout_s=60, log_fh=log_fh)
@@ -2094,74 +2206,49 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # path - and its 27-70 px-spread fits turned u_orange's wrist 6 x -5 deg = -30 deg into the insert)
             say(f"  [servo] {obj} round {k}: base not read in the frame ({sfinfo.get('error')}) - no correction, aiming as read")
             break
-        if d is None:
+        act = law.reading(d, info)
+        for n_ in law.notes:
+            say(f"  [servo] {obj} {n_}")
+        law.notes.clear()
+        if isinstance(act, SL.Stop) and act.why.startswith('not measured'):
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
-        sp_x, sp_y = (info.get('spread_px') or [0, 0])[:2]
-        if sp_y > SERVO_MAX_SPREAD_PX:
-            say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SERVO_MAX_SPREAD_PX} - the outline does not "
-                f"match the target, no correction"); break
-        if sp_x > SERVO_MAX_SPREAD_PX:
-            # the far edge fits, the left one does not (u_orange's slanted side face, 10-22): correct along the far edge's
-            # image-y only; the other axis stays as read (the dip grid covers +-1.5 mm)
-            d = np.asarray(info['d_far_only_mm'], float) / 1000.0
-            say(f"  [servo] {obj} round {k}: left-edge spread {sp_x} px > {SERVO_MAX_SPREAD_PX} - far-edge component only "
-                f"{info['d_far_only_mm']} mm")
-        yi = info.get('yaw_img_deg')
-        final_reading = np.asarray(d, float)                    # every measured reading, before any turn or step
-        if best_meas is None or np.hypot(*final_reading) < np.hypot(*best_meas[1]):
-            best_meas = (xy.copy(), final_reading.copy())
-        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
+        if isinstance(act, SL.Stop) and act.why.startswith('fit spread'):
+            say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SL.SERVO_MAX_SPREAD_PX} - the outline "
+                f"does not match the target, no correction"); break
+        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {info.get('yaw_img_deg')} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
-        # 10-22 00:12: four turns of -0.31..-0.35 deg left the reading at -0.3 (noise floor ~0.3 deg): a turn below
-        # SERVO_YAW_MIN_TURN_DEG is not worth a round
-        yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG or abs(yi / SERVO_YAW_GAIN) < SERVO_YAW_MIN_TURN_DEG
-        if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or k == SERVO_ITERS:
+        if isinstance(act, SL.Converged):
             break
-        if not yaw_ok:
-            # image yaw of the far edge vs the socket's; the wrist turns about the TCP (0.5 mm of part per degree), xy is
-            # re-measured after it. Effective gain 0.7-1.1 deg of reading per degree of wrist (10-21): turn 1:1, iterate
-            t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
-            if abs(yaw_total + t) > SERVO_MAX_YAW_DEG:
-                say(f"  [servo] {obj}: image yaw {yi} deg would turn the wrist {yaw_total + t:+.1f} deg in all (> "
-                    f"{SERVO_MAX_YAW_DEG}) - more than the reads can be off, stopping the servo"); break
+        if isinstance(act, SL.Stop):
+            say(f"  [servo] {obj}: {act.why} - more than the reads can be off, stopping the servo"); break
+        if isinstance(act, SL.Turn):
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                            label=f'servo up for turn {k}', timeout_s=60, log_fh=log_fh)   # vertical: xy is where we measured
             if _SAFETY_STOP:
                 return observed_base, held_q
-            if turn_wrist(t):
-                last_move, last_d = None, None                      # a turn moves the reading too: re-learn the xy gain
-                yaw_total += t
-                held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
+            if turn_wrist(act.deg):
+                law.turned(act.deg)
+                held_q = list((R_.from_euler('z', act.deg, degrees=True) * R_.from_quat(held_q)).as_quat())
                 q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw') or q
-                say(f"  [servo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
+                say(f"  [servo] {obj}: wrist turned {act.deg:+.2f} deg (image yaw)")
+            law.next_round()
             continue                                                # re-measure xy after the turn
-        # learn the move->reading gain from the previous xy step (10-22 03:28: measured from the clear height a 2.1 mm
-        # move changed u_orange's reading by ~5 mm - the px->mm scale at the target depth was off ~2.4x - and the servo
-        # oscillated); clamp it to [0.4, 3]
-        dv = np.asarray(d, float)
-        if last_move is not None and last_d is not None:
-            m_ = np.asarray(last_move); resp = last_d - dv                    # how much the reading moved for that step
-            if np.dot(m_, m_) > 1e-8:
-                gain = float(np.clip(np.dot(resp, m_) / np.dot(m_, m_), 0.4, 3.0))
-        step = dv / gain
-        xy = xy - step
-        last_move, last_d = step, dv
-    if best_meas is not None and final_reading is not None and np.hypot(*final_reading) > np.hypot(*best_meas[1]) + 0.0005:
-        # the last step made the reading worse (an overshoot): aim from the best measurement with the learned gain
-        xy = best_meas[0] - best_meas[1] / max(gain, 0.4)
-        say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*best_meas[1][0]:+.1f}, "
-            f"{1000*best_meas[1][1]:+.1f}) mm at gain {gain:.2f}")
+        xy = np.array(act.xy)                                       # SL.Step: the next place to measure
+        law.next_round()
+    out = law.finish()
+    xy = law.xy
+    if isinstance(out, SL.Aim) and out.overshot:
+        say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*out.overshot[0]:+.1f}, "
+            f"{1000*out.overshot[1]:+.1f}) mm at gain {out.overshot[2]:.2f}")
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
-    # the residual bias differs by measuring height: from just over the rim (-0.5, +0.9) mm (u_brown, by hand and pipeline);
-    # from the clear height (+0.2, -2.1) and (-1.1, -1.8) mm (u_orange, 10-22 04:47 and 03:55) - hand-eye tilt x the lever
-    SERVO_MEASURED[obj] = final_reading is not None
-    c = xy - st[:2] + (SERVO_BIAS_CLEAR_M if z_meas >= z_clear - 0.001 else SERVO_BIAS_M)
-    if np.hypot(*c) > SERVO_MAX_M:
-        say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
+    SERVO_MEASURED[obj] = law.final_reading is not None
+    if isinstance(out, SL.Stop):
+        say(f"  [servo] {obj}: {out.why} - not applied")
         return observed_base, held_q
+    c = np.array(out.dxy); yaw_total = out.yaw_deg
     if yaw_total:
         # the image yaw becomes the base's yaw for the insert, turned about the SEAT point (the pocket stays put): the
         # insert's own yaw step (held part vs base x seat) then has nothing to undo
@@ -2175,21 +2262,11 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     return ((bx + c[0], by + c[1], bz), bq), held_q
 
 
-SERVO_ITERS = 6
-SERVO_YAW_TOL_DEG = 0.3
-SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
-SERVO_MAX_SPREAD_PX = 12.0     # a fit whose edge residuals spread more than this does not match the part (good fits: 1-4 px)
-SERVO_MAX_YAW_DEG = 4.0        # the whole servo may turn the wrist this much; base and grasp reads are within ~3 deg
-SERVO_GAIN_CLEAR = 2.4         # reading change per mm of xy step when measured from the clear height (measured twice)
-SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
+from seams.servo_law import (SERVO_ITERS, SERVO_YAW_TOL_DEG, SERVO_YAW_MIN_TURN_DEG, SERVO_MAX_SPREAD_PX,  # noqa: E402,F401
+                             SERVO_MAX_YAW_DEG, SERVO_GAIN_CLEAR, SERVO_YAW_GAIN, SERVO_BIAS_M, SERVO_BIAS_CLEAR_M,
+                             SERVO_TOL_M, SERVO_MAX_M)   # one definition (the law's); depth_servo uses them too
 SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
-# the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
-# 10-22 00:13): the target's residual bias (hand-eye tilt x the 35 mm lift); the dip grid still covers +-1.5 mm around it
-SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5,0.9').split(',')]) / 1000.0
-SERVO_BIAS_CLEAR_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_MM', '-0.5,-2.0').split(',')]) / 1000.0
-SERVO_TOL_M = 0.001
-SERVO_MAX_M = 0.015
 
 
 def _emitter(on):
@@ -2224,10 +2301,8 @@ def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
         o = _seam_call(['execute', '--mate', mate], 450)
         out[obj] = o
         if o.get('placed'):
-            led = _ledger()
-            led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
-                            depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
-            json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+            SEATED.mark(obj, True, how='execute_mate',
+                        depth_mm=None if o.get('engagement_depth_m') is None else 1000 * float(o['engagement_depth_m']))
         say(f"  [certify] {mate} ({obj}): placed={o.get('placed')} refusal={o.get('refusal')!r} "
             f"{o.get('refusal_detail', '')} depth={o.get('engagement_depth_m')}")
     return out
@@ -2254,10 +2329,8 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     if out is None:
         say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
     if out.get('placed'):
-        led = _ledger()
-        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='execute_mate',
-                        depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.mark(obj, True, how='execute_mate',
+                    depth_mm=None if out.get('engagement_depth_m') is None else 1000 * float(out['engagement_depth_m']))
     say(f"  [execute_mate] {mate}: placed={out.get('placed')} refusal={out.get('refusal')!r} "
         f"{out.get('refusal_detail', '')} depth={out.get('engagement_depth_m')}")
     return out
@@ -2477,30 +2550,19 @@ def _is_bar(obj) -> bool:
         return False
 
 
-WEDGE_MAX_DZ_MM = 7.0       # stalled at most this far above the seat ...
-WEDGE_MAX_DXY_MM = 5.0      # ... and this close to the aim in x/y (cycle 3: 3.8-4.4 mm, 5 mm high = on the channel edge)
-
-
-def _wedged_near_seat(obj, since):
-    """The last insert's end state from its raw CSV (not the FSM label): {'dz_mm', 'dxy_mm'} if it ended still,
-    within WEDGE_MAX_DZ_MM above and WEDGE_MAX_DXY_MM of its predicted seat, else None."""
-    import csv as _csv, glob as _glob
-    metas = [m for m in _glob.glob(str(REPO_ROOT / f'compliant_insertion_studio/logs/insert_{obj}_*.meta.json'))
-             if os.path.getmtime(m) >= since - 1]
-    if not metas:
+def _wedged_near_seat(obj, since, result=None):
+    """{'dz_mm', 'dxy_mm'} if the last insert ended wedged (still, 0 < dz <= 7 mm over its predicted seat, within 5 mm
+    in xy: on a channel edge), else None. The insert's own outcome when it returned one (drive-mate: judged at rest),
+    else its trace judged by seams.insert_outcome (both meta schemas; the old reader saw only predicted_seat_xyz)."""
+    from seams.insert_outcome import outcome_of
+    if result is not None and result.get('stage_reached'):
+        o = dict(result)
+    else:
+        o = outcome_of('', obj, since).as_dict()
+    if o.get('stage_reached') != 'wedged' or o.get('measured_correction') is None:
         return None
-    mp = max(metas, key=os.path.getmtime)
-    try:
-        m = json.load(open(mp))
-        rows = [x for x in _csv.DictReader(open(mp.replace('.meta.json', '.csv'))) if x.get('tcp_z') not in ('', 'nan', None)]
-        P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
-        tgt = np.array(m['predicted_seat_xyz'])
-    except Exception:
-        return None
-    end = P[-1]; dz = 1000 * (end[2] - tgt[2]); dxy = 1000 * float(np.hypot(*(end[:2] - tgt[:2])))
-    if 0 < dz <= WEDGE_MAX_DZ_MM and dxy <= WEDGE_MAX_DXY_MM and 1000 * np.ptp(P[:, 2]) < 1.0:
-        return {'dz_mm': dz, 'dxy_mm': dxy}
-    return None
+    d = o['measured_correction']
+    return {'dz_mm': 1000 * float(d[2]), 'dxy_mm': 1000 * float(np.hypot(d[0], d[1]))}
 
 
 def cross_nudge_plan(res):
@@ -2543,13 +2605,29 @@ NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real
                                    # step 1 missed the bar entirely (operator, 2026-10-15)
 
 
+def _seat_check_accepted(obj, ob, **kw):
+    """seat_check.check, passing only what ExecuteMate would certify, one read-sigma inside its band (seams.acceptance:
+    one rule for both - attempt 24 stopped its recovery at an end +2.0 mm the certifier then refused)."""
+    from seat_check import check as _check
+    res = _check(obj, ob, **kw)
+    if res.get('ok') and res.get('height_err_mm') is not None:
+        from seams.acceptance import margin_m, seat_inside
+        inside, why = seat_inside(kw.get('base') or RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0,
+                                  res.get('end_heights_mm') or [], margin=margin_m())
+        if not inside:
+            res = dict(res, ok=False, acceptance=why)
+            print(f"  [seat-check] {obj}: seat check passes it, the certifier would not ({why}) -> recovery goes on",
+                  flush=True)
+    return res
+
+
 def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
     """Push a tilted bar's raised end along its axis into its slot (operator's method): closed
     fingers lowered beside the high end from safe height, then ONE guarded push toward the slot
     that stops at NUDGE_MAX_FORCE_N — the bar slides while it is free and the force rises once it
     is blocked (seated against the pocket end, or stuck). Depth re-check after every try; the next
     try starts from the new measurement. The base is re-fitted by every check (7th-axis creep)."""
-    from seat_check import check
+    check = _seat_check_accepted
     from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
     base = [ob]
     f = res.get('face') or {'cx': 0.0, 'cy': 0.0, 'z': NUDGE_PAD_Z_BASE_M, 'long_axis': 'y'}
@@ -2646,7 +2724,7 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
     MECHANICALLY — tap both edges at 3 N — press only that edge at <= 5 N, re-check. No guessing:
     if the edges read the same there is no roll and it stops."""
     from tap_check import tap_once
-    from seat_check import check
+    check = _seat_check_accepted
     from seat_check import TOP_FACE as _TF
     across_x = _TF[(obj, RUN_BASE['name'])].get('long_axis', 'y') == 'y'          # edges lie across the long axis
     off = lambda s: dict(offset_x_mm=s * EDGE_OFFSET_MM) if across_x else dict(offset_y_mm=s * EDGE_OFFSET_MM)
@@ -2678,8 +2756,7 @@ def _record_seat_check_error(obj, res):
         cross = float((res.get('cross') or {}).get('centre_mm'))
         along = float((res.get('axial') or {}).get('shift_mm', 0.0))
         e = [cross, along] if f.get('long_axis', 'y') == 'y' else [along, cross]
-        led = _ledger(); led.setdefault(obj, {})['rel_err_mm'] = e; led[obj]['t'] = time.time()
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.set_seat_error(obj, e, 'depth seat check', touch_t=True)
         print(f"  [seat-check] {obj}: measured seat error {e} mm (base frame) recorded for the parts over it", flush=True)
     except Exception as ex:
         print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
@@ -2691,16 +2768,14 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
     depth -0.08 mm from its CAD height, failed the run on 'marker not detected')."""
     ok = _seat_check_and_reseat(obj, state, args, say)
     if ok:
-        led = _ledger()
-        led[obj] = dict(led.get(obj) or {}, verified=True, t=time.time(), how='depth seat check')   # keep rel_err_mm
-        json.dump(led, open(ASSEMBLY_STATE, 'w'), indent=1)
+        SEATED.mark(obj, True, how='depth seat check')                  # merged: keeps rel_err_mm
     return ok
 
 
 def _seat_check_and_reseat(obj, state, args, say) -> bool:
     """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
     grasp (the pose the insert released it from), and insert it again. Fails closed."""
-    from seat_check import check
+    check = _seat_check_accepted
     from disassemble import seat_grasp, SEAT_EE_QUAT, HOVER_DZ
     ob = getattr(args, 'observed_base', None)
     if ob is None:
@@ -3031,90 +3106,10 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             # the servos fold one part's grip error (xy, image yaw) into the base pose they return - that is this insert's
             # AIM, not the base. Start every insert from the last MEASURED base (10-22 13:04: the in-hand re-read failed
             # as a partial view, line_green inherited u_orange's aim - its yaw 2.4 deg off - and wedged in the U openings)
-            if getattr(args, 'measured_base', None) is not None:
-                args.observed_base = args.measured_base
-            args.observed_base = track_base_in_hand(base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
-                                                    say, log_fh, held_obj=obj)
-            args.measured_base = args.observed_base
-            try:
-                from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
-            except Exception:
-                _PRISM = ()
-            if os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and obj in _PRISM:
-                # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
-                # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
-                # 60 mm high, where it had seated from the read aim before (slot 6-8 mm away, found by the route itself)
-                say(f"  [servo] {obj}: prismatic route - it searches itself, no xy servo")
-                # but the wrist still turns to the base's yaw first: skipping the whole servo (9a19b76) skipped this turn and
-                # line_green arrived +13.2 deg off its slot (base1 at ~16 deg; the U openings it threads need < 1.3 deg) -
-                # jammed on the U tops at +61 mm, 10-22 06:27 (INSERT_GEOMETRY: the corridor stage is a yaw wedge)
-                try:
-                    from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
-                    if args.observed_base is not None and state.held_quat is not None:
-                        err_, _t = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
-                                                 R_.from_quat(state.held_quat))
-                        if abs(err_) > 0.3 and turn_wrist(err_):
-                            state.held_quat = list((R_.from_euler('z', err_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
-                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-                            say(f"  [servo] {obj}: wrist turned {err_:+.2f} deg to the base yaw")
-                except Exception as e_:
-                    say(f"  [servo] {obj}: yaw to base not applied ({e_})")
-                # and the base is re-read from its markers in a CLOSE frame over the seat (no xy servo): the 0.56 m CAD
-                # fit carries the hand-eye rotation error x ~0.5 m of lever (several mm); line_green needs +-1.1 mm across
-                # the U openings. Bare and seated-assembly fits agreed to 0.4 mm (10-22 07:00), so the U parts are not the
-                # offset - the read height is. From the clear height (~0.17 m over the base top) the lever is ~1/3.
-                try:
-                    args.observed_base = close_base_read(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                         state.held_quat, state.last_grasp_id or 1, say, log_fh)
-                    args.measured_base = args.observed_base                 # a measurement too (markers, one close frame)
-                    # the wrist turned to the base yaw BEFORE this read: turn again to the closer read's yaw if they differ
-                    if args.observed_base is not None and state.held_quat is not None:
-                        err2_, _t2 = rel_yaw_error(obj, base_name or RUN_BASE['name'], R_.from_quat(args.observed_base[1]),
-                                                   R_.from_quat(state.held_quat))
-                        if abs(err2_) > 0.3 and turn_wrist(err2_):
-                            state.held_quat = list((R_.from_euler('z', err2_, degrees=True) * R_.from_quat(state.held_quat)).as_quat())
-                            STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                               (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-                            say(f"  [servo] {obj}: wrist turned {err2_:+.2f} deg to the close read's base yaw")
-                except Exception as e_:
-                    say(f"  [servo] {obj}: close base read not applied ({e_})")
-            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo' and seated_under(base_name or RUN_BASE['name'], obj):
-                # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
-                # marker read as the fallback when it cannot measure
-                bn_ = base_name or RUN_BASE['name']
-                ds = depth_servo(obj, bn_, args.observed_base, state.held_quat, state.last_grasp_id or 1, say, log_fh)
-                if ds is not None:
-                    args.observed_base, state.held_quat = ds
-                else:
-                    try:
-                        args.observed_base = close_base_read(obj, bn_, args.observed_base, state.held_quat,
-                                                             state.last_grasp_id or 1, say, log_fh)
-                    except Exception as e_:
-                        say(f"  [dservo] {obj}: close base read not applied ({e_})")
-                STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                   (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-            elif os.environ.get('HOVER_ALIGN', 'servo') == 'servo':
-                # the marker servo first (u_brown seated first try with it in attempts 16-18; the depth servo's clean,
-                # converged reading put u_brown 6 mm off at 12:39 - not yet understood), the depth-frame servo when the
-                # marker servo took no reading (12:05/12:22 u_orange: 0-1 base markers over its far-side seat; the depth
-                # servo converged and it entered on the lattice)
-                ob0_, hq0_ = args.observed_base, state.held_quat
-                args.observed_base, hq_ = hover_servo(obj, base_name or RUN_BASE['name'], ob0_, hq0_,
-                                                      state.last_grasp_id or 1, say, log_fh)
-                if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
-                    say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
-                    ds = depth_servo(obj, base_name or RUN_BASE['name'], ob0_, hq_ if hq_ is not None else hq0_,
-                                     state.last_grasp_id or 1, say, log_fh)
-                    if ds is not None:
-                        args.observed_base, hq_ = ds
-                if hq_ is not None and state.held_quat is not None and hq_ is not state.held_quat:
-                    state.held_quat = hq_                           # the wrist turned: the chained held pose turns with it
-                    STATE_REF.get('state') and setattr(STATE_REF['state'], 'held_tcp_quat',
-                                                       (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'))
-            elif os.environ.get('HOVER_ALIGN') == '1':
-                args.observed_base = hover_align(obj, base_name or RUN_BASE['name'], args.observed_base,
-                                                 state.held_quat, state.last_grasp_id or 1, say, log_fh)
+            mb_ = args.measured_base if getattr(args, 'measured_base', None) is not None else getattr(args, 'observed_base', None)
+            # AR3 (decision 10-22): drive-mate aligns the part (in-hand base read + servo) - the planner aims from the
+            # measured base and sends its corrections; drive-mate returns the base it measured
+            args.observed_base = mb_
         if _SAFETY_STOP:
             # 10-22 01:18: a protective stop inside hover_servo did not stop the run - drive-mate was called on a stopped arm
             # and waited 650 s. Nothing more is sent once the robot has left NORMAL safety.
@@ -3163,6 +3158,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
         STATE_REF['state'] = state
+        STATE_REF['args'] = args
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and os.environ.get('SEAMS_DRIVE') == '1':
             result = insert_via_drive_mate(obj, base_name or RUN_BASE['name'], argv, snap_before, say)
         elif tool_name == 'translate_object' and kw.get('action') == 'insert' and getattr(state, 'held_yaw_offset', 0.0):
@@ -3394,12 +3390,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # x/y within 0.2 mm of the aim, four times - a ~0.7 deg yaw in the jaws on a zero-clearance channel): do not
         # pull it out and repeat; release it where it is and let the seat check's nudges/taps finish it (how wedged
         # bars were seated before).
-        def _wedge_check():
+        def _wedge_check(result):
             """None: not wedged. True/False: wedged; released and nudged -> seated or not. Called after EVERY failed
             attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
             if not (_is_bar(obj) and not _SAFETY_STOP and not args.dry_run):
                 return None          # (10-22: the release-and-nudge is a recovery - it runs in one-node mode too)
-            w = _wedged_near_seat(obj, t_step)
+            w = _wedged_near_seat(obj, t_step, result)
             if w is None:
                 return None
             say(f"  [{step_idx}] {obj} wedged {w['dz_mm']:.1f} mm above its seat, {w['dxy_mm']:.1f} mm from the aim "
@@ -3418,7 +3414,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             say(f"  [{step_idx}] {obj}: stopped at the insert hover (STOP_AT_HOVER) - no descent")
             return False
         if result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert':
-            wc = _wedge_check()
+            wc = _wedge_check(result)
             if wc is not None:
                 if wc:
                     print(f"\n  ✓ {obj} complete")
@@ -3443,7 +3439,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     f"{1000*np.hypot(nb[0][0]-prev_ob[0][0], nb[0][1]-prev_ob[0][1]):.1f} mm since the attempt's aim")
             result = execute(step_idx, step, tool_name, kw, tag=f"try{k_try}") or result
             if result.get('result') == 'failure':
-                wc = _wedge_check()
+                wc = _wedge_check(result)
                 if wc is not None:
                     if wc:
                         print(f"\n  ✓ {obj} complete")
@@ -3486,7 +3482,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                     continue
                 r_ = execute(step_idx, f"recovery {t_}", t_, k_, tag=f"rec{j}")
                 if t_ == 'translate_object' and r_ is not None and r_.get('result') == 'failure':
-                    wc = _wedge_check()                    # never lift a held part out of a wedge
+                    wc = _wedge_check(r_)                  # never lift a held part out of a wedge
                     if wc is not None:
                         if wc:
                             print(f"\n  ✓ {obj} complete")
@@ -3520,7 +3516,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             return False
         seated_now = False
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
-            record_seat_offset(obj, t_step)
+            record_seat_offset(obj, t_step, result)
             seated_now = True
 
         # Tiny pause between primitives to let TF + topics settle (matches

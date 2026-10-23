@@ -14,7 +14,7 @@ driver plugs in behind the same action later (M3b).
                     depth are read off it: the CAD grasp point that lies on the tool axis (<= HELD_AXIS_TOL_M off
                     it) is the grasp, its tool-z coordinate the depth (GRASP_TOOL_OFFSET_M of the insert)
   result  seated          never the FSM label: where the arm RESTS after the insert (TCP still < 0.5 mm over 0.5 s)
-                          with |tcp_z - predicted seat z| < SEATED_DZ_M. The trace alone cannot say it (its seat
+                          with |tcp_z - predicted seat z| < insert_outcome.SEATED_DZ_M. The trace alone cannot say it (its seat
                           detector ends logging on arrival, still descending); its own reading is kept as trace_stage
           stage_reached   seat | wedged (still, 0 < dz <= 7 mm, within 5 mm of the aim: on a channel edge) | above |
                           below | unsettled (the trace ends still moving) | no_trace.  Checked 2026-10-20 against the
@@ -31,7 +31,6 @@ U parts -> compliant spiral) and adds a per-part seat-z offset (PER_OBJECT_BASE_
 stages/routes come from CAD. Both live inside the primitive this server wraps; the next step is deriving the route
 from the CAD stages (insert_stages.py) instead.
 """
-import glob
 import json
 import os
 import signal
@@ -55,13 +54,22 @@ from fmb_seam_msgs.action import DriveMate
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from seams.insert_outcome import outcome_of  # noqa: E402
 ACTION = '/ur5e/drive_mate'
 B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 HELD_AXIS_TOL_M = 0.006          # a CAD grasp point this close to the tool axis is the grasp
-SEATED_DZ_M = 0.005              # CLAUDE.md: |tcp_z - predicted_seat| < 5 mm and motion stopped
-WEDGE_DZ_M, WEDGE_DXY_M = 0.007, 0.005
 REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert: < 0.5 mm over 0.5 s
+
+
+def vision_pose(pose, source=''):
+    """A VisionPose in the robot base frame from ((x, y, z), (qx, qy, qz, qw)); sigma unknown (NaN), as measured here."""
+    from fmb_seam_msgs.msg import VisionPose
+    v = VisionPose(); v.header.frame_id = 'base'; v.header.stamp = rclpy.clock.Clock().now().to_msg()
+    (v.pose.position.x, v.pose.position.y, v.pose.position.z) = (float(c) for c in pose[0])
+    (v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z, v.pose.orientation.w) = (float(c) for c in pose[1])
+    v.sigma = [float('nan')] * 4; v.source = source
+    return v
 
 
 def resolve(mate):
@@ -106,63 +114,6 @@ def grasp_from_held(obj, p_fo, q_fo):
     return best if best and best[2] <= HELD_AXIS_TOL_M else (None, None, best[2] if best else None)
 
 
-def trace_outcome(obj, since):
-    """Seat judged from the newest insert CSV written since `since` (the meta's predicted seat vs the end TCP)."""
-    import csv
-    metas = [m for m in glob.glob(str(LOGS / f'insert_{obj}_*.meta.json')) if os.path.getmtime(m) >= since - 1]
-    if not metas:
-        return {'stage_reached': 'no_trace'}
-    return outcome_from_meta(max(metas, key=os.path.getmtime))
-
-
-def outcome_from_meta(mp):
-    import csv
-    m = json.load(open(mp)); csv_path = mp.replace('.meta.json', '.csv')
-    rows = [x for x in csv.DictReader(open(csv_path)) if x.get('tcp_z') not in ('', 'nan', None)]
-    # the prismatic stash writes predicted_seat_xyz; the compliant FSM writes cad_prediction.predicted_tcp_at_seat
-    seat = m.get('predicted_seat_xyz') or ((m.get('cad_prediction') or {}).get('predicted_tcp_at_seat') or {}).get('xyz_m')
-    if not seat:
-        return {'stage_reached': 'no_trace', 'trace_path': csv_path}
-    if not rows:
-        # the insert's quickest success (straight to the seat on the trajectory) writes its meta but no CSV rows: the
-        # resting TCP decides (2026-10-21: line_green +2.3 mm, 0.3 mm in xy, reported no_trace)
-        return {'stage_reached': 'no_trace', 'trace_path': csv_path, 'seat_xyz': [float(v) for v in seat],
-                'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
-    P = np.array([[float(x['tcp_x']), float(x['tcp_y']), float(x['tcp_z'])] for x in rows[-50:]])
-    tgt = np.array(seat, float)
-    end = P[-1]; d = end - tgt; still = float(np.ptp(P[:, 2])) < 0.001
-    dxy = float(np.hypot(d[0], d[1]))
-    if still and abs(d[2]) < SEATED_DZ_M:
-        stage = 'seat'
-    elif still and 0 < d[2] <= WEDGE_DZ_M and dxy <= WEDGE_DXY_M:
-        stage = 'wedged'
-    elif not still:
-        stage = 'unsettled'                                    # trace ends still moving: no judgement
-    else:
-        stage = 'above' if d[2] > 0 else 'below'
-    return {'stage_reached': stage, 'seated': stage == 'seat', 'still': still, 'trace_path': csv_path,
-            'seat_xyz': [float(v) for v in tgt],
-            'slide': [float(d[0]), float(d[1])], 'measured_correction': [float(v) for v in d],
-            'fsm_outcome': m.get('outcome'), 'router': m.get('router')}
-
-
-def judge_at_rest(out, rest):
-    """Seat judged where the arm came to rest after the insert (the decider); the trace's own reading is kept as
-    trace_stage. slide / measured_correction are the resting TCP vs the predicted seat."""
-    P, still = rest
-    tgt = np.array(out['seat_xyz']); d = np.asarray(P) - tgt; dxy = float(np.hypot(d[0], d[1]))
-    if not still:
-        stage = 'unsettled'
-    elif abs(d[2]) < SEATED_DZ_M:
-        stage = 'seat'
-    elif 0 < d[2] <= WEDGE_DZ_M and dxy <= WEDGE_DXY_M:
-        stage = 'wedged'
-    else:
-        stage = 'above' if d[2] > 0 else 'below'
-    return dict(out, trace_stage=out['stage_reached'], stage_reached=stage, seated=stage == 'seat', still=still,
-                judged_on='resting TCP', slide=[float(d[0]), float(d[1])], measured_correction=[float(v) for v in d])
-
-
 class DriveMateServer(Node):
     def __init__(self):
         super().__init__('ur5e_drive_mate')
@@ -195,7 +146,9 @@ class DriveMateServer(Node):
     def on_cancel(self, gh):
         p = self.proc
         if p is not None and p.poll() is None:
-            p.send_signal(signal.SIGINT)                       # the insert's own force-mode cleanup
+            # the whole insert process group, as a Ctrl-C would: the force-mode wrapper / touch_insert get it directly
+            # (10-22: SIGINT to translate_object alone ended in its subprocess.run SIGKILLing the child 0.25 s later)
+            os.killpg(p.pid, signal.SIGINT)
             threading.Thread(target=self._term_later, args=(p,), daemon=True).start()
         return CancelResponse.ACCEPT
 
@@ -204,7 +157,33 @@ class DriveMateServer(Node):
         try:
             p.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            p.terminate()                                      # never SIGKILL in force mode
+            os.killpg(p.pid, signal.SIGTERM)                  # never SIGKILL in force mode
+
+    def _align(self, gh, g, obj, base, gid, measured, held_world, env):
+        """seams.drive_align as a child in its own process group (a cancel reaches it like the insert); its result."""
+        argv = ['python3', '-u', '-m', 'seams.drive_align', '--obj', obj, '--base', base, '--grasp-id', str(gid),
+                '--measured', *[f'{v:.6f}' for v in (*measured[0], *measured[1])],
+                '--held-quat', *[f'{v:.6f}' for v in held_world]]
+        log_path = LOGS / f'drive_align_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
+        with open(log_path, 'w') as log:
+            try:
+                self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT,
+                                             start_new_session=True)
+            except Exception as e:
+                return dict(error=str(e), log=str(log_path))
+            fb = DriveMate.Feedback(); fb.stage = 'aligning'
+            while self.proc.poll() is None:
+                fb.z_above_seat = float('nan')
+                gh.publish_feedback(fb)
+                time.sleep(0.5)
+            self.proc = None
+        text = open(log_path).read()
+        line = next((l for l in reversed(text.splitlines()) if l.startswith('__ALIGN__ ')), None)
+        out = json.loads(line[len('__ALIGN__ '):]) if line else dict(error='no __ALIGN__ result')
+        out['log'] = str(log_path)
+        self.get_logger().info(f"{g.mate_id}: aligned ({out.get('route')}, measured={out.get('measured')}) "
+                               f"{out.get('error', '')} - {log_path.name}")
+        return out
 
     def execute(self, gh):
         with self.busy:
@@ -239,20 +218,48 @@ class DriveMateServer(Node):
         tq = self.tcp.orientation
         held_world = (R.from_quat([tq.x, tq.y, tq.z, tq.w]) * R.from_quat(q_fo)).as_quat()
         tp = g.target.pose
+        measured = ((tp.position.x, tp.position.y, tp.position.z),
+                    (tp.orientation.x, tp.orientation.y, tp.orientation.z, tp.orientation.w))
         # read fresh every goal: a server started before a config edit kept the old offset and aimed yellow 6 mm
         # deep while the planner (a new process) used the new one (2026-10-21)
         import importlib
         import primitives.shared.config as _cfg
         importlib.reload(_cfg)
         dz = float(_cfg.get_object_base_offset_m(obj)[2])     # known debt: per-part seat-z offset (docstring)
+        env = os.environ.copy()
+        env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'; env['ROS_MCP_MODE'] = 'real'
+        env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
+        # align (AR3, decision 10-22: vision measures, drive-mate moves): on a free base bring the part over its seat
+        # first - today's servo, run here instead of by the planner. Then the planner's corrections (follow / bias)
+        # on the base the alignment arrived at, in the order the planner applied them before.
+        aim, align = measured, {}
+        if not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1':
+            align = self._align(gh, g, obj, base, gid, measured, held_world, env)
+            if gh.is_cancel_requested:
+                gh.canceled(); return res
+            if align.get('safety'):
+                return refuse('robot_stopped', align['safety'])
+            if align.get('aim_base'):
+                aim = (tuple(align['aim_base'][0]), tuple(align['aim_base'][1]))
+            if align.get('measured_base'):
+                measured = (tuple(align['measured_base'][0]), tuple(align['measured_base'][1]))
+            tq = self.tcp.orientation                        # the wrist may have turned: the part turned with it
+            held_world = (R.from_quat([tq.x, tq.y, tq.z, tq.w]) * R.from_quat(q_fo)).as_quat()
+        try:
+            corr = json.loads(g.corrections_json) if g.corrections_json else []
+        except Exception as e:
+            return refuse('corrections', str(e))
+        if corr:
+            from seams.aim import Cad, apply_corrections
+            aim = apply_corrections(aim, corr, seat_in_base=Cad().seat_pos(base, obj))
+        res.base_measured = vision_pose(measured, source=f"drive_align: {align.get('route', 'none')}")
+        res.align_json = json.dumps(dict(align, corrections=[c.get('name') for c in corr],
+                                         aim=[list(aim[0]), list(aim[1])]))
         argv = ['python3', '-u', '-m', 'primitives.translate_object', '--mode', 'real', '--object-name', obj,
                 '--base-name', base, '--insert', '--insertion-type', 'compliant', '--grasp-id', str(gid),
                 '--current-object-orientation', *[f'{v:.6f}' for v in held_world],
-                '--final-base-pos', f'{tp.position.x:.6f}', f'{tp.position.y:.6f}', f'{tp.position.z + dz:.6f}',
-                '--final-base-orientation', *[f'{v:.6f}' for v in (tp.orientation.x, tp.orientation.y,
-                                                                    tp.orientation.z, tp.orientation.w)]]
-        env = os.environ.copy()
-        env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'; env['ROS_MCP_MODE'] = 'real'
+                '--final-base-pos', f'{aim[0][0]:.6f}', f'{aim[0][1]:.6f}', f'{aim[0][2] + dz:.6f}',
+                '--final-base-orientation', *[f'{v:.6f}' for v in aim[1]]]
         # the part's yaw in the jaws, world z, folded to +-45 (a square grasp gives 0): the hover subtracts it
         tcp_yaw = float(R.from_quat([tq.x, tq.y, tq.z, tq.w]).as_euler('xyz')[2])
         part_yaw = float(R.from_quat(held_world).as_euler('xyz')[2])
@@ -261,14 +268,14 @@ class DriveMateServer(Node):
         # one attempt per goal, a wedged bar held where it stopped: retries and recoveries are the caller's (the
         # replay sets the same two at import)
         env['PRISMATIC_MAX_RETRIES'] = '1'; env['PRISMATIC_HOLD_IF_WEDGED'] = '1'
-        env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
         self.get_logger().info(f'{g.mate_id}: {obj} into {base}, grasp {gid} at depth {1000 * depth:.1f} mm '
                                f'({1000 * off:.1f} mm off axis), in-hand yaw {held_yaw_off:+.2f} deg')
         t0 = time.time()
-        log = open(LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log', 'w') \
-            if LOGS.exists() else subprocess.DEVNULL
+        log_path = LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
+        log = open(log_path, 'w') if LOGS.exists() else subprocess.DEVNULL
         try:
-            self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT)
+            self.proc = subprocess.Popen(argv, cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT,
+                                         start_new_session=True)       # its own group: on_cancel signals all of it
         except Exception as e:
             return refuse('insert_failed_to_start', str(e))
         fb = DriveMate.Feedback(); fb.stage = 'inserting'
@@ -277,13 +284,18 @@ class DriveMateServer(Node):
             gh.publish_feedback(fb)
             time.sleep(0.5)
         rc = self.proc.returncode; self.proc = None
-        out = trace_outcome(obj, t0)
-        rest = self.resting_tcp()
-        if rest is not None and out.get('seat_xyz') is not None:
-            out = judge_at_rest(out, rest)
+        if log is not subprocess.DEVNULL:
+            log.close()
+        text = open(log_path).read() if LOGS.exists() else ''
+        # judged once, on the trace the insert named (seams.insert_outcome); judged where the arm came to rest
+        o = outcome_of(text, obj, t0, rest=self.resting_tcp())
+        if o.found_by != 'result':
+            self.get_logger().warn(f'{g.mate_id}: the insert named no trace - {o.found_by}'
+                                   + (f' (newest since the goal: {o.meta_path})' if o.meta_path else ''))
+        out = o.as_dict()
         res.stage_reached = out['stage_reached']; res.seated = bool(out.get('seated', False))
         res.trace_path = out.get('trace_path', '')
-        if 'slide' in out:
+        if out.get('slide') is not None:
             res.slide = out['slide']; res.measured_correction = out['measured_correction']
         res.refusal = ''
         self.get_logger().info(f'{g.mate_id}: rc={rc} stage={res.stage_reached} seated={res.seated} '
