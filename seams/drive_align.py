@@ -35,6 +35,11 @@ def main():
     sys.argv = ['replay_real_assembly']
     import replay_real_assembly as rr
     rr.RUN_BASE['name'] = a.base
+    # the replay's timing rows (every subprocess, camera read, servo step) for this align, beside its log (TGOAL:
+    # run 32's aligns took 75-128 s and their logs carry no times)
+    import time as _t
+    rr._TIMING['fh'] = open(REPO / 'compliant_insertion_studio' / 'logs' /
+                            f"drive_align_{a.obj}_{_t.strftime('%Y%m%d_%H%M%S')}.timing.jsonl", 'a', buffering=1)
     os.environ.setdefault('SEAMS_DRIVE', '1')
     measured = (tuple(a.measured[:3]), tuple(a.measured[3:]))
 
