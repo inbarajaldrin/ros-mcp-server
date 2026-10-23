@@ -1981,6 +1981,12 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         rounds.append({'k': k, 'tcp': [tp[0].tolist(), tp[1].tolist()], 'seat_tcp': st.tolist(), 'info': info})
         say(f"  [dservo] {obj} round {k}: {info.get('dxy_mm')} mm, yaw {info.get('yaw_img_deg')} deg, spread "
             f"{info.get('spread_px')} px" + (f" ({info.get('error')})" if d is None else ""))
+        if d is not None and np.hypot(*d) > SERVO_MAX_M:
+            # more than the whole correction may be (the end check) - a misread too; run 52 stepped 73 mm on it, twice
+            misread = True
+            say(f"  [dservo] {obj}: reading {1000*np.hypot(*d):.1f} mm is past the servo's {1000*SERVO_MAX_M:.0f} mm "
+                f"- a misread fit, its readings not used")
+            break
         if d is not None and abs(info.get('yaw_img_deg') or 0.0) > SERVO_MAX_YAW_DEG:
             # a yaw past what the whole servo may turn, read right after the wrist was turned to the base yaw, is the
             # fit matching something else: line_green read 35.9 / 46.1 deg (runs 51 / 49), its far-edge median then aimed
