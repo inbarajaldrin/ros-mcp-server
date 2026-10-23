@@ -224,7 +224,7 @@ def certify_many(mates):
             ev['ends_judged'] = wedge_possible(base, obj)
             inside, ev['why'] = seat_inside(base, obj, z_err, ends)
             method = 'both' if xy_seen else 'depth_seat_check'
-            ev['verdict'] = ('inside' if inside else 'outside') + ' (xy implied by seat depth)'
+            ev['verdict'] = ('inside' if inside else 'outside') + f" (xy implied by seat depth): {ev['why']}"
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
                     'tilt_deg': tilt, 'method': method, 'evidence': ev})
     return out
