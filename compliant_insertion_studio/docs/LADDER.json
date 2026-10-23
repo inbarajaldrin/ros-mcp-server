@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 22:12",
+ "updated": "2026-10-22 22:45",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -75,7 +75,7 @@
      "id": "AR3",
      "title": "drive-mate owns the insert",
      "status": "active",
-     "note": "Gate attempt 25 (17:17-17:39, log ablations/logs/replay_20261022_171746.log): drive-mate ALIGNED every part itself (marker servo u_brown/u_orange, yaw + close read line_green, depth servo yellow), applied the planner's corrections, inserted, judged - 4/4 first insert, mate:00-03 certified in one uninterrupted run, wall 1283 s (attempt 23: 2386). Yellow in on probe 1 (follow of line_green's measured seat). Left: recovery supervisor; align code out of the replay module (drive_align imports it); sigma gate | 21:35 recovery supervisor, first piece: seams.tap_probe - taps measure against the seated CAD, presses read through the force (seated / moving / blocked), on a free base they judge the seat; lateral nudges off there (attempt 27: 3 nudges chasing depth noise moved base1 ~50 mm, the taps then read line_green seated)"
+     "note": "Gate attempt 25 (17:17-17:39, log ablations/logs/replay_20261022_171746.log): drive-mate ALIGNED every part itself (marker servo u_brown/u_orange, yaw + close read line_green, depth servo yellow), applied the planner's corrections, inserted, judged - 4/4 first insert, mate:00-03 certified in one uninterrupted run, wall 1283 s (attempt 23: 2386). Yellow in on probe 1 (follow of line_green's measured seat). Left: recovery supervisor; align code out of the replay module (drive_align imports it); sigma gate | 21:35 recovery supervisor, first piece: seams.tap_probe - taps measure against the seated CAD, presses read through the force (seated / moving / blocked), on a free base they judge the seat; lateral nudges off there (attempt 27: 3 nudges chasing depth noise moved base1 ~50 mm, the taps then read line_green seated) | 22:35 real wedge (line_green, ExecuteMate 5.0 mm): tap map end- +4.2 / mid +1.8; vertical presses moving then blocked (stopped); ONE nudge -> taps -0.8..-1.1 = seated, certified -0.54 mm. Recovery = taps map -> presses -> one nudge if blocked -> taps judge. Also: prismatic hover no longer re-turns the yaw after drive-mate's align (2 jams); servo yaw cap 6 deg"
     },
     {
      "id": "AR4",
