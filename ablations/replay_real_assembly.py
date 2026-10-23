@@ -2624,6 +2624,7 @@ RESEAT_MAX = 1
 NUDGE_MAX_FORCE_N = 4.0              # push until the bar is blocked (seated or stuck): operator's rule,
                                      # replaces fixed step distances that had to guess the end (2026-10-15)
 NUDGE_PUSH_PAST_MM = 15.0            # travel cap (operator): finger face at most this far past the estimated end
+NUDGE_FIRST_END_MM = 4.0             # depth end this high after an insert: a wedge - the nudge before any tap
 NUDGE_SEAT_OVER_MM = 2.0             # ...and never past the seated CAD end by more than this: line_green has no axial
                                      # stop - run 31's push met no force, ran the 15 mm cap and left the bar 18 mm past its
                                      # seat, against the U at its far end (u_orange then read outside its seat)
@@ -2825,14 +2826,26 @@ def _seat_by_taps(obj, args, say):
     ob = getattr(args, 'measured_base', None) or ob
     say(f"  [seat-check] {obj} (depth, for the base and the across error): "
         f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
-    ok, tp = tap_recover(obj, ob, RUN_BASE['name'], say)
-    if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
-        return None                                          # the taps could not judge it: the depth ladder
-    if not ok and any(p.blocked for p in tp.points):
+    ends_ = res.get('end_heights_mm') or []
+    from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
+    if wedge_possible(RUN_BASE['name'], obj) and ends_ and max(ends_) > NUDGE_FIRST_END_MM and (res.get('axial') or {}).get('extent_mm'):
+        # an end this high is a wedge depth cannot mistake (runs 31/32 after the insert: +7.7 / +8.1 mm; seated bars read
+        # +1.5..+2.5 with depth's tilt): the map and a press before the nudge only confirmed it (~60 s, every press
+        # blocked) - nudge first, the taps judge after it
+        say(f"  [taps] {obj}: depth shows an end {max(ends_):+.1f} mm high (> {NUDGE_FIRST_END_MM:g}: a wedge) -> "
+            f"one lateral nudge first, then the taps judge")
+        ok, tp, blocked = False, None, True
+    else:
+        ok, tp = tap_recover(obj, ob, RUN_BASE['name'], say)
+        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
+            return None                                      # the taps could not judge it: the depth ladder
+        blocked = not ok and any(p.blocked for p in tp.points)
+        if blocked:
+            say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
+    if blocked:
         # the vertical presses are blocked (an end riding a lip springs back: 22:30 line_green +4.2 -> +2.7 -> +3.8 -> +3.8);
         # ONE lateral nudge frees it (22:35: depth ends +6.1 -> +0.6, taps then -0.8..-1.1), the taps judge after it -
         # never a second nudge on a depth reading (attempt 27: three, chasing +1.5-1.9 mm, moved the base ~50 mm)
-        say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
         prev = os.environ.get('NUDGE_FREE_BASE')
         os.environ['NUDGE_FREE_BASE'] = '1'
         global NUDGE_TRIES
