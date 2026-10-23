@@ -1937,6 +1937,8 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     except Exception:
         pass
     ob = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)   # depth fit, camera over the base
+    if ob is not None and ob is not observed_base:
+        LAST_TRACK_READ['pose'] = ob
     _emitter_hold()                                                   # the rounds are colour-only
     if ob is None or ob is observed_base:
         say(f"  [dservo] {obj}: base not re-read in hand")
@@ -2091,10 +2093,12 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
     except Exception:
         _PRISM = ()
     mode = os.environ.get('HOVER_ALIGN', 'servo')
-    marker_route = mode == 'servo' and obj not in _PRISM and not seated_under(base, obj)
-    if marker_route:
-        # the marker servo turns the wrist to this base's yaw and re-reads the base in hand with the turned wrist (the
-        # read it projects with): a read here first, before the turn, only fed that turn (run 34: ~15 s per U part)
+    servo_route = mode == 'servo' and obj not in _PRISM
+    if servo_route:
+        # the marker servo and the depth servo each re-read the base in hand themselves (the read they project with): a
+        # read here first only fed the wrist turn before it (run 34: ~15 s per U part). The depth servo's took the
+        # yellow base view -> outline over the table (back by the pick) -> base view again: 11.5 s and a backtrack
+        # (run 50b; the two reads agreed to 0.4 mm / 0.04 deg, the startup read's yaw to 0.18 deg)
         ob = measured_base
         LAST_TRACK_READ.pop('pose', None)
     else:
@@ -2145,6 +2149,8 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
             ds = depth_servo(obj, base, ob, held_quat, grasp_id, say, log_fh)
         finally:
             _emitter_release()
+        if LAST_TRACK_READ.get('pose') is not None:
+            out['measured_base'] = LAST_TRACK_READ['pose']           # the depth servo's in-hand read
         if ds is not None:
             ob, held_quat = ds
         else:
