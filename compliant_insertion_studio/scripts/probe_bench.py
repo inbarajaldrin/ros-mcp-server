@@ -31,7 +31,8 @@ def gripper_holding():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--xy', type=float, nargs=2, default=[-0.320, -0.500], help='bare table spot (clear area)')
-    ap.add_argument('--hover-z', type=float, default=0.1738, help='flange z ~15 mm over a finger-table touch')
+    ap.add_argument('--hover-z', type=float, default=0.170, help='flange z ~19 mm over a closed-tip table touch '
+                    '(TABLE_HEIGHT + RG2_TIP_CLOSED_M = 0.151)')
     ap.add_argument('--n', type=int, default=9)
     a = ap.parse_args()
     held, st = gripper_holding()
@@ -42,7 +43,11 @@ def main():
     print(f"in-process: {T.IN_PROCESS}", flush=True)
     q = [0.0, 1.0, 0.0, 0.0]
     x0, y0 = a.xy
-    r = T.move([x0, y0, a.hover_z], q)
+    subprocess.run([sys.executable, '-u', '-m', 'primitives.control_gripper', 'close', '--mode', 'real'], cwd=str(REPO),
+                   capture_output=True, timeout=30)
+    r = T.move([x0, y0, 0.30], q)                       # over the spot at safe height first, then straight down
+    if r.get('result') != 'failure':
+        r = T.move([x0, y0, a.hover_z], q)
     if r.get('result') == 'failure':
         print('hover not reached', r); return 1
     rows, start_z, first = [], a.hover_z, None
