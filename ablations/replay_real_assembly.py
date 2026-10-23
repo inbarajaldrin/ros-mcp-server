@@ -2653,6 +2653,11 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
     that stops at NUDGE_MAX_FORCE_N — the bar slides while it is free and the force rises once it
     is blocked (seated against the pocket end, or stuck). Depth re-check after every try; the next
     try starts from the new measurement. The base is re-fitted by every check (7th-axis creep)."""
+    if not BASE_FIXED_CFG() and os.environ.get('NUDGE_FREE_BASE', '0') != '1':
+        # on a free base the push never blocks - the base slides first: attempt 27's three pushes ran their travel cap
+        # and moved base1 ~50 mm while the bar was seated (tap map). Vertical presses (seams.tap_probe) only.
+        say(f"  [nudge] {obj}: free base - no lateral push (NUDGE_FREE_BASE=1 to allow)")
+        return False
     check = _seat_check_accepted
     from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
     base = [ob]
@@ -2788,10 +2793,44 @@ def _record_seat_check_error(obj, res):
         print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
 
 
+def _seat_by_taps(obj, args, say):
+    """The seat judged by taps (operator 10-22: "use force to tap smartly - you know where it seats and the force
+    feedback"): one depth view - it re-fits the base and measures where the part sits ACROSS its slot (what the parts
+    over it follow) - then seams.tap_probe maps the top against the seated CAD and presses only what is high, <= 4.5 N,
+    vertical. Attempt 27: the depth check called line_green's end +1.5/+1.7/+1.9 mm high, three lateral nudges pushed
+    the free base ~50 mm, and the taps then read the bar seated (-1.35..+0.05 mm). True / False; None: the taps could
+    not judge it (taps off the part) - the depth ladder decides."""
+    import seat_check as _sc
+    from seams.tap_probe import tap_recover
+    out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
+    res = _sc.check(obj, args.observed_base, move=True, out_dir=out_dir, base=RUN_BASE['name'])
+    ob = res.get('observed_base') or args.observed_base
+    args.observed_base = ob
+    say(f"  [seat-check] {obj} (depth, for the base and the across error): "
+        f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
+    ok, tp = tap_recover(obj, ob, RUN_BASE['name'], say)
+    if tp.off_part():
+        return None
+    if ok and (res.get('cross') or {}).get('centre_mm') is not None:
+        _record_seat_check_error(obj, res)                   # the across error the parts over it follow
+    if ok:
+        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: round(1000 * p.err_m, 2) for p in tp.points})
+    return ok
+
+
 def seat_check_and_reseat(obj, state, args, say) -> bool:
     """The depth seat check (+ nudges / edge press); a pass is recorded in the verify ledger as a depth
     confirmation, which verify_seated accepts when the markers cannot see the part (2026-10-20: fork_orange,
-    depth -0.08 mm from its CAD height, failed the run on 'marker not detected')."""
+    depth -0.08 mm from its CAD height, failed the run on 'marker not detected'). On a free base the taps judge
+    the seat first (_seat_by_taps); the depth ladder runs only when they could not."""
+    if (os.environ.get('SEAT_BY_TAPS', '1') == '1' and not BASE_FIXED_CFG()
+            and getattr(args, 'observed_base', None) is not None):
+        ok_t = _seat_by_taps(obj, args, say)
+        if ok_t is not None:
+            if not ok_t:
+                say(f"\n!!! {obj}: the taps could not seat it")
+            return ok_t
+        say(f"  [seat-check] {obj}: the taps could not judge it -> the depth ladder")
     ok = _seat_check_and_reseat(obj, state, args, say)
     if ok:
         SEATED.mark(obj, True, how='depth seat check')                  # merged: keeps rel_err_mm
@@ -2826,6 +2865,8 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
         # a seat the check passes is not touched (operator 10-22: no nudges on a seated part; 14:02 the lip rule nudged an
         # ok line_green sideways)
         plan = cross_nudge_plan(res) if ('pitch_deg' in res and not res.get('ok')) else None
+        if not BASE_FIXED_CFG() and os.environ.get('NUDGE_FREE_BASE', '0') != '1':
+            plan = None                                       # no sideways push on a free base (see nudge_into_slot)
         if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
             plan = None        # shifted along its length: the axial nudge first (line_red 2026-10-20: -16 mm,
                                # the sideways taps did nothing, the axial push seated it)
