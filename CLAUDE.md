@@ -1,6 +1,7 @@
 # ros-mcp-server — UR5e + RG2 FMB1 assembly
 
-**Branch `ur5e-fmb1-demo`. This is the tree that runs the real assembly.**
+**Branch `dev` (GitHub `inbarajaldrin/ros-mcp-server`, branch `dev`; it continues the cell's `ur5e-fmb1-demo`). This is the
+tree that runs the real assembly.** Push with `bash ablations/push_dev.sh` (via the backup repo on dual-a4500; never `main`).
 Last verified **2026-08-16**: FMB1 seated 4/4 (u_brown, u_orange, line_green, inverted_u_yellow)
 with one operator action — placing a part on the table.
 
