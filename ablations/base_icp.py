@@ -149,7 +149,7 @@ COVERAGE_MIN = 0.85     # matched points must span this fraction of the base in 
 
 
 TILT_MAX_DEG = 2.5            # a clean fit reads ~0.4 / 1.0 deg (the base is flat on the table)
-Z_OFF_MAX_M = 0.003           # from the table-snapped marker height
+Z_OFF_MAX_M = 0.003           # from the base's height on the table (DEFAULT_BASE_POSITION z)
 N_MIN = 4000                  # clean fits match ~7800 of 8000 sampled points
 
 
@@ -203,8 +203,12 @@ def read_icp(base, ob, seated=(), n_points=8000):
     # off the markers; two passed rms + coverage and seeded the next reads)
     if max(abs(e[0]), abs(e[1])) > TILT_MAX_DEG:
         return None, dict(info, error=f'tilted fit (roll/pitch {e[0]:+.1f}/{e[1]:+.1f} deg) - the base lies flat')
-    if abs(Bw[2, 3] - bz) > Z_OFF_MAX_M:
-        return None, dict(info, error=f'fit {1000 * (Bw[2, 3] - bz):+.1f} mm off the table height')
+    # against the base's height on the table, not the seed's: an in-hand seed is a marker read 4-5 mm high, and 21 good
+    # in-hand fits (rms ~1.1 mm, n ~7800, flat, z -62.6..-62.9) were rejected against it (10-23, run 31: ~25 s each)
+    from primitives.shared.config import DEFAULT_BASE_POSITION
+    z_tab = float(DEFAULT_BASE_POSITION[2])
+    if abs(Bw[2, 3] - z_tab) > Z_OFF_MAX_M:
+        return None, dict(info, error=f'fit {1000 * (Bw[2, 3] - z_tab):+.1f} mm off the table height')
     if n < N_MIN:
         return None, dict(info, error=f'only {n} matched points')
     return ((float(Bw[0, 3]), float(Bw[1, 3]), float(bz)), R.from_euler('z', yaw, degrees=True).as_quat()), info
