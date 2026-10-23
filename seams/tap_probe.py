@@ -35,6 +35,9 @@ CONTACT_N = 1.0              # first contact in the force record
 EDGE_IN_M = 0.004            # edge taps this far in from the CAD top-face edge
 END_IN_M = 0.008             # end taps this far in from the CAD top-face ends
 MAX_PRESSES = 6
+CLEAR_M = 0.025              # sideways travel between tap points happens this far over the part's seated top: its
+                             # neighbours stand up to +19.6 mm over line_green's (10-22: travel 3-7 mm over it ran the tips
+                             # into them and slid the free base 56, 128, 40, 59 mm in four tap sessions - base-read audit)
 VALID_M = (-0.005, 0.012)    # a tap reading outside this is not on the part (line_green's neighbours stand +19.6 mm
                              # over its top; the floor stops a seated part, so far below is a miss): never pressed
 Q_DOWN = (0.0, 1.0, 0.0, 0.0)
@@ -104,12 +107,16 @@ class Tapper:
         return np.array([p.xyz_top[0], p.xyz_top[1], p.xyz_top[2] + self.tip_m + max(hi, 0.0) + OVER_M])
 
     def go_over(self, p: Point):
+        """Over p: straight up to the clear height (CLEAR_M over the seated top), sideways there, straight down (guarded)
+        to OVER_M over the highest height seen. Never sideways near the part or its neighbours."""
+        from compliant_insertion_studio.wrapper.touch_insert import tcp_now
         tgt = self._over(p)
-        z = self._z()
-        if z < tgt[2] - 0.0005:                              # straight up first, never sideways low
-            from compliant_insertion_studio.wrapper.touch_insert import tcp_now
-            c = tcp_now()[0]
-            self._move([c[0], c[1], tgt[2]], duration=max(0.6, (tgt[2] - z) / 0.005))
+        c = tcp_now()[0]
+        if np.hypot(c[0] - tgt[0], c[1] - tgt[1]) > 0.0005:
+            z_clear = max(float(p.xyz_top[2]) + self.tip_m + CLEAR_M, float(tgt[2]))
+            if c[2] < z_clear - 0.0005:
+                self._move([c[0], c[1], z_clear])
+            self._move([tgt[0], tgt[1], z_clear], force=TAP_N)
         c = self._z()
         return self._move(tgt, force=TAP_N, duration=None if abs(c - tgt[2]) > 0.005 else 0.8)
 
