@@ -164,7 +164,14 @@ def main():
 
     ob, info = read_base(a.base)
     if ob is None:
-        sys.exit(f"{a.base} not read: {info}")
+        # the arm is elsewhere (10-22 22:04: left over the clear area after a set-down): fly to the last read and look
+        from replay_real_assembly import _last_base_pose
+        last = _last_base_pose(a.base)
+        if last is None or not view(last):
+            sys.exit(f"{a.base} not read: {info}")
+        time.sleep(1.5); ob, info = read_base(a.base)
+        if ob is None:
+            sys.exit(f"{a.base} not read from its last pose either: {info}")
     view(ob); time.sleep(1.5); ob, info = read_base(a.base)
     x0, y0 = 1000 * ob[0][0], 1000 * ob[0][1]; yaw0 = float(R.from_quat(ob[1]).as_euler('xyz', degrees=True)[2])
     tgt = a.to if a.to else (x0 + a.dx, y0 + a.dy, yaw0 + a.dyaw)
