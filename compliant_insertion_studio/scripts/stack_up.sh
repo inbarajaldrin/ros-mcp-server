@@ -38,6 +38,10 @@ source /opt/ros/humble/setup.bash 2>/dev/null
 source "$HOME/Desktop/ros2_ws/install/setup.bash" 2>/dev/null
 set -u
 
+# A wedged CLI daemon silently breaks every check below (queries return empty, so
+# a healthy stack reads as absent). Cheap to rule out up front.
+ros2 daemon stop >/dev/null 2>&1; sleep 2; ros2 daemon start >/dev/null 2>&1; sleep 2
+
 echo "════════════════════════════════════════════════════════════"
 echo "  stack_up — tree: $REPO"
 echo "════════════════════════════════════════════════════════════"
@@ -61,10 +65,18 @@ fi
 step 1/5 "UR driver (headless external control)"
 if timeout 8 ros2 control list_controllers 2>/dev/null | grep -q "scaled_joint_trajectory_controller.*active"; then
     ok "driver already up"
+    # An earlier launch_robot.sh that timed out mid-bringup leaves the controllers
+    # loaded but never reaches set_payload. "Driver up" therefore does NOT imply
+    # the payload is set, and force mode without it has no gravity compensation.
+    if ! grep -qs "Payload has been set successfully" /tmp/ur_bringup_logs/*.log; then
+        warn "payload not confirmed in any bringup log — set it before running force mode:"
+        warn "  see launch_robot.sh's set_payload block, or relaunch the driver cleanly"
+    fi
 else
     bash "$REPO/compliant_insertion_studio/scripts/launch_robot.sh" real --headless >/tmp/stack_up_driver.log 2>&1 \
         || { tail -15 /tmp/stack_up_driver.log; die "driver bringup failed (see /tmp/stack_up_driver.log)" 3; }
-    grep -q "Payload has been set successfully" /tmp/stack_up_driver.log \
+    # launch_robot.sh echoes the set_payload service response, not a log line.
+    grep -q "SetPayload_Response(success=True)" /tmp/stack_up_driver.log \
         && ok "F/T payload set from ft_calibration_*.yaml" \
         || warn "payload NOT confirmed — force mode will lack gravity comp"
     ok "driver up, controllers active"
@@ -91,18 +103,45 @@ case "$GS" in
 esac
 
 # ---------------------------------------------------------------- 3. camera
-step 3/5 "Camera (aruco localizer)"
-if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$"; then
-    ok "camera already publishing"
+step 3/5 "Camera (RealSense node + aruco localizer)"
+# The RealSense node owns the D415 and publishes colour + depth aligned to colour (the seat
+# check and the disassembly's free-spot map need depth); the localizer reads its colour topic
+# instead of opening the device itself (2026-10-14).
+RS=realsense2; IMG=/camera/camera/color/image_raw
+if timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$"; then
+    ok "RealSense node already publishing"
 else
-    bash "$REPO/compliant_insertion_studio/scripts/launch_camera.sh" --background >/dev/null 2>&1
+    nohup bash -c "source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash; \
+        exec ros2 launch ${RS}_camera rs_launch.py rgb_camera.color_profile:=1280,720,15 \
+        depth_module.depth_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=false \
+        enable_infra2:=false rgb_camera.auto_exposure_priority:=false" >/tmp/realsense.log 2>&1 &
+    for _ in $(seq 1 30); do
+        sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" && break
+    done
+    timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" \
+        || die "RealSense node did not start (see /tmp/realsense.log)" 5
+    ok "RealSense node up (colour + aligned depth)"
+fi
+if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$"; then
+    ok "localizer already publishing"
+else
+    bash "$REPO/compliant_insertion_studio/scripts/launch_camera.sh" --background --headless \
+        --image-topic "$IMG" >/dev/null 2>&1
     for _ in $(seq 1 20); do
         sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$" && break
     done
     timeout 5 ros2 topic list 2>/dev/null | grep -q "^/objects_poses_real$" \
-        || die "camera did not start (see /tmp/aruco_logs/)" 5
-    ok "camera up"
+        || die "localizer did not start (see /tmp/aruco_logs/)" 5
+    ok "localizer up"
 fi
+# The UR driver's control loop has no RT scheduling on this PC (no FIFO); with the localizer
+# (~165% CPU), the depth node and RViz loaded, it stalled and the robot dropped the external-
+# control program mid-run (2026-10-15, load 10.7 on 6 cores). Lower the camera stack's priority
+# (raising niceness needs no root) so the driver wins the CPU.
+for pid in $(pgrep -f "lib/aruco_camera_localizer/localize") $(pgrep -f "${RS}_camera_node"); do
+    renice -n 10 -p "$pid" >/dev/null 2>&1
+done
+ok "camera stack at nice 10 (driver keeps priority)"
 
 # ---------------------------------------------------------------- 4. grasp points
 step 4/5 "Grasp-points publisher (from THIS tree)"
@@ -124,7 +163,15 @@ fi
 # ---------------------------------------------------------------- 5. verify
 step 5/5 "Pre-flight"
 FAIL=0
-FRAMES="$(timeout 12 ros2 topic echo --once /objects_poses_real 2>/dev/null | grep -c child_frame_id)"
+# Read a few times: detection needs a moment to stabilise after the camera starts,
+# and a single early read undercounts (observed 3 frames when 5 were present).
+FRAMES=0
+for _ in 1 2 3; do
+    N="$(timeout 12 ros2 topic echo --once /objects_poses_real 2>/dev/null | grep -c child_frame_id)"
+    [ "${N:-0}" -gt "$FRAMES" ] && FRAMES="$N"
+    [ "$FRAMES" -ge 5 ] && break
+    sleep 2
+done
 [ "${FRAMES:-0}" -ge 2 ] && ok "camera sees $FRAMES frames" || { warn "camera sees only ${FRAMES:-0} frames — are the parts in view?"; FAIL=1; }
 
 HZ="$(timeout 8 ros2 topic hz /grasp_points_real 2>&1 | grep -oE 'average rate: [0-9.]+' | head -1)"

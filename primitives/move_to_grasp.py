@@ -39,6 +39,7 @@ from builtin_interfaces.msg import Duration
 from controller_manager_msgs.srv import ListControllers
 import math
 import numpy as np
+from collections import deque
 from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.ik import dh_params, forward_kinematics
@@ -47,6 +48,11 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+BELOW_TABLE_REJECT_M = 0.010   # an object pose centre this far below the table is a misread
+STEP2_JUMP_MAX_M = 0.020       # step-2 target this far (xy) from the step-1 hover: re-hover, never descend
+MISREAD_WAIT_ATTEMPTS = 60     # detection attempts (0.5 s each) while only below-table misreads arrive (streaks: 8.4 s, ~15 s)
+from primitives.shared.config import (GRASP_TIP_CLEARANCE_M, grip_width_mm, pad_center_offset_m,
+                                      rg2_tip_length_m, grasp_tool_offset_target_m)
 from queries.get_scene_info import load_grasp_validity_data
 
 # Import grasp points message type (using standard visualization_msgs MarkerArray)
@@ -335,8 +341,18 @@ def output_result(result):
 
 
 class DirectObjectMove(Node):
-    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None):
+    def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None,
+                 base_name=None, pre_grasp_width=None, pad_center=False):
         super().__init__('direct_object_move')
+        # When set (mm): observe and approach with the gripper fully open, and close to this
+        # width only right before the step-2 descent. A pre-grasp width set BEFORE the
+        # approach hides a part directly below (clear-area picks) and caused an
+        # open/close/open/close churn (2026-10-07).
+        self.pre_grasp_width = pre_grasp_width
+        # Assembly base the held part goes to next. When set, the step-1 wrist is chosen
+        # so the downstream rotate_object reorient keeps the camera away from the table
+        # (primitives/shared/camera_up.py). None keeps the joint-distance choice.
+        self.base_name = base_name
 
         # Mode must be explicitly specified - no default
         if mode is None:
@@ -400,6 +416,25 @@ class DirectObjectMove(Node):
         # IK targets are converted from gripper center to flange using GRIPPER_CENTER_TOOL_OFFSET.
         # Default 0: gripper center placed at the grasp point.
         self.offset = offset if offset is not None else 0
+
+        # --pad-center (2026-10-14): put the RG2 PAD CENTRE at the grasp point. The nominal
+        # "gripper center" (GRIPPER_CENTER_TOOL_OFFSET, 0.2286) is ~1 mm above the fingertip ends,
+        # so a legacy grasp holds the part ~14 mm shallow. Pad centre and fingertip depth follow the
+        # 4-bar linkage at the width the gripper closes to on this part. Not deeper than the
+        # insert allows (fingertips above base1 / seated parts at the seat, CAD:
+        # ablations/grasp_depth.py). The fingertips stay GRASP_TIP_CLEARANCE_M above the table (a short part lying flat cannot be pad-centred);
+        # the flange->grasp-point distance actually used is reported as grasp_tool_offset_m so the
+        # insert and the disassembly can use the same grasp.
+        self.pad_center = bool(pad_center)
+        self.grasp_gap_mm = None
+        self.grasp_tool_offset_m = None   # flange -> grasp point along tool z, as executed
+        self.grasp_depth_clamped = False
+        if self.pad_center:
+            nominal = float(GRIPPER_CENTER_TOOL_OFFSET[2])
+            self.grasp_gap_mm = grip_width_mm(object_name, pre_grasp_width)
+            self.offset += nominal - grasp_tool_offset_target_m(object_name, self.grasp_gap_mm)
+            self.min_gripper_center_z = (TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M
+                                         + rg2_tip_length_m(self.grasp_gap_mm) - nominal)
         
         # Initialize Quaternion Orientation Controller for gimbal-lock-free gripper control
         # This ensures stable gripper orientation at pitch=180° (face down) for any yaw angle
@@ -496,6 +531,12 @@ class DirectObjectMove(Node):
         self.gripper_check_done = False  # Pre-grasp check completed
         self.gripper_open_check_done = False  # Tried opening gripper to restore visibility (once only)
         self.gripper_needs_restore = False  # Gripper was opened for visibility, needs restore before step 2
+        # Recent positions of the target grasp point, for a median step-2 target
+        # (see grasp_point_position below). ~1.4 s at the publisher's 5 Hz.
+        self._gp_hist = deque(maxlen=7)
+        self._hover_xy = None   # step-1 target xy, to catch a step-2 target that jumped
+        self._rehovers = 0
+        self._gp_below_table = 0
         gripper_topic = '/gripper_width_sim' if self.mode == 'sim' else '/gripper_width_offset'
         gripper_msg_type = Float64 if self.mode == 'sim' else Float32
         self.gripper_width_sub = self.create_subscription(
@@ -562,7 +603,10 @@ class DirectObjectMove(Node):
         
         # Grasp topic wait retry settings
         self.grasp_wait_attempts = 0
-        self.max_grasp_wait_attempts = 3
+        # Ticked every timer period (0.5 s). 2026-10-07: 3 (= 1 s) gave up on a part sitting
+        # in plain view at the clear area — the localizer runs at ~2.5-3 Hz, so 1 s right
+        # after the arm stops is only 2-3 frames. 10 = 5 s.
+        self.max_grasp_wait_attempts = 40   # 20 s: the localizer re-acquires a part 8-15 s after an arm move (yellow from the staging view, 2026-10-19)
 
         # Step 2 upward search when object not detected
         self.upward_search_in_progress = False  # Flag to track if we're doing upward search
@@ -662,6 +706,18 @@ class DirectObjectMove(Node):
                 target_transform = transform
                 break
         
+        if (target_transform is not None and self.mode == 'real'
+                and target_transform.transform.translation.z < TABLE_HEIGHT - BELOW_TABLE_REJECT_M):
+            # Physically impossible: the part's centre below the table. The localizer sometimes
+            # reads yellow off a half-hidden second marker at z -116..-136 mm (table -82; the
+            # right reading is -45), 90 mm away in xy — step 1 chose its wrist yaw from one such
+            # reading and the fingers met the part (2026-10-17). Skip it; keep the last good pose.
+            self._below_table_rejects = getattr(self, '_below_table_rejects', 0) + 1
+            if self._below_table_rejects in (1, 10, 100):
+                self.get_logger().warn(
+                    f"Rejected {self._below_table_rejects} pose reading(s) of {self.object_name} below the table "
+                    f"(z={1000 * target_transform.transform.translation.z:.0f} mm)")
+            return
         if target_transform is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
@@ -714,7 +770,19 @@ class DirectObjectMove(Node):
                 marker.ns == self.object_name):
                 target_marker = marker
                 break
-        
+
+        if (target_marker is not None and self.mode == 'real'
+                and target_marker.pose.position.z < TABLE_HEIGHT - BELOW_TABLE_REJECT_M):
+            # Same misread as in tf_message_callback, carried through by the grasp-point
+            # publisher: yellow's grasp point at z -133 mm sent step 1 to hover 76 mm off the
+            # part with the wrong wrist yaw, and step 2 came down on it at -87 N (2026-10-17).
+            self._gp_below_table += 1
+            if self._gp_below_table in (1, 10, 100):
+                self.get_logger().warn(
+                    f"Rejected {self._gp_below_table} grasp point reading(s) of {self.object_name} below "
+                    f"the table (z={1000 * target_marker.pose.position.z:.0f} mm)")
+            target_marker = None
+
         if target_marker is not None:
             # Check if we were using stale data in step 2 and fresh data just arrived
             if self.step1_completed and self.using_stale_data_step2 and self.trajectory_in_progress:
@@ -737,6 +805,11 @@ class DirectObjectMove(Node):
             
             # Update grasp point in real-time (like object poses)
             self.selected_grasp_point = target_marker
+            # Stationary samples only: estimates taken while the arm moves (approach,
+            # descent) are offset/lagged — for line_green ~9-10 mm (2026-10-07).
+            if not self.trajectory_in_progress:
+                p = target_marker.pose.position
+                self._gp_hist.append((p.x, p.y, p.z))
             # Track update time to ensure we use fresh data
             self.last_grasp_point_update_time = self.get_clock().now()
             # Don't unsubscribe - keep receiving updates in real-time
@@ -763,6 +836,11 @@ class DirectObjectMove(Node):
         """Force/torque callback (WrenchStamped for both sim and real)"""
         self.current_force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
         self.current_torque = np.array([msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z])
+        import time as _t
+        buf = self.__dict__.setdefault('_wrench_buf', [])
+        buf.append((_t.time(), self.current_force.copy(), self.current_torque.copy()))
+        while buf and buf[0][0] < buf[-1][0] - 0.4:
+            buf.pop(0)
 
     def _gripper_width_callback(self, msg):
         """Gripper width callback (Float64 for sim, Float32 for real)"""
@@ -841,10 +919,23 @@ class DirectObjectMove(Node):
         # arm. See _start_force_monitoring for why the pre-motion sample is unsafe.
         if not getattr(self, '_baseline_rebased', True):
             self._baseline_rebased = True
-            self.baseline_force = self.current_force.copy()
-            self.baseline_torque = self.current_torque.copy()
-            self.get_logger().info(
-                f"Force baseline re-taken after settle: F={self.baseline_force}")
+            # the median of the last ~0.3 s, not one sample: the wrench carries ~100 ms robot-side glitches (10-23 run
+            # 45: one re-take read F=(-18.5, -44.6, +50.2) N against (1.6, -1.2, -0.1) a moment before, and the guard
+            # then stopped line_green's descent on a -50 N 'contact' with nothing touched)
+            import time as _t
+            buf = [b for b in getattr(self, '_wrench_buf', []) if b[0] >= _t.time() - 0.3]
+            if len(buf) >= 5:
+                f_med = np.median([b[1] for b in buf], axis=0); t_med = np.median([b[2] for b in buf], axis=0)
+            else:
+                f_med, t_med = self.current_force.copy(), self.current_torque.copy()
+            if np.linalg.norm(f_med - self.baseline_force) > 8.0:
+                self.get_logger().warn(
+                    f"Force re-take {np.round(f_med, 2)} is {np.linalg.norm(f_med - self.baseline_force):.1f} N off the "
+                    f"pre-motion baseline {np.round(self.baseline_force, 2)} - a glitch, keeping the pre-motion baseline")
+            else:
+                self.baseline_force, self.baseline_torque = f_med, t_med
+                self.get_logger().info(
+                    f"Force baseline re-taken after settle (median of {len(buf)}): F={self.baseline_force}")
             return
 
         # Step 2 is top-down vertical descent - check Z force delta magnitude for contact
@@ -893,25 +984,18 @@ class DirectObjectMove(Node):
         
         # Wait for trajectory to complete before sending new one (same for both modes)
         if self.trajectory_in_progress:
-            # During retreat, cancel if grasp point is re-detected
-            if self.is_y_movement_trajectory and self.latest_grasp_points is not None:
+            # During retreat, the grasp point may come back into view. This used to cancel
+            # the retreat goal, and a cancelled trajectory makes the controller hold
+            # position instantly — a full-speed hard stop. 2026-10-07: let the 5 cm s-curve
+            # retreat finish instead (<= ~2 s); goal_result's "Retreat completed" path then
+            # waits for detection to settle and step 2 restores the gripper before moving in.
+            if (self.is_y_movement_trajectory and self.latest_grasp_points is not None
+                    and not getattr(self, '_redetected_in_retreat_logged', False)):
                 for marker in self.latest_grasp_points.markers:
                     if marker.id == self.grasp_id and marker.ns == self.object_name:
-                        self.get_logger().info("Grasp point re-detected during retreat — cancelling retreat")
-                        if self.current_goal_handle is not None:
-                            try:
-                                self.current_goal_handle.cancel_goal_async()
-                            except Exception as e:
-                                self.get_logger().debug(f"Could not cancel retreat: {e}")
-                        self.is_y_movement_trajectory = False
-                        self.trajectory_in_progress = False
-                        # Restore gripper to initial width before step 2
-                        self._restore_gripper_if_needed()
-                        # Pause before retrying step 2
-                        self.waiting_after_recovery = True
-                        self.recovery_wait_start_time = self.get_clock().now()
-                        self.recovery_wait_duration = 1.0
-                        return
+                        self.get_logger().info("Grasp point re-detected during retreat — letting the retreat finish")
+                        self._redetected_in_retreat_logged = True
+                        break
             self.get_logger().debug("Trajectory already in progress, skipping...")
             return
         
@@ -928,6 +1012,32 @@ class DirectObjectMove(Node):
                 self.recovery_wait_start_time = None
                 self.get_logger().info(f"Wait period completed. Continuing movement after tracking recovery.")
         
+        # Deferred pre-grasp width (--pre-grasp-width): open once for a clear view; the
+        # width is set by the restore hook right before the step-2 descent.
+        if (not self.gripper_check_done and self.pre_grasp_width is not None
+                and self.current_gripper_width is not None):
+            explicit = self.target_xyz is not None
+            if explicit:
+                # An explicit target (the replay's depth fit) needs no view of the part: no open for a view, and the
+                # pre-grasp width is set once before the descent only if the fingers are narrower than it or > 3 mm
+                # wider (10-23: open + restore were two control_gripper processes, ~4.7 s of a ~14 s grasp)
+                w, pg = float(self.current_gripper_width), float(self.pre_grasp_width)
+                self.gripper_needs_restore = not (pg <= w <= pg + 3.0)
+                self.get_logger().info(
+                    f"Gripper at {w:.0f}mm, pre-grasp {pg:.0f}mm, explicit target: "
+                    + ("set before the descent" if self.gripper_needs_restore else "already there - no gripper call"))
+                self.gripper_open_check_done = False      # not opened: an occlusion still gets the open-and-look path
+            else:
+                if self.current_gripper_width < self.GRIPPER_FULLY_OPEN_WIDTH:
+                    self.get_logger().info(
+                        f"Gripper at {self.current_gripper_width:.0f}mm — opening for a clear view "
+                        f"(pre-grasp {self.pre_grasp_width:.0f}mm is set before the descent)")
+                    self._run_control_gripper("open")
+                self.gripper_needs_restore = True
+                self.gripper_open_check_done = True  # already open: occlusion handling goes to retreat
+            self.initial_gripper_width = float(self.pre_grasp_width)
+            self.gripper_check_done = True
+
         # Pre-grasp gripper check (once before step 1)
         if not self.gripper_check_done:
             if self.current_gripper_width is None:
@@ -1040,6 +1150,22 @@ class DirectObjectMove(Node):
                         for marker in self.latest_grasp_points.markers
                     )
                     if not object_exists:
+                        # Before step 1 (2026-10-07): starting directly above the part — a pick
+                        # at the clear area — with the gripper already at its pre-grasp width,
+                        # the fingers hide the part from the camera. Open fully once to see it;
+                        # the width is restored right before the step-2 descent
+                        # (gripper_needs_restore, checked where the step-2 trajectory is sent).
+                        if (not self.step1_completed and not self.gripper_open_check_done
+                                and self.current_gripper_width is not None
+                                and self.current_gripper_width < self.GRIPPER_FULLY_OPEN_WIDTH):
+                            self.gripper_open_check_done = True
+                            self.get_logger().info(
+                                f"Object '{self.object_name}' not visible before step 1 with the "
+                                f"gripper at {self.current_gripper_width:.0f}mm — opening to see it")
+                            self._run_control_gripper("open")
+                            self.gripper_needs_restore = True
+                            self.grasp_wait_attempts = 0  # full detection budget with an open view
+                            return
                         # In step 2, if object not detected, try opening gripper or retreat (only during step 2, not after)
                         if self.step1_completed and not self.step2_completed and not self.upward_search_done:
                             self.upward_search_done = True
@@ -1057,8 +1183,14 @@ class DirectObjectMove(Node):
                             if marker.ns == self.object_name
                         ]
                         msg = f"Grasp point {self.grasp_id} not found for object '{self.object_name}'. Available grasp IDs: {sorted(available_ids)}"
-                if self.grasp_wait_attempts < self.max_grasp_wait_attempts:
-                    self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{self.max_grasp_wait_attempts}), retrying...")
+                # The part IS seen, only as below-table misreads: those come in streaks of a few
+                # seconds (yellow, 2026-10-17: ~4 s right after a closed-finger nudge, then 157/157
+                # good readings at the same spot) — wait them out longer before giving up.
+                budget = self.max_grasp_wait_attempts
+                if self._gp_below_table or getattr(self, '_below_table_rejects', 0):
+                    budget = MISREAD_WAIT_ATTEMPTS
+                if self.grasp_wait_attempts < budget:
+                    self.get_logger().warn(f"{msg} (attempt {self.grasp_wait_attempts}/{budget}), retrying...")
                     return
                 self.error_message = msg
                 self.get_logger().error(self.error_message + " Cannot proceed in grasp point mode. Exiting.")
@@ -1106,6 +1238,28 @@ class DirectObjectMove(Node):
                 self.selected_grasp_point.pose.position.y,
                 self.selected_grasp_point.pose.position.z
             ])
+
+            # 2026-10-07: step 2 committed its descent target from ONE sample. A single
+            # 11 mm z blip (-0.043 vs -0.032 m, part lying still) made the regrasp hold
+            # u_brown 10.9 mm off, and the insert then rejected a genuine seat. Step 3
+            # cannot correct it — the closing fingers occlude the marker. Use the median
+            # of recent samples for the step-2 target — but ONLY samples taken from the
+            # hover onward (history is cleared when step 1 completes). Mixing in
+            # approach-phase samples made it worse: for line_green they were ~9-10 mm off
+            # the close-range reading, the median discarded the correct close-range value,
+            # and the bar was gripped off-centre and seated wrong.
+            # No added wait: uses whatever stationary samples the existing timing gives;
+            # with fewer than 3 the latest sample is used, as before.
+            if self.step1_completed and not self.step2_completed and len(self._gp_hist) >= 3:
+                gp_median = np.median(np.array(self._gp_hist), axis=0)
+                dev = np.linalg.norm(gp_median - grasp_point_position)
+                if dev > 0.002:
+                    self.get_logger().warn(
+                        f"Step 2 grasp point sample ({grasp_point_position[0]:.3f}, "
+                        f"{grasp_point_position[1]:.3f}, {grasp_point_position[2]:.3f}) is "
+                        f"{dev*1000:.1f} mm from the median of the last {len(self._gp_hist)} "
+                        f"— using the median")
+                grasp_point_position = gp_median
             
             # Track if we're using stale data in step 2
             self.using_stale_data_step2 = using_stale_grasp_point and self.step1_completed
@@ -1362,18 +1516,42 @@ class DirectObjectMove(Node):
                 target_ee_position[2] -= self.offset
 
             # Enforce minimum gripper center height to prevent table collision
-            if target_ee_position[2] < self.min_gripper_center_z:
+            clamped = target_ee_position[2] < self.min_gripper_center_z
+            if clamped:
                 self.get_logger().info(
                     f"Raising gripper center from {target_ee_position[2]*1000:.1f}mm to "
                     f"{self.min_gripper_center_z*1000:.1f}mm (min clearance for table)")
                 target_ee_position[2] = self.min_gripper_center_z
+            if self.step1_completed:
+                self._record_grasp_depth(object_position[2], target_ee_position[2], clamped)
 
         # Step 1: always add hover height offset
         if not self.step1_completed:
             target_ee_position[2] += self.hover_height_offset  # Move to hover height
 
         self.get_logger().info(f"Target gripper center: ({target_ee_position[0]:.3f}, {target_ee_position[1]:.3f}, {target_ee_position[2]:.3f})")
-        
+
+        # Step 2 descends from the hover in a straight line with the wrist yaw chosen at step 1.
+        # If its target is far from the hover, the hover (and yaw) came from a different reading
+        # than the descent: hover again over the new reading (once), never descend (2026-10-17).
+        if not self.step1_completed:
+            self._hover_xy = np.array(target_ee_position[:2], dtype=float)
+        elif (self.mode == 'real' and not self.step2_completed and self._hover_xy is not None
+              and np.linalg.norm(target_ee_position[:2] - self._hover_xy) > STEP2_JUMP_MAX_M):
+            jump_mm = 1000 * np.linalg.norm(target_ee_position[:2] - self._hover_xy)
+            if self._rehovers < 1:
+                self._rehovers += 1
+                self.get_logger().warn(
+                    f"Step 2 target is {jump_mm:.0f} mm (xy) from the step-1 hover - the readings "
+                    f"disagree. Not descending: hovering again over the latest reading.")
+                self.step1_completed = False
+                return
+            self.error_message = (f"Step 2 target is {jump_mm:.0f} mm (xy) from the hover after a "
+                                  f"re-hover - object pose unstable. Not descending.")
+            self.get_logger().error(self.error_message)
+            self.should_exit = True
+            return
+
         # Step 3: Attempt final fine positioning if step 2 is done and step 3 not yet attempted (real mode only)
         if self.step2_completed and not self.step3_attempted and self.grasp_id is not None and self.mode == 'real':
             self.step3_attempted = True
@@ -1426,8 +1604,10 @@ class DirectObjectMove(Node):
                 step3_target_ee[2] -= self.offset
 
             # Enforce minimum gripper center height
-            if step3_target_ee[2] < self.min_gripper_center_z:
+            clamped = step3_target_ee[2] < self.min_gripper_center_z
+            if clamped:
                 step3_target_ee[2] = self.min_gripper_center_z
+            self._record_grasp_depth(grasp_point_position[2], step3_target_ee[2], clamped)
 
             # Store these for step 3 trajectory computation (will recompute trajectory with these targets)
             self.step3_target_position = step3_target_ee
@@ -1574,6 +1754,14 @@ class DirectObjectMove(Node):
             goal.trajectory = traj_msg
             goal.goal_time_tolerance = Duration(sec=1)
 
+            # 2026-10-07: a visibility open followed by a retreat that COMPLETES (no
+            # re-detection mid-retreat) never restored the pre-grasp width, so step 2
+            # descended fully open and closed from ~100 mm. The target above was just
+            # computed from a detection made with the fingers open — restore now,
+            # before moving in. No-op on the paths that already restored.
+            if self.gripper_needs_restore:
+                self._restore_gripper_if_needed()
+
             self.trajectory_in_progress = True
             step_label = "Step 3" if step3_mode else "Step 2"
             self.get_logger().info(f"{step_label} trajectory sent and accepted")
@@ -1586,9 +1774,16 @@ class DirectObjectMove(Node):
             # Step 1: full multi-seed search
             sol_a = compute_ik_wrist3_extended(ik_position, target_rot, current_joints=self.current_joint_angles, max_tries=1)
 
+            # Camera-up wrist (2026-10-07): the two yaws differ by 180 deg about the tool
+            # axis, which flips the camera side of the reorient that follows. Choose it
+            # here — rotate_object can only pick among reorients this grasp allows.
+            cam_pref = self._camera_up_wrist(target_rot, target_rot_alt)
+
             # Skip sol_b if sol_a is good enough (close to current joints)
             sol_b = None
-            if self.current_joint_angles is not None and sol_a is not None:
+            if cam_pref is not None:
+                sol_b = compute_ik_wrist3_extended(ik_position, target_rot_alt, current_joints=self.current_joint_angles, max_tries=1)
+            elif self.current_joint_angles is not None and sol_a is not None:
                 ref = np.array(self.current_joint_angles)
                 joint_dist_a = np.linalg.norm(np.array(sol_a) - ref)
                 if joint_dist_a > 1.5:
@@ -1604,7 +1799,16 @@ class DirectObjectMove(Node):
                     candidates.append(sol_a)
                 if sol_b is not None:
                     candidates.append(sol_b)
-                if candidates:
+                preferred = {'a': sol_a, 'b': sol_b}.get(cam_pref)
+                if cam_pref is not None and preferred is None:
+                    self.get_logger().warn(
+                        "Camera-up wrist has no IK solution — falling back to the other wrist. "
+                        "The reorient after this grasp will face the camera toward the table.")
+                if preferred is not None:
+                    joint_angles = preferred
+                    chosen_yaw = yaw_degrees if cam_pref == 'a' else yaw_alt
+                    self.get_logger().info(f"Chose yaw={chosen_yaw:.1f}° (camera-up reorient; joint distance: {np.linalg.norm(np.array(joint_angles) - ref):.3f} rad)")
+                elif candidates:
                     joint_angles = min(candidates, key=lambda s: np.linalg.norm(np.array(s) - ref))
                     chosen_yaw = yaw_degrees if (sol_a is not None and np.array_equal(joint_angles, sol_a)) else yaw_alt
                     self.get_logger().info(f"Chose yaw={chosen_yaw:.1f}° (joint distance: {np.linalg.norm(np.array(joint_angles) - ref):.3f} rad)")
@@ -1672,6 +1876,31 @@ class DirectObjectMove(Node):
         self.last_target_pose = (target_ee_position.tolist(), target_quaternion)
 
         # Don't set movement_completed here - wait for trajectory completion callback
+
+    def _camera_up_wrist(self, rpy_a, rpy_b):
+        """'a' or 'b': the step-1 wrist whose downstream reorient puts the camera above
+        the gripper. None when not applicable (no --base-name, no object pose, no
+        assembly target) or when both wrists are equivalent for the camera."""
+        if self.base_name is None or self.final_orientation_quat is None:
+            return None
+        try:
+            from primitives.shared.camera_up import assembly_targets, reorient_camera_z
+            if getattr(self, '_camera_targets', None) is None:
+                self._camera_targets = assembly_targets(self.object_name, self.base_name) or []
+            if not self._camera_targets:
+                return None
+            R_obj = R.from_quat(self.final_orientation_quat).as_matrix()
+            cz = [reorient_camera_z(R.from_euler('xyz', rpy, degrees=True).as_matrix(),
+                                    R_obj, self._camera_targets) for rpy in (rpy_a, rpy_b)]
+        except Exception as e:
+            self.get_logger().warn(f"Camera-up wrist check failed ({e}); using joint distance")
+            return None
+        self.get_logger().info(
+            f"Camera-up check (base {self.base_name}): reorient camera_z yaw {rpy_a[2]:.1f}° "
+            f"-> {cz[0]:+.2f}, yaw {rpy_b[2]:.1f}° -> {cz[1]:+.2f}")
+        if abs(cz[0] - cz[1]) < 0.2:
+            return None
+        return 'a' if cz[0] > cz[1] else 'b'
 
     def _try_gripper_open_or_retreat(self, reason: str):
         """Try opening gripper to restore visibility before falling back to retreat.
@@ -2096,6 +2325,18 @@ class DirectObjectMove(Node):
             pose = self.final_object_pose
             self.get_logger().info(f"Final object pose: position=({pose.pose.position.x:.6f}, {pose.pose.position.y:.6f}, {pose.pose.position.z:.6f}), quaternion=({pose.pose.orientation.x:.6f}, {pose.pose.orientation.y:.6f}, {pose.pose.orientation.z:.6f}, {pose.pose.orientation.w:.6f})")
 
+    def _record_grasp_depth(self, grasp_point_z, gripper_center_z, clamped):
+        """Flange -> grasp point along tool z for this target (top-down grasp)."""
+        self.grasp_tool_offset_m = float(GRIPPER_CENTER_TOOL_OFFSET[2]) + float(gripper_center_z - grasp_point_z)
+        self.grasp_depth_clamped = bool(clamped)
+        if self.pad_center:
+            pad = pad_center_offset_m(self.grasp_gap_mm)
+            self.get_logger().info(
+                f"Pad-centre grasp: gap {self.grasp_gap_mm:.1f} mm, pad centre {1000*pad:.1f} mm below flange, "
+                f"flange->grasp point {1000*self.grasp_tool_offset_m:.1f} mm"
+                + (f" (CLAMPED: pad centre {1000*(self.grasp_tool_offset_m - pad):.1f} mm above the grasp point, "
+                   f"tips {1000*GRASP_TIP_CLEARANCE_M:.0f} mm above the table)" if clamped else ""))
+
     def output_result_json(self, movement_type="move_to_object"):
         """Output movement result as JSON"""
         if self.movement_completed and not self.error_message and self.final_position is not None and self.final_orientation_quat is not None:
@@ -2120,6 +2361,12 @@ class DirectObjectMove(Node):
                     },
                 }
             }
+            if self.grasp_tool_offset_m is not None:
+                result["grasp_tool_offset_m"] = round(self.grasp_tool_offset_m, 5)
+                result["grasp_depth_clamped"] = self.grasp_depth_clamped
+                result["grasp_pad_center"] = self.pad_center
+                if self.grasp_gap_mm is not None:
+                    result["grasp_gap_mm"] = self.grasp_gap_mm
         else:
             # Failure
             result = {
@@ -2188,6 +2435,9 @@ class DirectObjectMove(Node):
             # Check if step 1 completed, trigger step 2 (both sim and real modes)
             if not self.step1_completed:
                 self.step1_completed = True
+                # Step-2 target uses only samples taken from the hover onward (see the
+                # median below): approach-phase samples were ~9-10 mm off for line_green.
+                self._gp_hist.clear()
                 self.upward_search_done = False  # Reset search flag for step 2
                 self.force_sensor_zeroed_for_step2 = False  # Reset force sensor flag for step 2
                 # Switch to faster timer period for step 2 to get more frequent pose updates
@@ -2203,6 +2453,17 @@ class DirectObjectMove(Node):
                 if self.mode == 'sim':
                     # Sim mode: skip step 3 (ground truth poses, no refinement needed)
                     self.get_logger().info("Step 2 completed. Skipping step 3 (sim mode)")
+                    self._print_final_object_pose()
+                    self.movement_completed = True
+                    self.should_exit = True
+                    self.get_logger().info("Movement completed successfully")
+                    return
+                if self.target_xyz is not None:
+                    # An explicit target (the replay's depth CAD fit, ~1 mm) is the trusted measurement: step 3's fresh
+                    # low-hover MARKER grasp point (no pad-centre depth) replaced it on 2026-10-22 02:13 - xy (-5.7,
+                    # -2.4) mm off and 33 mm deeper, clamped 2 mm over the table - and drove a finger onto u_orange at
+                    # 81.6 N. The marker read from the low hover is the one known 9-10 mm off (depth-pick memo).
+                    self.get_logger().info("Step 2 completed. Skipping step 3 (explicit --target-xyz from the depth fit)")
                     self._print_final_object_pose()
                     self.movement_completed = True
                     self.should_exit = True
@@ -2264,6 +2525,16 @@ def main(args=None):
                        help='Vertical offset below grasp point for gripper center in meters (default: 0 = gripper center at grasp point)')
     parser.add_argument('--mode', type=str, default=None, choices=['sim', 'real'], required=True,
                        help='Mode: "sim" for simulation (uses /objects_poses_sim with TFMessage), "real" for real robot (uses /objects_poses_real with TFMessage). REQUIRED - no default.')
+    parser.add_argument('--pre-grasp-width', type=float, default=None,
+                       help='Pre-grasp gripper width (mm), applied right before the step-2 '
+                            'descent; the gripper stays fully open while observing/approaching.')
+    parser.add_argument('--base-name', type=str, default=None,
+                       help='Assembly base the part is headed for. Picks the wrist whose '
+                            'downstream reorient keeps the camera away from the table.')
+    parser.add_argument('--pad-center', action='store_true',
+                       help='Place the RG2 pad centre (not the nominal 0.2286 m gripper center, '
+                            'which is at the fingertip ends) at the grasp point; fingertips kept '
+                            'clear of the table. Reports grasp_tool_offset_m.')
     # Parse arguments from sys.argv if args is None
     if args is None:
         args = parser.parse_args()
@@ -2275,7 +2546,8 @@ def main(args=None):
                       height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
-                      offset=args.offset, mode=args.mode)
+                      offset=args.offset, mode=args.mode, base_name=args.base_name,
+                      pre_grasp_width=args.pre_grasp_width, pad_center=args.pad_center)
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling

@@ -44,6 +44,27 @@ def forward_kinematics(dh_params, joint_angles):
     return T
 
 
+WRIST3_LIMIT_RAD = 4.0          # wrist_3 stays within +-4 rad (camera + gripper cables wind up, 10-20)
+
+
+def nearest_joint_equivalent(target, current, wrist3_limit=WRIST3_LIMIT_RAD):
+    """The 2*pi equivalent of `target` nearest `current` for the continuous joints (pan, wrist_1-3); FK unchanged.
+
+    IK candidates are ranked by wrapped joint change but a single-point trajectory drives the raw values:
+    2026-10-22 08:17 rotate_object sent wrist_3 -3.14 from +3.85 (the same pose as +3.14, 0.7 rad away), swung
+    5.9 rad and hit a protective stop. Returns (joints, None), or (None, reason) when a joint has no
+    equivalent inside its limit (wrist_3: +-4 rad)."""
+    q = np.array(target, dtype=float)
+    cur = np.array(current, dtype=float)
+    for i, lim in ((0, 2 * np.pi), (3, 2 * np.pi), (4, 2 * np.pi), (5, wrist3_limit)):
+        opts = [q[i] + k * 2 * np.pi for k in (-2, -1, 0, 1, 2)]
+        opts = [v for v in opts if abs(v) <= lim]
+        if not opts:
+            return None, f"joint {i} target {q[i]:.2f} rad has no equivalent within +-{lim:.2f} rad"
+        q[i] = min(opts, key=lambda v: abs(v - cur[i]))
+    return q, None
+
+
 # ---------------------------------------------------------------------------
 # IK objective functions
 # ---------------------------------------------------------------------------

@@ -1,0 +1,28 @@
+# The cell's binding map (2026-10-20, M3a): the assembly graph's mates -> the bodies on this table.
+# Declaration data, not per-part constants: this is what the planner's binding layer knows; drive-mate and vision
+# resolve a mate id through it and never carry part names of their own.
+#
+# Source: prompt2assembly plan-anything/data/assemblies/fmb1/artifacts/fmb1.assembly-graph.json (dual-a4500,
+# assembly_digest 0438cd53...). Graph labels -> this cell's names: Body1 base1, Body2 u_brown, Body5 u_orange,
+# Body3 line_green, Body4 inverted_u_yellow (occurrence:01/04 = class:03, the two U parts, interchangeable).
+# Acceptance is the graph's: every FMB1 mate declares half-widths 1 mm on each mate-frame axis and 1 deg
+# (quat_dot_min 0.99996), class insertion, fastening free (judged at rest).
+fmb1:
+  reference: base1
+  order: [mate:00, mate:01, mate:02, mate:03]          # the graph's linear extension (occurrence 01, 04, 02, 03)
+  acceptance: {halfwidth_m: [0.001, 0.001, 0.001], tilt_deg: 1.0}
+  # graph_seat_z_mm: the mover's volume centroid above the base's, at the graph's assembled pose (occurrence
+  # translations, exact geometry). Certification measures against THIS seat, not our assembly JSON: ours puts yellow
+  # 6.0 mm high (u_brown +0.5, line_green +1.05), and our insert is tuned to ours (2026-10-21).
+  mates:
+    mate:00: {mover: u_brown,           occurrence: occurrence:01, label: Body2, graph_seat_z_mm: 17.50}
+    mate:01: {mover: u_orange,          occurrence: occurrence:04, label: Body5, graph_seat_z_mm: 17.50}
+    mate:02: {mover: line_green,        occurrence: occurrence:02, label: Body3, graph_seat_z_mm: 24.25}
+    mate:03: {mover: inverted_u_yellow, occurrence: occurrence:03, label: Body4, graph_seat_z_mm: 14.26}
+
+# Sigma (decided 2026-10-20, ARCHITECTURE_SEAMS): from the read's own sample spread until calibrated by tests; a read
+# that cannot state its sigma is refused, not averaged. Marker reads: the spread of their still samples (>= 3).
+# The two single-shot depth estimators carry their measured repeatability, with the test that gave it:
+sigma:
+  base_icp:   {xy: 0.0018, from: "handeye_icp_survey 2026-10-20: 1.8 mm median spread of the 6-dof CAD fit over 11 views"}
+  seat_depth: {z: 0.0005, from: "seat_check 2026-10-20 on seated parts: forks +0.2 / -0.3 mm, line_brown +0.02 mm"}

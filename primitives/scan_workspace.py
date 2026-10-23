@@ -384,6 +384,254 @@ class ScanWorkspace(Node):
         output_result(result)
 
 
+# ---------------------------------------------------------------------------
+# Survey mode (2026-10-13): view one FIXED target (base1) from many poses and record what
+# the camera reports from each. A perfect camera/hand-eye gives the same base1 pose from
+# every viewpoint; the spread is the error. The dataset also feeds a hand-eye fit.
+#
+# Motion is NOT the scan path above: that uses fixed-seed IK + a single joint-space point,
+# which can pick another arm configuration (it swung the arm on 2026-10-07 via move_xyz).
+# Survey moves are Cartesian waypoints seeded from the CURRENT joints (as move_to_safe_height),
+# flange never below SAFE_HEIGHT, tool axis aimed at the target, tilt <= SURVEY_MAX_TILT_DEG.
+# ---------------------------------------------------------------------------
+SURVEY_HEIGHTS = (0.34, 0.42, 0.50)          # flange z (m); SAFE_HEIGHT is 0.32
+SURVEY_RING = {0.42: 0.10, 0.50: 0.15}       # flange xy offset from the target per height (m)
+SURVEY_YAWS_DEG = (-40.0, 40.0)              # extra wrist yaws at the middle height, centre
+SURVEY_MAX_TILT_DEG = 20.0
+SURVEY_MAX_JOINT_STEP = 1.5                  # rad, any joint, per move — refuse bigger
+SURVEY_RECORD_S = 3.0
+SURVEY_MIN_RADIUS = 0.25                     # m, flange distance from the base z axis — no self-collision
+                                             # check in the Cartesian planner, so stay clear of the shoulder
+
+
+SURVEY_WIDE_RING = {0.34: 0.06, 0.42: 0.10, 0.50: 0.15}
+SURVEY_WIDE_YAWS_DEG = (-50.0, 0.0, 50.0)    # ordered so consecutive wrist steps stay < 1 rad
+# Close pass (operator-approved 2026-10-13, flat board + <5 cm objects only): grasp-range views.
+# Below SAFE_HEIGHT on purpose; its own hard floor. Gripper centre ~91 mm above the table at 0.24.
+SURVEY_CLOSE_HEIGHTS = (0.28, 0.24)
+SURVEY_CLOSE_RING = {0.28: 0.04, 0.24: 0.03}
+SURVEY_CLOSE_FLOOR = 0.235
+
+
+def survey_viewpoints(target, R_start, wide=False, close=False):
+    """[(flange_pos, R_flange, label)] aiming the tool z axis at `target`.
+    wide=True (calibration target): wrist yaws at every height + rings at every height,
+    and a +45 deg yaw copy of the middle ring — rotation diversity for a hand-eye solve."""
+    from scipy.spatial.transform import Rotation as Rot
+    x_ref = R_start[:, 0]
+    out = []
+    heights = SURVEY_CLOSE_HEIGHTS if close else SURVEY_HEIGHTS
+    rings = SURVEY_CLOSE_RING if close else (SURVEY_WIDE_RING if wide else SURVEY_RING)
+    for h in heights:
+        if close and h < SURVEY_CLOSE_FLOOR:
+            raise ValueError(f"close survey height {h} below floor {SURVEY_CLOSE_FLOOR}")
+        offs = [(0.0, 0.0)]
+        r = rings.get(h)
+        if r:
+            offs += [(r, 0.0), (0.0, r), (-r, 0.0), (0.0, -r)]
+        for dx, dy in offs:
+            p = np.array([target[0] + dx, target[1] + dy, h])
+            z = target - p
+            z /= np.linalg.norm(z)
+            x = x_ref - z * (x_ref @ z)
+            x /= np.linalg.norm(x)
+            R = np.column_stack([x, np.cross(z, x), z])
+            if close:
+                yaws = SURVEY_WIDE_YAWS_DEG if dx == dy == 0.0 else (0.0,)
+            elif wide:
+                yaws = SURVEY_WIDE_YAWS_DEG if dx == dy == 0.0 else ((0.0, 45.0) if h == SURVEY_HEIGHTS[1] else (0.0,))
+            else:
+                yaws = (0.0,) + (SURVEY_YAWS_DEG if (h == SURVEY_HEIGHTS[1] and dx == dy == 0.0) else ())
+            for yaw in yaws:
+                Ry = R @ Rot.from_euler('z', yaw, degrees=True).as_matrix()
+                out.append((p, Ry, f"h{h:.2f}_dx{dx:+.2f}_dy{dy:+.2f}_yaw{yaw:+.0f}"))
+    return out
+
+
+class Survey(Node):
+    def __init__(self, target_name, image_topic=None):
+        super().__init__('scan_workspace_survey')
+        self.target_name = target_name
+        self.joints = None
+        self.tcp = None
+        self.frames = {}
+        self.rec = None
+        self.action_client = ActionClient(self, FollowJointTrajectory, ACTION_SERVER)
+        self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
+        self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', self._tcp_cb,
+                                 QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                            durability=DurabilityPolicy.VOLATILE, depth=10))
+        self.create_subscription(TFMessage, OBJECT_TOPIC_REAL, self._obj_cb, 10)
+        # pre-snap poses (localizer 2026-10-13); absent on older localizers -> just empty
+        self.create_subscription(TFMessage, OBJECT_TOPIC_REAL + '_raw', self._raw_cb, 10)
+        self.image = None
+        if image_topic:
+            from sensor_msgs.msg import Image
+            self.create_subscription(Image, image_topic, lambda m: setattr(self, 'image', (time.time(), m)), 2)
+
+    def _joint_cb(self, msg):
+        d = dict(zip(msg.name, msg.position))
+        if all(n in d for n in JOINT_NAMES):
+            self.joints = np.array([d[n] for n in JOINT_NAMES])
+
+    def _tcp_cb(self, msg):
+        p, o = msg.pose.position, msg.pose.orientation
+        self.tcp = (time.time(), [p.x, p.y, p.z, o.x, o.y, o.z, o.w])
+        if self.rec is not None:
+            self.rec['tcp'].append(self.tcp[1])
+
+    def _obj_cb(self, msg):
+        now = time.time()
+        for t in msg.transforms:
+            tr, q = t.transform.translation, t.transform.rotation
+            row = [now, tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w]
+            self.frames[t.child_frame_id] = row
+            if self.rec is not None:
+                self.rec['objects'].setdefault(t.child_frame_id, []).append(row)
+
+    def _raw_cb(self, msg):
+        if self.rec is None:
+            return
+        now = time.time()
+        for t in msg.transforms:
+            tr, q = t.transform.translation, t.transform.rotation
+            self.rec['objects_raw'].setdefault(t.child_frame_id, []).append(
+                [now, tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w])
+
+    def spin_for(self, s):
+        end = time.time() + s
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.02)
+
+    def wait_still(self, window=0.5, tol=0.0002, timeout=6.0):
+        hist, end = [], time.time() + timeout
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.01)
+            if self.tcp is None:
+                continue
+            now = time.time()
+            hist = [h for h in hist + [(now, np.array(self.tcp[1][:3]))] if now - h[0] <= window]
+            if now - hist[0][0] >= 0.95 * window:
+                pts = np.array([h[1] for h in hist])
+                if np.max(np.linalg.norm(pts - pts.mean(0), axis=1)) < tol:
+                    return True
+        return False
+
+    def move_to(self, pos, R):
+        """Cartesian move from the current joints. Returns (ok, reason)."""
+        from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinematics, dh_params
+        from primitives.shared.velocity_profiles import s_curve_profile
+        q0 = self.joints.copy()
+        wps = compute_cartesian_waypoints_ik(q0, pos[2], num_waypoints=60, target_pos=pos, target_orientation=R)
+        if wps is None:
+            return False, "no Cartesian IK path"
+        T = forward_kinematics(dh_params, wps[-1])
+        if np.linalg.norm(T[:3, 3] - pos) > 0.002:
+            return False, f"IK end error {1000 * np.linalg.norm(T[:3, 3] - pos):.1f} mm"
+        step = float(np.max(np.abs(np.array(wps[-1]) - q0)))
+        if step > SURVEY_MAX_JOINT_STEP:
+            return False, f"joint step {step:.2f} rad > {SURVEY_MAX_JOINT_STEP}"
+        cart = float(np.linalg.norm(pos - forward_kinematics(dh_params, q0)[:3, 3]))
+        dur = compute_duration(joint_distance=step, cartesian_distance=cart, profile='s_curve')
+        traj = JointTrajectory()
+        traj.joint_names = JOINT_NAMES
+        for p, v, t in s_curve_profile([q0] + list(wps), dur):
+            traj.points.append(JointTrajectoryPoint(positions=p, velocities=v, time_from_start=Duration(
+                sec=int(t), nanosec=int((t - int(t)) * 1e9))))
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+        goal.goal_time_tolerance = Duration(sec=1)
+        fut = self.action_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+        gh = fut.result()
+        if gh is None or not gh.accepted:
+            return False, "goal rejected"
+        res = gh.get_result_async()
+        rclpy.spin_until_future_complete(self, res, timeout_sec=dur + 15.0)   # never cancel: runs to completion
+        if res.result() is None or res.result().result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
+            return False, "trajectory did not complete"
+        return True, f"{dur:.1f}s"
+
+
+def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=False, close=False):
+    from primitives.shared.ik import forward_kinematics, dh_params
+    rclpy.init()
+    node = Survey(target_name, os.environ.get('SURVEY_IMAGE_TOPIC', '/intel_camera_rgb_raw') if image_dir else None)
+    if image_dir:
+        import cv2
+        from cv_bridge import CvBridge
+        bridge = CvBridge()
+        os.makedirs(image_dir, exist_ok=True)
+    result = {"result": "failure", "mode": "real", "movement_type": "survey", "target": target_name}
+    try:
+        if not node.action_client.wait_for_server(timeout_sec=10.0):
+            result["error"] = "UR robot driver isn't running"
+            return result
+        node.spin_for(2.0)
+        if node.joints is None or (target_xyz is None and target_name not in node.frames):
+            result["error"] = f"no joints or '{target_name}' not visible from the start pose"
+            return result
+        target = np.array(target_xyz if target_xyz is not None else node.frames[target_name][1:4], dtype=float)
+        T0 = forward_kinematics(dh_params, node.joints)
+        views = survey_viewpoints(target, T0[:3, :3], wide=wide, close=close)
+        node.get_logger().info(f"Survey of {target_name} at {np.round(target, 4).tolist()}: {len(views)} viewpoints")
+        poses = []
+        for i, (pos, R, label) in enumerate(views):
+            tilt = float(np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1))))
+            if np.hypot(pos[0], pos[1]) < SURVEY_MIN_RADIUS:
+                node.get_logger().warn(f"[{i + 1}/{len(views)}] {label}: flange {np.hypot(pos[0], pos[1]):.3f} m "
+                                       f"from the base axis < {SURVEY_MIN_RADIUS}, skipped")
+                continue
+            if tilt > SURVEY_MAX_TILT_DEG + 0.5:
+                node.get_logger().warn(f"[{i + 1}/{len(views)}] {label}: tilt {tilt:.1f} deg > limit, skipped")
+                continue
+            ok, why = node.move_to(pos, R)
+            node.get_logger().info(f"[{i + 1}/{len(views)}] {label} tilt {tilt:.1f} deg: {'moved ' + why if ok else 'SKIPPED ' + why}")
+            if not ok:
+                if why in ("goal rejected", "trajectory did not complete"):
+                    result["error"] = f"motion failed at {label}: {why}"
+                    break               # fail closed: stop the survey where the arm is
+                continue
+            still = node.wait_still()
+            t_settled = time.time()
+            node.rec = {'tcp': [], 'objects': {}, 'objects_raw': {}}
+            frames = []
+            for k in range(3):                       # 3 raw frames across the record window
+                node.spin_for(SURVEY_RECORD_S / 3)
+                # Only frames RECEIVED after the arm settled: a frame captured before the move ended
+                # (the localizer republishes at ~3 Hz) put a 22.8 px outlier in the 2026-10-13 data.
+                if image_dir and node.image is not None and node.tcp is not None and node.image[0] > t_settled + 0.4:
+                    fn = f"{image_dir}/{i:02d}_{label}_{k}.png"
+                    cv2.imwrite(fn, bridge.imgmsg_to_cv2(node.image[1], 'bgr8'))
+                    frames.append({"file": fn, "tcp": node.tcp[1], "joints": node.joints.tolist()})
+            rec, node.rec = node.rec, None
+            tgt = np.array(rec['objects'].get(target_name, []))
+            poses.append({"label": label, "tilt_deg": tilt, "still": still, "joints": node.joints.tolist(), "frames": frames,
+                          "flange_cmd": pos.tolist(), "tcp_mean": np.mean(rec['tcp'], 0).tolist() if rec['tcp'] else None,
+                          "n": int(len(tgt)), "target_median": np.median(tgt[:, 1:4], 0).tolist() if len(tgt) else None,
+                          "objects": rec['objects'], "objects_raw": rec['objects_raw']})
+            raw = np.array(rec['objects_raw'].get(target_name, []))
+            node.get_logger().info(f"    {target_name}: n={len(tgt)}" + (
+                f" median {np.round(1000 * np.median(tgt[:, 1:4], 0), 1).tolist()} mm" if len(tgt) else " NOT SEEN")
+                + (f" | raw n={len(raw)} median {np.round(1000 * np.median(raw[:, 1:4], 0), 1).tolist()} mm" if len(raw) else ""))
+        seen = [p for p in poses if p["target_median"]]
+        if seen:
+            m = np.array([p["target_median"] for p in seen])
+            spread = 1000 * np.linalg.norm(m - np.median(m, 0), axis=1)
+            result.update(n_poses=len(poses), n_seen=len(seen), spread_max_mm=float(spread.max()),
+                          spread_median_mm=float(np.median(spread)))
+        with open(out_path, 'w') as f:
+            json.dump({"target": target_name, "target_start": target.tolist(), "poses": poses}, f)
+        result["dataset"] = out_path
+        if "error" not in result:
+            result["result"] = "success"
+        return result
+    finally:
+        node.action_client.destroy()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def output_result(result):
     """Output JSON result with markers"""
     print("__RESULT_JSON__")
@@ -396,8 +644,33 @@ def main(args=None):
     parser.add_argument('--object-name', type=str, required=True, help='Name of the object to locate')
     parser.add_argument('--mode', type=str, default='real', choices=['real'],
                        help='Mode: only "real" is supported (default: "real")')
+    parser.add_argument('--survey', action='store_true',
+                        help='Survey mode: view the (fixed, already visible) object from many poses '
+                             'and record what the camera reports; writes a JSON dataset.')
+    parser.add_argument('--out', type=str, default=None, help='Survey dataset path (JSON)')
+    parser.add_argument('--plan-only', action='store_true', help='Survey: print the viewpoints, do not move')
+    parser.add_argument('--target-xyz', type=float, nargs=3, default=None,
+                        help='Survey: aim at this point (robot base frame, m) instead of the object\'s pose')
+    parser.add_argument('--image-dir', type=str, default=None, help='Survey: save 3 raw frames per pose here')
+    parser.add_argument('--wide', action='store_true', help='Survey: calibration viewpoint set (more wrist yaws)')
+    parser.add_argument('--close', action='store_true',
+                        help='Survey: grasp-range pass, flange 0.28/0.24 m (BELOW safe height; flat target, clear table only)')
 
     args = parser.parse_args()
+
+    if args.survey:
+        if args.plan_only:
+            from primitives.shared.config import DEFAULT_BASE_POSITION
+            tgt = np.array(args.target_xyz or DEFAULT_BASE_POSITION, dtype=float)
+            R0 = rpy_to_matrix([FIXED_ROLL, FIXED_PITCH, FIXED_YAW])
+            for pos, R, label in survey_viewpoints(tgt, R0, wide=args.wide, close=args.close):
+                tilt = np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1)))
+                print(f"{label:32s} flange {np.round(pos, 3).tolist()} tilt {tilt:4.1f} deg")
+            sys.exit(0)
+        out = args.out or time.strftime(f"/tmp/survey_{args.object_name}_%Y%m%d_%H%M%S.json")
+        result = run_survey(args.object_name, out, args.target_xyz, args.image_dir, args.wide, args.close)
+        output_result(result)
+        sys.exit(0 if result["result"] == "success" else 1)
 
     # Enforce real mode only
     if args.mode != 'real':

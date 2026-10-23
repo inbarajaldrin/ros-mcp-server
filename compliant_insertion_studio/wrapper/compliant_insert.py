@@ -220,6 +220,12 @@ def _parse_args(argv=None):
                    help="Spiral pitch (radial growth per turn). Default 2 mm.")
     p.add_argument("--search-R-max-mm", type=float, default=8.0,
                    help="Spiral max radius (abort threshold). Default 8 mm.")
+    p.add_argument("--search-r0-mm", type=float, default=1.5,
+                   help="Spiral start radius. Default 1.5 mm (avoids a centre stall); an aim confirmed by vision wants less:"
+                        " the spot 1 mm off the aim is otherwise never visited (operator 10-21).")
+    p.add_argument("--search-drop-mm", type=float, default=0.0,
+                   help="SEARCH -> INSERT_DESCENT when the TCP sinks this far below the rim contact height (0 = off). For a"
+                        " light press the |fz| rim-cross detector (arms above 4 N) never arms (free base, 10-21).")
     # Calibration provenance (passed through to meta JSON)
     p.add_argument("--cal-yaml", default=None,
                    help="path to foundational calibration YAML (recorded in meta JSON)")
@@ -391,6 +397,8 @@ class CompliantInsertEpisode(Node):
         )
 
         self.create_subscription(PoseStamped, "/tcp_pose_broadcaster/pose", self._tcp_cb, sensor_qos)
+        # ~1.2 s of the native-rate wrench for the phase-locked zero (2026-10-14)
+        self._wbuf = __import__("collections").deque(maxlen=600)
         self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._wrench_cb, sensor_qos)
         self.create_subscription(Float32, "/gripper_width", self._gripper_cb, 10)
 
@@ -418,7 +426,10 @@ class CompliantInsertEpisode(Node):
 
     # ------------------- callbacks ----------------------------------------
     def _tcp_cb(self, msg): self.tcp = msg
-    def _wrench_cb(self, msg): self.wrench = msg
+    def _wrench_cb(self, msg):
+        self.wrench = msg
+        w = msg.wrench
+        self._wbuf.append((time.time(), w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z))
     def _gripper_cb(self, msg):
         try:
             self.gripper_width_v = float(msg.data)
@@ -644,6 +655,65 @@ class CompliantInsertEpisode(Node):
                 f"zero_ftsensor failed: {getattr(result, 'message', 'no response')}"
             )
         return ok
+
+    # ------------------- glitch-aware zero (2026-10-14) --------------------
+    # The UR wrench stream carries a robot-side glitch: one 4-6 ms burst every ~102 ms at an
+    # almost fixed absolute value (~11 N here), present since May on both PCs and unaffected by
+    # the gripper bridge's poll rate or by zeroing. zero_ftsensor() latches whatever sample is
+    # current, so ~1 zero in 20 latched a glitch and baked it in (u_brown 2026-10-14: 2 N
+    # before, 11-15 N after, arm still). Measured at rest (20 trials): the service returns in
+    # 51 ms, the zero takes effect 18 ms after the call (std 15 ms). So: time the call to land
+    # in the middle of the ~96 ms clean gap, and verify with a glitch-proof median.
+    ZERO_EFFECT_LATENCY_S = 0.018
+    GLITCH_PERIOD_S = 0.102
+    ZERO_GOOD_N = 1.0
+
+    def _glitch_mask(self, F):
+        dev = np.linalg.norm(F - np.median(F, axis=0), axis=1)
+        mad = np.median(np.abs(dev - np.median(dev))) + 1e-6
+        return dev > max(2.0, 8.0 * mad)
+
+    def _phase_locked_zero(self) -> bool:
+        end = time.time() + 0.7                        # fill the buffer (the arm is already still)
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.002)
+        buf = np.array(self._wbuf)
+        if len(buf) >= 100:
+            g = self._glitch_mask(buf[:, 1:4])
+            onsets = buf[np.where(g & ~np.r_[False, g[:-1]])[0], 0]
+            if len(onsets) >= 2:
+                d = np.diff(onsets)
+                d = d[(d > 0.06) & (d < 0.15)]
+                period = float(np.median(d)) if len(d) else self.GLITCH_PERIOD_S
+                target = onsets[-1] + period / 2.0     # first mid-gap after the last glitch
+                while target - self.ZERO_EFFECT_LATENCY_S < time.time() + 0.003:
+                    target += period
+                call_at = target - self.ZERO_EFFECT_LATENCY_S
+                while time.time() < call_at:
+                    rclpy.spin_once(self, timeout_sec=0.001)
+                self.get_logger().info(f"zero phase-locked: glitch period {1000 * period:.1f} ms, "
+                                       f"aiming {1000 * (target - onsets[-1]):.0f} ms after the last glitch")
+            else:
+                self.get_logger().info("zero: no glitch rhythm seen in the last 0.7 s — zeroing now")
+        return self._zero_ftsensor_call()
+
+    def _median_bias(self, wait_s: float = 0.15, window_s: float = 0.3) -> dict | None:
+        """Post-zero residual as the median of NON-glitch samples (a single sample can be a glitch)."""
+        t0 = time.time() + wait_s
+        end = t0 + window_s
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.002)
+        buf = np.array([r for r in self._wbuf if r[0] >= t0])
+        if len(buf) < 20:
+            self.get_logger().warn("too few wrench samples for the post-zero median")
+            return None
+        good = buf[~self._glitch_mask(buf[:, 1:4])]
+        m = np.median(good[:, 1:7], axis=0)
+        msg = WrenchStamped()
+        msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z = (float(v) for v in m[:3])
+        msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z = (float(v) for v in m[3:])
+        (f_x, f_y, f_z), (t_x, t_y, t_z) = self._wrench_in_base(msg)
+        return {"Fx": f_x, "Fy": f_y, "Fz": f_z, "Tx": t_x, "Ty": t_y, "Tz": t_z}
 
     def _sample_bias(self, settle_s: float = 0.5) -> dict | None:
         """Drop cached wrench, settle, return the next fresh sample as a bias dict.
@@ -1110,17 +1180,24 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         return s.PHASE_ABORT
     ep.hands_off = 1   # all subsequent rows are hands-off
 
-    # Zero call
-    if not ep._zero_ftsensor_call():
-        ep.meta.set_outcome(s.OUTCOME_ABORT, "zero_ftsensor_failed")
-        return s.PHASE_ABORT
-
-    # 2026-05-07: was 0.5s. The post-zero F/T values stabilize within ~50ms;
-    # 0.2s gives ample margin. Saves ~0.3s per insert.
-    bias = ep._sample_bias(settle_s=0.2)
-    if bias is None:
-        ep.meta.set_outcome(s.OUTCOME_ABORT, "no_post_zero_wrench_sample")
-        return s.PHASE_ABORT
+    # Zero: phase-locked against the robot-side wrench glitch, verified with a median
+    # (2026-10-14; replaces call + single-sample check + re-read + blind re-zero).
+    bias, max_axis_f = None, float("inf")
+    for attempt in (1, 2):
+        if not ep._phase_locked_zero():
+            ep.meta.set_outcome(s.OUTCOME_ABORT, "zero_ftsensor_failed")
+            return s.PHASE_ABORT
+        bias = ep._median_bias()
+        if bias is None:
+            ep.meta.set_outcome(s.OUTCOME_ABORT, "no_post_zero_wrench_sample")
+            return s.PHASE_ABORT
+        max_axis_f = max(abs(bias["Fx"]), abs(bias["Fy"]), abs(bias["Fz"]))
+        # Good zeros measure 0.05-0.40 N (80 trials at rest); a phase-locked zero still lands on
+        # a glitch edge ~1.25% of the time (2.27 N seen), which the 5 N abort would let through.
+        if max_axis_f <= ep.ZERO_GOOD_N:
+            break
+        ep.get_logger().warn(f"post-zero median residual {max_axis_f:.2f} N > {ep.ZERO_GOOD_N} N "
+                             f"after attempt {attempt}" + (" — zeroing again" if attempt == 1 else ""))
     ep.meta.set_post_zero_bias(bias)
     # Stash the post-zero bias on ep so downstream contact detection can subtract
     # it before threshold check — without this, residual sensor bias (e.g., 2.67N
@@ -1131,7 +1208,6 @@ def run_zero(ep: CompliantInsertEpisode) -> str:
         float(bias["Tx"]), float(bias["Ty"]), float(bias["Tz"]),
     )
 
-    max_axis_f = max(abs(bias["Fx"]), abs(bias["Fy"]), abs(bias["Fz"]))
     if max_axis_f > ep.args.bias_abort_n:
         # Do NOT subtract a residual this large: it is not sensor bias, it is a
         # botched zero. Subtracting it would hand force_mode a phantom load.
@@ -1242,6 +1318,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                     from compliant_insertion_studio.wrapper.cad_lookup import (
                         predict_tcp_at_seat,
                     )
+                    from primitives.shared.config import held_tool_offset
                     bp = base_world_pose_for_cad
                     # Phase 5 v2 (2026-05-04): cad_lookup now needs held_quat
                     # (object orientation in world) and EE orientation in world
@@ -1278,8 +1355,10 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                         base_world_quat_xyzw=bp[3:],
                         held_quat_xyzw=list(held_quat),
                         ee_orientation_xyzw=ee_quat,
+                        flange_offset_m=float(held_tool_offset()[2]),
                     )
                     predicted_tcp_z_at_seat = pred["predicted_tcp_at_seat"]["xyz_m"][2]
+                    ep.get_logger().info(f"held grasp: flange -> grasp point {1000*held_tool_offset()[2]:.1f} mm")
                     fs = pred.get("fold_symmetry_used", {})
                     ep.get_logger().info(
                         f"Phase 5 v2 CAD-derived predicted_tcp_z_at_seat = "
@@ -1390,6 +1469,8 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                 fsm_cfg['search_v_s_m_s'] = float(getattr(ep.args, 'search_v_s_mm_s', 5.0)) / 1000.0
                 fsm_cfg['search_pitch_m'] = float(getattr(ep.args, 'search_pitch_mm', 2.0)) / 1000.0
                 fsm_cfg['search_R_max_m'] = float(getattr(ep.args, 'search_R_max_mm', 8.0)) / 1000.0
+                fsm_cfg['search_r0_m'] = float(getattr(ep.args, 'search_r0_mm', 1.5)) / 1000.0
+                fsm_cfg['search_drop_m'] = float(getattr(ep.args, 'search_drop_mm', 0.0)) / 1000.0
             # Pass hole_xy_prior as spiral origin override (cross-attempt learning).
             # If a previous run found the hole xy via z-drop detection, anchor
             # this spiral search there rather than peg's random contact xy.
@@ -1465,6 +1546,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                         from compliant_insertion_studio.wrapper.cad_geometry import (
                             build_contact_candidates, get_seated_so_far,
                         )
+                        from primitives.shared.config import held_tool_offset
                         R_grasp = pred.get("fold_symmetry_used", {}).get(
                             "R_eq_quat_xyzw")
                         if R_grasp is not None:
@@ -1478,6 +1560,7 @@ def run_active(ep: CompliantInsertEpisode) -> str:
                                 R_grasp_quat_xyzw=R_grasp,
                                 predicted_tcp_z_at_seat=predicted_tcp_z_at_seat,
                                 seated_objects=seated,
+                                flange_offset_world_z=-float(held_tool_offset()[2]),
                             )
                             ep.get_logger().info(
                                 "Contact candidates (CAD-derived): "

@@ -1,0 +1,170 @@
+# No side panels (Displays/Views/...) for the demo: RViz creates only the panels
+# listed here. Bring one back at runtime from the Panels menu.
+Panels: []
+
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 0.1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 14
+      Reference Frame: <Fixed Frame>
+      Value: true
+
+    # Both descriptions are latched (TRANSIENT_LOCAL). A Volatile subscriber
+    # misses the one-shot publish and the model never appears.
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: UR5e
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rg2/robot_description
+      Enabled: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RG2
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Grasp points
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /grasp_points_real
+      Value: true
+
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+      Marker Scale: 0.3
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Tree:
+        {}
+      Update Interval: 0
+      Value: false
+
+    # Gripper camera (D415 via aruco_camera_localizer). /annotated_stream carries
+    # the marker detections; switch Topic to /intel_camera_rgb_raw for the clean
+    # feed. Its panel is the right half of the window (make_split_layout.py).
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Camera
+      Normalize Range: true
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /annotated_stream
+      Value: true
+
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+
+  Views:
+    # View framed by the operator in RViz on 2026-10-07 (Ctrl+S, copied back here).
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.35
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: -0.023
+        Y: 0.249
+        Z: 0.269
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.29
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 2.6
+
+    Saved: ~
+
+Window Geometry:
+  Camera:
+    collapsed: false
+  Height: 1080
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Width: 1920
+  X: 0
+  Y: 0

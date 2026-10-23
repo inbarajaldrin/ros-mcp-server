@@ -2,9 +2,75 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: **2026-08-16**. The 2026-05-07 architecture below still stands; what
-> changed is the branch you must work from, the bringup path, and several claims that were
-> re-measured and did not hold.
+> Date of last update: **2026-10-23** (OptiPlex cell; see the 2026-10-22/23 section first). The 2026-05-07 architecture below still
+> stands; 2026-08-16 changed the branch and bringup path; 2026-10-14 fixed the grasp depth and
+> added robot self-disassembly, a hands-off loop and depth seat checking; 2026-10-15 made the loop
+> robust to the 7th-axis slider, fixed line_green's slot aim and scripted every recovery;
+> **2026-10-18: 3 consecutive hands-off cycles (disassemble + assemble) passed** — see
+> "State of the system" and the runbook under "Run commands".
+
+## 2026-10-22/23 — FMB1 hands-off through the seams, 968 -> 687 s
+
+**State:** FMB1 assembles hands-off on the free base through vision -> drive-mate -> ExecuteMate; every mate is
+certified. Runs 34-44 (10-23 03:26-08:48): 968 / 944 / 880 / 919 / 829 / 854 / 850 / 705 / 793 / 687 s
+(`ablations/cycle_time.py <replay_*.timing.jsonl>`; baseline 1088, TGOAL 544). Stops in that stretch: run 38
+(u_brown jammed +20 mm x3, unexplained, next pick seated) and run 40 (certifier refusal, now recovered automatically).
+
+**Run one cycle** (reset + base push + timed run; the seam servers must be up - vision_server, grip_adapter,
+drive_mate_server, execute_mate_server, `python3 -u -m seams.<name>`, logs /tmp/<name>.log):
+```bash
+export FMB_LAYOUT=fmb1_home_2026_10_21 BASE_FROM=icp NO_AIM_BIAS=1 PRE_INSERT_READ=off FOLLOW_YAW=0
+J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
+for p in inverted_u_yellow line_green u_orange; do python3 -u ablations/disassemble.py --assembly-json $J --only $p --to-free-spot; done
+python3 -u ablations/disassemble.py --assembly-json $J --only u_brown --to-staging
+python3 -u ablations/move_base.py --base base1 --to 141 -482 19 --max-pushes 10
+SEAMS_DRIVE=1 SEAMS_CERTIFY=1 python3 -u ablations/replay_real_assembly.py --assembly-json $J --part-at-staging
+```
+(the replay with `--part-at-staging` expects `ablations/logs/placed_parts.json` to name u_brown at (-0.32, -0.5)).
+
+**What changed (see `git log` 10-22..23 for the evidence in each message):**
+- u_orange's clear-height servo: a measured 2x2 response matrix (`seams/servo_law.py`), 6 rounds -> 2.
+- Servo, depth-servo, hover and view moves in process, timed by distance (`_move_unless_there`, SERVO_INPROC).
+- D415 projector held off through each servo's colour-only stretch (`_emitter_hold`): it was a ros2-CLI toggle x8/align.
+- Certify: base fit seeded by the saved read (`seams/vision_ops.pose`); ExecuteMate judges a bar's ENDS from a fresh
+  tap map when one exists (depth reads line_green's ends ~+2.5 mm high); a not_at_seat refusal on a wedge-prone part
+  taps it and re-certifies.
+- line_green: the touch insert no longer calls a no-contact descent 'in' (its rim is only 7 mm over the seat); the
+  depth servo's far edge is taken by its MAD-checked median; when the base cannot be re-read in hand, the held part's
+  outline over bare table measures the grip offset (`held_axial_correction`, along + across). It now seats from the
+  insert. Nudge-first / bounded nudge / taps remain the recovery.
+- Safety: press guards 4.0 N (a 4.5 N guard peaked at 5.2 N), nudge bounded at the seated CAD end, program-drop
+  re-send retries, move_base escalates a push that did not move the base.
+
+**Gotchas:** the seam servers do NOT inherit the replay's environment - restart one with any flag its child must see
+(DSERVO_ROBUST, etc.). `pgrep -f` self-matches its own shell: check by PID. The Mac (WhatsApp route) sleeps.
+
+**Open:** TGOAL needs ~143 s more - drive-mate still time (35-46 s per part: in-hand base ICP ~7 s, frames, wrist
+turns), per-step primitive processes (move_to_safe_height x8, control_gripper x8, ~25 s), depth picks (~10 s each).
+line_green's across error (~2.5 mm) varies run to run (not the grip alone). Run 38's u_brown jam.
+
+## 2026-10-20 (long day) — FMB3 onboarded, base free, vision tied to CAD
+
+Read `compliant_insertion_studio/.claude/skills/onboard-assembly/SKILL.md` and `docs/LADDER.json` (the ladder plugin
+draws it). In short:
+- **FMB3** (base3 + 2 lines + 2 forks) assembles; 4 cycles run (pull every part to the staging region, the arm moves
+  the empty base - `ablations/move_base.py`, one slow push per slide - reassemble). Not clean yet: recoveries
+  needed in each. `ablations/assembly_cycle.sh <json> <label>` with `MOVE_BASE="--dy=-30"` etc.
+- **Regions** live in `primitives/shared/cell_layout.yaml`; per-part numbers come from CAD for any assembly.
+- **Base read = 6-dof CAD fit to depth** (`BASE_FROM=icp`, `base_icp.read_icp`), 1.2 mm rms; the hand-eye mount
+  needed no refit (`handeye_icp_survey.py solve6`). Depth frames taken while moving are ~10 mm off: every read uses
+  frames/poses from a still arm (`depth_timing.py`).
+- **Fused estimator v1** inside the localizer package (`aruco_camera_localizer/fused_estimator.py`, 1 Hz, one core):
+  markers seed, CAD-to-depth refines, `/objects_poses_fused` + `_info` (sigma provisional). Not consumed yet.
+- **Inserts on an unfixed base**: one attempt per insert call, base re-read between attempts from a view the held
+  part does not block (`held_clear_read.py`), hover yaw ABSOLUTE (it stacked on retries: the angled insert), a bar
+  wedged near its seat is held, released and finished by the seat check, roll -> FMB1 edge press, depth seat check
+  (close, tilted - glare) confirms every part.
+- **Safety**: wrist_3 wound to 6.30 rad over the day (two protective stops, camera cable a full turn): `move_cartesian`
+  refuses |wrist_3| > 4 rad, `unwind_wrist` runs at part starts. The external-control program can drop after a good
+  move (no safety event): `ensure_program` re-sends it, the replay/disassembly retry once.
+- **Next**: clean M2 cycles; slot read for zero-clearance channels if the fresh reads are not enough; consume the
+  fused estimator (VisionPose) in the replay; M3a.
 
 ## ⚠️ Which tree can run the real assembly
 
@@ -44,6 +110,241 @@ Routing key: `primitives/translate_object.py` `if args.object_name in ('line_gre
 
 Do not cite pass 2 as a second 4/4. The seat-acceptance gap it exposed is open work — see
 "What's still open".
+
+**2026-10-14** — robot disassembles and reassembles itself; 2 consecutive hands-off 4/4 cycles.
+
+| Run | Result |
+|---|---|
+| Loop cycle 1 | disassemble 4/4 + assemble **4/4 hands-off**, 15.4 min (yellow seated on attempt 2) |
+| Loop cycle 2 | disassemble 4/4 + assemble **4/4 hands-off**, 13.7 min |
+| Loop cycle 3 | u_brown, u_orange seated; **line_green tilted** (pitch −2.45°, one end +4.95 mm), top-down reseat did not fix it → run stopped (fail-closed) |
+| Board reset by operator | u_brown, u_orange seated; line_green tilted again (+3.3°); pulled out to the clear area and regrasped: still +3.0°; the top-down reseat after that read flat (0.81°); yellow seated → 4/4 |
+
+What changed, and why (commits on `ur5e-fmb1-demo`, 2026-10-14):
+
+- **Grasp depth was ~14 mm shallow on every part** (`386e31e`). `GRIPPER_CENTER_TOOL_OFFSET`
+  = 0.2286 m is the RG2 **fingertip end**, not the pad centre (closed tips touched base1's top at
+  flange − 230.86 mm). `move_to_grasp --pad-center` puts the pad centre on the grasp point (RG2
+  4-bar linkage + 29.8 mm pad from CAD, `config.rg2_tip_length_m/pad_center_offset_m`), limited so
+  the fingertips stay 4 mm above base1/seated parts at the seat (CAD meshes:
+  `ablations/grasp_depth.py` → `eval_resources/fmb1_grasp_depth.json`) and 2 mm above the table at
+  a pick. The executed depth (`grasp_tool_offset_m`) chains to the insert via `GRASP_TOOL_OFFSET_M`
+  (`config.held_tool_offset`) and is recorded per part for the disassembly. Depths: u_brown/u_orange
+  216.3 mm, line_green 225.8 mm (base top 7 mm under its fingers at the seat), yellow 211.0 mm.
+  Operator's rule: *the grasp point and the pad centre should meet* — not "hold the whole height".
+- **Self-disassembly with the insert's own grasp** (`ablations/disassemble.py`, operator rule: same
+  grasp points as assembly). Free table spots from a median-of-10 depth map, ≥40 mm between parts.
+  `--relocate PART [--from-staging]`, `--only PART --to-staging` (pull a bad seat out to the clear area).
+- **Loop driver** `ablations/fmb1_loop.py --cycles N --start-with {disassemble,assemble}` → per-cycle
+  record in `ablations/logs/fmb1_loop.jsonl` (seat − prediction per insert from the raw CSV).
+- **line_green depth seat check** (`ablations/seat_check.py`): plane fit to the bar's top face from
+  0.56 m (D415 gives no depth closer than ~0.45 m at 1280×720); pitch ≤ 1.5°, height ≤ 2.5 mm;
+  one top-down reseat with the insert grasp if not flat.
+- **Insert recovery** in the replay: a failed insert places the part in the clear area, regrasps,
+  reinserts (`INSERT_MAX_RECOVERIES=1`). `--part-at-staging` resumes a part waiting in the clear area.
+- **Force guards** use a 51-sample (~100 ms) median (`97f0bd1`): the robot-side wrench glitch runs up
+  to 14 consecutive samples; a 15-sample median hit 22.6 N at rest and false-stopped a descent.
+- **`stop_run.sh`** restores a commandable arm unattended (`e5c9dbf`): prismatic leaves
+  `passthrough_trajectory_controller` active, which blocks the trajectory controller. Also fixed:
+  prismatic's controller-state parse matched "inactive" as active; its seat may end ≤ 2.5 mm above
+  the prediction (was 1.0 — yellow sat seated at +1.0 mm through two 60 s timeouts).
+- Camera freshness check before every grasp; subprocess watchdog; per-sticker marker calibration
+  (`aruco_camera_localizer` commit `97df4d5`, `config/sticker_calibration.json`).
+
+**2026-10-15** — the failures behind "line_green doesn't go in" found and fixed; recoveries scripted.
+Runbook: "Run commands → The hands-off loop, and getting out of trouble" below.
+
+What was wrong, and the fix (commits `848031f` → `557dd71`):
+
+- **The UR5e rides a Vention 7th-axis slider.** Inserts, nudges and pull-outs creep the carriage, so
+  base1 moves *in the robot frame* (+8 mm in an hour) though it never moves on the table. The base
+  was read once per run. Now: re-read between parts (on the vertical exit, 0.32 → 0.56 m, no
+  detour), inside every seat check, between nudge tries, before every disassembly seat grasp.
+- **The marker read of base1 is not good enough** (55–61 mm in x by viewpoint/run). `base_depth.py`
+  fits the base's top-face outline (CAD 161 mm square) in aligned depth from 0.56 m: repeats to ~1 mm.
+  Marker read is the fallback. Depth needs ≥ ~0.45 m: **not from home** (0 points there).
+- **Base yaw was never applied to the insert.** `rotate_object` snaps to cardinals in the assembly
+  frame; the base sits at ~3°. `translate_object`'s hover now turns the wrist by the residual yaw.
+- **line_green's slot is the line through where the two U parts really seated**, not the base
+  (CAD: u_brown y −47.5, u_orange +48.5, line_green between). It went straight in only when the two
+  U parts sat at the same x; a 3.6 mm x difference turns the slot 2.2° → bar ends ±2.7 mm off →
+  it sat on the U tops 38 mm up. Now aimed at the U parts' mean x and the yaw of their line, from
+  their own force-search seat offsets (`ablations/logs/seated_offsets.json`). Not their y.
+- **prismatic_peg_insertion pulled seated parts out.** A part at seat depth 6.6 mm from the aim was
+  called a failure and retracted *gripped* (dragging seated parts); a part that had dropped into
+  the channel was aborted on 5 mm drift. Now: at seat depth, ≤ 15 mm off-aim is a found slot; once
+  5 mm below first contact, drift ≤ 15 mm is allowed.
+- **Nudge (tilted line_green):** one push until 4 N (operator's rule), capped 15 mm past the end;
+  the fingers come down past the RAW depth end (depth smears a raised end ~7 mm outward, so the
+  corrected end is only for the cap) and step further out on contact — never land on the part.
+- **A part slipped out during a pull-out and lay 7 mm from base1;** every step said "ok" and the
+  next pick put an open finger on the base (protective stop). Now: grip checked (RG2 grip flag) after
+  close and after the pull-out; `spacing_check.py` (every table part ≥ 25 mm from base1 and the other
+  parts, CAD outlines at observed poses) runs at assembly startup and after disassembly; a part
+  against base1 is picked with a grasp point whose fingers clear it (`clear_grasp`, line_green has
+  grasp points 2/3 at ±50 mm along its length — added to aruco-grasp-annotator's
+  `data/grasp_points/line_green_grasp_points.json`, which is **not** under git).
+- **Protective stop → the run used to wait 60 s and command the stopped robot.** Now the replay polls
+  the dashboard at 1 Hz, interrupts the step and skips recovery/cleanup; `recover_pstop.sh` recovers.
+- **Robot program dropped under CPU load** (no RT scheduling on this PC; load 10.7/6 cores). The
+  camera stack and RViz run at nice 10, the run scripts at nice 5.
+- **Spots:** inside the home image by 60 px and above its bottom 160 px (the fingers at pre-grasp
+  width hide that band — yellow there went undetected).
+
+**2026-10-18 — 3 consecutive hands-off cycles: the end condition is met.**
+`ablations/fmb1_loop.py --cycles 3 --start-with disassemble` (run "1018b", record in `ablations/logs/fmb1_loop.jsonl`,
+logs `ablations/logs/loop_20261018_{105236,110346,111547}_*.log`): every cycle disassembled 4/4 and assembled 4/4 with no operator
+action, 11.2 / 12.0 / 12.1 min per cycle. Every part verified after its insert and again at the end
+(`verify_assembly --xy-only`, marker xy 0.2–6.7 mm). line_green came out tilted ~3.5° after the insert in
+2 of 3 cycles (and in ~every run on 10-17/18); **one nudge flattened it every time** (here pitch → 0.01° and 0.14°).
+Videos of those assemblies: `~/Documents/fmb1_frames/mp4/fmb1_run1018b_cycle{1,2,3}_assembly_*.mp4`
+(also on dual-a4500 `~/fmb1_videos/`, and copied to the operator's Mac `~/Downloads`).
+
+What changed 10-15 → 10-18, and why (each fixed a stop seen on the cell):
+
+- **Placing, not dropping** (`bfdc78d`): `move_down --to-table` stops with closed tips 1 mm above the
+  table — the old 80 mm floor dropped parts. Hover yaw fix = **base yaw only** (the chained camera
+  residual turned U parts 5–7°; with no yaw fix yellow failed 6/6). Insert recovery lifts to safe
+  height before moving to the clear area (it dragged a part across the assembly).
+- **Never lift a gripped seated part; retry a failed release; halt when the robot is unreachable**
+  (`6df8f74`). Disassembly grasps where the insert actually seated the part (`7613ed0`).
+- **Spot planning** (`cc58efa`, `397ddff`, `9536863`, `0ba0bf1`): bounded backtracking over a
+  reachable-ring grid, farthest-first, 30 mm between CAD outlines, view margin 40 px, finger band 100 px.
+- **Empty gripper passed the grasp check** (`96d6a42`): u_brown's pick closed on nothing (0.6 mm), the
+  width-only check passed, the insert "seated on touchdown". Now fails at width ≤ grip width − 6 mm.
+- **Verify the assembly after every part** (`7eedefe`, `da43fb9`, `a9d2811`, `8bcdf1e`):
+  `verify_seated` runs `queries/verify_assembly --xy-only` (xy + yaw) on every seated part from the base
+  view, between parts and at the end. Only readings that DETECT the part vote (majority); "not detected"
+  extends the window (≤ 8 reads, the localizer drops frames for seconds); a part never seen from above
+  gets **one second look from home** (seated u_brown lies on its side right under the camera there —
+  edge-on markers; it stopped a good cycle 3 on 10-18). Occlusion ledger
+  `ablations/logs/assembly_state.json`: line_green under yellow passes only if verified before yellow.
+- **Insert aim from seat history** (`6c1494f`): median of each part's last 5 seat offsets
+  (`seat_offset_history.json`) — u_orange's seat sat 7–9.5 mm off in y, outside the 8 mm spiral.
+- **Yellow's marker misread** (`fb3df93`, `6113d72`, `7c9f84f`, `651c01b`): the localizer intermittently
+  puts yellow 70 mm below the table and ~76 mm off in xy (z −113 mm, grasp point −133 mm), in streaks of
+  8–15 s right after arm motion, never with the arm still (0/157). One such grasp point sent step 1 to
+  hover off the part with the wrong wrist yaw and step 2 came down on it at −87 N. Now `move_to_grasp`
+  rejects poses AND grasp points below the table, waits out a misread streak (≤ 60 attempts, 30 s), and
+  never descends to a target > 20 mm (xy) from where it hovered (re-hovers once, then fails).
+  `spacing_check` clusters samples and lets depth pick between disagreeing readings (`55fe615`, `c0464fc`).
+- **Rare roll wedge of line_green** (`1e74fd5`): level but > 2.5 mm high → tap both edges at 3 N with
+  closed fingers, press the higher at 5 N (`ablations/tap_check.py`). Depth roll is unusable (−4° bias).
+- **Demo video** (`b741e35`): never live-encode on the OptiPlex — two live H.264 recorders took the load
+  5 → 12 on 6 cores and the CPU-bound localizer dropped/misread parts (three loop stops on 10-17).
+  Record a rosbag, render later elsewhere (runbook below).
+- **Cell:** enp1s0 is static (DHCP cycling dropped the arm link); after a link event restart the driver
+  with `close_robot.sh` + `stack_up.sh`.
+
+**2026-10-19 — generated start layouts (operator: "tip the parts flat, leave one tippable upright").**
+The disassembly used to leave every part standing as seated, so every assembly was the easy 1-pass
+case. `--layout staging` (fmb1_loop / disassemble) follows the IDEA of the operator's sim task
+`fmb1_assemble_ur5e_rg2_flat_gen` (dual-a4500 `pa-footprint/plan-anything/data/tasks/...`; not its numbers —
+the sim robot sits at table height): parts flat on a large face, yaw/flip free, in the staging
+rectangle, ≥ 25 mm apart; one tippable part per cycle stays upright (u_brown → u_orange → yellow), or
+`--all-flat`.
+
+- **Staging rectangle** (sim → base_link → UR base): x 0.19…0.51, y −0.54…−0.22 — the sim's "reorient"
+  rectangle lands on our clear area (−0.32, −0.50), which confirms the mapping. Clear (depth), reachable
+  top-down (IK), seen from `STAGING_VIEW` (0.35, −0.38, 0.56) — **not from home** (home sees x ≤ ~0.42).
+  The disassembly looks there first (depth: nothing raised may sit in a part's footprint or tip sweep).
+- **Tip** (`ablations/tip_part.py`, operator's method): closed fingertips strike the part's TOP at an angle,
+  ≤ 5 N, like the line_green nudge — lowered beside the part (guarded), one diagonal stroke meeting the near
+  face ~16 mm below the top, ending 45 mm above the table (never touches the fallen part). U parts are struck
+  on a leg (they stand open-top), yellow on its solid top centre. `--observe` tips a part where it stands.
+- **Bugs found on the arm, fixed:** the gripper holds the U parts by a LEG, 25.5 mm off centre — plan by
+  the part's centre, send the flange to centre + grasp offset (aiming by the flange put the strike past the
+  part); a stroke starting above the top only clipped yellow's edge (5.9 N, no tip); wrist turn + carry in
+  one move, and even a pure 89° turn in place, exceed move_cartesian's 1.5 rad joint step — turns over 60°
+  go in two halves, in place, and back the same way; the stroke's wrist turn is ≤ 45°.
+- **Assembly:** parts not seen from home are planned (`--derive-sequence`) and picked from the staging view.
+  Flat U parts / yellow take the 2-pass path (place in the clear area, regrasp, insert).
+- **Results 10-19 — NOT yet 3 clean staging cycles in a row** (a fresh 3-cycle staging run started 17:40 with
+  everything below in; its outcome is in `ablations/logs/fmb1_loop.jsonl`). Every staging ASSEMBLY that ran
+  to its end passed 4/4 hands-off (flat u_orange/u_brown/yellow on the 2-pass path, parts out of the home view
+  picked from above their last-seen position). Best run before the afternoon's fixes: 2 clean cycles in a row
+  (13:43–14:25). Each stop since, its cause and fix (all committed):
+  - the 89° wrist turn over `move_cartesian`'s 1.5 rad cap (`8ac1c91` two halves; then `e14e4d8`: wrist_3
+    gets its own 3.2 rad cap, one turn per part, no turn-back — the next part's hover turns at safe height);
+  - a tipped yellow sliding 13 mm on → `0a35c74` landing margins, `68f9dcb` the draw keeps the most
+    spread-out of 30 (closest pair median 32 → 55 mm; the region is ~24 % used);
+  - **set-downs landed at 17–44 N** (move_down's 100 ms median lags the s-curve descent; measured) — an upright
+    u_brown fell and lay 16 mm from yellow. `a02c4da`: move_down to 15 mm above the CAD touch height, then a
+    4 mm/s guarded move; every landing since stopped at 5.0–5.1 N;
+  - **`--relocate` scored every grasp at grasp 1's 35 mm opening**; u_brown's 84 mm bridge grasp looked clear and
+    the 35 mm-open fingers came down on it → PROTECTIVE_STOP. `c4ef229`: each grasp at its own
+    `grasp_validity` width, clearest wins; `801ecd9`/`68f9dcb`: a part too close is relocated inside the staging
+    region (`--spot-staging`, farthest spot ≥ 25 mm, stance kept) and the check re-run once;
+  - the staging view at 0.62 m sees a standing yellow only intermittently → `d0e9d98` pre-pick view straight
+    above the part's last-seen position (0.52 m), seen for 20 s before the pick; `636cca1` the pick's own
+    "not detected" wait 5 → 20 s; the layout check waits out a misread streak (30 s), looks above the spot, then home;
+  - the assembly's startup spacing check now relocates a too-close part instead of stopping (`e14e4d8`);
+  - **a flat yellow with its bridge grasp 5 mm from base1's edge** (base read scatters ~8 mm) → the descent hit the
+    base → PROTECTIVE_STOP. `95b2343`: before every pick the recorded grasp's open-finger outlines are checked
+    (≥ 15 mm from base1 / other parts) and the part relocated first if not. Open: `move_to_grasp`'s descent guard
+    did not fire (its baseline is re-taken after a 0.5 s grace, and the F/T glitch makes a tighter threshold false-stop).
+- **Do not skip the pass-2 `rotate_object`** (tried `rotate_object skipped` when the chained orientation was
+  already fold-equivalent to the target: two rim stalls, insert aimed at TCP x +94 instead of +42 = 51 mm = 2 ×
+  the leg-grasp offset). The camera's raw quaternion and rotate_object's output are the two fold branches of
+  one orientation; `predict_tcp_at_seat` rotates the (asymmetric) grasp offset by the branch it gets, and the
+  chain was validated with rotate_object's. Reverted in `77c8bc9`; the 0.01 rad step stays (~10 s per 2-pass part).
+- **Prismatic insert retries re-aim from data, bounded by CAD** (`b3c60fa`, the insert code opened by the
+  operator for this). The ladder used to retract 1 cm and descend at the same xy (3 identical 5.0 mm stalls on
+  yellow). Now it logs which CAD contact the stall matched (`Contact candidates (CAD-derived): SEAT / BASE_RIM /
+  OBJ:line_green …` via `cad_geometry`, the compliant path's chain; yellow: rim = seat + 25.5 mm, line_green's
+  top = seat + 45.5) and attempt 2 aims where the part slid to, attempt 3 the mirror, for slides of 1.5–10 mm.
+  Pockets are sub-mm (CAD: yellow x ±0.6 / y ±0.5; feet astride line_green ±1 mm) — no yaw/tilt search. Verified
+  on the arm: line_green "stalled +37.4 mm above the seat, slide 1.1 mm → not an xy miss" (seated on attempt 2);
+  yellow seated on attempt 1 (compliance slid it 5.0 mm). Yellow's earlier 3× stall was a grasp offset: the
+  regrasp recovery seated it at 0.8 mm.
+- Verify from the base view: seated u_brown reads tilted ~10° (edge-on markers) → a reading tilted > 5° is
+  unusable; the second look from home decides (`1fe84d2`).
+- **Iterate per part, not per cycle, when fixing something** (operator): `docs/DEBUG_LOOP.md`, CLAUDE.md §5a.
+- Seat-offset history (`ablations/logs/seat_offset_history.json`): every part seats 5–8 mm in −y from the CAD
+  prediction (yellow −5…−9, U parts −2…−10); the aim bias absorbs the median, the compliance finds the rest.
+  The constant −y bias is the queued calibration item, not a ladder problem.
+
+**2026-10-19 evening — game plan, geometry, per-part iteration.** Operator directions (all in memory notes
+and the game plan): the base will not stay fixed (cm, degrees) — everything follows the camera-read base;
+solve pose per part but the abstracted insertion primitive carries NO per-part settings (stages, clearances,
+free DOFs from CAD + observation); remove the errors we can measure before touching the primitive; iterate
+ONE part (pull + reinsert), judged by ease metrics from raw logs, never the FSM label; reads are an
+optimization target (measure the grasp error once on the held part, then chain); commit freely.
+- **Game plan** (Claude Doc, link in memory `game-plan-doc`): tracks A perception/pose, B one primitive,
+  C operations, milestones M0–M3; the planner / execute-mate / vision boundary (for prompt2assembly transfer);
+  GPT's review verbatim in `docs/GPT_PLAN_REVIEW_2026-10-19.md` (agrees: base-free before the primitive; adds
+  pose freshness gates, measure the seated part not the TCP, re-read the base after contact, 30 single-part
+  trials per condition).
+- **Ease metrics**: `ablations/insert_ease.py` (attempts, contact→seat s, seat dev in the base frame, lateral
+  force-time N·s, stalls); `ablations/insert_stages.py` (time per CAD stage). `docs/INSERT_GEOMETRY.md`: the
+  prismatic parts spend 58 % of insert time wedged in a corridor (line_green 5–9 mm into the U openings,
+  ±1.1 mm; yellow's legs astride line_green, ±1 mm) that no TCP tilt shows; per-stage rules for the primitive.
+- **Loop 1019c** (staging): cycles 1–2 clean (1338 s, 1152 s), cycle 3 failed on line_green turned −4.5° from
+  insert-derived U offsets. **Loop 1019d**: cycle 1 clean (1395 s), cycle 2 stopped by a relocation judged
+  failed after it had worked (fixed `8fd53c5`); its assembly then passed by hand with two autonomous recoveries.
+- **Fixes (all committed)**: seated-part grasp from a close hover read (`seat_grasp(observed_part=)`; the base
+  view reads step ~8 mm between two localizer detection sets); gentle clear-area set-down in the assembly
+  (sideways stances still release at move_down's 80 mm floor — operator: the topple is acceptable);
+  seated-part tops from the rotated CAD mesh (`cad_geometry`, U tops were 24.5 mm low); line_green's turn from
+  close hover reads of the seated U parts (`record_follow_reads`, 0.30 m above each seat; the base-view reads
+  said 1 mm while the bar found the slot 6 mm across), insert-based fallback capped 1.5°; grip-width guard
+  after every close (expected `config.grip_width_mm` ± 8 mm → open, lift, re-pick once; a flat u_brown closed
+  across both legs at 69 mm and slipped out — the opening chooser had judged 32 mm clearance from a pose it
+  could not have, logged now); fold-aware orientation mean in `observe_parts`; corridor-aware prismatic
+  retries (`df1c0a5`: retract above the entrance — the old 10 mm retract stayed inside the opening — Rz
+  compliant, re-aim ≤ 2 mm); telemetry meta on the trajectory-reached exit; **held-yaw calibration** before
+  every insert (`held_yaw_calibration`: read the held part above the base, turn the wrist by the difference to
+  the chain, modulo fold symmetry, 0.3–6°) — line_green read +2.26° on its first use; yellow's marker is not
+  visible while held; u_brown is detected only above the base (0 over the taped clear area).
+- **Per-part data tonight**: `ablations/part_loop.sh u_brown 3` — iteration 1 (no correction): straight drop,
+  contact→seat 0 s, dev (−0.1, +0.1) mm, 0 N·s; iteration 2: 14.5 s on the rim, (+1.7, +2.5) mm, 24.8 N·s;
+  iteration 3 never ran: the **workspace light went off** at ~21:45 and the verify failed closed (localizer
+  sees nothing). Board then: u_brown, u_orange seated; line_green at (314, −471), yellow at (283, −337).
+- **Next**: `compliant_insertion_studio/scripts/when_lit.sh '<cmd>'` gates any command on the light. Resume
+  with line_green then yellow (`replay --only … --skip-startup`), then `part_loop.sh u_brown 3` for the held-yaw
+  A/B (GPT's experiment 2), then plain-layout cycles (`fmb1_loop.py --layout spots`) before any tipping loop.
+  Open: the held-yaw read for yellow (marker hidden by the bridge grasp); line_green's held-xy; the U parts'
+  seat spread (2–7 mm; the hover reads put u_brown at (−6.4, −3.0) mm from CAD) — GPT's experiment 1.
 
 ---
 
@@ -105,6 +406,70 @@ in **REMOTE CONTROL** — the driver comes up headless, no program loaded and no
 four scattered bringup commands (`launch_robot.sh real --headless`, gripper bridge,
 `launch_camera.sh`, `grasp_points_publisher.py`) still work individually; `SETUP.md` §3 documents
 them.
+
+Since 2026-10-15 `stack_up.sh` also starts the **RealSense node with aligned depth** (the localizer
+reads its colour topic; the base read, seat check, spacing check and spot planning need the depth)
+and drops the camera stack to nice 10. `stack_down.sh` stops that node and the demo RViz too.
+RViz with the raw camera: `bash compliant_insertion_studio/scripts/launch_rviz_demo.sh --raw`.
+
+### The hands-off loop, and getting out of trouble (2026-10-15 runbook)
+
+Everything below is a script; nothing needs inline python. All of it from the repo root, on
+`ur5e-fmb1-demo`, after `stack_up.sh`.
+
+```bash
+# The loop: disassemble -> assemble, N times; fails closed at the first problem
+python3 -u ablations/fmb1_loop.py --cycles 3 --start-with disassemble   # parts seated now
+python3 -u ablations/fmb1_loop.py --cycles 3 --start-with assemble      # parts on the table
+python3 -u ablations/fmb1_loop.py --cycles 3 --layout staging [--all-flat]   # generated layouts, tipped flat
+#   per-cycle record: ablations/logs/fmb1_loop.jsonl; logs: ablations/logs/loop_<ts>_*.log
+#   staging layouts: ablations/logs/staging_layout.json (last) + staging_layouts.jsonl (all)
+
+# Staging layout pieces (all from the repo root)
+python3 -u ablations/staging_layout.py --look [--cycle N] [--seed S]   # look over the region + draw one (no part motion)
+python3 -u ablations/tip_part.py PART --observe                       # tip a standing part where it is
+python3 -u ablations/disassemble.py --assembly-json x --layout staging --resume-held PART   # finish a stopped one
+
+# One part (the assembly JSON every replay takes)
+J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
+python3 -u ablations/replay_real_assembly.py --assembly-json $J --only line_green
+
+# Checks (no motion unless noted)
+python3 -u ablations/spacing_check.py              # from home: table parts >= 25 mm from base1 + each other
+python3 -u ablations/base_depth.py                 # base1 from its depth outline (arm at flange 0.56 over it)
+python3 -u ablations/seat_check.py --object line_green   # moves to the 0.56 m view; flat/high/tilted
+python3 -u ablations/disassemble.py --assembly-json x --dry-run   # plan spots -> /tmp/disassemble_spots.png
+```
+
+| situation | do |
+|---|---|
+| robot in **PROTECTIVE_STOP** (the run halts by itself, no cleanup motion) | `bash compliant_insertion_studio/scripts/recover_pstop.sh` — unlock, re-send program, lift straight up, home. Leaves the gripper as is. |
+| a run must stop now | `bash compliant_insertion_studio/scripts/stop_run.sh` |
+| a part is **too close** to base1 / another part (spacing check fails) | `python3 -u ablations/disassemble.py --assembly-json x --relocate PART --grasp-id auto` — picks with the grasp point whose open fingers clear the obstacles, sets it down at a free spot. Part seen badly from home (bottom of the image): add `--pick-view-dy 0.10`. |
+| the gripper still **holds** a part after a failed run | `python3 -u ablations/disassemble.py --assembly-json x --place-held PART` (to the staging area), then `replay_real_assembly.py --assembly-json $J --only PART --skip-startup --part-at-staging` |
+| line_green seated **tilted** | the replay nudges it by itself (push until 4 N from past the high end, ≤ 3 tries). By hand: `seat_check.py` to see which end. |
+| a seated part must come out (bad seat) | `python3 -u ablations/disassemble.py --assembly-json x --only PART --to-staging` |
+| robot program dropped (`Connection to reverse interface dropped` in `/tmp/ur_bringup_logs/`) | `stop_run.sh` re-sends it; check the load (`uptime`) — the camera stack must be at nice 10 |
+| gripper `Circuit1/2:True` (latched) | power-cycle procedure in the root `CLAUDE.md` |
+
+State the scripts keep (all under `ablations/logs/`): `grasp_tool_offsets.json` (grasp depth per
+part, chains insert ↔ disassembly), `seated_offsets.json` (seat − prediction per seated part; the
+line_green slot follows u_brown/u_orange from it; disassembly removes entries), `seat_checks/`,
+`seat_offset_history.json` (insert aim bias), `assembly_state.json` (verify/occlusion ledger).
+
+**Demo video (2026-10-18).** During the run, only a rosbag on the OptiPlex; the overlay is drawn
+afterwards from the poses the localizer PUBLISHED, with its own drawing code — nothing re-detected:
+
+```bash
+bash compliant_insertion_studio/scripts/record_demo_bag.sh ~/Documents/fmb1_frames/NAME_bag   # SIGINT to stop
+# on dual-a4500 (~/fmb1_videos: render_bag.py, encode_frames.sh, localizer_src/, wireframe/ copied there):
+python3 render_bag.py NAME_bag NAME --localizer-src localizer_src --wireframes wireframe --workers 16
+bash encode_frames.sh NAME NAME      # NAME_{rgb,annotated,side_by_side}.mp4, real-time
+```
+~2.4–4 MB/s of bag (1.4–2.1 GB per assembly), ~12 % of one core. The localizer itself publishes no
+pose for ~18 % of frames (gaps ≤ 4.8 s) — the overlay is blank there, as the live stream was. The Mac
+is reachable only through a Tailscale DERP relay (~0.4 MB/s): copy with `rsync --partial`, no timeout.
+dual-a4500's disk is ~97 % full: delete `NAME/rgb` and `NAME/annotated` after encoding.
 
 ### The autonomous insert (what worked in iter 8)
 
@@ -245,6 +610,39 @@ From `CLAUDE.md` (project conventions) and `SKILL.md` (methodology):
 0c. **`prismatic_peg_insertion` hangs after success.** Observed printing
     `[SUCCESS] Insertion complete on attempt 3` and then not exiting. Blocks unattended chaining
     of the assembly.
+
+### Opened 2026-10-14
+
+0d. **[2026-10-15: cause found and fixed — see State of the system: the slot is the line through
+    the seated U parts; aim follows it; the nudge flattens the rest.]**
+    **line_green ends tilted after some inserts (3 of the last 4).** Depth seat check: pitch
+    −2.45° / +3.3° / +3.0°, one end ~5 mm high. A fresh regrasp from the clear area gave the same
+    tilt, so it is in the seat, not the grasp. Suspect: a U part (whose regrasp took the other,
+    fold-symmetric arm, or which needed an extra staging pass) seated the "other way round" so the
+    bar end rests on it — **unverified**. `seat_check.py` is **confirmed by the operator**: every
+    time it reported line_green off, it was off (and flat readings were flat). Trust it as the tell.
+    Operator's route for a real tilt (QUEUED_FIXES #13): approach the bar **at its measured angle**,
+    grasp, safe height as held, fix orientation, reinsert. The top-down reseat cannot fix a tilt.
+0e. **Constant-ish −y seat offset** (QUEUED_FIXES #12): ~2 mm world −y bias plus a few mm of
+    run-to-run scatter; suspected camera mount (hand-eye). Operator: fix later.
+0f. **U parts sometimes tip over when set down in the clear area** (u_orange 2/3 cycles, u_brown
+    1/3); the extra pass always recovered. Cause not investigated.
+0g. **D415 USB-C plug is worn**: dropped off USB twice during wrist rotations; flipping the plug
+    restored 5000 Mbps. The replay refuses a grasp when the camera is not streaming.
+
+### Opened 2026-10-17/18
+
+0h. **line_green tilts ~3.5° after nearly every insert** (one end ~6 mm high); the nudge fixes it
+    every time, so the loop passes, but it costs ~1 min per cycle and the cause is not found. The
+    operator's account: wedged by a slight roll in an unusual direction.
+0i. **Yellow misread streaks in the localizer** (below-table pose for 8–15 s after arm motion) are
+    worked around in `move_to_grasp`, not fixed at the source (`aruco_camera_localizer` IPPE choice /
+    temporal state during motion). The 30 s wait would not cover a longer streak.
+0j. **Vention 7th axis is in E-STOP** (safety-module fuse LED red; its safety box is not wired to the UR
+    controller; operator ordering a cabinet key). The carriage is not held, so the base creeps in the
+    robot frame — tolerated by the base re-reads. Do not use armctl `connect()` (it auto-releases the e-stop).
+0k. **Seated u_brown's marker is edge-on from the base view** — handled by the second look from home;
+    a better base view would make it unnecessary.
 
 ### Critical-path
 

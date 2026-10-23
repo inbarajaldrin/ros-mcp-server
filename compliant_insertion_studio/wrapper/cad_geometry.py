@@ -67,7 +67,9 @@ def get_seated_so_far(base_name: str, target_object: str) -> list[str]:
     Returns [] if the file is missing or target isn't in the assembly.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    json_path = repo_root / "ablations" / "eval_resources" / f"{base_name[:3] if base_name.startswith('fmb') else 'fmb1'}_assembly.json"
+    # baseN -> fmbN_assembly.json (2026-10-20: base3 read FMB1's order, so a fork saw no line under it)
+    n = base_name[4:] if base_name.startswith('base') and base_name[4:].isdigit() else '1'
+    json_path = repo_root / "ablations" / "eval_resources" / f"fmb{n}_assembly.json"
     if not json_path.exists():
         json_path = repo_root / "ablations" / "eval_resources" / "fmb1_assembly.json"
     if not json_path.exists():
@@ -91,11 +93,11 @@ def _load_assembly_seat_z_above_base(base_name: str, object_name: str) -> Option
         candidate = ASSEMBLY_INDEX_DIR / f"fmb_assembly{base_name[4:]}.json"
         if not candidate.exists():
             return None
-        d = json.load(open(candidate))
-        comp = next((c for c in d["components"] if c.get("name") == object_name), None)
-        if comp is None:
+        try:                                   # the SETTLED seat (cad_lookup: the file's pose dropped onto its support)
+            from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
+            return float(load_seat_pose_in_base(base_name, object_name)[0][2])
+        except KeyError:
             return None
-        return float(comp["position"]["z"])
     return None
 
 
@@ -108,6 +110,24 @@ def _load_base_top_z_local(base_name: str) -> float:
 def _load_object_local_top_z(object_name: str) -> float:
     """Returns the local-z of the object's top surface (max z of its OBJ bbox)."""
     return float(_load_obj_verts(object_name)[:, 2].max())
+
+
+def _load_seated_top_above_origin(base_name: str, object_name: str) -> Optional[float]:
+    """Height of the object's highest point above its CAD origin IN ITS SEATED POSE (mesh rotated by
+    the assembly quaternion). The unrotated bbox put the seated U parts' tops 24.5 mm too low
+    (32.0 instead of 56.5 mm above the base): they seat on their side. line_green wedging 4-8 mm
+    into their openings then read "between contacts" (2026-10-19)."""
+    if not (base_name.startswith("base") and base_name[4:].isdigit()):
+        return None
+    candidate = ASSEMBLY_INDEX_DIR / f"fmb_assembly{base_name[4:]}.json"
+    if not candidate.exists():
+        return None
+    comp = next((c for c in json.load(open(candidate))["components"] if c.get("name") == object_name), None)
+    if comp is None:
+        return None
+    q = comp["rotation"]["quaternion"]
+    V = R.from_quat([q[k] for k in "xyzw"]).apply(_load_obj_verts(object_name))
+    return float(V[:, 2].max())
 
 
 def _peg_lower_extent_world_z_at_seat(
@@ -182,7 +202,11 @@ def build_contact_candidates(
         seat_z_above = _load_assembly_seat_z_above_base(base_name, seated_name)
         if seat_z_above is None:
             continue
-        local_top = _load_object_local_top_z(seated_name)
+        local_top = _load_seated_top_above_origin(base_name, seated_name)
+        if local_top is None:
+            local_top = _load_seated_top_above_origin(base_name, seated_name)
+        if local_top is None:
+            local_top = _load_object_local_top_z(seated_name)
         candidates[f"OBJ:{seated_name}"] = expected_contact_tcp_z(
             surface_world_z=base_world_z + seat_z_above + local_top,
             object_name=target_object, grasp_id=target_grasp_id,
@@ -273,3 +297,63 @@ def classify_contact(
             "surface": surface_tolerance_m,
         },
     }
+
+
+def seated_under(base_name: str, object_name: str, margin_m: float = 0.005) -> list[str]:
+    """Parts seated before object_name whose seated CAD footprint (base-frame xy box) overlaps its own: it threads over
+    them before it meets the base (a corridor stage - inverted_u_yellow astride line_green)."""
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+
+    def box(o):
+        sp, sq = load_seat_pose_in_base(base_name, o)
+        P = R.from_quat(sq).apply(_surface_points(o, 0.003)) + sp
+        return P[:, 0].min(), P[:, 0].max(), P[:, 1].min(), P[:, 1].max()
+    ax0, ax1, ay0, ay1 = box(object_name)
+    out = []
+    for o in get_seated_so_far(base_name, object_name):
+        bx0, bx1, by0, by1 = box(o)
+        if ax0 < bx1 + margin_m and bx0 < ax1 + margin_m and ay0 < by1 + margin_m and by0 < ay1 + margin_m:
+            out.append(o)
+    return out
+
+
+AT_REST_BAND_M = 0.005          # drive-mate's at-rest acceptance |dz| vs the seat
+_WEDGE_CACHE: dict = {}
+
+
+def wedge_possible(base_name: str, object_name: str, band_m: float = AT_REST_BAND_M) -> bool:
+    """Can the part rest stably OFF its seat yet look seated by its at-rest height? (operator 10-22: "every peg and
+    pocket gives you the relation to whether there is a wedge"). The part at its seated pose is shifted 1-12 mm along each
+    base axis and dropped onto the base + parts seated before it (1 mm height maps); a rest h above the seat, tilted with
+    one end down (h/2 at the grasp), inside the at-rest band = a wedge only a seat check can see. FMB1: line_green 7.0 mm
+    (its end on the base top past the pocket, h/2 = 3.5 mm) -> True; u_brown 29.1, u_orange / yellow 31.5 mm -> False
+    (out of the pocket they sit on the rim, far outside the band: the at-rest result decides)."""
+    key = (base_name, object_name, band_m)
+    if key in _WEDGE_CACHE:
+        return _WEDGE_CACHE[key]
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+    cell = 0.001
+
+    def hmap(X, top):
+        ij = np.floor(X[:, :2] / cell).astype(np.int64)
+        k = ij[:, 0] * 100003 + ij[:, 1]
+        o = np.argsort(k); k, z = k[o], X[o, 2]
+        u, s = np.unique(k, return_index=True)
+        return dict(zip(u.tolist(), (np.maximum if top else np.minimum).reduceat(z, s).tolist()))
+
+    def placed(o):
+        sp, sq = load_seat_pose_in_base(base_name, o)
+        return R.from_quat(sq).apply(_surface_points(o, 0.0008)) + sp
+    sup = hmap(np.vstack([_surface_points(base_name, 0.0008)] + [placed(p) for p in get_seated_so_far(base_name, object_name)]), True)
+    X = placed(object_name)
+    rests = []
+    for ax in (0, 1):
+        for d in (0.001, 0.002, 0.003, 0.005, 0.008, 0.012):
+            for sg in (-1.0, 1.0):
+                Y = X.copy(); Y[:, ax] += sg * d
+                h = max([sup[k] - z for k, z in hmap(Y, False).items() if k in sup] + [0.0])
+                if h > 0.0006:
+                    rests.append(h)
+    out = bool(rests) and min(rests) / 2.0 < band_m
+    _WEDGE_CACHE[key] = out
+    return out

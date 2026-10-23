@@ -35,6 +35,7 @@ import re
 import time
 
 import logging
+import signal
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,62 @@ import logging
 # IK solvers, collision checkers, rotate_object, etc.  By handling them here
 # we skip ~2-3s of import overhead.
 # ---------------------------------------------------------------------------
+
+
+# Parts routed to the prismatic insertion (its own search/recovery ladder) - part-name routing that rung UNI replaces with a
+# CAD-stage rule. Exported so callers (the replay's hover servo) follow the same decision instead of keeping their own list.
+# inverted_u_yellow left 10-22: on a free base it seats by the depth servo + vertical touch lattice (in on dip 7), the
+# prismatic search slid it 14-19 mm along line_green at up to 20 N (9 of 10 attempts). UNI replaces this table.
+# line_green left 10-22 23:20: on a free base its prismatic search slid the bar 15-23 mm and dragged base1 13 mm between
+# attempts (runs 28c, 29: 5 of 6 attempts jammed on the U tops); the touch route probes vertically (no lateral force),
+# across-first in the corridor between the U parts, and the taps judge the seat.
+PRISMATIC_ROUTE_OBJECTS = ('line_brown', 'line_red', 'fork_orange', 'fork_yellow')
+
+CHILD_CLEANUP_S = 30.0   # a force-mode child's own cleanup gets this long before SIGTERM; never SIGKILL (CLAUDE.md)
+
+
+def _settle_child(proc, forward_sigint=True):
+    """Let an insert/motion child finish its own cleanup: SIGINT it (once more if it is still running 2 s on - its
+    handler is idempotent, it may not have got ours), wait CHILD_CLEANUP_S, then SIGTERM and wait. Never SIGKILL: a
+    force-mode child killed mid-search leaves the arm in force mode (10-22: subprocess.run SIGKILLed touch_insert 0.25 s
+    after drive-mate's cancel; the compliant route's timeout called proc.kill())."""
+    try:
+        proc.wait(timeout=2.0)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        pass
+    if forward_sigint:
+        proc.send_signal(signal.SIGINT)
+    try:
+        return proc.wait(timeout=CHILD_CLEANUP_S)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        return proc.wait()
+
+
+def _run_child(argv, timeout=None, **kw):
+    """subprocess.run without its SIGKILL: on Ctrl-C / a cancel, or a timeout, the child ends through _settle_child.
+    Returns a CompletedProcess-like object with returncode (None never: the child is waited for)."""
+    proc = subprocess.Popen(argv, **kw)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(signal.SIGINT)
+        _settle_child(proc, forward_sigint=False)
+        raise
+    except KeyboardInterrupt:
+        _settle_child(proc)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode)
+
+
+def _base_fixed() -> bool:
+    try:
+        from primitives.shared.config import BASE_FIXED
+        return bool(BASE_FIXED)
+    except Exception:
+        return True
+
 
 def _subprocess_fast_path():
     """Exit early for subprocess-only invocations (before heavy imports)."""
@@ -170,7 +227,7 @@ def _subprocess_fast_path():
         if not ok:
             _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
-        ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode], timeout=310)
+        ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode, '--to-table'], timeout=310)
         _finish(ok, out, "place_down")
 
     if is_compliant_insert:
@@ -226,7 +283,9 @@ def _subprocess_fast_path():
         # SEARCH spiral can't break the gripper-jaws-on-base-rim standoff for
         # these wide-grasp parts; prismatic's tiered approach handles it.
         # u_brown / u_orange keep the validated compliant_insert path.
-        if args.object_name in ('line_green', 'inverted_u_yellow'):
+        # FMB3 (2026-10-20): the lines are line_green's bar; the forks straddle both lines like yellow over
+        # line_green -> prismatic for both. To be replaced by a CAD-stage rule (no per-part routing).
+        if args.object_name in PRISMATIC_ROUTE_OBJECTS:
             # Per-object base offset already applied above (one branch handles
             # all objects). Continue with hover + prismatic dispatch.
 
@@ -248,11 +307,37 @@ def _subprocess_fast_path():
                 hover_argv += ['--final-base-orientation',
                                *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[line_green route] hover: {' '.join(hover_argv)}", flush=True)
-            r = subprocess.run(hover_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            r = _run_child(hover_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             if r.returncode != 0:
                 _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
                          "object_name": args.object_name,
                          "error": f"hover subprocess returned {r.returncode}"})
+                sys.exit(1)
+            # Align funnel (2026-10-21, operator: use the frames and CAD, read them, fix before contact): at the hover the
+            # camera sees the base and the held part in the same frames; their relative yaw vs the CAD seat is turned
+            # out in place until < 0.3 deg. The bookkeeping (base yaw, in-hand yaw, hover fix) left line_green 5-8 deg
+            # off its slot. Never blocks: unmeasured -> the descent goes on as before. ALIGN_AT_HOVER=0 skips it.
+            if os.environ.get('ALIGN_AT_HOVER', '1') == '1':
+                ra = subprocess.run([sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.align_at_hover',
+                                     '--object-name', args.object_name, '--base-name', args.base_name]
+                                    + (['--target-base-quat', *[f"{v:.6f}" for v in args.final_base_orientation]]
+                                       if args.final_base_orientation is not None else []),
+                                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    capture_output=True, text=True, timeout=180)
+                for line in ra.stdout.splitlines():
+                    if line.startswith('[align]') or line.startswith('{"result"'):
+                        print(line, flush=True)
+            # The operator's view of the moment before contact (2026-10-21): HOVER_SNAPSHOT=<dir> saves a wrist-camera
+            # frame here, after the hover's yaw; STOP_AT_HOVER=1 stops before any descent.
+            if os.environ.get('HOVER_SNAPSHOT'):
+                try:
+                    subprocess.run([sys.executable, '-c', _SNAP_PY, os.environ['HOVER_SNAPSHOT'], args.object_name],
+                                   timeout=20)
+                except Exception as e:
+                    print(f"[hover snapshot] failed: {e}", flush=True)
+            if os.environ.get('STOP_AT_HOVER') == '1':
+                _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
+                         "object_name": args.object_name, "error": "stopped at hover (STOP_AT_HOVER)"})
                 sys.exit(1)
             # Step 2: run prismatic_peg_insertion (stash primitive)
             prism_argv = [
@@ -274,7 +359,7 @@ def _subprocess_fast_path():
                 prism_argv += ['--final-base-orientation',
                                *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[line_green route] prismatic: {' '.join(prism_argv)}", flush=True)
-            r = subprocess.run(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            r = _run_child(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             success = (r.returncode == 0)
             _output({
                 "result": "success" if success else "failure",
@@ -285,6 +370,49 @@ def _subprocess_fast_path():
                 "router": "line_green→prismatic_peg_insertion",
             })
             sys.exit(0 if success else 1)
+
+        # Free base (2026-10-21, operator): no compliance - guarded touches that retract on first contact and correct
+        # (compliant_insertion_studio/wrapper/touch_insert.py); the compliant search's lateral push dragged the base.
+        # 2026-10-21 20:12: 9 touches at the aim and 2-4 mm around it all stopped on the rim; a CAD overlay put the
+        # held part within ~1-2 mm of its chained pose and over the seat - u_brown's pocket admits it only within about
+        # +-1 x +-0.5 mm, below what a probe grid (or any read: 2-5 mm view spread) hits. So the default stays the
+        # sliding search (light on a free base); touch is opt-in (INSERT_MODE=touch).
+        # 2026-10-21 23:10: touch is the free-base default again. A sliding search cannot work on an untaped base: at
+        # 9 N the part carried base1 (its edges static in the wrist camera through a 66 s spiral), at 1.5 N it slid
+        # 1.6 mm in a whole search. The aim now comes from the hover servo (repeats to ~0.5 mm) and the probes step a
+        # 1 mm hexagonal lattice (touch_insert.hex_grid). INSERT_MODE=compliant keeps the sliding search.
+        if (not _base_fixed() and os.environ.get('INSERT_MODE', 'touch') == 'touch'
+                and args.final_base_pos is not None and args.final_base_orientation is not None
+                and args.current_object_orientation is not None):
+            touch_argv = [sys.executable, '-u', '-m', 'compliant_insertion_studio.wrapper.touch_insert',
+                          '--object-name', args.object_name, '--base-name', args.base_name,
+                          '--grasp-id', str(args.grasp_id),
+                          '--current-object-orientation', *[f"{v:.6f}" for v in args.current_object_orientation],
+                          '--final-base-pos', *[f"{v:.6f}" for v in args.final_base_pos],
+                          '--final-base-orientation', *[f"{v:.6f}" for v in args.final_base_orientation]]
+            print(f"[touch route] {' '.join(touch_argv[2:])}", flush=True)
+            rt = _run_child(touch_argv, env=_make_env())
+            sys.exit(rt.returncode)
+
+        # Yaw the held part to the MEASURED base before the compliant hover (2026-10-21, operator image: u_brown square to
+        # the table over a base at 9.4 deg). The compliant hover keeps the EE orientation of the reorient step, which
+        # squares the part to the world axes; the prismatic route has its own hover yaw fix, this route had none.
+        if (args.final_base_orientation is not None and args.current_object_orientation is not None
+                and os.environ.get('COMPLIANT_YAW_TO_BASE', '1') == '1'):
+            try:
+                from scipy.spatial.transform import Rotation as _R
+                from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
+                err, _tilt = rel_yaw_error(args.object_name, args.base_name, _R.from_quat(args.final_base_orientation),
+                                           _R.from_quat(args.current_object_orientation))
+                if abs(err) > 0.3:
+                    print(f"[compliant yaw] turning the wrist {err:+.2f} deg about world z: held part vs base x seat", flush=True)
+                    if turn_wrist(err):
+                        args.current_object_orientation = list(
+                            (_R.from_euler('z', err, degrees=True) * _R.from_quat(args.current_object_orientation)).as_quat())
+                    else:
+                        print("[compliant yaw] wrist turn refused - inserting at the reorient yaw", flush=True)
+            except Exception as _e:
+                print(f"[compliant yaw] not applied ({_e})", flush=True)
 
         # Build wrapper argv. Hardcoded autonomous-search params match the
         # working production config validated against u_brown / u_orange runs
@@ -322,10 +450,29 @@ def _subprocess_fast_path():
             # chamfer, and 5N lateral wasn't enough to overcome partial-engagement
             # friction. With 9N press + 8N lateral, the same insert seated within
             # 1.7s of SEARCH. Real crashes are still well-bounded by --override-fz-cap.
-            '--search-F-press-N', '9.0',
-            '--search-Fmax-N', '8.0',
+            # free base (2026-10-21 19:56): with the lateral force capped at 2.5 N the 9 N press pinned u_brown on the
+            # rim (spiral 3 mm in 45 s, 2 mm lag). Pressed at 4.5 N the rim friction is below the lateral command,
+            # the base still does not slide (its weight adds to its own table friction), and parts stay <= 5 N.
+            # 2026-10-21 22:55: on a free base the 9 N press made the part carry the base: through a 66 s spiral (TCP
+            # +-3 mm) base1's edges stayed within 1 px in the wrist camera - the spiral moved part AND base, never the part
+            # over the base (79 earlier seats were on a taped base). Free base: press lightly so the part slides over it
+            # (friction part-on-base << base-on-table, whose share includes the base's weight); a TCP sinking below the
+            # rim (--search-drop-mm) hands over to the 8 N INSERT_DESCENT once the part is in its pocket.
+            '--search-F-press-N', (('9.0' if os.environ.get('LIGHT_SEARCH', '0') != '1' else '4.5') if _base_fixed()
+                                   else os.environ.get('SEARCH_PRESS_N', '1.5')),
+            # 2026-10-21: on a base that is NOT fixed (cell_layout base_fixed: false) 8 N lateral turned base1 from
+            # 0.19 to ~8.4 deg over two u_brown searches (the yaw the operator saw "move away"); an untaped base
+            # slides at a few N, so the lateral search force stays below that and the aim comes from vision instead
+            # 2026-10-21 22:00 (operator): back to the tuned 9 / 8 N by default - at 4.5 / 2.5 N the part barely slid on the
+            # rim (< 2 mm per attempt); the aim now comes from the yaw turn + silhouette servo. LIGHT_SEARCH=1 keeps the light one.
+            '--search-Fmax-N', (('8.0' if os.environ.get('LIGHT_SEARCH', '0') != '1' else '2.5') if _base_fixed()
+                                else os.environ.get('SEARCH_FMAX_N', '1.5')),
+            '--search-drop-mm', ('0' if _base_fixed() else os.environ.get('SEARCH_DROP_MM', '1.5')),
             '--search-v-s-mm-s', '5.0',
-            '--search-pitch-mm', '2.0',
+            # aim confirmed by the silhouette servo (free base: the replay servos before every insert; or SERVO_AIMED=1): start the spiral at 0.3 mm with a 1 mm
+            # pitch - from r0 = 1.5 mm it never visited the spot ~1 mm off the aim where u_brown drops (operator 10-21)
+            '--search-r0-mm', ('0.3' if (os.environ.get('SERVO_AIMED') == '1' or not _base_fixed()) else '1.5'),
+            '--search-pitch-mm', ('1.0' if (os.environ.get('SERVO_AIMED') == '1' or not _base_fixed()) else '2.0'),
             '--search-R-max-mm', '8.0',
             '--search-max-duration-s', '60.0',
             '--timeout', '180',
@@ -363,11 +510,16 @@ def _subprocess_fast_path():
             rc = proc.wait(timeout=300)
             t.join(timeout=1.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.send_signal(signal.SIGINT)                    # its handler ends the episode + force-mode cleanup
+            _settle_child(proc, forward_sigint=False)
             t.join(timeout=1.0)
             _output({"result": "failure", "mode": args.mode, "movement_type": "insert",
                      "error": "compliant_insert wrapper timed out (300s)"})
             sys.exit(1)
+        except KeyboardInterrupt:
+            _settle_child(proc)
+            t.join(timeout=1.0)
+            raise
         out_text = '\n'.join(lines)
         rj = _extract_json(out_text)
         if rj is None:
@@ -382,6 +534,23 @@ def _subprocess_fast_path():
             rj.setdefault("base_name", args.base_name)
         _output(rj)
         sys.exit(0 if rc == 0 and rj.get("result") == "success" else 1)
+
+
+_SNAP_PY = r"""
+import sys, time, os, rclpy, numpy as np, cv2
+from sensor_msgs.msg import Image
+out_dir, name = sys.argv[1], sys.argv[2]; os.makedirs(out_dir, exist_ok=True)
+rclpy.init(); n = rclpy.create_node('hover_snapshot'); g = {}
+time.sleep(1.0)                                                   # still arm: let the frame settle
+n.create_subscription(Image, '/camera/camera/color/image_raw', lambda m: g.__setitem__('c', m), 1)
+t = time.time()
+while 'c' not in g and time.time() - t < 8: rclpy.spin_once(n, timeout_sec=0.1)
+if 'c' in g:
+    m = g['c']; a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, -1)
+    if m.encoding == 'rgb8': a = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+    p = os.path.join(out_dir, f"hover_{name}_{time.strftime('%Y%m%d_%H%M%S')}.jpg"); cv2.imwrite(p, a); print('[hover snapshot]', p, flush=True)
+n.destroy_node(); rclpy.shutdown()
+"""
 
 
 if __name__ == '__main__':
@@ -405,11 +574,11 @@ from builtin_interfaces.msg import Duration
 
 from primitives.shared.ik import (
     forward_kinematics, dh_params, compute_cartesian_waypoints_ik,
-    IKSolverConfig, IKSolver,
+    IKSolverConfig, IKSolver, nearest_joint_equivalent,
 )
 from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 from primitives.shared.config import (
-    TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET,
+    TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset,
     DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION,
 )
 from primitives.shared.collision import (
@@ -426,6 +595,13 @@ BASE_TOPIC = "/objects_poses_sim"
 OBJECT_TOPIC = "/objects_poses_sim"
 EE_TOPIC = "/tcp_pose_broadcaster/pose"
 HOVER_HEIGHT = 0.15  # Height to hover above base before descending
+MAX_HOVER_YAW_FIX_DEG = 10.0  # larger residuals mean a wrong chain, not a base yaw — leave them
+# Base yaw only (see the hover). Off -> the wrist stays at the deterministic rotate's cardinal yaw;
+# yellow then failed 6/6 (2026-10-15), so it is on.
+HOVER_YAW_FIX = os.environ.get('HOVER_YAW_FIX', '1') == '1'
+# drive-mate sets HOVER_YAW_FIX=0 when its align step already turned the wrist to the base yaw (10-22 run 28c: the hover
+# turned line_green a further -9.09 / +3.10 deg on top of it - an Euler 'held yaw' of a part held at pitch 90 deg is
+# noise - and the bar jammed on the U tops twice; before, the same noise happened to fall outside 10 deg and skip it)
 ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
@@ -852,7 +1028,7 @@ class TranslateObject(Node):
             # Hover: same XY as target, Z = base + HOVER_HEIGHT
             hover_gripper_center = ee_target_position.copy()
             hover_gripper_center[2] = base_current_position[2] + HOVER_HEIGHT
-            tool_offset_world = ee_target_rot_matrix @ GRIPPER_CENTER_TOOL_OFFSET
+            tool_offset_world = ee_target_rot_matrix @ held_tool_offset()
             target_flange = hover_gripper_center - tool_offset_world
             self.get_logger().info(
                 f"Hover gripper center Z: {hover_gripper_center[2]:.4f}, "
@@ -883,6 +1059,11 @@ class TranslateObject(Node):
             ik_result = self.compute_ik_with_current_seed(target_flange, target_quat)
             if ik_result is None:
                 self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
+                self.get_logger().error(self.error_message)
+                return False
+            ik_result, why_ = nearest_joint_equivalent(ik_result, self.current_joint_angles)   # raw = wrapped rank
+            if ik_result is None:
+                self.error_message = f"Motion planning failed: {why_}"
                 self.get_logger().error(self.error_message)
                 return False
 
@@ -1116,7 +1297,42 @@ class TranslateObject(Node):
         # Convert gripper center to flange using FK-derived rotation
         T_fk = forward_kinematics(dh_params, self.current_joint_angles)
         R_fk = T_fk[:3, :3]
-        tool_offset_world = R_fk @ GRIPPER_CENTER_TOOL_OFFSET
+        # Residual yaw: rotate_object snaps the wrist to cardinal orientations in the assembly
+        # frame and never adds the observed base yaw, so the part went down ~2.5 deg off its slot
+        # (line_green, 2026-10-15: ends ~3 mm sideways, landed on the U parts). Turn the wrist about
+        # world z by the part's remaining yaw error, when that is all that is left.
+        R_target_ee = R_fk
+        # The base's own yaw — the only thing the deterministic rotate leaves out (it snaps to
+        # cardinals as if the base were square to the robot). NOT target-vs-chained: the chain
+        # carries the pick-time camera read and turned U parts 5.6-6.6 deg (operator: the part
+        # read can be wrong, that is why the rotate is deterministic). The jaws square the part
+        # to the wrist, so the base yaw, folded to +-45 deg, is the whole correction.
+        # 2026-10-15: yellow 6/6 failed at cardinal yaw, seated with the ~3 deg base yaw.
+        base_yaw_deg = float(np.degrees(np.arctan2(R_base_current[1, 0], R_base_current[0, 0])))
+        # ABSOLUTE: the wrist's own yaw off the cardinals is taken out first. Relative to the current wrist, every
+        # re-entry added the base yaw again (2026-10-20 cycle 3: line_brown's hover wrist went -3.95, -8.51,
+        # -15.28 deg over three lift-and-retry attempts - the "angled insertion" the operator saw).
+        xf = R_fk @ np.array([1.0, 0.0, 0.0]); xd = np.array([-1.0, 0.0, 0.0])      # top-down (0,1,0,0) x axis
+        wrist_dev_deg = float(np.degrees(np.arctan2(xf[1], xf[0]) - np.arctan2(xd[1], xd[0])))
+        wrist_dev_deg = (wrist_dev_deg + 45.0) % 90.0 - 45.0
+        # The part's own yaw in the jaws (measured, world z; HELD_YAW_OFFSET_DEG from the held read / drive-mate's held
+        # pose): the jaws do not square it - line_green sat +1.64 deg in them (depth, 2026-10-21) and went in turned
+        # against the slot the opposite way to the base (operator saw it). Flange yaw = cardinal + base yaw - offset.
+        held_off_deg = float(os.environ.get('HELD_YAW_OFFSET_DEG', '0') or 0.0)
+        yaw_fix_deg = ((base_yaw_deg - wrist_dev_deg - held_off_deg) + 45.0) % 90.0 - 45.0
+        # 2026-10-21 test: the operator saw the bar turned against the slot the other way; at the hover a +3 deg world-z
+        # wrist turn brought base1's markers 3 deg TOWARD the bar in the image while the hover had applied -3.19:
+        # HOVER_YAW_SIGN=-1 applies the correction mirrored, to confirm before the term with the flip is traced
+        yaw_fix_deg *= float(os.environ.get('HOVER_YAW_SIGN', '1') or 1.0)
+        r_chain = R.from_matrix(R_grasp_rotation @ R_object_current.T).as_rotvec()
+        if HOVER_YAW_FIX and 0.2 < abs(yaw_fix_deg) <= MAX_HOVER_YAW_FIX_DEG:
+            R_target_ee = R.from_euler('z', yaw_fix_deg, degrees=True).as_matrix() @ R_fk
+            self.get_logger().info(f"Hover yaw fix: {yaw_fix_deg:+.2f} deg about world z (base yaw {base_yaw_deg:+.2f}, held {held_off_deg:+.2f}, "
+                                   f"wrist already {wrist_dev_deg:+.2f} off cardinal; "
+                                   f"chain residual {np.degrees(r_chain[2]):+.2f} deg ignored)")
+        else:
+            self.get_logger().info(f"Hover yaw fix: none (base yaw {yaw_fix_deg:+.2f} deg)")
+        tool_offset_world = R_target_ee @ held_tool_offset()   # as this part was actually grasped
         hover_flange = hover_gripper_center - tool_offset_world
         self.get_logger().info(f"Hover flange position (FK-derived): {hover_flange}")
 
@@ -1128,6 +1344,7 @@ class TranslateObject(Node):
             target_z=hover_flange[2],
             num_waypoints=num_waypoints,
             target_pos=hover_flange.tolist(),
+            target_orientation=None if R_target_ee is R_fk else R_target_ee,
         )
         if waypoints is None:
             self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
@@ -1180,7 +1397,7 @@ class TranslateObject(Node):
                                       self.current_ee_pose.pose.orientation.z,
                                       self.current_ee_pose.pose.orientation.w])
             R_ee_topic = R.from_quat(ee_quat_topic).as_matrix()
-            actual_gripper_center = ee_pos_topic + R_ee_topic @ GRIPPER_CENTER_TOOL_OFFSET
+            actual_gripper_center = ee_pos_topic + R_ee_topic @ held_tool_offset()
             gripper_center_error = hover_gripper_center - actual_gripper_center
             pos_error = np.linalg.norm(gripper_center_error)
 

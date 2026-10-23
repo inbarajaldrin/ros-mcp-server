@@ -152,6 +152,15 @@ class SearchDirector:
                  stall_progress_ratio: float = 0.15,
                  stall_window_s: float = 1.0,
                  lag_pause_thresh_m: float = 0.002,
+                 # Rim-stall unload (staged/032-search-rim-unload). Defaults from
+                 # analysis/scripts/42_rim_stall_trigger.py over 29 inserts.
+                 stall_unload_window_s: float = 2.0,
+                 stall_unload_xy_m: float = 0.0003,
+                 unload_press_N: float = 1.5,
+                 unload_max_s: float = 1.5,
+                 unload_caught_up_m: float = 0.0005,
+                 unload_cooldown_s: float = 0.5,
+                 unload_max_attempts: int = 3,
                  near_miss_fz_thresh_N: float = 4.0,
                  # 2026-05-07: gradient-follower thresholds. Lowered in soft
                  # second-stage SEARCH so the gradient mode kicks in on
@@ -159,7 +168,28 @@ class SearchDirector:
                  # alignment respect the compliance instead of the spiral.
                  gradient_d_fz_dt_thresh: float = -3.0,   # N/s (soft: -1.0)
                  gradient_fz_thresh: float = 6.0,         # N    (soft: 5.0)
-                 gradient_v_thresh: float = 5e-4):       # m/s  (soft: 1e-4)
+                 gradient_v_thresh: float = 5e-4,        # m/s  (soft: 1e-4)
+                 # Height-map recentring (2026-10-21, analysis in the 10-21 session: 81 rim-search-then-seat
+                 # inserts). Pressed at F_press, the TCP sits 0.08-0.11 mm (u_brown) / 0.20-0.26 mm (u_orange)
+                 # lower within ~2.5 mm of the pocket. The centroid of the lowest 2 % of rim heights (after a
+                 # z = a + b*t drift fit) points at the pocket within 27 deg after 10 s, 16 deg over a full search
+                 # (89 % within +-45 deg); lateral force / moments while sliding do not (81-95 deg, chance).
+                 recentre: bool = True,
+                 recentre_period_s: float = 5.0,
+                 recentre_min_shift_m: float = 0.001,
+                 recentre_lowest_frac: float = 0.02,
+                 recentre_min_samples: int = 200,
+                 excursion_max_m: float = 0.015):
+        self.recentre = bool(recentre)
+        self.recentre_period_s = float(recentre_period_s)
+        self.recentre_min_shift_m = float(recentre_min_shift_m)
+        self.recentre_lowest_frac = float(recentre_lowest_frac)
+        self.recentre_min_samples = int(recentre_min_samples)
+        self.excursion_max_m = float(excursion_max_m)
+        self._rim_z = []                  # (t, x, y, z) while pressed on the rim
+        self._aim_xy: Optional[tuple[float, float]] = None
+        self._t_last_recentre: Optional[float] = None
+        self.recentres: list = []         # telemetry: (t, cx, cy, n_samples)
         self.r0 = float(r0_m)
         self.pitch = float(pitch_m)
         self.v_s = float(v_s_m_s)
@@ -172,6 +202,14 @@ class SearchDirector:
         self.stall_progress_ratio = float(stall_progress_ratio)
         self.stall_window_s = float(stall_window_s)
         self.lag_pause_thresh_m = float(lag_pause_thresh_m)
+        self.stall_unload_window_s = float(stall_unload_window_s)
+        self.stall_unload_xy_m = float(stall_unload_xy_m)
+        self.unload_press = float(unload_press_N)
+        self.unload_max_s = float(unload_max_s)
+        self.unload_caught_up_m = float(unload_caught_up_m)
+        self.unload_cooldown_s = float(unload_cooldown_s)
+        self.unload_max_attempts = int(unload_max_attempts)
+        self._reset_unload()
         self.near_miss_fz_thresh_N = float(near_miss_fz_thresh_N)
         # Tunable gradient-follower thresholds (soft mode lowers these)
         self.gradient_d_fz_dt_thresh = float(gradient_d_fz_dt_thresh)
@@ -213,6 +251,9 @@ class SearchDirector:
     def set_center(self, center_xy_base: tuple[float, float]) -> None:
         """FSM calls this on first SEARCH tick with current TCP xy as spiral origin."""
         self._center_xy = (float(center_xy_base[0]), float(center_xy_base[1]))
+        self._aim_xy = self._center_xy
+        self._rim_z = []
+        self._t_last_recentre = None
         self._theta = 0.0
         self._spiral_path_len = 0.0
         self._t_stall_start = None
@@ -225,6 +266,26 @@ class SearchDirector:
         # the first search, corrupting both the damping term and the gradient override.
         self._last_t = None
         self._tcp_buf.clear()
+        self._reset_unload()
+
+    def _reset_unload(self) -> None:
+        self._rim_xy_hist = deque()
+        self._t_last_advance: Optional[float] = None
+        self._unload_until: Optional[float] = None
+        self._unload_cooldown_until: float = float('-inf')
+        self._unload_attempts: int = 0
+        self._arc_at_unload: float = 0.0
+        # FSM ignores the v4 rim-cross detector until this time: an unload drops |fz|
+        # on purpose, which is exactly the signature v4 fires on.
+        self.v4_suppressed_until: float = float('-inf')
+        self.last_unloading: bool = False
+
+    def _end_unload(self, t: float) -> None:
+        self._unload_until = None
+        self._unload_cooldown_until = t + self.unload_cooldown_s
+        self.v4_suppressed_until = max(self.v4_suppressed_until, self._unload_cooldown_until)
+        self._rim_xy_hist.clear()
+        self._t_last_advance = t
 
     def resume_after_false_detection(self) -> None:
         """Continue the existing spiral instead of restarting it.
@@ -263,13 +324,58 @@ class SearchDirector:
             return 0.0, 0.0
         return (tcp_x - x0) / dt, (tcp_y - y0) / dt
 
+    def _maybe_recentre(self, t: float) -> None:
+        """Move the spiral centre to the low point of the rim height map (see __init__), restart the spiral
+        there at r0. Only toward a point within excursion_max of the original aim."""
+        if self._t_last_recentre is None:
+            self._t_last_recentre = t
+            return
+        if t - self._t_last_recentre < self.recentre_period_s or len(self._rim_z) < self.recentre_min_samples:
+            return
+        self._t_last_recentre = t
+        T = [p[0] for p in self._rim_z]; Z = [p[3] for p in self._rim_z]
+        n = len(T); mt = sum(T) / n; mz = sum(Z) / n
+        stt = sum((ti - mt) ** 2 for ti in T)
+        b = sum((ti - mt) * (zi - mz) for ti, zi in zip(T, Z)) / stt if stt > 1e-12 else 0.0
+        res = sorted(((zi - (mz + b * (ti - mt))), i) for i, (ti, zi) in enumerate(zip(T, Z)))
+        k = max(10, int(self.recentre_lowest_frac * n))
+        low = [self._rim_z[i] for _, i in res[:k]]
+        cx = sum(p[1] for p in low) / len(low); cy = sum(p[2] for p in low) / len(low)
+        ax, ay = self._aim_xy
+        if math.hypot(cx - ax, cy - ay) > self.excursion_max_m - self.r0:
+            return
+        if math.hypot(cx - self._center_xy[0], cy - self._center_xy[1]) < self.recentre_min_shift_m:
+            return
+        self._center_xy = (cx, cy)
+        self._theta = 0.0
+        self.recentres.append((t, cx, cy, n))
+        self.last_mode = "recentre_height_map"
+        print(f"[SEARCH] recentre on the rim height map's low point: centre {1000*(cx-ax):+.1f}, {1000*(cy-ay):+.1f} mm "
+              f"from the aim ({n} rim samples)", flush=True)
+
     def update(self, t: float, fz_smoothed_base: float,
-               tcp_x_base: float, tcp_y_base: float
+               tcp_x_base: float, tcp_y_base: float, tcp_z_base: Optional[float] = None
                ) -> tuple[float, float, float]:
         """Returns (Fx_cmd, Fy_cmd, Fz_cmd) in base_link frame, or sets
         self.abort_reason if the search should be aborted."""
         Fz_cmd = -self.F_press
         self.abort_reason = None
+
+        # RIM-STALL UNLOAD (staged/032-search-rim-unload, 2026-10-07). Pressed on the rim
+        # at F_press, friction can pin the peg ~lag_pause_thresh behind the reference:
+        # theta holds, the lateral push points at a reference that no longer moves, and
+        # nothing changes until the total budget runs out (146 s frozen within 0.2 mm,
+        # insert_u_brown_20261007_211322). The lateral_stall detector below only counts
+        # ADVANCED arc, so it never sees this. While unloading, the press drops to a light
+        # contact so the existing constant-force xy push can slide the peg to the
+        # reference; rotation stays locked (selection vector unchanged).
+        unloading = self._unload_until is not None and t < self._unload_until
+        if self._unload_until is not None and not unloading:
+            self._end_unload(t)
+        if unloading:
+            Fz_cmd = -self.unload_press
+        in_unload_window = unloading or t < self._unload_cooldown_until
+        self.last_unloading = unloading
 
         # Center must be set by FSM at first tick; if not, default to current.
         if self._center_xy is None:
@@ -292,7 +398,7 @@ class SearchDirector:
         # If peg is off-rim (small fz), the v4 detector handles transition.
         # Director still commands Fz_press to keep peg pressed; lateral
         # command is reduced (peg may already be falling into chamfer).
-        if abs(fz_smoothed_base) < self.fz_gate:
+        if abs(fz_smoothed_base) < self.fz_gate and not in_unload_window:
             self.last_mode = "spiral_off_rim"
             self.last_cmd_base = (0.0, 0.0, Fz_cmd)
             # Don't advance theta when off rim (peg doesn't need to spiral)
@@ -322,8 +428,51 @@ class SearchDirector:
         self.last_spiral_advanced = spiral_advanced
         self.last_e_mag = prev_e_mag
 
+        if unloading and prev_e_mag <= self.unload_caught_up_m:
+            self._end_unload(t)               # slid to the reference: restore the press
+            unloading = False
+            self.last_unloading = False
+            Fz_cmd = -self.F_press
+
+        # Rim-stall trigger: theta held AND the TCP has not moved in xy for a full window.
+        self._rim_xy_hist.append((t, tcp_x_base, tcp_y_base))
+        while self._rim_xy_hist and t - self._rim_xy_hist[0][0] > self.stall_unload_window_s:
+            self._rim_xy_hist.popleft()
+        if spiral_advanced or self._t_last_advance is None:
+            self._t_last_advance = t
+        if (not in_unload_window
+                and t - self._t_last_advance >= self.stall_unload_window_s
+                and self._rim_xy_hist
+                and t - self._rim_xy_hist[0][0] >= 0.9 * self.stall_unload_window_s):
+            hx = [p[1] for p in self._rim_xy_hist]
+            hy = [p[2] for p in self._rim_xy_hist]
+            if math.hypot(max(hx) - min(hx), max(hy) - min(hy)) < self.stall_unload_xy_m:
+                if self._unload_attempts >= self.unload_max_attempts:
+                    self.abort_reason = (
+                        f"rim_stall: pinned on the rim through {self._unload_attempts} "
+                        f"unloads (no xy motion > {1000*self.stall_unload_xy_m:.1f}mm in "
+                        f"{self.stall_unload_window_s:.1f}s)")
+                    self.last_mode = "abort_rim_stall"
+                    self.last_cmd_base = (0.0, 0.0, Fz_cmd)
+                    return 0.0, 0.0, Fz_cmd
+                self._unload_attempts += 1
+                self._unload_until = t + self.unload_max_s
+                self.v4_suppressed_until = self._unload_until + self.unload_cooldown_s
+                self._arc_at_unload = self._spiral_path_len
+                unloading = True
+                self.last_unloading = True
+                Fz_cmd = -self.unload_press
+
+        if self.recentre and tcp_z_base is not None and not in_unload_window:
+            self._rim_z.append((t, tcp_x_base, tcp_y_base, tcp_z_base))
+            self._maybe_recentre(t)
+
         new_r = self.r0 + (self.pitch / (2 * math.pi)) * self._theta
         self.last_radius_m = new_r
+        # Progress = the reference advanced 2 mm of ARC since the last unload, which only
+        # happens while the peg keeps up. (Radius growth undercounts at large r.)
+        if self._unload_attempts and self._spiral_path_len - self._arc_at_unload > 0.002:
+            self._unload_attempts = 0         # the spiral got moving again
 
         # Abort: spiral exhausted
         if new_r > self.R_max:
@@ -438,6 +587,8 @@ class SearchDirector:
 
         self.last_cmd_base = (Fx_cmd, Fy_cmd, Fz_cmd)
         self.last_mode = f"spiral r={1000*new_r:.2f}mm θ={math.degrees(self._theta):.0f}°"
+        if unloading:
+            self.last_mode += f" UNLOAD {self._unload_attempts}/{self.unload_max_attempts}"
         return Fx_cmd, Fy_cmd, Fz_cmd
 
 
@@ -649,7 +800,9 @@ class ContactSearchFSM:
             Kd_xy_N_per_m_per_s = float(self.cfg.get("search_Kd_N_s_m",  40.0)),
             Fmax_N            = float(self.cfg.get("search_Fmax_N",      3.0)),
             F_press_N         = float(self.cfg.get("search_F_press_N",   9.0)),
-            fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",   3.0)),
+            # on the rim = |fz| above half the press, at most 3 N (a 1.5 N free-base press otherwise reads 'off rim')
+            fz_gate_low_N     = float(self.cfg.get("search_fz_gate_N",
+                                                   min(3.0, 0.5 * float(self.cfg.get("search_F_press_N", 9.0))))),
             # 2026-05-07: relax stall detection. Original (0.15, 1.0s) fires
             # at 15% progress in 1s — too aggressive when peg lands wedged
             # at slot rim and needs a few seconds + lateral force to break
@@ -660,6 +813,8 @@ class ContactSearchFSM:
             # outer bound.
             stall_progress_ratio = float(self.cfg.get("search_stall_progress_ratio", 0.02)),
             stall_window_s       = float(self.cfg.get("search_stall_window_s",       2.0)),
+            recentre             = bool(self.cfg.get("search_recentre", True)),
+            excursion_max_m      = float(self.cfg.get("search_excursion_max_m", 0.015)),
         )
         # Seeded by FSM at SEARCH entry (predicted_tcp_xy from CAD prior).
         # SearchDirector's bootstrap mode drives toward this xy until |F_lat|
@@ -854,6 +1009,14 @@ class ContactSearchFSM:
         # marked hole near edge, peg seated at slot lip) and peg-slightly-below
         # (slot deeper than CAD; verified 1.6mm in 2026-05-06 first GUIDED demo).
         self.at_target_z_tol_m = float(self.cfg.get("at_target_z_tol_m", 0.005))
+        # One-sided seat band (2026-10-07). A seat BELOW the prediction is still a seat:
+        # the grasp-point z of a part lying on its side flips between two values ~10 mm
+        # apart, so a regrasp can hold the part ~10 mm higher in the jaws and it bottoms
+        # out ~11 mm deeper in TCP z (u_brown 193849: -11.1 mm; u_orange 215309: -11.1 mm;
+        # both explained by the grasp flange z to within 0.7 mm). The old |dz| <= 5 mm
+        # rejected both, searched on a seated part and aborted. A real miss sits ABOVE
+        # (the rim is ~31 mm over the seat). Floor keeps a gross miss beside the base out.
+        self.seat_accept_below_m = float(self.cfg.get("seat_accept_below_m", 0.020))
         # Tilt thresholds (deg from canonical face-down). Operator-demo data:
         #   u_orange: max 1.36° during successful descent
         #   u_brown:  max 5.56°
@@ -1406,7 +1569,9 @@ class ContactSearchFSM:
             absolute_at_target = False
             if self.predicted_tcp_z is not None:
                 dz_abs = abs(tcp_z - self.predicted_tcp_z)
-                absolute_at_target = dz_abs <= self.at_target_z_tol_m
+                dz_signed = tcp_z - self.predicted_tcp_z
+                absolute_at_target = (-self.seat_accept_below_m <= dz_signed
+                                      <= self.at_target_z_tol_m)
 
             # Path (2): relative descent fallback
             # 2026-05-07: gate this path on predicted_tcp_z being None so it
@@ -1773,7 +1938,7 @@ class ContactSearchFSM:
                 self._search_total_start_t = t
                 sd = self.search_director
                 self._search_total_max_s = spiral_sweep_seconds(
-                    sd.r0, sd.R_max, sd.pitch)
+                    sd.r0, sd.R_max, sd.pitch) + (30.0 if sd.recentre else 0.0)   # room for one restarted spiral
             if self._search_resuming:
                 # Resuming after a rejected v4 — keep the existing center/theta.
                 self._search_resuming = False
@@ -1781,7 +1946,7 @@ class ContactSearchFSM:
                 self.search_director.set_center(self.predicted_tcp_xy)
             else:
                 self.search_director.set_center((tcp_x, tcp_y))
-            Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+            Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y, tcp_z)
             wrench = (Fx, Fy, Fz, 0.0, 0.0, 0.0)
             # Rotation LOCKED in SEARCH. This is deliberate and empirically required,
             # despite SKILL.md section 10 stating all-True as a hard rule:
@@ -1813,10 +1978,49 @@ class ContactSearchFSM:
             self._search_last_cmd_t = t
             return action
 
+        # z-drop trigger (free base, 2026-10-21): pressed lightly so the part slides over an untaped base instead of
+        # carrying it (at 9 N the base moved with the TCP: its edges stayed within 1 px in the wrist camera through a
+        # 66 s spiral), |fz| never exceeds the v4 detector's 4 N arm level. The TCP sinking below the rim contact
+        # height for 0.15 s is the part starting into its pocket.
+        drop_m = float(self.cfg.get("search_drop_m", 0.0) or 0.0)
+        if drop_m > 0 and self.surface_z is not None and self.surface_z - tcp_z > drop_m:
+            if getattr(self, '_search_drop_t', None) is None:
+                self._search_drop_t = t
+        else:
+            self._search_drop_t = None
+        if getattr(self, '_search_drop_t', None) is not None and t - self._search_drop_t >= 0.15:
+            self.hole_observed_xy = (float(tcp_x), float(tcp_y))
+            self.hole_observed_z  = float(tcp_z)
+            self.hole_observed_t  = float(t)
+            self.state = self.INSERT_DESCENT
+            action.transitioned = True
+            action.new_state = self.INSERT_DESCENT
+            action.transition_msg = (
+                f"z-drop in SEARCH at t={t:.2f}s xy=({tcp_x:+.4f},{tcp_y:+.4f}): "
+                f"{1000*(self.surface_z - tcp_z):.1f} mm below the rim contact "
+                f"after {t-self._search_start_t:.2f}s of search → INSERT_DESCENT"
+            )
+            action.state = self.INSERT_DESCENT
+            return action
+
         # v4 detector — fires on rim-cross. SEARCH always autofires (v4 is the
         # only transition trigger out of SEARCH; SIGUSR1 is not used in
         # autonomous mode by convention).
-        v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
+        # Suppressed while the director unloads off a rim stall (staged/032): the
+        # self-inflicted |fz| drop is v4's firing signature. Reset afterwards so it
+        # needs a fresh rim-contact -> collapse cycle.
+        if drop_m > 0:
+            # light press (z-drop trigger on): the APPROACH touchdown arms v4 above 4 N and the 1.5 N press then reads
+            # as a collapse - it fired 0.7 s into the first free-base search (10-21 22:56) and pressed 8 N on the rim
+            v4_fired_now = False
+        elif t < getattr(self.search_director, 'v4_suppressed_until', float('-inf')):
+            v4_fired_now = False
+            self._v4_suppressed_active = True
+        else:
+            if getattr(self, '_v4_suppressed_active', False):
+                self.found_hole_detector.reset()
+                self._v4_suppressed_active = False
+            v4_fired_now = self.found_hole_detector.update(t, fz_smoothed)
         if v4_fired_now:
             self.v4_predicate_fire = {
                 "t_s": float(t),
@@ -1861,8 +2065,8 @@ class ContactSearchFSM:
                 f"R_max={1000*self.search_director.R_max:.1f}mm) — peg never crossed rim.")
             return action
 
-        # Per-tick spiral update (high-rate inner loop on the PD position-tracker)
-        Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y)
+        # Per-tick spiral update (high-rate inner loop on the PD position-tracker); tcp_z feeds the rim height map
+        Fx, Fy, Fz = self.search_director.update(t, fz_smoothed, tcp_x, tcp_y, tcp_z)
         # Director self-aborted (spiral exhausted or stall)?
         if self.search_director.abort_reason is not None:
             action.kind = "exit_abort"
@@ -1977,7 +2181,9 @@ class ContactSearchFSM:
             speed_z = abs(v_z) if v_z is not None else float('inf')
             motion_stopped = speed_z < self.insert_motion_thresh_m_s
             fz_high = abs(fz_smoothed) > 3.0
-            far_from_seat = abs(tcp_z - self.predicted_tcp_z) > 0.005  # >5mm from seat
+            # Outside the one-sided seat band: too high (rim) or implausibly deep.
+            _dz = tcp_z - self.predicted_tcp_z
+            far_from_seat = (_dz > self.at_target_z_tol_m or _dz < -self.seat_accept_below_m)
             condition = motion_stopped and fz_high and far_from_seat
             if condition:
                 if self._soft_research_first_t is None:
@@ -2028,8 +2234,9 @@ class ContactSearchFSM:
                     # the spiral expanding correctly, so re-tightening it only
                     # shrinks coverage. Lower press/lateral force reduces wedging
                     # risk during the continued search without discarding progress.
-                    self.search_director.F_press = 4.0    # was 9.0
-                    self.search_director.Fmax    = 3.0    # was 8.0
+                    # never harder than the search already was (free base: 1.5 / 1.5 N, 10-21)
+                    self.search_director.F_press = min(4.0, self.search_director.F_press)    # was 9.0
+                    self.search_director.Fmax    = min(3.0, self.search_director.Fmax)       # was 8.0
                     # Reduce damping so peg can move with light forces
                     self.search_director.Kd      = 10.0   # was 40
                     # Gradient thresholds left at defaults: loosening them made the

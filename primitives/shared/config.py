@@ -6,6 +6,109 @@ TABLE_HEIGHT = TABLE_HEIGHT_WORLD - ROBOT_BASE_Z  # Table surface Z in robot bas
 TABLE_COLLISION_MARGIN_SIDEWAYS = 0.08  # Safety margin for sideways/horizontal EE orientations
 TABLE_COLLISION_MARGIN_FACEDOWN = 0.08  # Safety margin for face_down EE orientation 
 GRIPPER_CENTER_TOOL_OFFSET = np.array([0.0, 0.0, 0.2286])  # 3D offset from EE flange to gripper center in tool frame (meters)
+# --- RG2 fingertip / pad geometry (2026-10-14) -------------------------------------------------
+# GRIPPER_CENTER_TOOL_OFFSET (0.2286) is NOT the pad centre: it sits ~1 mm above the fingertip
+# ends, so a grasp aimed with it holds the part ~14 mm shallow. Measured: closed fingertips touched
+# base1's top (35 mm CAD, on the table) at flange - 230.86 mm. The RG2 4-bar linkage (CAD, R = 55 mm)
+# moves the tips with width: depth(a) = 55 cos(a) + const, rubber gap = 110 sin(a) - 3.96 mm.
+# Pads are 29.8 mm long (CAD), so the pad centre is 14.9 mm above the tips.
+RG2_TIP_CLOSED_M = 0.23086          # flange -> fingertip end, gripper closed (gap ~0)
+RG2_PAD_HALF_M = 0.0149             # fingertip end -> pad centre
+GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above the table
+# Rubber gap when closed on each part: the CAD width across the jaws at the part's assembly grasp
+# (aruco-grasp-annotator grasp_validity, which adds its 14 mm grasp clearance - removed here). Checked
+# against the /gripper_status readback on FMB1 (logs 2026-10-07..14): u_brown/u_orange 21.0 (CAD 21.0),
+# line_green 25.9 (25.8), inverted_u_yellow 42.0 (42.7). Any part of fmb1/2/3_assembly.json (2026-10-20).
+_GRASP_POINTS_DIR = '/home/aldrin/Documents/aruco-grasp-annotator/data/grasp_points'
+
+
+def cad_grip_width_mm(object_name: str, grasp_id: int | None = None) -> float:
+    import json
+    gid = grasp_id if grasp_id is not None else get_grasp_id_for_assembly(object_name)
+    d = json.load(open(f"{_GRASP_POINTS_DIR}/{object_name}_grasp_points.json"))
+    g = next(g for g in d['grasp_points'] if g['id'] == int(gid))
+    w = g['grasp_validity'].get('x_axis_gripper_width_mm') or g['grasp_validity'].get('y_axis_gripper_width_mm')
+    return round(float(w) - float(d.get('filter_params', {}).get('grasp_clearance_mm', 14.0)), 1)
+
+
+class _GripWidth(dict):
+    """GRIP_WIDTH_MM[part] -> the CAD closed width at its assembly grasp (computed on first use)."""
+    def __missing__(self, k):
+        v = cad_grip_width_mm(k)
+        self[k] = v
+        return v
+
+    def __contains__(self, k):
+        try:
+            self[k]
+            return True
+        except Exception:
+            return False
+
+
+GRIP_WIDTH_MM = _GripWidth()
+
+
+def rg2_tip_length_m(gap_mm: float) -> float:
+    """Flange -> fingertip end along tool z at rubber gap `gap_mm` (RG2 linkage, anchored closed)."""
+    ca = lambda g: np.cos(np.arcsin(np.clip((g + 3.96) / 110.0, 0.0, 1.0)))
+    return RG2_TIP_CLOSED_M - 0.055 * (ca(0.0) - ca(gap_mm))
+
+
+def pad_center_offset_m(gap_mm: float) -> float:
+    """Flange -> pad centre along tool z at rubber gap `gap_mm`: where a grasp point belongs."""
+    return rg2_tip_length_m(gap_mm) - RG2_PAD_HALF_M
+
+
+def held_tool_offset_for(object_name: str) -> np.ndarray:
+    """held_tool_offset() for a named part when the environment does not carry it: the depth move_to_grasp last
+    executed for that part (ablations/logs/grasp_tool_offsets.json). 2026-10-21: in-process measurements (hover
+    align, face touch) fell back to the nominal 228.6 mm while u_brown was held at 216.25 - a 12.4 mm error that
+    moved every projected/predicted held-part pose."""
+    import json, os
+    if os.environ.get('GRASP_TOOL_OFFSET_M'):
+        return held_tool_offset()
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'ablations', 'logs', 'grasp_tool_offsets.json')
+    try:
+        v = json.load(open(p))[object_name]['grasp_tool_offset_m']
+        return np.array([0.0, 0.0, float(v)])
+    except Exception:
+        return held_tool_offset()
+
+
+def held_tool_offset() -> np.ndarray:
+    """Flange -> held part's grasp point in the tool frame, for every step that predicts where a
+    HELD part is (insert hover, seat prediction, contact candidates, prismatic target).
+    move_to_grasp --pad-center reports the value it executed (grasp_tool_offset_m); the caller
+    passes it on as GRASP_TOOL_OFFSET_M in the subprocess environment (like ROS_MCP_MODE).
+    Unset -> the legacy nominal GRIPPER_CENTER_TOOL_OFFSET."""
+    import os
+    v = os.environ.get('GRASP_TOOL_OFFSET_M')
+    return np.array([0.0, 0.0, float(v)]) if v else GRIPPER_CENTER_TOOL_OFFSET.copy()
+
+
+def grasp_tool_offset_target_m(object_name: str, gap_mm: float) -> float:
+    """Flange -> grasp point a --pad-center grasp aims for: the pad centre on the grasp point,
+    unless the fingertips would then hit base1 or a seated part at the insert (CAD, computed by
+    ablations/grasp_depth.py into eval_resources/grasp_depth.json, every assembly). move_to_grasp then also
+    keeps the tips above the table at the pick."""
+    import json, os
+    pad = pad_center_offset_m(gap_mm)
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                     'ablations', 'eval_resources', 'grasp_depth.json')
+    try:
+        return max(pad, float(json.load(open(p))['parts'][object_name]['seat_floor_offset_m']))
+    except Exception:
+        return pad
+
+
+def grip_width_mm(object_name: str, pre_grasp_width_mm: float | None = None, grasp_id: int | None = None) -> float:
+    try:
+        return cad_grip_width_mm(object_name, grasp_id) if grasp_id is not None else GRIP_WIDTH_MM[object_name]
+    except Exception:
+        return max(0.0, (pre_grasp_width_mm or 35.0) - 14.0)
+
+
 SAFE_HEIGHT_ABOVE_TABLE = 0.4      # Safe/hover height above table surface (meters)
 SAFE_HEIGHT = TABLE_HEIGHT + SAFE_HEIGHT_ABOVE_TABLE  # Absolute safe height Z in robot base frame
 ROTATE_ABOUT_GRIPPER_CENTER = False # If True, rotate about gripper center; if False, rotate about flange
@@ -58,6 +161,10 @@ PER_OBJECT_BASE_OFFSET_M: dict = {
     # predicts; XY nearly identical.
     # Final offset = line_green offset (+1.13, +1.88, +4.76) + Δ
     #              = (+1.34, +1.16, -6.92) mm
+    # 2026-10-21: NOT a pure CAD error to fix at the source. Moving yellow's CAD seat to the graph's z (and -6.0 mm
+    # out of this offset) left the insert target unchanged but moved its CAD contact heights / hover 6 mm: 7 attempts
+    # drifted 10-15 mm and aborted; restoring this pair seated it first try (00:12). The insert keeps this pair;
+    # certification takes the seat from the prompt2assembly graph instead (seams/bindings.yaml graph_seat_z_mm).
     "inverted_u_yellow": (+0.00134, +0.00116, -0.00692),
     # 2026-05-07: line_green calibrated from operator-manual-seat (with
     # u_brown + u_orange already seated as flanking obstacles):
@@ -80,8 +187,23 @@ PER_OBJECT_BASE_OFFSET_M: dict = {
 
 
 def get_object_base_offset_m(object_name: str) -> tuple[float, float, float]:
-    """Per-object base-position offset (meters). Returns (0,0,0) if no entry."""
-    return tuple(PER_OBJECT_BASE_OFFSET_M.get(object_name, (0.0, 0.0, 0.0)))
+    """Per-object base-position offset (meters). Returns (0,0,0) if no entry.
+
+    The table was measured against the NOMINAL seat (the assembly file's pose, base1). Seat poses are the SEATED CAD now
+    (cad_lookup.load_seat_pose_in_base, 2026-10-22: each part dropped onto its support - yellow 6.0 mm, U parts 0.5,
+    line_green 1.05): the part's settle is added back to z so every tuned insert target stays where it was."""
+    off = PER_OBJECT_BASE_OFFSET_M.get(object_name)
+    if off is None:
+        return (0.0, 0.0, 0.0)
+    drop = 0.0
+    import os as _os_
+    if _os_.environ.get('SEAT_SETTLE', '1') == '1':
+        try:
+            from compliant_insertion_studio.wrapper.cad_lookup import _settle_drop
+            drop = float(_settle_drop('base1', object_name))
+        except Exception:
+            drop = 0.0
+    return (off[0], off[1], off[2] + drop)
 
 
 # Per-object SEAT classifier tolerance (meters). Used by both the contact
@@ -219,7 +341,7 @@ PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
 HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)
-DH_PARAMS = [
+DH_PARAMS_NOMINAL = [
     (0,  0.1625,  0,     np.pi/2),
     (0,  0,      -0.425,  0),
     (0,  0,      -0.3922, 0),
@@ -227,6 +349,24 @@ DH_PARAMS = [
     (0,  0.0997,  0,    -np.pi/2),
     (0,  0.0996,  0,     0)
 ]
+# This robot's calibration, as DH deltas (dtheta rad, dd m, da m, dalpha rad) per joint, fitted
+# 2026-10-14 so our FK reproduces the controller's (factory-calibrated) TCP over 486 logged
+# poses: gripper-centre error 1.78 mm median / 2.38 max (nominal) -> 0.08 / 0.6 mm, same on a
+# held-out half. Our IK was aiming ~1.8 mm off everywhere; the camera chain already used the
+# controller's calibrated TCP. The driver logs "calibration parameters ... don't match" because
+# of the same thing. ROS_MCP_NOMINAL_DH=1 reverts to the nominal table.
+DH_DELTAS = [
+    (+0.0024662, +0.000227, -0.000196, -0.0001885),
+    (-0.0002025, -0.000360, -0.000067, -0.0000175),
+    (+0.0014137, -0.000360, -0.000210, +0.0001710),
+    (-0.0012252, -0.000358, +0.000079, +0.0014573),
+    (-0.0048625, -0.000066, +0.000032, +0.0006912),
+    (-0.0000000, -0.000009, +0.000002, +0.0000052),
+]
+if __import__('os').environ.get('ROS_MCP_NOMINAL_DH') == '1':
+    DH_PARAMS = DH_PARAMS_NOMINAL
+else:
+    DH_PARAMS = [tuple(n + d for n, d in zip(nom, dl)) for nom, dl in zip(DH_PARAMS_NOMINAL, DH_DELTAS)]
 
 
 # --- Gripper width lookup from fmb1_assembly.json ---
@@ -241,9 +381,9 @@ DH_PARAMS = [
 import json as _json
 import os as _os
 
-_ASSEMBLY_JSON_PATHS = [
+_ASSEMBLY_JSON_PATHS = [   # every assembly's parts (names are unique across FMB1/2/3; 2026-10-20)
     _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                  "ablations", "eval_resources", "fmb1_assembly.json"),
+                  "ablations", "eval_resources", f"{_f}_assembly.json") for _f in ("fmb1", "fmb2", "fmb3")
 ]
 _GRASP_WIDTH_CACHE: dict | None = None  # populated on first lookup
 
@@ -280,6 +420,18 @@ def get_gripper_width_mm(object_name: str, grasp_id: int,
     return _load_grasp_width_table().get((object_name, int(grasp_id)), default_mm)
 
 
+def get_base_for_part(object_name: str) -> str | None:
+    """The base a part assembles into (base_name of the fmb*_assembly.json that lists it)."""
+    for path in _ASSEMBLY_JSON_PATHS:
+        try:
+            d = _json.load(open(path))
+            if any(o.get('object_name') == object_name for o in d.get('assembly_order', [])):
+                return d.get('base_name')
+        except Exception:
+            pass
+    return None
+
+
 def get_grasp_id_for_assembly(object_name: str) -> int | None:
     """Returns the grasp_id used in the FMB1 assembly for `object_name`, or
     None if the object isn't in the assembly. Used by loop scripts so
@@ -289,3 +441,30 @@ def get_grasp_id_for_assembly(object_name: str) -> int | None:
             return int(gid)
     return None
 
+
+
+# Cell layout (2026-10-20): the assembly region, clear area and staging region come from cell_layout.yaml
+# (`active:` there, or FMB_LAYOUT=<name>). FMB_CLEAR_AREA="x,y" still overrides only the clear area.
+import os as _os
+
+
+def _load_cell_layout():
+    import yaml
+    from pathlib import Path
+    d = yaml.safe_load(open(Path(__file__).with_name('cell_layout.yaml')))
+    name = _os.environ.get('FMB_LAYOUT') or d['active']
+    if name not in d['layouts']:
+        raise KeyError(f"cell layout {name!r} not in cell_layout.yaml (have {sorted(d['layouts'])})")
+    return name, d['layouts'][name]
+
+
+CELL_LAYOUT_NAME, CELL_LAYOUT = _load_cell_layout()
+ASSEMBLY_REGION_CENTER = tuple(float(v) for v in CELL_LAYOUT['assembly_region']['center'])
+ASSEMBLY_REGION_HALF = tuple(float(v) for v in CELL_LAYOUT['assembly_region'].get('half', (0.12, 0.12)))
+CLEAR_AREA_XY = tuple(float(v) for v in (_os.environ['FMB_CLEAR_AREA'].split(',') if _os.environ.get('FMB_CLEAR_AREA')
+                                         else CELL_LAYOUT['clear_area']))
+STAGING_REGION = {'x': tuple(CELL_LAYOUT['staging_region']['x']), 'y': tuple(CELL_LAYOUT['staging_region']['y'])}
+STAGING_VIEW = tuple(float(v) for v in CELL_LAYOUT['staging_region']['view'])
+BASE_FIXED = bool(CELL_LAYOUT.get('base_fixed', False))   # the run's base is fixed: never push it (cell_layout.yaml)
+PARKED_REGION = ({'x': tuple(CELL_LAYOUT['parked_region']['x']), 'y': tuple(CELL_LAYOUT['parked_region']['y'])}
+                 if CELL_LAYOUT.get('parked_region') else None)

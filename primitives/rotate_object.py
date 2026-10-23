@@ -39,7 +39,7 @@ import signal
 import time
 
 
-from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params
+from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params, nearest_joint_equivalent
 from primitives.shared.velocity_profiles import single_point, compute_duration
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
@@ -78,6 +78,19 @@ DEFAULT_OBJECT_TOPIC = "/objects_poses_sim"
 DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
 # DEFAULT_BASE_ORIENTATION is imported from config
 
+
+
+def _measured_base_yaw(base_name, max_age_s=900.0):
+    """Yaw (rad) of the replay's last base read (ablations/logs/last_base_pose.json) when it is recent, else None."""
+    import json as _json, os as _os, time as _time
+    try:
+        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'ablations', 'logs', 'last_base_pose.json')
+        pos, quat, t = _json.load(open(p))[base_name]
+        if _time.time() - float(t) > max_age_s or _os.environ.get('ROTATE_TO_MEASURED_BASE', '1') != '1':
+            return None
+        return float(R.from_quat(quat).as_euler('xyz')[2])
+    except Exception:
+        return None
 
 class ExtendedCardinalOrientations:
     """24 extended cardinal orientations with intermediary angles"""
@@ -237,6 +250,7 @@ class ExtendedCardinalOrientations:
 
 
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
+from primitives.shared.camera_up import camera_z
 
 
 class ReorientForAssembly(Node):
@@ -1067,8 +1081,13 @@ class ReorientForAssembly(Node):
             # Round to 1 decimal to avoid floating point boundary issues (e.g., 44.999° vs 45.001°)
             error_bucket = int(round(obj_error, 1) / error_tolerance)
 
-            # SECONDARY: Minimize EE rotation (prefer smallest joint motion)
-            return (error_bucket, 0, ee_rotation)
+            # SECONDARY: camera away from the table (2026-10-07). Within an error bucket the
+            # two wrist rolls give the same object pose; the camera-down one preceded a
+            # toppled staging drop, the camera-up one seated. Never outranks object error.
+            camera_down = 1 if camera_z(R.from_quat(candidate[1]).as_matrix()) < 0 else 0
+
+            # TERTIARY: Minimize EE rotation (prefer smallest joint motion)
+            return (error_bucket, camera_down, ee_rotation)
 
         candidates.sort(key=sort_key)
 
@@ -1083,6 +1102,13 @@ class ReorientForAssembly(Node):
 
             # Note: The sort_key already handles facing-away preference, object error,
             # and EE rotation in the correct priority order. No need for post-sort override.
+            cz = camera_z(R.from_quat(best_cardinal_quat).as_matrix())
+            self.get_logger().info(f"  -> Chose {best_cardinal_name}: camera_z={cz:+.2f} "
+                                   f"({'camera up' if cz >= 0 else 'CAMERA DOWN'})")
+            if cz < 0:
+                self.get_logger().warn(
+                    "  -> No camera-up candidate at this object error — the grasp wrist did not "
+                    "allow one (move_to_grasp --base-name picks it). Proceeding camera-down.")
         
         return (best_cardinal_name, best_cardinal_quat, best_resulting_object_R, 
                 best_matched_target_R, best_object_error, candidates)
@@ -1176,7 +1202,15 @@ class ReorientForAssembly(Node):
         # Sim mode: read from ROS topic
         if self.mode == 'real':
             R_base = self.get_rotation_from_quat(DEFAULT_BASE_ORIENTATION)
-            self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
+            # the base's MEASURED yaw (the replay's last base read, minutes old): rotating to the default yaw left every
+            # insert's align to turn the wrist ~19 deg in a separate step (purpose map 10-23: 4 of 8 turn_wrist calls a
+            # run, ~4 s each). Without a fresh read the default stands and the align turns as before.
+            yaw_meas = _measured_base_yaw(base_name)
+            if yaw_meas is not None:
+                R_base = R.from_euler('z', yaw_meas).as_matrix() @ R_base
+                self.get_logger().info(f"Using the measured base yaw {np.degrees(yaw_meas):+.2f} deg (last base read)")
+            else:
+                self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
         else:
             if base_name not in self.current_poses:
                 self.error_message = f"Base {base_name} not found"
@@ -1614,6 +1648,13 @@ class ReorientForAssembly(Node):
         # Also update the expected object orientation based on actual EE pose
         resulting_object_R = R_final_ee @ R_grasp
         best_quat = final_ee_quat  # Update for later use
+
+        # Candidates were ranked by WRAPPED joint change (_max_joint_change); send the raw values that match it.
+        joint_angles, why_ = nearest_joint_equivalent(joint_angles, self.current_joint_angles)
+        if joint_angles is None:
+            self.error_message = f"Motion planning failed: {why_}"
+            self.get_logger().error(self.error_message)
+            return False
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))

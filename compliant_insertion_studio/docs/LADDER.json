@@ -1,0 +1,224 @@
+{
+ "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
+ "updated": "2026-10-23 10:45",
+ "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
+ "tracks": [
+  {
+   "name": "Milestones",
+   "rungs": [
+    {
+     "id": "M0",
+     "title": "Loop with today's fixes",
+     "status": "done",
+     "note": "3/3 plain-layout cycles (1020b)"
+    },
+    {
+     "id": "M1",
+     "title": "Measure: ease metrics + CAD stages per part",
+     "status": "done",
+     "note": "insert_ease / insert_stages / INSERT_GEOMETRY.md"
+    },
+    {
+     "id": "M2",
+     "title": "Base free + measured errors",
+     "status": "next",
+     "note": "10-23 operator: judged on FMB1 (FMB3 = final validation at the end). CLEARS AT: 3 consecutive unattended FMB1 cycles (reset + assembly, rc 0, every mate certified) with the base moved by the arm to a DIFFERENT pose each cycle (~3 cm / ~5 deg from the layout pose) + sigmas from the recorded reads + the aim error mapped over base position (10-22: base at (160, -483) made u_brown miss 3x with the servo converged - a position-dependent vision error > 2.5 mm over ~20 mm). Count: 0/3. | PAUSED by the operator 10-20 (M3a first, on FMB1). CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8 | 10-22 22:10 FOUND: the aim depends on where the base sits. Base dragged to (160, -483) mm: u_brown missed 3x (marker AND depth servo agreed it was over its socket, aim vs base identical to the good runs within 1.4 mm, 61 probes +-2.5 mm flat on the rim each time); pushed back to (143, -485) by move_base: in first insert. A position-dependent error in the vision chain (hand-eye / base fit vs workspace position) > 2.5 mm over ~20 mm - must be mapped before M2's 3 cm moves"
+    },
+    {
+     "id": "M3a",
+     "title": "Drive-mate action + lab surface",
+     "status": "done",
+     "note": "CLEARED 10-22 16:38, attempt 23 (log ablations/logs/replay_20261022_155846.log): one uninterrupted FMB1 run, rc 0, all 4 inserts by drive-mate, ExecuteMate placed=true mate:00-03 in one journal episode (depth -0.02 / 1.23 / 0.78 / -0.12 mm). Automatic recoveries in it: u_orange outer retry (1st servo's gain went bad, aim -8.9 mm; 2nd -1.8 mm seated), line_green's wedge (end +8.2 mm) caught by its seat check and freed by nudge 1. Caveat (AR0): the seam is shallow - aim, servo, recovery and seat judging run in the replay; AR3 makes it real. Wall 2386 s (baseline 1088): the touch lattices (u_orange 687 s, yellow 471 s) dominate | 10-22 17:39 attempt 25 repeated it THROUGH the deepened seam (drive-mate aligns + inserts + judges), 1283 s"
+    },
+    {
+     "id": "UNI",
+     "title": "One insertion primitive (no part names)",
+     "status": "next",
+     "note": "10-23 operator: gate on FMB1 now, FMB3 at the final validation. On FMB1 every part already goes through touch_insert with CAD-derived cases (wedge_possible, seated_under); left: drop the part-name lists and per-part seat-z offsets, FMB1 4/4 unchanged. | today: translate_object.py:231 routes by a part-name list to two primitives (compliant_insert FSM for the U parts, prismatic_peg_insertion for lines/forks/yellow) + per-part seat-z offsets. Target: one primitive, stages + strategy (pocket search vs guarded channel descent) from CAD (insert_stages.py), seat from CAD / the graph, residuals measured by drive-mate. Gate: FMB1 4/4 + FMB3 4/4 at today's numbers, then remove the old paths"
+    },
+    {
+     "id": "M4",
+     "title": "Twin planner transfer",
+     "status": "next",
+     "note": "FMB1 planner on the cell, _correct_seat -> drive-mate"
+    },
+    {
+     "id": "M3b",
+     "title": "RL driver",
+     "status": "next",
+     "note": "admittance servo, Isaac ROS policy behind the same action"
+    }
+   ]
+  },
+  {
+   "name": "Architecture",
+   "rungs": [
+    {
+     "id": "AR0",
+     "title": "Architecture review: deepening candidates",
+     "status": "done",
+     "note": "10-22 16:02: 5 agents mapped the code; report /tmp/architecture-review-20261022-160226.html. drive-mate is a pass-through: aim, servo, recovery and seat judging sit in the replay, so M3a passes the seam on paper only. 51 of 163 3-day fixes were handoff / duplication / silent failure; 0 offline tests"
+    },
+    {
+     "id": "AR1",
+     "title": "One aim module (seams.aim)",
+     "status": "done",
+     "note": "5b94f9e + 2c5d602. Gate attempt 24 (17:08): aims as before - u_brown, u_orange first try, line_green 2nd try (prismatic); stopped at mate:02 on a separate fault (seat check passed an end +2.0 mm that ExecuteMate refused: one acceptance rule now, ead152c)"
+    },
+    {
+     "id": "AR2",
+     "title": "Insert outcome returned, not re-read",
+     "status": "done",
+     "note": "merged 8174301: seams.insert_outcome (0 diffs over 400 recorded inserts); drive-mate judges the trace the insert named; seats recorded from drive-mate's result; primitives exit 0 w/o result = failure. Gate: attempt 25 -> gate attempt 25 (17:39): every insert's trace found from its own result, seats recorded from drive-mate's result"
+    },
+    {
+     "id": "AR3",
+     "title": "drive-mate owns the insert",
+     "status": "active",
+     "note": "Gate attempt 25 (17:17-17:39, log ablations/logs/replay_20261022_171746.log): drive-mate ALIGNED every part itself (marker servo u_brown/u_orange, yaw + close read line_green, depth servo yellow), applied the planner's corrections, inserted, judged - 4/4 first insert, mate:00-03 certified in one uninterrupted run, wall 1283 s (attempt 23: 2386). Yellow in on probe 1 (follow of line_green's measured seat). Left: recovery supervisor; align code out of the replay module (drive_align imports it); sigma gate | 21:35 recovery supervisor, first piece: seams.tap_probe - taps measure against the seated CAD, presses read through the force (seated / moving / blocked), on a free base they judge the seat; lateral nudges off there (attempt 27: 3 nudges chasing depth noise moved base1 ~50 mm, the taps then read line_green seated) | 22:35 real wedge (line_green, ExecuteMate 5.0 mm): tap map end- +4.2 / mid +1.8; vertical presses moving then blocked (stopped); ONE nudge -> taps -0.8..-1.1 = seated, certified -0.54 mm. Recovery = taps map -> presses -> one nudge if blocked -> taps judge. Also: prismatic hover no longer re-turns the yaw after drive-mate's align (2 jams); servo yaw cap 6 deg"
+    },
+    {
+     "id": "AR4",
+     "title": "Seated-parts state, one owner",
+     "status": "done",
+     "note": "merged 8174301: seams.seated_parts, one locked atomic writer of ledger + offsets + history; a verdict keeps the seat error. Gate: attempt 25 -> gate attempt 25: ledger/offsets via one writer, disassembly forget + seat errors kept (yellow followed line_green's)"
+    },
+    {
+     "id": "AR-gate",
+     "title": "Refactors keep behaviour",
+     "status": "next",
+     "note": "no refactor while a run is on the arm (touch_insert loads fresh per insert); each lands with tests at its new interface on recorded logs, then one FMB1 run must match before the next rung"
+    }
+   ]
+  },
+  {
+   "name": "Speed",
+   "rungs": [
+    {
+     "id": "T0",
+     "title": "Cycle time measured, not guessed",
+     "status": "done",
+     "note": "replay + disassembly write timing rows, motion recorder (position + wrist turns), cycle_time.py. Baseline run: 1088 s wall, arm moving 25%"
+    },
+    {
+     "id": "T1",
+     "title": "Read once, no needless trips",
+     "status": "active",
+     "note": "one survey window (49.0 -> 4.7 s); per-step snapshots from one standing subscriber (3360af1); one-node mode drops the per-part base re-read, certify views, notch trip and U held-yaw read. State machine + ranked cuts: ASSEMBLY_STATE_MACHINE.md"
+    },
+    {
+     "id": "T2",
+     "title": "No process start per step",
+     "status": "active",
+     "note": "10-22: the touch insert's probes run in ONE process (move_cartesian.plan_move on one node): bench, nothing gripped, 2.35 s/dip vs 11.75; on the arm 61 probes in 150 s (attempt 26). Open: the replay's other primitives still start a process each 10-23: the hover servo's moves too (SERVO_INPROC, benched empty: 2.1 s vs 4.6 s)"
+    },
+    {
+     "id": "T3",
+     "title": "Move floors by distance",
+     "status": "active",
+     "note": "10-22: probe steps/retracts <= 5 mm timed by distance (>= 0.6 s), descents sized to the measured rim; servo moves to where the arm already is skipped. Open: the 2.5 s floor elsewhere"
+    },
+    {
+     "id": "TGOAL",
+     "title": "FMB1 wall time halved, same success",
+     "status": "next",
+     "note": "CLEARS AT: a full FMB1 run (4/4 seated, verified) whose cycle_time.py wall time is <= 50% of the instrumented baseline (1088 -> 544 s). 10-22: attempt 23 2386 s -> gate 25 1283 s -> 26/26b ~1000 s projected (u_orange 202, line_green 224, yellow 187, u_brown ~200). Left (arm still): drive-mate's align 60-90 s/part (servo rounds ~6 s each, 2 in-hand base reads), ExecuteMate ~24 s/mate re-measuring every predecessor, line_green's nudge 66 s (and it drags the free base ~18 mm) 10-23 run 31 (u_brown 175 s, u_orange 290 s, line_green 430 s with its recovery): fixed - in-hand base fits were all rejected against the seed's height (21cf428); line_green's pre-pick search ~20 s (d5f3dc6); the nudge slid line_green 18 mm past its seat (b60c28a). Open: u_orange's clear-height servo oscillates (6 rounds, still 1.5 mm off -> 21 probes) 10-23 runs 32/33 (4/4 each, with one line_green resume): u_orange's clear-height servo uses a measured 2x2 response (6 rounds -> 2, 21 probes -> 1, drive-mate 182 -> ~91 s); servo moves in process (2.1 s vs 4.6). line_green root cause: the touch insert released it 'in' without contact (rim 7 mm over the seat), 2-8 mm off along the pocket (+-1.4 mm play) - fixed by an axial search with pushes (b63ee7f, untested). Run 32 ~1200 s with recovery; next sinks: line_green recovery, ExecuteMate ~20 s/mate, pick prep ~37 s/part 10-23 03:45 run 34: 4/4 hands-off, one uninterrupted run, cycle_time wall 968 s (arm moving 35%). Still-time sinks: drive-mate aligns ~255 s (camera reads, 2 in-hand base reads, wrist turns), line_green recovery 130 s (the bar pivots in the jaws, -y end 2-4 mm past the pocket end, nudge seats it), ExecuteMate ~20 s/mate, move_to_grasp 56 s 04:14 run 35: 4/4 hands-off, 944 s (U aligns 93 -> 59 s: one in-hand base read, servo moves in process). After it: depth-servo moves in process, taps 9.9 -> 6.9 s, certify's base read stops spending ~15 s on a read it discarded (the ExecuteMate server ran without BASE_FROM) 04:46 run 36: 4/4 hands-off, 880 s (certify 9-12 s each) 05:33 run 37: 4/4 hands-off, 919 s (4 uninterrupted runs: 968/944/880/919). line_green's axial grasp error measured from the held outline over bare table (2.8 mm toward -y, MAD 1.1 px): the depth servo now corrects the aim by it when it cannot re-read the base in hand (83e63e5, first in run 38) 06:08 run 38b: 4/4 hands-off, 829 s - line_green seated from the insert with no nudge (depth servo ran fully, robust far-edge rule, corridor search found the 2.5 mm across error). Run 38 before it stopped: u_brown jammed +20 mm x3 with a converged servo and the same held pose (unexplained) 06:34 run 39: 4/4, 854 s - line_green seated with no recovery via the held-outline correction (3.7 mm along); its 50-probe across search -> left edge added (194249c) 07:30 run 41: 4/4, 850 s; line_green from the insert in 10 probes (held outline, both edges), the certifier's +2.34 mm end read recovered by taps + re-certify (6b87c60). Steady 830-920 s; left: drive-mate still ~240 s 07:57 run 42: 4/4 hands-off, 705 s (35% under the 1088 s baseline; 161 s to go) - the D415 projector held off through each servo's colour-only stretch (b19ab43: 8 ros2-CLI toggles, ~18 s, per align); line_green 168 s, certified first ask 08:24 run 43: 4/4, 793 s (line_green tapped: depth end +2.02 vs 2.0). Since: view moves in process, entering push by distance 08:48 run 44: 4/4 hands-off, 687 s (best; 37% under the baseline, 143 s to go), every mate certified first ask 10:30 run 47: 4/4, 819 s (line_green nudge-recovered). Morning stops fixed: F/T glitch zero (median re-take), protective stop from the marker fallback (removed: re-measure or stop), my projector shortcut (reverted). Reset ~90 s faster (seeded base fits, GapField spot search). Still audit + chain-of-events page (run_trace.py)"
+    }
+   ]
+  },
+  {
+   "name": "Assemblies",
+   "rungs": [
+    {
+     "id": "FMB1",
+     "title": "FMB1 hands-off",
+     "status": "done",
+     "note": "3/3 cycles 10-18, base moved 10-20"
+    },
+    {
+     "id": "FMB3",
+     "title": "FMB3 onboarded + assembled",
+     "status": "done",
+     "note": "4/4 seated 10-20 (lines nudged, forks 0.6 mm from CAD)"
+    },
+    {
+     "id": "FMB2",
+     "title": "FMB2 onboarded",
+     "status": "next",
+     "note": "10-23 operator: deferred - final validation after the FMB1 milestones. | onboard_check: grasp depth entries missing"
+    },
+    {
+     "id": "LOOP3",
+     "title": "FMB3 disassemble + reassemble loop",
+     "status": "next",
+     "note": "10-23 operator: deferred - final validation after the FMB1 milestones. | paused 10-20 for M3a (FMB3 fully seated). cycles 1-4 done 4/4, none clean. Cycle 4 added: program-drop recovery, CAD-fit read limits, aim by interlocked seated parts (fork_yellow first attempt). Cycle 5 = first with every fix from the start"
+    }
+   ]
+  },
+  {
+   "name": "Vision",
+   "rungs": [
+    {
+     "id": "HE1",
+     "title": "Hand-eye refit (markers, top-down)",
+     "status": "done",
+     "note": "10-20: 2.8 -> 1.2 mm spread"
+    },
+    {
+     "id": "HELD",
+     "title": "Base read with the part in hand",
+     "status": "done",
+     "note": "view shifted so the held part clears the base"
+    },
+    {
+     "id": "GLARE",
+     "title": "Seat check out of the glare",
+     "status": "done",
+     "note": "close, tilted 25 deg, vs the base-top plane"
+    },
+    {
+     "id": "ICP",
+     "title": "Base pose from CAD-to-depth fit",
+     "status": "done",
+     "note": "base_icp.py: 1.3-1.5 mm rms per view"
+    },
+    {
+     "id": "HE2",
+     "title": "Hand-eye refit from CAD fits over tilted views",
+     "status": "done",
+     "note": "mount already at the floor: 6-dof CAD fits agree to 1.8 mm median over 11 views; refit not needed. The 11 mm was a 4-dof fit forcing a 0.9 deg-pitched base flat"
+    },
+    {
+     "id": "BASEFIT",
+     "title": "Base read = 6-dof CAD fit (BASE_FROM=icp)",
+     "status": "done",
+     "note": "startup, between parts, before insert; 1.2 mm rms live"
+    },
+    {
+     "id": "DEPTHLAT",
+     "title": "Depth timing: how long after the arm stops is depth reliable",
+     "status": "done",
+     "note": "frames taken while moving are ~10 mm off and no time shift fixes them; after the stop they are right at once; they arrive 150 ms (p90 650 ms) late. Rule: frames stamped >= 0.25 s after the TCP stopped (no fixed sleeps); immediate reads = reads 3 s later within 0.2 mm. Left: a 1-4 mm per-view bias"
+    },
+    {
+     "id": "SIGMA",
+     "title": "Fused estimator INSIDE aruco_camera_localizer -> VisionPose",
+     "status": "active",
+     "note": "v1 in the localizer package (fused_estimator.py, af6c3a2+): base3 = 6-dof base read within 0.4 mm; loose parts refine at ~1.2 mm rms; seated parts rejected (joint multi-object fit next); per-part bias file + sigma from repeatability next; replay not consuming it yet"
+    },
+    {
+     "id": "DTILT",
+     "title": "Depth tilt bias in the seat views",
+     "status": "active",
+     "note": "10-21: same static base1 read by the 6-dof CAD fit from 12 views (top-down z0.52/0.60 x yaw 0/+-60, tilted 20/30 from +-x/-y; 0.9-1.3 mm rms each): xy spread median 2.1 max 5.1 mm, yaw 0.94 deg, z 6.5 mm; tilted views worst (y -439..-449). A rigid 6-dof mount correction does not help (leave-one-out 2.7 -> 2.7 mm): not a hand-eye offset - depth intrinsics or arm kinematics next. Until fixed: compare reads from the same view geometry, top-down certification only; the touch insert absorbs the residual. Top-down base views agree with the arm on tilt (base1 ~0.5 deg toward +x). Survey: ablations/logs/handeye_icp/20261021_200144. CLEARS AT: seated end heights within +-1 mm in every view."
+    },
+    {
+     "id": "SAMEFRAME",
+     "title": "Aim from the base markers in the SAME frame as the part",
+     "status": "done",
+     "note": "10-22 00:13 CLEARED: u_brown seated by the pipeline on the free base1 (yaw 20 deg), no operator step - servo (same-frame marker pose, 2.5 mm over the rim) (4.3, 3.0) -> (0.1, 0.0) mm in one move, dip grid entered at (-0.5, +0.9) mm on dip 17 (same residual as by hand -> SERVO_BIAS), drive-mate seated, ExecuteMate placed=true; 9.5 min. | 10-21 23:50: u_brown seated on the free base1 (yaw 26 deg) by hand-driven observe->move->observe (scripts/manual_loop): base pose from its 2 visible markers in the hover frame (tilt from the chain, yaw searched, translation solved: 1.6 px, repeats 0.3 mm / 0.1 deg), part = its outline over bare table, one move (-4.6, 9.2) -> (0.0, -0.4) mm, then a 0.5 mm dip grid within 1.5 mm entered on dip 17/19, +1.06 mm of the seat at 6 N. The hover servo's target (CAD fit at 0.56 m projected at 0.29 m) carries hand-eye rotation error x 0.27 m: it reported 0.1 mm / 0.3 deg with the part ~5 mm / 2 deg off. NEXT: hover_servo uses the same-frame marker pose; free-base insert = the 0.5 mm dip grid (no spiral: 9 N carries the base, 1.5 N does not slide). CLEARS AT: u_brown seated by the pipeline on the free base, no operator step."
+    }
+   ]
+  }
+ ]
+}
