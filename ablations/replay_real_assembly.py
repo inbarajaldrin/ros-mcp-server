@@ -1978,6 +1978,9 @@ def close_base_read(obj, base, observed_base, held_q, grasp_id, say, log_fh=None
 SERVO_MEASURED: dict = {}         # obj -> did the last hover_servo take a reading
 
 
+LAST_TRACK_READ = {}            # the hover servo's in-hand base read (with the turned wrist)
+
+
 def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=None):
     """Free base, one-node: bring the held part over its seat before the insert (AR3: the call drive-mate's align step
     makes). From the last MEASURED base: the in-hand base re-read, then by route - a prismatic part turns to the base
@@ -1986,16 +1989,23 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
     Returns {aim_base, measured_base, held_quat, tcp_quat (the flange after a wrist turn, else None), route}."""
     from compliant_insertion_studio.wrapper.align_at_hover import rel_yaw_error, turn_wrist
     out = dict(aim_base=None, measured_base=None, held_quat=held_quat, tcp_quat=None, route='')
-    ob = track_base_in_hand(base, measured_base, say, log_fh, held_obj=obj)
-    out['measured_base'] = ob
-
-    def _tcp_q():
-        return (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
     try:
         from primitives.translate_object import PRISMATIC_ROUTE_OBJECTS as _PRISM
     except Exception:
         _PRISM = ()
     mode = os.environ.get('HOVER_ALIGN', 'servo')
+    marker_route = mode == 'servo' and obj not in _PRISM and not seated_under(base, obj)
+    if marker_route:
+        # the marker servo turns the wrist to this base's yaw and re-reads the base in hand with the turned wrist (the
+        # read it projects with): a read here first, before the turn, only fed that turn (run 34: ~15 s per U part)
+        ob = measured_base
+        LAST_TRACK_READ.pop('pose', None)
+    else:
+        ob = track_base_in_hand(base, measured_base, say, log_fh, held_obj=obj)
+    out['measured_base'] = ob
+
+    def _tcp_q():
+        return (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
     if mode == 'servo' and obj in _PRISM:
         # the prismatic route searches for itself; the servo aim (a +-2.5 mm dip grid needs it) only misleads it:
         # 10-22 05:17 line_green's outline fit broke (140 px), its 'best reading' moved the aim 6 mm and the bar stopped
@@ -2051,6 +2061,8 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
         out['route'] = 'marker servo'
         ob0_, hq0_ = ob, held_quat
         ob, hq_ = hover_servo(obj, base, ob0_, hq0_, grasp_id, say, log_fh)
+        if LAST_TRACK_READ.get('pose') is not None:
+            out['measured_base'] = LAST_TRACK_READ['pose']           # the servo's in-hand read: drive-mate's measured base
         if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
             out['route'] = 'marker servo -> depth servo'
             say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
@@ -2135,6 +2147,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     # the base read again WITH the turned wrist: the servo projects it from the hover with this same orientation, so the
     # hand-eye's translation error cancels between the read and the projection
     observed_base = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)
+    LAST_TRACK_READ['pose'] = observed_base
     (bx, by, bz), bq = observed_base
     tcp = (snapshot_robot_state().get('tcp') or {})
     pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=grasp_id, base_world_xyz=[bx, by, bz],
