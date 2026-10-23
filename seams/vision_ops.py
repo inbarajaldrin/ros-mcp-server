@@ -217,9 +217,9 @@ def certify_many(mates):
             # a seated u_orange (flat by touch, ends +0.1 / -0.2 mm) read +0.89 / -1.79 and +2.38 / -0.16 mm from two
             # views a minute apart (10-22 11:50) - the centre height held within 1.6 mm
             from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
-            judge_ends = wedge_possible(base, obj)
-            ev['ends_judged'] = judge_ends
-            inside = bool(abs(z_err) <= lim_z and (not judge_ends or all(abs(e) / 1000.0 <= lim_z for e in ends)))
+            from seams.acceptance import seat_inside          # the same rule the planner's seat recovery stops on
+            ev['ends_judged'] = wedge_possible(base, obj)
+            inside, ev['why'] = seat_inside(base, obj, z_err, ends)
             method = 'both' if xy_seen else 'depth_seat_check'
             ev['verdict'] = ('inside' if inside else 'outside') + ' (xy implied by seat depth)'
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],

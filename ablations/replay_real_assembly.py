@@ -2605,13 +2605,29 @@ NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real
                                    # step 1 missed the bar entirely (operator, 2026-10-15)
 
 
+def _seat_check_accepted(obj, ob, **kw):
+    """seat_check.check, passing only what ExecuteMate would certify, one read-sigma inside its band (seams.acceptance:
+    one rule for both - attempt 24 stopped its recovery at an end +2.0 mm the certifier then refused)."""
+    from seat_check import check as _check
+    res = _check(obj, ob, **kw)
+    if res.get('ok') and res.get('height_err_mm') is not None:
+        from seams.acceptance import margin_m, seat_inside
+        inside, why = seat_inside(kw.get('base') or RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0,
+                                  res.get('end_heights_mm') or [], margin=margin_m())
+        if not inside:
+            res = dict(res, ok=False, acceptance=why)
+            print(f"  [seat-check] {obj}: seat check passes it, the certifier would not ({why}) -> recovery goes on",
+                  flush=True)
+    return res
+
+
 def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
     """Push a tilted bar's raised end along its axis into its slot (operator's method): closed
     fingers lowered beside the high end from safe height, then ONE guarded push toward the slot
     that stops at NUDGE_MAX_FORCE_N — the bar slides while it is free and the force rises once it
     is blocked (seated against the pocket end, or stuck). Depth re-check after every try; the next
     try starts from the new measurement. The base is re-fitted by every check (7th-axis creep)."""
-    from seat_check import check
+    check = _seat_check_accepted
     from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
     base = [ob]
     f = res.get('face') or {'cx': 0.0, 'cy': 0.0, 'z': NUDGE_PAD_Z_BASE_M, 'long_axis': 'y'}
@@ -2708,7 +2724,7 @@ def press_high_edge(obj, ob, say, out_dir) -> bool:
     MECHANICALLY — tap both edges at 3 N — press only that edge at <= 5 N, re-check. No guessing:
     if the edges read the same there is no roll and it stops."""
     from tap_check import tap_once
-    from seat_check import check
+    check = _seat_check_accepted
     from seat_check import TOP_FACE as _TF
     across_x = _TF[(obj, RUN_BASE['name'])].get('long_axis', 'y') == 'y'          # edges lie across the long axis
     off = lambda s: dict(offset_x_mm=s * EDGE_OFFSET_MM) if across_x else dict(offset_y_mm=s * EDGE_OFFSET_MM)
@@ -2759,7 +2775,7 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
 def _seat_check_and_reseat(obj, state, args, say) -> bool:
     """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
     grasp (the pose the insert released it from), and insert it again. Fails closed."""
-    from seat_check import check
+    check = _seat_check_accepted
     from disassemble import seat_grasp, SEAT_EE_QUAT, HOVER_DZ
     ob = getattr(args, 'observed_base', None)
     if ob is None:
