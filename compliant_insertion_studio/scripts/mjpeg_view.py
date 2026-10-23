@@ -173,6 +173,8 @@ figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
 <script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
 <script>
 let since=-1;const log=document.getElementById('log');
+const q=new URLSearchParams(location.search).get('fps');
+if(q)document.querySelectorAll('#views img').forEach(im=>im.src=im.getAttribute('src')+'?fps='+encodeURIComponent(q));
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}
 function add(e){
@@ -224,10 +226,16 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path.startswith('/stream'):
             try:
-                i = int(self.path.split('/')[2]) if self.path.count('/') >= 2 and self.path.split('/')[2] else 0
+                pth = self.path.split('?')[0]
+                i = int(pth.split('/')[2]) if pth.count('/') >= 2 and pth.split('/')[2] else 0
             except ValueError:
                 i = 0
             i = min(max(i, 0), len(TOPICS) - 1)
+            from urllib.parse import parse_qs, urlparse
+            try:                                            # ?fps= per viewer, at most --fps (the cell's own screen: 1)
+                fps = min(a.fps, max(0.2, float((parse_qs(urlparse(self.path).query).get('fps') or [a.fps])[0])))
+            except ValueError:
+                fps = a.fps
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
             self.end_headers()
@@ -237,7 +245,7 @@ class H(BaseHTTPRequestHandler):
                     if jpg:
                         self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
                                          + str(len(jpg)).encode() + b'\r\n\r\n' + jpg + b'\r\n')
-                    time.sleep(1.0 / a.fps)
+                    time.sleep(1.0 / fps)
             except (BrokenPipeError, ConnectionResetError):
                 return
         if a.transcript:
