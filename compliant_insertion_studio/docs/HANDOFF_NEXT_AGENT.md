@@ -2,12 +2,52 @@
 
 > Read this **first.** Then route to the right doc based on what you're being asked to do.
 >
-> Date of last update: **2026-10-20** (OptiPlex cell; see the 2026-10-20 section first). The 2026-05-07 architecture below still
+> Date of last update: **2026-10-23** (OptiPlex cell; see the 2026-10-22/23 section first). The 2026-05-07 architecture below still
 > stands; 2026-08-16 changed the branch and bringup path; 2026-10-14 fixed the grasp depth and
 > added robot self-disassembly, a hands-off loop and depth seat checking; 2026-10-15 made the loop
 > robust to the 7th-axis slider, fixed line_green's slot aim and scripted every recovery;
 > **2026-10-18: 3 consecutive hands-off cycles (disassemble + assemble) passed** — see
 > "State of the system" and the runbook under "Run commands".
+
+## 2026-10-22/23 — FMB1 hands-off through the seams, 968 -> 687 s
+
+**State:** FMB1 assembles hands-off on the free base through vision -> drive-mate -> ExecuteMate; every mate is
+certified. Runs 34-44 (10-23 03:26-08:48): 968 / 944 / 880 / 919 / 829 / 854 / 850 / 705 / 793 / 687 s
+(`ablations/cycle_time.py <replay_*.timing.jsonl>`; baseline 1088, TGOAL 544). Stops in that stretch: run 38
+(u_brown jammed +20 mm x3, unexplained, next pick seated) and run 40 (certifier refusal, now recovered automatically).
+
+**Run one cycle** (reset + base push + timed run; the seam servers must be up - vision_server, grip_adapter,
+drive_mate_server, execute_mate_server, `python3 -u -m seams.<name>`, logs /tmp/<name>.log):
+```bash
+export FMB_LAYOUT=fmb1_home_2026_10_21 BASE_FROM=icp NO_AIM_BIAS=1 PRE_INSERT_READ=off FOLLOW_YAW=0
+J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
+for p in inverted_u_yellow line_green u_orange; do python3 -u ablations/disassemble.py --assembly-json $J --only $p --to-free-spot; done
+python3 -u ablations/disassemble.py --assembly-json $J --only u_brown --to-staging
+python3 -u ablations/move_base.py --base base1 --to 141 -482 19 --max-pushes 10
+SEAMS_DRIVE=1 SEAMS_CERTIFY=1 python3 -u ablations/replay_real_assembly.py --assembly-json $J --part-at-staging
+```
+(the replay with `--part-at-staging` expects `ablations/logs/placed_parts.json` to name u_brown at (-0.32, -0.5)).
+
+**What changed (see `git log` 10-22..23 for the evidence in each message):**
+- u_orange's clear-height servo: a measured 2x2 response matrix (`seams/servo_law.py`), 6 rounds -> 2.
+- Servo, depth-servo, hover and view moves in process, timed by distance (`_move_unless_there`, SERVO_INPROC).
+- D415 projector held off through each servo's colour-only stretch (`_emitter_hold`): it was a ros2-CLI toggle x8/align.
+- Certify: base fit seeded by the saved read (`seams/vision_ops.pose`); ExecuteMate judges a bar's ENDS from a fresh
+  tap map when one exists (depth reads line_green's ends ~+2.5 mm high); a not_at_seat refusal on a wedge-prone part
+  taps it and re-certifies.
+- line_green: the touch insert no longer calls a no-contact descent 'in' (its rim is only 7 mm over the seat); the
+  depth servo's far edge is taken by its MAD-checked median; when the base cannot be re-read in hand, the held part's
+  outline over bare table measures the grip offset (`held_axial_correction`, along + across). It now seats from the
+  insert. Nudge-first / bounded nudge / taps remain the recovery.
+- Safety: press guards 4.0 N (a 4.5 N guard peaked at 5.2 N), nudge bounded at the seated CAD end, program-drop
+  re-send retries, move_base escalates a push that did not move the base.
+
+**Gotchas:** the seam servers do NOT inherit the replay's environment - restart one with any flag its child must see
+(DSERVO_ROBUST, etc.). `pgrep -f` self-matches its own shell: check by PID. The Mac (WhatsApp route) sleeps.
+
+**Open:** TGOAL needs ~143 s more - drive-mate still time (35-46 s per part: in-hand base ICP ~7 s, frames, wrist
+turns), per-step primitive processes (move_to_safe_height x8, control_gripper x8, ~25 s), depth picks (~10 s each).
+line_green's across error (~2.5 mm) varies run to run (not the grip alone). Run 38's u_brown jam.
 
 ## 2026-10-20 (long day) — FMB3 onboarded, base free, vision tied to CAD
 
