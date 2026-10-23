@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO))
 from seams import servo_law as L  # noqa: E402
 
 L.TURN_AND_STEP = False          # the logs were made by the law without it
+L.SERVO_MAX_YAW_DEG = 4.0        # ...and with the 4 deg yaw cap (6 since run 28)
 
 import re  # noqa: E402
 
