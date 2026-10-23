@@ -55,7 +55,13 @@ def seat_inside(base: str, obj: str, z_err_m: float, ends_mm=(), margin=0.0):
     if abs(z_err_m) > lim:
         return False, f'centre {1000 * z_err_m:+.2f} mm outside +-{1000 * lim:.1f} mm'
     if ends_mm and wedge_possible(base, obj):
-        worst = max(ends_mm, key=abs)
-        if abs(worst) / 1000.0 > lim:
-            return False, f'an end at {worst:+.2f} mm outside +-{1000 * lim:.1f} mm (the part can wedge here)'
+        # the ends against the part's OWN measured centre (the centre is judged absolutely above): a wedge lifts one end
+        # relative to the rest, while the depth view's bias lifts the whole part (line_green: seated bars read ends within
+        # 1.63 mm of their centre over 40 readings, wedged ones 3.9-4.5 mm; on an absolute band the bias alone pushed
+        # seated ends to +2.0..2.7 mm and the certifier refused seated bars, 10-23 runs 40/41/48/50)
+        c_mm = 1000 * z_err_m
+        worst = max(ends_mm, key=lambda e: abs(e - c_mm))
+        if abs(worst - c_mm) / 1000.0 > lim:
+            return False, (f'an end at {worst:+.2f} mm is {worst - c_mm:+.2f} mm from the centre ({c_mm:+.2f}), outside '
+                           f'+-{1000 * lim:.1f} mm (the part can wedge here)')
     return True, f'within +-{1000 * lim:.1f} mm'

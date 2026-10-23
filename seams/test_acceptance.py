@@ -12,10 +12,17 @@ def test_band_is_the_graphs_plus_two_sigma():
     assert abs(lim_z_m('base1') - 0.002) < 1e-12 and lim_z_m('no_such_base') is None
 
 
-def test_attempt_24_line_green_keeps_recovering():
-    """end +2.0 mm: inside the certifier's band (by 0), not inside the recovery's (one sigma in) - one more tap."""
-    assert seat_inside('base1', 'line_green', 0.00072, [2.0, -0.56])[0]
-    ok, why = seat_inside('base1', 'line_green', 0.00072, [2.0, -0.56], margin=margin_m())
+def test_ends_judged_against_the_centre():
+    """10-23: a bar's ends are judged against its own measured centre - depth lifts the whole bar (seated: ends within
+    1.63 mm of the centre over 40 readings), a wedge lifts one end (3.9-4.5 mm). attempt 24's +2.0 / -0.56 at a +0.72
+    centre is a seated bar (both ends 1.28 mm off it); run 48's +2.39 end at +1.26 too."""
+    assert seat_inside('base1', 'line_green', 0.00072, [2.0, -0.56], margin=margin_m())[0]
+    assert seat_inside('base1', 'line_green', 0.00126, [2.39, 0.1])[0]
+
+
+def test_a_wedged_end_still_fails():
+    """one end lifted relative to the rest: an end 3.0 mm over a centre still inside the band is refused."""
+    ok, why = seat_inside('base1', 'line_green', 0.0015, [4.5, -1.2])
     assert not ok and 'end' in why
 
 
