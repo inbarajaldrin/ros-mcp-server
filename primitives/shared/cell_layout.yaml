@@ -15,7 +15,7 @@
 # Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
 # only the clear area. Add a layout instead of editing one that a past run used.
 
-active: fmb1_parked_2026_10_21
+active: fmb1_home_2026_10_21   # 10-23: every run sets FMB_LAYOUT=fmb1_home_2026_10_21; the default now matches
 
 layouts:
   # operator 2026-10-21 16:15: scene reset by hand - base1 empty near home (read (0.032, -0.450) from the
