@@ -98,6 +98,12 @@ def log_entries(since):
             continue
         m, ts = d.get('message') or {}, _local(d.get('timestamp'))
         c = m.get('content')
+        at = d.get('attachment') if isinstance(d.get('attachment'), dict) else {}
+        if d.get('type') == 'attachment' and at.get('type') == 'queued_command' and \
+                (at.get('origin') or {}).get('kind') == 'human' and at.get('prompt'):
+            # a message typed while the session was busy: recorded as a queued command, not a user record (operator 10-23)
+            out.append({'k': 'user', 't': ts, 'x': at['prompt']})
+            continue
         if d.get('type') == 'user' and isinstance(c, str):
             if '<task-notification>' in c:
                 ev = c.split('<event>')[1].split('</event>')[0] if '<event>' in c else 'background event'
@@ -172,7 +178,7 @@ figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
 <script src='https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js'></script>
 <script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
 <script>
-let since=-1;const log=document.getElementById('log');
+let since=-1;const log=document.getElementById('log');const recentUser=[];   // a message typed while busy is recorded twice
 const q=new URLSearchParams(location.search).get('fps');
 // an MJPEG stream through the proxy can stall or be cut, and an <img> never reconnects by itself (operator 10-23: the
 // views froze until a reload): reconnect each stream every 40 s, on an error, and when the tab comes back into view
@@ -191,6 +197,7 @@ function add(e){
     g.querySelector('summary').textContent=e.x.slice(0,90)+(g.n>1?'  (+'+(g.n-1)+' more)':'');return}
   if(e.k==='event'){const d=document.createElement('div');d.className='event';
     d.innerHTML=esc(e.x)+"<span class='ts'>"+e.t+"</span>";log.appendChild(d);return}
+  if(e.k==='user'){if(recentUser.includes(e.x))return;recentUser.push(e.x);if(recentUser.length>4)recentUser.shift()}
   const r=document.createElement('div');r.className='row '+e.k;
   r.innerHTML="<div class='bubble md'>"+md(e.x)+"</div><div class='ts'>"+e.t+"</div>";log.appendChild(r)}
 async function poll(){
