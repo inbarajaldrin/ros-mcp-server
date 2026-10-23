@@ -2057,6 +2057,24 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
     return out
 
 
+GRASP_DEPTH_MEAS_MIN_M = 0.003   # a servo touchdown this far over the CAD rim is the grasp depth, not noise ...
+GRASP_DEPTH_MEAS_MAX_M = 0.012   # ... and up to this (more is a part on something else - the yellow met line_green's top +18 mm)
+GRASP_DEPTH_FIX = {}             # obj -> depth correction (m) measured this grasp; drive_align reports it to drive-mate
+
+
+def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
+    """A servo move, skipped when the arm is already there (within 0.3 mm, same orientation): the 10-22 motion trace
+    counted 15 servo moves to exactly the previous target (hover from the clear height = clear, up for a turn, done) at
+    ~4 s each."""
+    tcp = snapshot_robot_state().get('tcp') or {}
+    if (tcp.get('xyz') and tcp.get('quat_xyzw') and np.linalg.norm(np.asarray(tcp['xyz']) - np.asarray(xyz, float)) < 0.0003
+            and abs(float(np.dot(tcp['quat_xyzw'], q))) > 0.99999):
+        return {'result': 'success', 'skipped': 'already there'}
+    return run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                           *[f"{float(v):.5f}" for v in xyz], '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
+                           *extra], label=label, timeout_s=60, log_fh=log_fh)
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -2139,18 +2157,12 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     for k in range(SL.SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
         if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
-            run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{cur[0]:.5f}",
-                            f"{cur[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                           label=f'servo up {k}', timeout_s=60, log_fh=log_fh)
+            _move_unless_there((cur[0], cur[1], z_clear), q, f'servo up {k}', log_fh)
             if _SAFETY_STOP:
                 return observed_base, held_q
-        r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                            f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                           label=f'servo clear {k}', timeout_s=60, log_fh=log_fh)
+        r = _move_unless_there((xy[0], xy[1], z_clear), q, f'servo clear {k}', log_fh)
         if r.get('result') != 'failure':
-            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                                f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
-                                '--max-force', '4', '--min-duration', '2'], label=f'servo hover {k}', timeout_s=60, log_fh=log_fh)
+            r = _move_unless_there((xy[0], xy[1], z_meas), q, f'servo hover {k}', log_fh, extra=('--max-force', '4', '--min-duration', '2'))
         if r.get('result') == 'failure' and r.get('contact') and not _SAFETY_STOP:
             # touched down before the measuring height (10-22 12:05, u_orange twice at ~4.5 N: the grasp left it hanging
             # lower than the chain) - the image comparison projects the target at whatever height we are, so measure
@@ -2164,6 +2176,22 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 law.measuring_low()
                 say(f"  [servo] {obj}: touched down {1000*(z_meas - 0.002 - rim_z):+.1f} mm over the CAD rim - measuring "
                     f"from 2 mm above the contact")
+                # the touchdown MEASURES the grasp depth: the part hangs that much lower in the jaws than the chain says.
+                # Carry it everywhere the depth matters - the seat and rim heights here (the image projects the target
+                # at the part's real lift), and the insert (drive_align reports it; drive-mate inserts with it).
+                # Attempt 26 (10-22 18:01): u_orange touched down +7.4 mm; the servo projected at the chain's lift and
+                # oscillated (+10.6 -> +1.1 -> -3.0 -> +5.1 mm), the insert's 61 probes all met the rim +7.2 mm high
+                # and its rim-measured depth fix (capped at 6 mm) ignored it.
+                dz_ = (z_meas - 0.002) - rim_z
+                if GRASP_DEPTH_MEAS_MIN_M < dz_ <= GRASP_DEPTH_MEAS_MAX_M and obj not in GRASP_DEPTH_FIX:
+                    from primitives.shared.config import held_tool_offset_for
+                    d0 = float(held_tool_offset_for(obj)[2])
+                    os.environ['GRASP_TOOL_OFFSET_M'] = f"{d0 + dz_:.5f}"
+                    GRASP_DEPTH_FIX[obj] = dz_
+                    st = st + np.array([0.0, 0.0, dz_]); rim_z += dz_
+                    z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
+                    say(f"  [servo] {obj}: grasp depth {1000*d0:.1f} -> {1000*(d0 + dz_):.1f} mm (measured by the touchdown); "
+                        f"seat and rim raised {1000*dz_:+.1f} mm")
         if r.get('result') == 'failure':
             say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})")
             if _SAFETY_STOP:
@@ -2186,9 +2214,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
             z_meas = z_clear
             law.measuring_from_clear()                 # the reading moves ~2.4 mm per mm of step from there
-            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                                f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                               label=f'servo up to measure {k}', timeout_s=60, log_fh=log_fh)
+            r = _move_unless_there((xy[0], xy[1], z_clear), q, f'servo up to measure {k}', log_fh)
             if _SAFETY_STOP:
                 return observed_base, held_q
             _emitter(False)
@@ -2222,9 +2248,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         if isinstance(act, SL.Stop):
             say(f"  [servo] {obj}: {act.why} - more than the reads can be off, stopping the servo"); break
         if isinstance(act, SL.Turn):
-            run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                            f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                           label=f'servo up for turn {k}', timeout_s=60, log_fh=log_fh)   # vertical: xy is where we measured
+            _move_unless_there((xy[0], xy[1], z_clear), q, f'servo up for turn {k}', log_fh)   # vertical: xy is where we measured
             if _SAFETY_STOP:
                 return observed_base, held_q
             if turn_wrist(act.deg):
@@ -2241,9 +2265,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if isinstance(out, SL.Aim) and out.overshot:
         say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*out.overshot[0]:+.1f}, "
             f"{1000*out.overshot[1]:+.1f}) mm at gain {out.overshot[2]:.2f}")
-    run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
-                    f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                   label='servo done: clear', timeout_s=60, log_fh=log_fh)
+    _move_unless_there((xy[0], xy[1], z_clear), q, 'servo done: clear', log_fh)
     SERVO_MEASURED[obj] = law.final_reading is not None
     if isinstance(out, SL.Stop):
         say(f"  [servo] {obj}: {out.why} - not applied")

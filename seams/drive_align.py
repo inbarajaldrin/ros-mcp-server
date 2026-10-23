@@ -46,7 +46,8 @@ def main():
         return None if p is None else [list(map(float, p[0])), list(map(float, p[1]))]
     out = dict(aim_base=pose(al['aim_base']), measured_base=pose(al['measured_base']),
                held_quat=None if al['held_quat'] is None else list(map(float, al['held_quat'])),
-               route=al['route'], measured=bool(rr.SERVO_MEASURED.get(a.obj)), safety=rr._SAFETY_STOP or '')
+               route=al['route'], measured=bool(rr.SERVO_MEASURED.get(a.obj)), safety=rr._SAFETY_STOP or '',
+               grasp_depth_fix_m=rr.GRASP_DEPTH_FIX.get(a.obj))   # the servo's touchdown measured the grasp depth
     print('__ALIGN__ ' + json.dumps(out), flush=True)
     return 0 if not rr._SAFETY_STOP else 2
 
