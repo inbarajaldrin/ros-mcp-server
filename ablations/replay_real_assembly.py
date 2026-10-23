@@ -1927,7 +1927,7 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [dservo] {obj}: held part not outlined over the table"); return None
     stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"dservo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
-    tp_outline = _tcp_pose_now()                                     # the outline's frame (the base read moves the arm)
+    tp_outline, hq_outline = _tcp_pose_now(), list(held_q)           # the outline's frame (the base read moves the arm)
     try:
         # the held part over bare table, every grasp: where it sits in the hand (camera rigid with the gripper) - the
         # data for measuring a bar's axial grasp error without the base (line_green: 2-4 mm toward -y, 16/19 inserts)
@@ -1961,7 +1961,7 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         return np.array(pr['predicted_tcp_at_seat']['xyz_m'])
     z = TRACK_VIEW_Z
     xy = seat_tcp(_tcp_pose_now()[1], held_q)[:2].copy()
-    yaw_total, rounds, ok = 0.0, [], False
+    yaw_total, rounds, ok, misread = 0.0, [], False, False
     for k in range(DSERVO_ITERS):
         q_now = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')      # keep the orientation, in process
         rr_ = (_move_unless_there((xy[0], xy[1], z), q_now, f'dservo round {k}: over the aim', log_fh) if q_now else
@@ -1981,6 +1981,15 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         rounds.append({'k': k, 'tcp': [tp[0].tolist(), tp[1].tolist()], 'seat_tcp': st.tolist(), 'info': info})
         say(f"  [dservo] {obj} round {k}: {info.get('dxy_mm')} mm, yaw {info.get('yaw_img_deg')} deg, spread "
             f"{info.get('spread_px')} px" + (f" ({info.get('error')})" if d is None else ""))
+        if d is not None and abs(info.get('yaw_img_deg') or 0.0) > SERVO_MAX_YAW_DEG:
+            # a yaw past what the whole servo may turn, read right after the wrist was turned to the base yaw, is the
+            # fit matching something else: line_green read 35.9 / 46.1 deg (runs 51 / 49), its far-edge median then aimed
+            # 2.5 mm off the held part's measured place along x (clean fits agree with it to 0.1 mm, run 47) and run 51
+            # wedged an end +6.7 mm. None of its readings are used.
+            misread = True
+            say(f"  [dservo] {obj}: image yaw {info.get('yaw_img_deg')} deg is past the servo's {SERVO_MAX_YAW_DEG:.0f} deg "
+                f"- a misread fit, its readings not used")
+            break
         far_bad = d is not None and info['spread_px'][1] > DSERVO_SPREAD_YAW_PX
         if (far_bad and DSERVO_ROBUST and (info.get('spread_mad_px') or [99, 99])[1] <= SERVO_MAX_SPREAD_PX):
             # the far edge's columns disagree in std but agree in MAD: its median holds, its slope (the yaw) does not -
@@ -2021,6 +2030,12 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                   open(f"{stem}.json", 'w'), indent=1)
     except Exception:
         pass
+    if not ok and misread and HELD_AXIAL:
+        # the held part's place in the hand, from its outline over bare table (taken above), against this frame's base read
+        c = held_axial_correction(obj, grasp_id, hq_outline, outline, tp_outline, say)
+        if c is not None:
+            say(f"  [dservo] {obj}: aim shifted ({1000*c[0]:+.1f}, {1000*c[1]:+.1f}) mm by the held part's place in the hand")
+            return ((bx + c[0], by + c[1], bz), bq), held_q
     if not ok:
         say(f"  [dservo] {obj}: not converged - caller keeps its aim"); return None
     st = seat_tcp((snapshot_robot_state().get('tcp') or {}).get('quat_xyzw'), held_q)
