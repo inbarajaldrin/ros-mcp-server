@@ -271,6 +271,11 @@ class DriveMateServer(Node):
         part_yaw = float(R.from_quat(held_world).as_euler('xyz')[2])
         held_yaw_off = (np.degrees(part_yaw - tcp_yaw) + 45.0) % 90.0 - 45.0
         env['HELD_YAW_OFFSET_DEG'] = f'{held_yaw_off:.3f}'
+        if align.get('route'):
+            # the align step turned the wrist to the base yaw already: the insert's hover must not turn it again (run 28c:
+            # line_green turned a further -9.09 deg by an Euler 'held yaw' of a part held at pitch 90 - noise - and jammed)
+            env['HOVER_YAW_FIX'] = '0'; env['HELD_YAW_OFFSET_DEG'] = '0'
+            held_yaw_off = 0.0
         # one attempt per goal, a wedged bar held where it stopped: retries and recoveries are the caller's (the
         # replay sets the same two at import)
         env['PRISMATIC_MAX_RETRIES'] = '1'; env['PRISMATIC_HOLD_IF_WEDGED'] = '1'

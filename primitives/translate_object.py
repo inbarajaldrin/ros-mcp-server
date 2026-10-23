@@ -595,7 +595,10 @@ HOVER_HEIGHT = 0.15  # Height to hover above base before descending
 MAX_HOVER_YAW_FIX_DEG = 10.0  # larger residuals mean a wrong chain, not a base yaw — leave them
 # Base yaw only (see the hover). Off -> the wrist stays at the deterministic rotate's cardinal yaw;
 # yellow then failed 6/6 (2026-10-15), so it is on.
-HOVER_YAW_FIX = True
+HOVER_YAW_FIX = os.environ.get('HOVER_YAW_FIX', '1') == '1'
+# drive-mate sets HOVER_YAW_FIX=0 when its align step already turned the wrist to the base yaw (10-22 run 28c: the hover
+# turned line_green a further -9.09 / +3.10 deg on top of it - an Euler 'held yaw' of a part held at pitch 90 deg is
+# noise - and the bar jammed on the U tops twice; before, the same noise happened to fall outside 10 deg and skip it)
 ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
