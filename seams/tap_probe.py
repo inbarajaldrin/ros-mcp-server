@@ -46,6 +46,7 @@ class Point:
     xyz_top: np.ndarray        # the seated CAD top face here, world (m)
     err_m: Optional[float] = None
     blocked: int = 0
+    missed: bool = False         # the descent went to its floor without contact: the tip was not over the part
 
 
 @dataclass
@@ -132,13 +133,20 @@ class Tapper:
     def tap(self, p: Point):
         self.go_over(p)
         err, rec, r, _ = self._descend(p, TAP_N)
-        p.err_m = float(err)
+        # no contact = the descent reached its floor in the air: not a height (run 28c: five taps 'read' -1.45 mm, the
+        # floor, contact False - the tips were beside the bar - and the map called it seated)
+        p.missed = not bool(r.get('contact'))
+        p.err_m = None if p.missed else float(err)
         self._move(self._over(p), duration=0.8)              # straight back up (unguarded: lifting off a contact)
         self.log.append(dict(kind='tap', point=p.name, err_mm=round(1000 * err, 2), contact=bool(r.get('contact'))))
-        return err
+        return p.err_m
 
     def map(self):
-        return {p.name: round(1000 * self.tap(p), 2) for p in self.points}
+        out = {}
+        for p in self.points:
+            e = self.tap(p)
+            out[p.name] = 'missed' if e is None else round(1000 * e, 2)
+        return out
 
     def press(self, p: Point):
         """Press p at <= PRESS_N; the verdict from where it stopped and how the force built."""
@@ -150,8 +158,13 @@ class Tapper:
         # travel under load: contact-to-stop time x the commanded speed (constant-speed descent)
         loaded_m = SPEED_M_S * (t_end - t_c) if (t_c is not None and t_end is not None) else 0.0
         moved = (err0 is not None and err0 - err > MOVED_MIN_M) or loaded_m > 2 * MOVED_MIN_M
-        verdict = 'seated' if abs(err) <= self.band_m else ('moving' if moved else 'blocked')
-        p.err_m = float(err)
+        peak = max([dF for _, dF in rec], default=0.0)
+        if peak < CONTACT_N:                                 # never touched: the tip is not over the part
+            verdict = 'missed'
+            p.missed, p.err_m = True, None
+        else:
+            verdict = 'seated' if abs(err) <= self.band_m else ('moving' if moved else 'blocked')
+            p.err_m = float(err)
         if verdict == 'blocked':
             p.blocked += 1
         self._move(self._over(p), duration=0.8)
@@ -161,13 +174,22 @@ class Tapper:
         return verdict
 
     def valid(self, p: Point):
-        return p.err_m is not None and VALID_M[0] <= p.err_m <= VALID_M[1]
+        return (not p.missed) and p.err_m is not None and VALID_M[0] <= p.err_m <= VALID_M[1]
 
     def seated(self):
-        return all(self.valid(p) and abs(p.err_m) <= self.band_m for p in self.points)
+        """Every measured point inside the band, and the middle and (on a bar) both ends among them; a missed point is
+        unknown, not a pass."""
+        need = {'mid', 'end-', 'end+'} & {p.name for p in self.points}
+        meas = [p for p in self.points if self.valid(p)]
+        return need <= {p.name for p in meas} and all(abs(p.err_m) <= self.band_m for p in meas) and \
+            not self.off_part()
 
     def off_part(self):
-        return [p.name for p in self.points if p.err_m is not None and not self.valid(p)]
+        """Points that read a height the part cannot have (another part's top, far below): the pose is off - stop."""
+        return [p.name for p in self.points if (not p.missed) and p.err_m is not None and not self.valid(p)]
+
+    def missed(self):
+        return [p.name for p in self.points if p.missed]
 
 
 def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None):
@@ -183,6 +205,9 @@ def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None
             return True, tp
         if tp.off_part():
             say(f"  [taps] {obj}: taps off the part {tp.off_part()} (the base pose is off) - not pressing")
+            return False, tp
+        if {'mid', 'end-', 'end+'} & set(tp.missed()):
+            say(f"  [taps] {obj}: missed {tp.missed()} - the map cannot judge it, not pressing")
             return False, tp
         cand = [p for p in tp.points if tp.valid(p) and p.err_m > tp.band_m and p.blocked < 2]
         if not cand:

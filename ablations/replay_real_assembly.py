@@ -2806,11 +2806,36 @@ def _seat_by_taps(obj, args, say):
     res = _sc.check(obj, args.observed_base, move=True, out_dir=out_dir, base=RUN_BASE['name'])
     ob = res.get('observed_base') or args.observed_base
     args.observed_base = ob
+    # the taps go where drive-mate last MEASURED the base (its align read, top-down), not the depth re-fit from the
+    # seat check's tilted view: run 28c's taps from that re-fit all landed beside the bar (no contact at any point)
+    ob = getattr(args, 'measured_base', None) or ob
     say(f"  [seat-check] {obj} (depth, for the base and the across error): "
         f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
     ok, tp = tap_recover(obj, ob, RUN_BASE['name'], say)
-    if tp.off_part():
-        return None
+    if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
+        return None                                          # the taps could not judge it: the depth ladder
+    if not ok and any(p.blocked for p in tp.points):
+        # the vertical presses are blocked (an end riding a lip springs back: 22:30 line_green +4.2 -> +2.7 -> +3.8 -> +3.8);
+        # ONE lateral nudge frees it (22:35: depth ends +6.1 -> +0.6, taps then -0.8..-1.1), the taps judge after it -
+        # never a second nudge on a depth reading (attempt 27: three, chasing +1.5-1.9 mm, moved the base ~50 mm)
+        say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
+        prev = os.environ.get('NUDGE_FREE_BASE')
+        os.environ['NUDGE_FREE_BASE'] = '1'
+        global NUDGE_TRIES
+        tries0, NUDGE_TRIES = NUDGE_TRIES, 1
+        try:
+            nudge_into_slot(obj, args.observed_base, res, say, out_dir)
+        finally:
+            NUDGE_TRIES = tries0
+            if prev is None:
+                os.environ.pop('NUDGE_FREE_BASE', None)
+            else:
+                os.environ['NUDGE_FREE_BASE'] = prev
+        ob2 = observe_base_pose(RUN_BASE['name']) or ob       # the push moves a free base: tap where it is now
+        args.observed_base = args.measured_base = ob2
+        ok, tp = tap_recover(obj, ob2, RUN_BASE['name'], say)
+        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
+            return None
     if ok and (res.get('cross') or {}).get('centre_mm') is not None:
         _record_seat_check_error(obj, res)                   # the across error the parts over it follow
     if ok:
