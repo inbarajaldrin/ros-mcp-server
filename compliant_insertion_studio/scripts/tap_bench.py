@@ -39,11 +39,15 @@ def main():
     m = tp.map()
     t1 = time.time()
     print(f"map {m} mm in {t1 - t0:.1f} s ({(t1 - t0) / len(pts):.2f} s/tap)", flush=True)
-    v = tp.press(pts[0])
-    print(f"press on the table: {v} {tp.log[-1]} ({time.time() - t1:.1f} s)", flush=True)
+    v0 = tp.press(pts[0])
+    print(f"press at its seated height: {v0} {tp.log[-1]} ({time.time() - t1:.1f} s)", flush=True)
+    # a point whose seat is 3 mm UNDER the table: the table holds it 3 mm high, the press cannot move it -> blocked
+    low = Point('low', pts[1].xyz_top - np.array([0.0, 0.0, 0.003])); tp.points.append(low); tp.min_z = 0.145
+    v = tp.press(low)
+    print(f"press on the table: {v} {tp.log[-1]}", flush=True)
     T.move([x0, y0, 0.30], [0.0, 1.0, 0.0, 0.0])
     print(json.dumps(tp.log))
-    ok = all(abs(e) < 1.5 for e in m.values()) and v == 'blocked'
+    ok = all(abs(e) < 1.5 for e in m.values()) and v0 == 'seated' and v == 'blocked'
     print('BENCH', 'OK' if ok else 'NOT OK')
     return 0 if ok else 1
 

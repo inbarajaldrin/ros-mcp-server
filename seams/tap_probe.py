@@ -26,7 +26,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 TAP_N = 3.0                  # a measuring tap: contact, not a push (3 N did not move a wedged bar, 10-20)
-PRESS_N = 5.0                # operator's limit for pressing parts in the base
+PRESS_N = 4.5                # the guard trips past it; the peak stays under the operator's 5 N (bench: 5.0 -> 5.12 N)
 OVER_M = 0.003               # the tip waits this far over the highest height seen
 SPEED_M_S = 0.004            # descent speed of taps and presses
 PRESS_BELOW_M = 0.0015       # a press may go this far under the seated top (a cocked part rolls down past it)
@@ -53,6 +53,7 @@ class Tapper:
     band_m: float              # |err| within this = seated here
     log: list = field(default_factory=list)
     press_below_m: float = PRESS_BELOW_M
+    min_z: float = 0.15
 
     @staticmethod
     def for_part(obj, base_pose, base='base1', band_m=None):
@@ -87,7 +88,7 @@ class Tapper:
     def _move(self, xyz, force=None, duration=None, on_sample=None):
         from compliant_insertion_studio.wrapper.touch_insert import _node
         from primitives.move_cartesian import plan_move
-        return plan_move(_node(), list(map(float, xyz)), ('quat', list(Q_DOWN)), max_force=force, min_z=0.15,
+        return plan_move(_node(), list(map(float, xyz)), ('quat', list(Q_DOWN)), max_force=force, min_z=self.min_z,
                          duration=duration, on_sample=on_sample)
 
     def _z(self):
