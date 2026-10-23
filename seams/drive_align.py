@@ -41,8 +41,14 @@ def main():
     rr._TIMING['fh'] = open(REPO / 'compliant_insertion_studio' / 'logs' /
                             f"drive_align_{a.obj}_{_t.strftime('%Y%m%d_%H%M%S')}.timing.jsonl", 'a', buffering=1)
     import compliant_insertion_studio.wrapper.marker_yaw as _my    # the servo's camera reads, timed (logging only)
-    for _fn in ('still_frame', 'base_pose_same_frame', 'socket_shift_world', 'held_outline_px'):
+    for _fn in ('still_frame', 'base_pose_same_frame', 'socket_shift_world', 'held_outline_px', 'base_pose_world'):
         setattr(_my, _fn, rr._timed(getattr(_my, _fn), 'camera', lambda a_, k_, n_=_fn: n_))
+    # the rest of the align's still time (10-23 still audit: ~120 s per run inside drive-mate had no row)
+    import base_icp as _bi
+    _bi.read_icp = rr._timed(_bi.read_icp, 'camera', lambda a_, k_: 'read_icp (in-hand base fit)')
+    import compliant_insertion_studio.wrapper.align_at_hover as _ah
+    _ah.turn_wrist = rr._timed(_ah.turn_wrist, 'move', lambda a_, k_: f'turn_wrist {a_[0] if a_ else ""}')
+    rr.snapshot_robot_state = rr._timed(rr.snapshot_robot_state, 'state', lambda a_, k_: 'snapshot_robot_state')
     os.environ.setdefault('SEAMS_DRIVE', '1')
     measured = (tuple(a.measured[:3]), tuple(a.measured[3:]))
 

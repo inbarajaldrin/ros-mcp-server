@@ -143,9 +143,23 @@ def close_node():
                 rclpy.shutdown()
 
 
+_TFH = {}   # the insert's timing rows (still audit / chain-of-events trace): one row per move
+
+
 def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=None):
     """A straight guarded/unguarded move. In process (one node, primitives.move_cartesian.plan_move) unless
     TOUCH_INPROC=0. duration: exact seconds - given for the short probe moves (<= SHORT_MOVE_M) by distance."""
+    t0 = time.time()
+    try:
+        return _move(xyz, quat, max_force, min_duration, min_z, duration)
+    finally:
+        fh = _TFH.get('fh')
+        if fh is not None:
+            fh.write(json.dumps({'kind': 'touch_move', 't0': t0, 't1': time.time(),
+                                 'label': f"{'guarded' if max_force else 'free'} to z {1000 * float(xyz[2]):.1f}"}) + '\n')
+
+
+def _move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=None):
     if IN_PROCESS:
         from primitives.move_cartesian import plan_move
         return plan_move(_node(), xyz, ('quat', list(quat)), max_force=max_force, min_duration=min_duration or 0.0,
@@ -190,6 +204,7 @@ def main():
     ap.add_argument('--final-base-pos', type=float, nargs=3, required=True)
     ap.add_argument('--final-base-orientation', type=float, nargs=4, required=True)
     a = ap.parse_args()
+    _TFH['fh'] = open(LOGS / f"touch_{a.object_name}_{time.strftime('%Y%m%d_%H%M%S')}.timing.jsonl", 'a', buffering=1)
     from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
     from compliant_insertion_studio.wrapper.cad_geometry import _load_base_top_z_local
     from primitives.shared.config import held_tool_offset_for

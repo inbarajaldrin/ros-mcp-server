@@ -486,10 +486,21 @@ SATURATED_BRIGHTNESS = 230.0     # above: the frame is blown out (10-22 01:55: r
 DARK_EXPOSURE = ('8000', '128')  # manual exposure, gain that restore marker reads with the lights off (dim-light memo)
 
 
+EXPOSURE_RECHECK_S = 60.0
+_EXPOSURE_LAST = {}
+
+
 def ensure_exposure(say=print):
     """Keep the D415 colour exposure usable: blown out -> auto exposure; very dark under auto -> the dark-room manual
-    exposure. Returns the brightness after any change (None if no frame)."""
+    exposure. Returns the brightness after any change (None if no frame). A normal reading under EXPOSURE_RECHECK_S old is
+    reused: the room's light does not swing between the extremes in a minute, and each read is a camera process (~1 s;
+    run 44 spent 9.2 s still on them)."""
+    c = _EXPOSURE_LAST
+    if c.get('b') is not None and time.time() - c['t'] < EXPOSURE_RECHECK_S:
+        return c['b']
     b = camera_brightness()
+    if b is not None and 12 <= b <= SATURATED_BRIGHTNESS:
+        c.update(b=b, t=time.time())
     if b is None or b < 0:
         return b
     def _set(*kv):
