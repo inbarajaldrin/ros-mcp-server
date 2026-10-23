@@ -2621,13 +2621,31 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     except Exception as e:
         pose, info = None, {'error': str(e)}
     say(f"  [depth-pick] {obj}: {json.dumps(info)}")
-    if pose is None:
-        return None
-    if (np.hypot(*info.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M
-            or abs(info.get('turned_deg', 0.0)) > DEPTH_PICK_MAX_TURN_DEG
-            or info.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)):
-        say(f"  [depth-pick] {obj}: fit moved {info['moved_mm']} mm, turned {info.get('turned_deg')} deg on "
-            f"{info.get('n')}/{info.get('n_data')} points - not trusted, markers as before"); return None
+
+    def trusted(pose_, info_):
+        return pose_ is not None and not (
+            np.hypot(*info_.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M
+            or abs(info_.get('turned_deg', 0.0)) > DEPTH_PICK_MAX_TURN_DEG
+            or info_.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info_.get('n_data', 1), 1))
+    if not trusted(pose, info):
+        # re-measure once from the other view height (a different depth sample of the same part) before refusing
+        cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
+        alt = next((z_ for z_ in DEPTH_VIEW_ZS if cur is None or abs(z_ - cur[2]) > 0.02), None)
+        if cur is not None and alt is not None:
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{alt:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                '--min-z', '0.15'], label=f'depth-pick re-measure above {obj} at {alt:.2f} m', timeout_s=60,
+                               log_fh=log_fh)
+            if r.get('result') != 'failure':
+                try:
+                    from part_depth import read as _read
+                    pose, info = _read(obj)
+                except Exception as e:
+                    pose, info = None, {'error': str(e)}
+                say(f"  [depth-pick] {obj} (re-measured at {alt:.2f} m): {json.dumps(info)}")
+    if not trusted(pose, info):
+        say(f"  [depth-pick] {obj}: fit {'failed' if pose is None else 'moved ' + str(info.get('moved_mm')) + ' mm, turned ' + str(info.get('turned_deg')) + ' deg'}"
+            f" - not trusted (no marker fallback)"); return None
     import json as _j
     from primitives.shared.config import _GRASP_POINTS_DIR
     g = next(g_ for g_ in _j.load(open(f'{_GRASP_POINTS_DIR}/{obj}_grasp_points.json'))['grasp_points'] if g_['id'] == gid)
@@ -3514,8 +3532,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             argv += ['--pre-grasp-width', f"{w_:g}"]
         if tool_name == 'move_to_grasp' and os.environ.get('PICK_FROM', 'depth') == 'depth' and not args.dry_run:
             tgt = depth_pick_target(obj, int(kw.get('grasp_id', state.last_grasp_id or 1)), say, log_fh)
-            if tgt is not None:
-                argv += ['--target-xyz', *[f"{v:.5f}" for v in tgt[0]], '--target-xyzw', *[f"{v:.6f}" for v in tgt[1]]]
+            if tgt is None:
+                # no marker fallback (operator 10-23: "better to stop rather than do something harmful"): run 46's pick
+                # fell back to the marker pose - 9-10 mm off at the low hover - and drove a finger onto u_brown at
+                # -105 N (protective stop). No trusted grasp measurement -> no descent.
+                say(f"\n!!! {obj}: no trusted grasp measurement (depth fit) - not picking")
+                return {'result': 'failure', 'error': 'no trusted grasp measurement', 'label': f"{obj}#{step_idx}{tag} {tool_name}"}
+            argv += ['--target-xyz', *[f"{v:.5f}" for v in tgt[0]], '--target-xyzw', *[f"{v:.6f}" for v in tgt[1]]]
         label = f"{obj}#{step_idx}{tag} {tool_name}"
         if tool_name == 'rotate_object' and already_at_target(obj, state.held_quat, base_name):
             # Pass 2 of a 2-pass part: the regrasp already holds it at the target orientation and
