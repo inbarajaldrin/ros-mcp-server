@@ -1831,6 +1831,48 @@ DSERVO_SPREAD_YAW_PX = 20.0     # a yaw slopes the far edge and spreads the fit:
 DSERVO_ITERS = 6
 
 
+HELD_AXIAL = os.environ.get('HELD_AXIAL', '1') == '1'
+HELD_AXIAL_MAX_M = 0.006         # a larger 'offset' is a misread (the play along line_green's pocket is +-1.4 mm)
+HELD_AXIAL_MAD_PX = 3.0
+
+
+def held_axial_correction(obj, grasp_id, held_q, outline, tcp_pose, say):
+    """World xy (m) to move the aim so the held part's CAD grasp point lands on the seat: minus the part's offset along
+    image-y (the far edge vs the CAD part held at its grasp, projected from the TCP through the hand-eye). None when the
+    far edge does not fit (MAD) or the offset is implausible."""
+    try:
+        import cv2
+        from compliant_insertion_studio.wrapper.marker_yaw import _intrinsics
+        from compliant_insertion_studio.wrapper.cad_lookup import load_grasp_offset_in_object
+        from seat_check import X_CAM
+        from handeye_icp_survey import T as _T
+        from grasp_depth import load_mesh, surface_points
+        from primitives.shared.config import held_tool_offset_for
+        tp, tq = np.asarray(tcp_pose[0], float), np.asarray(tcp_pose[1], float)        # the TCP the outline was taken at
+        Rh = R_.from_quat(held_q)
+        centre = tp + R_.from_quat(tq).apply([0, 0, float(held_tool_offset_for(obj)[2])])
+        P = Rh.apply(surface_points(*load_mesh(obj), 0.0015)) + centre - Rh.apply(load_grasp_offset_in_object(obj, int(grasp_id)))
+        K, D = _intrinsics(); Twc = _T(tp, tq) @ X_CAM; Tcw = np.linalg.inv(Twc)
+        Pc = (Tcw[:3, :3] @ P.T).T + Tcw[:3, 3]
+        uv, _ = cv2.projectPoints(Pc.astype(np.float32), np.zeros(3), np.zeros(3), K, D); uv = uv.reshape(-1, 2)
+        dy, zs = [], []
+        for x, y in outline['far']:
+            m = np.abs(uv[:, 0] - x) < 2.5
+            if m.sum() >= 3:
+                i = np.argmin(np.where(m, uv[:, 1], np.inf)); dy.append(y - uv[i, 1]); zs.append(Pc[i, 2])
+        if len(dy) < 8:
+            say(f"  [held-axial] {obj}: far edge out of the projection ({len(dy)} columns)"); return None
+        dy = np.asarray(dy); med = float(np.median(dy)); mad = float(1.4826 * np.median(np.abs(dy - med)))
+        d = Twc[:3, :3] @ np.array([0.0, med * float(np.median(zs)) / K[1, 1], 0.0])     # part - CAD grasp, world
+        say(f"  [held-axial] {obj}: far edge {med:+.1f} px (MAD {mad:.1f}, {len(dy)} columns) from the CAD grasp = "
+            f"({1000*d[0]:+.1f}, {1000*d[1]:+.1f}) mm")
+        if mad > HELD_AXIAL_MAD_PX or np.hypot(d[0], d[1]) > HELD_AXIAL_MAX_M:
+            say(f"  [held-axial] {obj}: not used (MAD > {HELD_AXIAL_MAD_PX} px or > {1000*HELD_AXIAL_MAX_M:.0f} mm)"); return None
+        return np.array([-d[0], -d[1]])
+    except Exception as e:
+        say(f"  [held-axial] {obj}: not measured ({e})"); return None
+
+
 DSERVO_ROBUST = os.environ.get('DSERVO_ROBUST', '0') == '1'   # far edge by its median when only its std is spread (trial)
 
 
@@ -1866,17 +1908,27 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [dservo] {obj}: held part not outlined over the table"); return None
     stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"dservo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
+    tp_outline = _tcp_pose_now()                                     # the outline's frame (the base read moves the arm)
     try:
         # the held part over bare table, every grasp: where it sits in the hand (camera rigid with the gripper) - the
         # data for measuring a bar's axial grasp error without the base (line_green: 2-4 mm toward -y, 16/19 inserts)
         import cv2 as _cv2
-        json.dump({'outline': outline, 'tcp': [list(map(float, v)) for v in _tcp_pose_now()], 'held_q': list(held_q)},
+        json.dump({'outline': outline, 'tcp': [list(map(float, v)) for v in tp_outline], 'held_q': list(held_q)},
                   open(f"{stem}_outline.json", 'w')); _cv2.imwrite(f"{stem}_table.png", img_)
     except Exception:
         pass
     ob = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)   # depth fit, camera over the base
     if ob is None or ob is observed_base:
-        say(f"  [dservo] {obj}: base not re-read in hand"); return None
+        say(f"  [dservo] {obj}: base not re-read in hand")
+        # no base in this frame - the hand still is: the held part's far edge over bare table against the CAD grasp
+        # (camera rigid with the gripper) gives where it sits along image-y (a bar's axis). 10-23: line_green's far end
+        # read 18.3 px (MAD 1.1) past a centred grasp = 2.8 mm toward base -y, the overhang that wedged 16 of 19 inserts
+        c = held_axial_correction(obj, grasp_id, held_q, outline, tp_outline, say) if HELD_AXIAL else None
+        if c is None:
+            return None
+        (bx_, by_, bz_), bq_ = observed_base
+        say(f"  [dservo] {obj}: aim shifted ({1000*c[0]:+.1f}, {1000*c[1]:+.1f}) mm by the held part's place in the hand")
+        return ((bx_ + c[0], by_ + c[1], bz_), bq_), held_q
     (bx, by, bz), bq = ob
     off = float(held_tool_offset_for(obj)[2])
 
