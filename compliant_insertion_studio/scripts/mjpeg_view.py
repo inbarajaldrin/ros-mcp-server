@@ -77,13 +77,13 @@ def _local(iso):
 
 
 def log_entries(since):
-    """Transcript records from byte offset `since` (the last ~3 MB when negative: tool output fills it) as compact entries, and the new
+    """Transcript records from byte offset `since` (the last ~12 MB when negative: tool output and images fill it) as compact entries, and the new
     offset. Only complete lines; thinking, tool results and bookkeeping records are left out."""
     import json
     import os
     out = []
     size = os.path.getsize(a.transcript)
-    start = max(0, size - 3_000_000) if since < 0 else min(since, size)
+    start = max(0, size - 12_000_000) if since < 0 else min(since, size)
     with open(a.transcript, 'rb') as f:
         f.seek(start)
         data = f.read(size - start)
@@ -176,14 +176,14 @@ function add(e){
     let g=log.lastElementChild;
     if(!g||g.tagName!=='DETAILS'){g=document.createElement('details');g.className='tools';g.innerHTML='<summary></summary>';g.n=0;log.appendChild(g)}
     const d=document.createElement('div');d.textContent=e.x;g.appendChild(d);g.n++;
-    g.querySelector('summary').textContent=g.n+(g.n===1?' step':' steps')+' - '+e.x.slice(0,70);return}
+    g.querySelector('summary').textContent=e.x.slice(0,90)+(g.n>1?'  (+'+(g.n-1)+' more)':'');return}
   if(e.k==='event'){const d=document.createElement('div');d.className='event';
     d.innerHTML=esc(e.x)+"<span class='ts'>"+e.t+"</span>";log.appendChild(d);return}
   const r=document.createElement('div');r.className='row '+e.k;
   r.innerHTML="<div class='bubble md'>"+md(e.x)+"</div><div class='ts'>"+e.t+"</div>";log.appendChild(r)}
 async function poll(){
   try{
-    const r=await fetch('/log?since='+since);const j=await r.json();
+    const r=await fetch('log?since='+since);const j=await r.json();
     const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
     j.entries.forEach(add);
     while(log.children.length>500)log.removeChild(log.firstChild);
@@ -227,7 +227,7 @@ class H(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
         if a.transcript:
-            figs = ''.join(f"<figure><img src='/stream/{i}'><figcaption>{t}</figcaption></figure>" for i, t in enumerate(TOPICS))
+            figs = ''.join(f"<figure><img src='stream/{i}'><figcaption>{t}</figcaption></figure>" for i, t in enumerate(TOPICS))
             page = PAGE_SPLIT.replace('__FIGS__', figs).encode()
             self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(page)
