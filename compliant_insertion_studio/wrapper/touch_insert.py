@@ -122,6 +122,19 @@ def _node():
     return _NODE['n']
 
 
+def close_node():
+    """Release the probes' ROS context: a caller that goes on to start its own (seat_check.capture_world calls
+    rclpy.init) must not find one already up (run 29d: 'Context.init() must only be called once' after the taps)."""
+    n = _NODE.pop('n', None)
+    if n is not None:
+        import rclpy
+        try:
+            n.destroy_node()
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
+
+
 def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=None):
     """A straight guarded/unguarded move. In process (one node, primitives.move_cartesian.plan_move) unless
     TOUCH_INPROC=0. duration: exact seconds - given for the short probe moves (<= SHORT_MOVE_M) by distance."""

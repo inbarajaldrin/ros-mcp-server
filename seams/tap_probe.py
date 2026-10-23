@@ -193,6 +193,15 @@ class Tapper:
 
 
 def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None):
+    """tap_recover_ with the probes' ROS context released afterwards (the caller's next camera read starts its own)."""
+    from compliant_insertion_studio.wrapper.touch_insert import close_node
+    try:
+        return tap_recover_(obj, base_pose, base, say, tapper)
+    finally:
+        close_node()
+
+
+def tap_recover_(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None):
     """Map the top, press the highest point not yet blocked twice, re-tap it, repeat; True when every point is inside
     the band. False with the map when presses no longer move it (the caller's other recoveries: nudge, reseat)."""
     tp = tapper or Tapper.for_part(obj, base_pose, base)
