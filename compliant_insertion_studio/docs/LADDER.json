@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 17:42",
+ "updated": "2026-10-22 18:30",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -109,20 +109,20 @@
     {
      "id": "T2",
      "title": "No process start per step",
-     "status": "next",
-     "note": "long-lived worker: one ROS node, primitives run in it (the 3-4.5 s per-step dead time)"
+     "status": "active",
+     "note": "10-22: the touch insert's probes run in ONE process (move_cartesian.plan_move on one node): bench, nothing gripped, 2.35 s/dip vs 11.75; on the arm 61 probes in 150 s (attempt 26). Open: the replay's other primitives still start a process each"
     },
     {
      "id": "T3",
      "title": "Move floors by distance",
-     "status": "next",
-     "note": "2.5 s floor for mm moves -> joint-distance durations with a lower floor; tested with nothing gripped first"
+     "status": "active",
+     "note": "10-22: probe steps/retracts <= 5 mm timed by distance (>= 0.6 s), descents sized to the measured rim; servo moves to where the arm already is skipped. Open: the 2.5 s floor elsewhere"
     },
     {
      "id": "TGOAL",
      "title": "FMB1 wall time halved, same success",
      "status": "next",
-     "note": "CLEARS AT: a full FMB1 run (4/4 seated, verified) whose cycle_time.py wall time is <= 50% of the instrumented baseline, dead time <= 1 s per primitive"
+     "note": "CLEARS AT: a full FMB1 run (4/4 seated, verified) whose cycle_time.py wall time is <= 50% of the instrumented baseline (1088 -> 544 s). 10-22: attempt 23 2386 s -> gate 25 1283 s -> 26/26b ~1000 s projected (u_orange 202, line_green 224, yellow 187, u_brown ~200). Left (arm still): drive-mate's align 60-90 s/part (servo rounds ~6 s each, 2 in-hand base reads), ExecuteMate ~24 s/mate re-measuring every predecessor, line_green's nudge 66 s (and it drags the free base ~18 mm)"
     }
    ]
   },
