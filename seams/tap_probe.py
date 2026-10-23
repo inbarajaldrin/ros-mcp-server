@@ -69,6 +69,13 @@ class Tapper:
     log: list = field(default_factory=list)
     press_below_m: float = PRESS_BELOW_M
     min_z: float = 0.15
+    low_m: Optional[float] = None  # a point down to this far UNDER the seat is seated: the pocket floor stops the part and
+                                   # a press cannot lower it, so the recovery's margin (band_m) is for the high side only.
+                                   # run 52: a level bar tapped -1.38..-1.62 mm, -1.62 under the 1.5 mm band, inside the
+                                   # certifier's 2.0 - "every high point is blocked" stopped the run. None: band_m
+
+    def inside(self, err):
+        return -(self.low_m if self.low_m is not None else self.band_m) <= err <= self.band_m
 
     @staticmethod
     def for_part(obj, base_pose, base='base1', band_m=None):
@@ -124,7 +131,9 @@ class Tapper:
         if band_m is None:
             lim = lim_z_m(base)
             band_m = (lim - margin_m()) if lim is not None else 0.0015
-        return Tapper(P, float(RG2_TIP_CLOSED_M), float(band_m))
+        else:
+            lim = None
+        return Tapper(P, float(RG2_TIP_CLOSED_M), float(band_m), low_m=float(lim) if lim is not None else None)
 
     # -- motion (one node, the touch insert's) --------------------------------------------------------------------
     def _move(self, xyz, force=None, duration=None, on_sample=None):
@@ -211,7 +220,7 @@ class Tapper:
             verdict = 'missed'
             p.missed, p.err_m = True, None
         else:
-            verdict = 'seated' if abs(err) <= self.band_m else ('moving' if moved else 'blocked')
+            verdict = 'seated' if self.inside(err) else ('moving' if moved else 'blocked')
             p.err_m = float(err)
         if verdict == 'blocked':
             p.blocked += 1
@@ -229,7 +238,7 @@ class Tapper:
         unknown, not a pass."""
         need = {'mid', 'end-', 'end+'} & {p.name for p in self.points}
         meas = [p for p in self.points if self.valid(p)]
-        return need <= {p.name for p in meas} and all(abs(p.err_m) <= self.band_m for p in meas) and \
+        return need <= {p.name for p in meas} and all(self.inside(p.err_m) for p in meas) and \
             not self.off_part()
 
     def off_part(self):
