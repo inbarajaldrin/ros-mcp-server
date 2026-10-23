@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 16:55",
+ "updated": "2026-10-22 17:20",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -62,26 +62,26 @@
     {
      "id": "AR1",
      "title": "One aim module (seams.aim)",
-     "status": "active",
-     "note": "5b94f9e module, 2c5d602 wired (build_argv + drive-mate take the Aim; -134 replay lines; golden aims, 159 tests). Gate run attempt 24 running"
+     "status": "done",
+     "note": "5b94f9e + 2c5d602. Gate attempt 24 (17:08): aims as before - u_brown, u_orange first try, line_green 2nd try (prismatic); stopped at mate:02 on a separate fault (seat check passed an end +2.0 mm that ExecuteMate refused: one acceptance rule now, ead152c)"
     },
     {
      "id": "AR2",
      "title": "Insert outcome returned, not re-read",
      "status": "active",
-     "note": "2b3eb91 on branch ar2-insert-outcome: seams.insert_outcome (0 diffs over 400 recorded inserts), drive-mate judges the trace the insert named, replay records seats from drive-mate's result, primitives exit 0 without a result = failure. Merges after AR1's gate run"
+     "note": "merged 8174301: seams.insert_outcome (0 diffs over 400 recorded inserts); drive-mate judges the trace the insert named; seats recorded from drive-mate's result; primitives exit 0 w/o result = failure. Gate: attempt 25"
     },
     {
      "id": "AR3",
      "title": "drive-mate owns the insert",
-     "status": "next",
-     "note": "Decided 10-22 (operator ok, ARCHITECTURE_SEAMS.md): vision measures, drive-mate moves (asks the vision seam for held-vs-seat at its hover); recovery is a supervisor beside drive-mate. Replay then sends {mate, vision target + sigma, held}. Gate for M4"
+     "status": "active",
+     "note": "merged 8174301 (gate: attempt 25): safety - no SIGKILL on drive-mate's cancel path; seams.servo_law (25/25 logged sessions reproduce); drive-mate RUNS the alignment (seams.drive_align) and applies the planner's corrections; DriveMate.action + corrections_json / base_measured / align_json; one seat-acceptance rule (seams.acceptance). Left: recovery supervisor, align code out of the replay module, sigma gate"
     },
     {
      "id": "AR4",
      "title": "Seated-parts state, one owner",
      "status": "active",
-     "note": "44dce4c on branch (stacked on AR2): seams.seated_parts, the one writer of ledger + seated offsets + history; locked, atomic, per-part merge; seat error with its own time + source. Merges after AR2's gate"
+     "note": "merged 8174301: seams.seated_parts, one locked atomic writer of ledger + offsets + history; a verdict keeps the seat error. Gate: attempt 25"
     },
     {
      "id": "AR-gate",
