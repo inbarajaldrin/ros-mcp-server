@@ -4,7 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ "$(git branch --show-current)" = dev ] || { echo "not on dev - refusing"; exit 1; }
-git push origin dev:refs/heads/dev --tags
+git push origin dev:refs/heads/dev
+git push origin 'refs/tags/ckpt/*:refs/tags/ckpt/*' 2>/dev/null || true   # only our checkpoint tags
 ssh -o BatchMode=yes aaugus11@100.80.151.46 \
-  'cd ~/a4500-backup-20260828/Documents/ros-mcp-server && git push origin dev:refs/heads/dev && git push origin --tags'
+  'cd ~/a4500-backup-20260828/Documents/ros-mcp-server && git push origin dev:refs/heads/dev && (git push origin "refs/tags/ckpt/*:refs/tags/ckpt/*" 2>/dev/null || true)'
 git fetch -q github dev && echo "GitHub dev = $(git rev-parse --short github/dev), local = $(git rev-parse --short HEAD)"
