@@ -82,8 +82,25 @@ def rel_yaw_error(obj, base, Rb, Ro, R_target_base=None):
     return float(np.degrees(d[2])), float(np.degrees(np.hypot(d[0], d[1])))
 
 
+TURN_INPROC = os.environ.get('TURN_INPROC', '1') == '1'
+TURN_DEG_S, TURN_MIN_S, TURN_SHORT_DEG = 4.0, 1.0, 6.0
+
+
 def turn_wrist(deg):
-    """Turn the flange about world z by `deg`, in place."""
+    """Turn the flange about world z by `deg`, in place.
+    TURN_INPROC=1: on the touch insert's one node, a turn up to 6 deg timed by its angle (4 deg/s, >= 1 s) - the servo's
+    1-3 deg corrections took ~4 s each as a pose-reading node + a move_cartesian process held at its 2.5 s floor
+    (run 56: 16 s of still arm in 4 turns). Larger turns keep the planner's own timing."""
+    if TURN_INPROC:
+        from compliant_insertion_studio.wrapper.touch_insert import tcp_now, move as _tmove, close_node as _close
+        try:
+            p, q0 = tcp_now()
+            q = (R.from_euler('z', deg, degrees=True) * R.from_quat(q0)).as_quat()
+            dur = max(TURN_MIN_S, abs(deg) / TURN_DEG_S) if abs(deg) <= TURN_SHORT_DEG else None
+            r = _tmove([float(v) for v in p], [float(v) for v in q], min_z=0.15, duration=dur)
+        finally:
+            _close()
+        return r.get('result') == 'success'
     import rclpy
     from geometry_msgs.msg import PoseStamped
     rclpy.init(); n = rclpy.create_node('align_tcp'); s = {}

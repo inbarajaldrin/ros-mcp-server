@@ -2542,12 +2542,46 @@ def _emitter(on):
     if _EMITTER['state'] is not None and _EMITTER['state'] == bool(on):
         return
     try:
-        subprocess.run(['ros2', 'param', 'set', '/camera/camera', 'depth_module.emitter_enabled', '1' if on else '0'],
-                       capture_output=True, timeout=10, env=make_env())
+        if not (EMITTER_INPROC and _set_emitter_inproc(on)):
+            subprocess.run(['ros2', 'param', 'set', '/camera/camera', 'depth_module.emitter_enabled', '1' if on else '0'],
+                           capture_output=True, timeout=10, env=make_env())
         time.sleep(0.8)
         _EMITTER['state'] = bool(on)
     except Exception:
         _EMITTER['state'] = None
+
+
+EMITTER_INPROC = os.environ.get('EMITTER_INPROC', '1') == '1'
+
+
+def _set_emitter_inproc(on):
+    """The projector set as one SetParameters service call on a private context (~0.05 s) - the ros2 CLI took ~1.5 s
+    to start each time (10-23). False when the service did not answer: the caller falls back to the CLI."""
+    import rclpy
+    from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+    from rcl_interfaces.srv import SetParameters
+    from rclpy.executors import SingleThreadedExecutor
+    ctx = rclpy.context.Context()
+    rclpy.init(context=ctx)
+    try:
+        n = rclpy.create_node('replay_emitter', context=ctx)
+        ex = SingleThreadedExecutor(context=ctx); ex.add_node(n)
+        cl = n.create_client(SetParameters, '/camera/camera/set_parameters')
+        if not cl.wait_for_service(timeout_sec=2.0):
+            return False
+        req = SetParameters.Request()
+        req.parameters = [Parameter(name='depth_module.emitter_enabled',
+                                    value=ParameterValue(type=ParameterType.PARAMETER_INTEGER, integer_value=1 if on else 0))]
+        fut = cl.call_async(req)
+        ex.spin_until_future_complete(fut, timeout_sec=3.0)
+        res = fut.result()
+        return bool(res and res.results and res.results[0].successful)
+    finally:
+        try:
+            n.destroy_node()
+        except Exception:
+            pass
+        rclpy.shutdown(context=ctx)
 
 
 def _emitter_hold():

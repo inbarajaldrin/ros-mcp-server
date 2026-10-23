@@ -153,8 +153,12 @@ def _node():
         from geometry_msgs.msg import PoseStamped
         from primitives.move_cartesian import Mover
         rclpy.init()
-        n = Mover(); n.tcp = None
+        from geometry_msgs.msg import WrenchStamped
+        n = Mover(); n.tcp = None; n.W = None
         n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: setattr(n, 'tcp', m.pose), 5)
+        # the full wrench (torque too) for the insert's wrench trace - the Mover keeps force only
+        n.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench', lambda m: setattr(n, 'W', (
+            m.wrench.force.x, m.wrench.force.y, m.wrench.force.z, m.wrench.torque.x, m.wrench.torque.y, m.wrench.torque.z)), 50)
         _NODE['n'] = n
     return _NODE['n']
 
@@ -173,6 +177,23 @@ def close_node():
 
 
 _TFH = {}   # the insert's timing rows (still audit / chain-of-events trace): one row per move
+_WFH = {}   # the insert's wrench trace (<stem>.wrench.csv): every guarded-loop sample of every probe / push (10-23: line_green
+            # wedged in runs 58/59 with probes identical to clean runs - the pivot in the jaws shows in torque, not recorded)
+
+
+def _wrench_sample(label):
+    fh = _WFH.get('fh')
+    if fh is None:
+        return None
+    n = _NODE.get('n')
+
+    def rec(t, dF, F, q):
+        W = getattr(n, 'W', None) or (float('nan'),) * 6
+        p = getattr(n, 'tcp', None)
+        z = p.position.z if p is not None else float('nan')
+        fh.write(f"{time.time():.3f},{label},{z:.5f},{dF:.2f}," + ",".join(f"{v:.3f}" for v in W) + "," +
+                 ",".join(f"{v:.4f}" for v in q) + "\n")
+    return rec
 
 
 def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=None):
@@ -192,7 +213,7 @@ def _move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=Non
     if IN_PROCESS:
         from primitives.move_cartesian import plan_move
         return plan_move(_node(), xyz, ('quat', list(quat)), max_force=max_force, min_duration=min_duration or 0.0,
-                         min_z=min_z, duration=duration)
+                         min_z=min_z, duration=duration, on_sample=_wrench_sample(f"to_z_{1000 * float(xyz[2]):.1f}"))
     argv = [sys.executable, '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
             *[f"{v:.5f}" for v in xyz], '--quat', *[f"{v:.6f}" for v in quat], '--min-z', f"{min_z:.3f}"]
     if max_force is not None:
@@ -260,6 +281,11 @@ def main():
     meta = {'object': a.object_name, 'base': a.base_name, 'grasp_id': a.grasp_id, 'router': 'touch_insert',
             'predicted_seat_xyz': [float(v) for v in seat], 'rim_tcp_z': float(rim_z), 'probes': []}
     open(str(stem) + '.csv', 'w').write('t_s,tcp_x,tcp_y,tcp_z\n')
+    try:
+        _WFH['fh'] = open(str(stem) + '.wrench.csv', 'w', buffering=1)
+        _WFH['fh'].write('t_s,move,tcp_z,dF,fx,fy,fz,tx,ty,tz,q0,q1,q2,q3,q4,q5\n')
+    except Exception:
+        _WFH.pop('fh', None)
     print(f"[touch] seat TCP ({1000*seat[0]:.1f}, {1000*seat[1]:.1f}, {1000*seat[2]:.1f}) mm, rim contact "
           f"{1000*(rim_z - seat[2]):+.1f} mm above it", flush=True)
 
