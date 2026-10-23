@@ -2461,6 +2461,15 @@ def _emitter(on):
     colour-only rounds (_emitter_hold) - run 41's u_brown align toggled it 8 times (~18 s)."""
     if on and _EMITTER['hold']:
         return
+    if not on and _EMITTER['state'] is None:
+        # the dots only swamp the colour image in a dark room: in a lit one the projector stays on and no toggle is
+        # needed at all (purpose map 10-23: ~26 s of toggles a run with the lights on)
+        b_ = ensure_exposure(lambda m: None)
+        if b_ is not None and b_ >= LOW_LIGHT_BRIGHTNESS:
+            _EMITTER['lit'] = True
+            return
+    if _EMITTER.get('lit'):
+        return                                   # lit room: never turned off, so nothing to restore either
     if _EMITTER['state'] is not None and _EMITTER['state'] == bool(on):
         return
     try:
