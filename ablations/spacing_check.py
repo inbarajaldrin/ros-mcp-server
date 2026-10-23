@@ -278,3 +278,32 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+class GapField:
+    """gap_mm(P + t, o) for many translations t of one outline P against fixed obstacles, fast: the obstacles' densified
+    points in one k-d tree each and their hull planes computed once (staging_spot asked gap_mm per 1 cm grid cell, each
+    call densifying both outlines, pairing every point and rebuilding hulls: 12.7-15.6 s a part with the arm still)."""
+
+    def __init__(self, P, obstacles):
+        from scipy.spatial import cKDTree
+        self.P = np.asarray(P, float)
+        self.Pd = _densify(self.P)
+        hp = ConvexHull(self.P).equations
+        self.P_n, self.P_d = hp[:, :2], hp[:, 2]
+        self.obs = []
+        for o in obstacles:
+            o = np.asarray(o, float)
+            h = ConvexHull(o).equations
+            self.obs.append((o, h[:, :2], h[:, 2], cKDTree(_densify(o))))
+
+    def gap(self, t):
+        t = np.asarray(t, float)
+        P2 = self.P + t
+        best = np.inf
+        for o, n, d, tree in self.obs:
+            if np.any(np.all(P2 @ n.T + d <= 1e-9, axis=1)):          # a vertex of the part inside the obstacle
+                return 0.0
+            if np.any(np.all(o @ self.P_n.T + (self.P_d - self.P_n @ t) <= 1e-9, axis=1)):   # obstacle vertex inside the part
+                return 0.0
+            best = min(best, float(tree.query(self.Pd + t)[0].min()))
+        return 1000 * best

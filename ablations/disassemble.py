@@ -575,7 +575,7 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
     the open fingers clear too. Returns the flange target (x, y) and that gap in mm, or (None, None, 0).
     The flange carries the part: flange target = its grasp point now + the translation."""
     from scipy.spatial.transform import Rotation as Rr
-    from spacing_check import outline, finger_outlines, base_outline, gap_mm, GRASPS, FINGER_GAP_MIN_MM
+    from spacing_check import outline, finger_outlines, base_outline, GRASPS, FINGER_GAP_MIN_MM, GapField
     from staging_layout import REGION, CLEARANCE_M
     P = np.asarray(outline(name, seen[name]))[:, :2]
     F = finger_outlines(name, seen[name], gid, open_mm)
@@ -584,6 +584,8 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
     grip = Rr.from_quat(q).apply([g['position'][k] for k in 'xyz'])[:2] + np.asarray(p)[:2]
     obst = [base_outline(base_pose)] + [np.asarray(outline(n, seen[n]))[:, :2] for n in seen if n != name]
     c0 = (P.min(0) + P.max(0)) / 2
+    G = GapField(P, obst)                                  # the same gaps as gap_mm, ~20x faster (12.7-15.6 s a part)
+    GF = [GapField(f, obst) for f in F]
     best, best_key = (None, None, 0.0), None
     seen_in_view = _staging_view_projector()
     for cx in np.arange(REGION['x'][0], REGION['x'][1] + 1e-9, step):
@@ -599,7 +601,7 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
                 continue                                       # the staging view must see it (10-22 11:30: the yellow at
                                                                # (560, -280) lay under the fingers' band, unseen by the
                                                                # planner -> recorded 2 passes on an upright part -> lost)
-            gap = min(gap_mm(P2, o) for o in obst)
+            gap = G.gap(t)
             if gap < 1000 * CLEARANCE_M:
                 continue
             # enough room is enough: past SPOT_GAP_ENOUGH_MM the spot nearest the image centre wins, not the emptiest
@@ -609,7 +611,7 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
             key = (1, -c) if gap >= SPOT_GAP_ENOUGH_MM else (0, gap)
             if best_key is not None and key <= best_key:
                 continue
-            if min(gap_mm(f + t, o) for f in F for o in obst) < FINGER_GAP_MIN_MM:
+            if min(g_.gap(t) for g_ in GF) < FINGER_GAP_MIN_MM:
                 continue
             best, best_key = (float(grip[0] + t[0]), float(grip[1] + t[1]), float(gap)), key
     return best
