@@ -33,7 +33,8 @@ PRESS_BELOW_M = 0.0015       # a press may go this far under the seated top (a c
 MOVED_MIN_M = 0.0005         # a press that travelled this far after first contact moved the part
 CONTACT_N = 1.0              # first contact in the force record
 EDGE_IN_M = 0.004            # edge taps this far in from the CAD top-face edge
-END_IN_M = 0.025             # end taps this far in from the CAD top-face ends: 8 mm put line_green's end tap inside the U
+FINGER_HALF_M = 0.012        # the closed finger block's half size (20.2 mm block) + margin
+END_IN_M = 0.010             # end taps this far in from the CAD top-face ends: 8 mm put line_green's end tap inside the U
                              # part's opening, where the 20 mm finger block lands on the U arm beside the bar (+10.6 mm,
                              # 10-23 00:08); 25 mm still leaves a 45 mm lever for the pitch
 MAX_PRESSES = 6
@@ -74,19 +75,46 @@ class Tapper:
         f = TOP_FACE[(obj, base)]
         (bx, by, bz), bq = base_pose
         Rb = R.from_quat(bq)
-
-        def w(dx, dy):
-            return np.array([bx, by, bz]) + Rb.apply([f['cx'] + dx, f['cy'] + dy, f['z']])
         long_y = f.get('long_axis', 'y') == 'y'
         hl, hc = float(f['half_long_m']), float(f['half_cross_m'])
-        al = max(hl - END_IN_M, 0.0)
+        # tap points from the CAD: the closed finger block (FINGER_HALF_M each way) must not overlap any seated
+        # neighbour's footprint (10-23 00:08-00:12: line_green's end taps 8 and 25 mm in from its ends landed inside the
+        # U parts' openings, on their arms: +10.6 / +12.3 mm). Ends: scanned inward from END_IN_M until clear.
+        boxes = _neighbour_boxes(obj, base, top_z=float(f['z']))
+
+        def b_xy(a_, c_):                                   # base-frame (x, y) of along a_, across c_
+            return (f['cx'] + c_, f['cy'] + a_) if long_y else (f['cx'] + a_, f['cy'] + c_)
+
+        def clear(a_, c_):
+            x, y = b_xy(a_, c_)
+            return all(x + FINGER_HALF_M < x0 or x - FINGER_HALF_M > x1 or y + FINGER_HALF_M < y0 or y - FINGER_HALF_M > y1
+                       for x0, x1, y0, y1 in boxes)
+
+        def scan(sign, c_=0.0):
+            a_ = hl - END_IN_M
+            while a_ >= 0.010:
+                if clear(sign * a_, c_):
+                    return sign * a_
+                a_ -= 0.002
+            return None
+        pts = []
+        a_mid = 0.0 if clear(0.0, 0.0) else next((s_ * a_ for a_ in np.arange(0.002, hl, 0.002) for s_ in (1, -1)
+                                                    if clear(s_ * a_, 0.0)), None)
+        if a_mid is not None:
+            pts.append(('mid', a_mid, 0.0))
+        if hl >= 2 * hc:                                    # a bar: both ends where the block is clear of neighbours
+            for nm, sg in (('end-', -1), ('end+', 1)):
+                a_ = scan(sg)
+                if a_ is not None and (a_mid is None or abs(a_ - a_mid) >= 0.015):
+                    pts.append((nm, a_, 0.0))
         ac = max(hc - EDGE_IN_M, 0.0)
-        pts = [('mid', 0.0, 0.0)]
-        if hl >= 2 * hc:                                    # a bar: both ends; else the corners' midpoints
-            pts += [('end-', -al, 0.0), ('end+', al, 0.0)]
-        pts += [('edge-', 0.0, -ac), ('edge+', 0.0, ac)]
-        # base-frame (dx, dy) of each point: along the long axis by a, across it by c
-        P = [Point(n, w(c, a) if long_y else w(a, c)) for n, a, c in pts]
+        for nm, sg in (('edge-', -1), ('edge+', 1)):
+            if a_mid is not None and clear(a_mid, sg * ac):
+                pts.append((nm, a_mid, sg * ac))
+
+        def w(dx, dy):
+            return np.array([bx, by, bz]) + Rb.apply([dx, dy, f['z']])
+        P = [Point(n, w(*b_xy(a_, c_))) for n, a_, c_ in pts]
         if band_m is None:
             lim = lim_z_m(base)
             band_m = (lim - margin_m()) if lim is not None else 0.0015
@@ -208,6 +236,21 @@ def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None
         return tap_recover_(obj, base_pose, base, say, tapper)
     finally:
         close_node()
+
+
+def _neighbour_boxes(obj, base, margin=0.001, top_z=None):
+    """Base-frame xy boxes (x0, x1, y0, y1) of the parts seated before `obj` (seated CAD) that stand higher than
+    top_z - 2 mm: only those can meet the finger block (the yellow sits astride line_green, whose top is below its own)."""
+    from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
+    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base, _surface_points
+    out = []
+    for o in get_seated_so_far(base, obj):
+        sp, sq = load_seat_pose_in_base(base, o)
+        P = R.from_quat(sq).apply(_surface_points(o, 0.003)) + sp
+        if top_z is not None and P[:, 2].max() < top_z - 0.002:
+            continue
+        out.append((P[:, 0].min() - margin, P[:, 0].max() + margin, P[:, 1].min() - margin, P[:, 1].max() + margin))
+    return out
 
 
 def close_fingers():
