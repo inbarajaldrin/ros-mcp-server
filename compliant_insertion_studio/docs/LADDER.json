@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 17:20",
+ "updated": "2026-10-22 17:42",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -28,7 +28,7 @@
      "id": "M3a",
      "title": "Drive-mate action + lab surface",
      "status": "done",
-     "note": "CLEARED 10-22 16:38, attempt 23 (log ablations/logs/replay_20261022_155846.log): one uninterrupted FMB1 run, rc 0, all 4 inserts by drive-mate, ExecuteMate placed=true mate:00-03 in one journal episode (depth -0.02 / 1.23 / 0.78 / -0.12 mm). Automatic recoveries in it: u_orange outer retry (1st servo's gain went bad, aim -8.9 mm; 2nd -1.8 mm seated), line_green's wedge (end +8.2 mm) caught by its seat check and freed by nudge 1. Caveat (AR0): the seam is shallow - aim, servo, recovery and seat judging run in the replay; AR3 makes it real. Wall 2386 s (baseline 1088): the touch lattices (u_orange 687 s, yellow 471 s) dominate"
+     "note": "CLEARED 10-22 16:38, attempt 23 (log ablations/logs/replay_20261022_155846.log): one uninterrupted FMB1 run, rc 0, all 4 inserts by drive-mate, ExecuteMate placed=true mate:00-03 in one journal episode (depth -0.02 / 1.23 / 0.78 / -0.12 mm). Automatic recoveries in it: u_orange outer retry (1st servo's gain went bad, aim -8.9 mm; 2nd -1.8 mm seated), line_green's wedge (end +8.2 mm) caught by its seat check and freed by nudge 1. Caveat (AR0): the seam is shallow - aim, servo, recovery and seat judging run in the replay; AR3 makes it real. Wall 2386 s (baseline 1088): the touch lattices (u_orange 687 s, yellow 471 s) dominate | 10-22 17:39 attempt 25 repeated it THROUGH the deepened seam (drive-mate aligns + inserts + judges), 1283 s"
     },
     {
      "id": "UNI",
@@ -68,20 +68,20 @@
     {
      "id": "AR2",
      "title": "Insert outcome returned, not re-read",
-     "status": "active",
-     "note": "merged 8174301: seams.insert_outcome (0 diffs over 400 recorded inserts); drive-mate judges the trace the insert named; seats recorded from drive-mate's result; primitives exit 0 w/o result = failure. Gate: attempt 25"
+     "status": "done",
+     "note": "merged 8174301: seams.insert_outcome (0 diffs over 400 recorded inserts); drive-mate judges the trace the insert named; seats recorded from drive-mate's result; primitives exit 0 w/o result = failure. Gate: attempt 25 -> gate attempt 25 (17:39): every insert's trace found from its own result, seats recorded from drive-mate's result"
     },
     {
      "id": "AR3",
      "title": "drive-mate owns the insert",
      "status": "active",
-     "note": "merged 8174301 (gate: attempt 25): safety - no SIGKILL on drive-mate's cancel path; seams.servo_law (25/25 logged sessions reproduce); drive-mate RUNS the alignment (seams.drive_align) and applies the planner's corrections; DriveMate.action + corrections_json / base_measured / align_json; one seat-acceptance rule (seams.acceptance). Left: recovery supervisor, align code out of the replay module, sigma gate"
+     "note": "Gate attempt 25 (17:17-17:39, log ablations/logs/replay_20261022_171746.log): drive-mate ALIGNED every part itself (marker servo u_brown/u_orange, yaw + close read line_green, depth servo yellow), applied the planner's corrections, inserted, judged - 4/4 first insert, mate:00-03 certified in one uninterrupted run, wall 1283 s (attempt 23: 2386). Yellow in on probe 1 (follow of line_green's measured seat). Left: recovery supervisor; align code out of the replay module (drive_align imports it); sigma gate"
     },
     {
      "id": "AR4",
      "title": "Seated-parts state, one owner",
-     "status": "active",
-     "note": "merged 8174301: seams.seated_parts, one locked atomic writer of ledger + offsets + history; a verdict keeps the seat error. Gate: attempt 25"
+     "status": "done",
+     "note": "merged 8174301: seams.seated_parts, one locked atomic writer of ledger + offsets + history; a verdict keeps the seat error. Gate: attempt 25 -> gate attempt 25: ledger/offsets via one writer, disassembly forget + seat errors kept (yellow followed line_green's)"
     },
     {
      "id": "AR-gate",
