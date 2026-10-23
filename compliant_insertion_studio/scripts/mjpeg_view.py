@@ -122,43 +122,48 @@ def log_entries(since):
 
 PAGE_SPLIT = """<html><head><title>FMB1 cell</title><meta name='viewport' content='width=device-width'>
 <style>
-:root{--bg:#0f1113;--chat:#16191c;--line:#262a2f;--text:#e3e6ea;--muted:#8a919a;--me:#2f6fd6;--bot:#22262b;--tool:#7d858f;--event:#c9a86a}
+:root{--bg:#f5f4ed;--chat:#faf9f5;--line:#e5e2d6;--text:#2d2b27;--muted:#8a8578;--accent:#d97757;--me:#ece9df;--metext:#2d2b27;
+  --tool:#8a8578;--event:#9a5a3a;--eventbg:#f6ebe3;--code:#efece3;--pre:#f1eee5;--views:#e9e6dc}
+@media (prefers-color-scheme:dark){:root{--bg:#1f1e1d;--chat:#262624;--line:#3a3935;--text:#ecebe6;--muted:#9a978e;--accent:#d97757;
+  --me:#3a3936;--metext:#ecebe6;--tool:#8f8c83;--event:#e3a98c;--eventbg:#33281f;--code:#33322f;--pre:#1c1b1a;--views:#1a1918}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;height:100vh;overflow:hidden}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 ui-sans-serif,-apple-system,'Segoe UI',sans-serif;display:flex;height:100vh;overflow:hidden}
 #chat{flex:1 1 45%;display:flex;flex-direction:column;background:var(--chat);border-right:1px solid var(--line);min-width:0}
-#chat header{padding:10px 16px;border-bottom:1px solid var(--line);font-weight:600;display:flex;align-items:center;gap:8px}
-#chat header .dot{width:8px;height:8px;border-radius:50%;background:#3fb950}
+#chat header{padding:12px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;font-weight:600}
+#chat header .mark{width:22px;height:22px;color:var(--accent)}
 #chat header small{color:var(--muted);font-weight:400}
-#log{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
-.row{display:flex;flex-direction:column;max-width:88%}
-.row.user{align-self:flex-end;align-items:flex-end}
+#log{flex:1;overflow-y:auto;padding:18px 22px;display:flex;flex-direction:column;gap:12px}
+.row{display:flex;flex-direction:column;max-width:92%}
+.row.user{align-self:flex-end;align-items:flex-end;max-width:80%}
 .row.claude{align-self:flex-start;align-items:flex-start}
-.bubble{padding:8px 12px;border-radius:14px;word-wrap:break-word;overflow-wrap:anywhere}
-.user .bubble{background:var(--me);color:#fff;border-bottom-right-radius:4px}
-.claude .bubble{background:var(--bot);border-bottom-left-radius:4px}
-.ts{color:var(--muted);font-size:11px;margin:2px 6px 0;font-variant-numeric:tabular-nums}
-details.tools{align-self:flex-start;color:var(--tool);font:12px/1.4 ui-monospace,Menlo,monospace;margin-left:4px;max-width:88%}
-details.tools summary{cursor:pointer;list-style:none;opacity:.85}
-details.tools summary::before{content:'▸ ';}details.tools[open] summary::before{content:'▾ ';}
-details.tools div{padding:1px 0 1px 14px;white-space:pre-wrap;overflow-wrap:anywhere}
-.event{align-self:center;color:var(--event);background:#2a2418;border:1px solid #3d3322;border-radius:10px;padding:3px 10px;
-  font:12px/1.4 ui-monospace,Menlo,monospace;max-width:92%;overflow-wrap:anywhere;white-space:pre-wrap}
+.user .bubble{background:var(--me);color:var(--metext);padding:9px 14px;border-radius:16px}
+.claude .bubble{padding:0 2px;font-family:ui-serif,Georgia,'Times New Roman',serif;font-size:16px;line-height:1.65}
+.bubble{word-wrap:break-word;overflow-wrap:anywhere}
+.ts{color:var(--muted);font-size:11px;margin:3px 4px 0;font-variant-numeric:tabular-nums}
+details.tools{align-self:flex-start;color:var(--tool);font:12px/1.45 ui-monospace,Menlo,monospace;max-width:92%}
+details.tools summary{cursor:pointer;list-style:none}
+details.tools summary::before{content:'▸ ';color:var(--accent)}details.tools[open] summary::before{content:'▾ '}
+details.tools div{padding:1px 0 1px 16px;white-space:pre-wrap;overflow-wrap:anywhere}
+.event{align-self:flex-start;color:var(--event);background:var(--eventbg);border-radius:8px;padding:3px 10px;
+  font:12px/1.45 ui-monospace,Menlo,monospace;max-width:92%;overflow-wrap:anywhere;white-space:pre-wrap}
 .event .ts{margin-left:6px}
 .md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
-.md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}.md li{margin:.15em 0}
-.md h1,.md h2,.md h3{font-size:15px;margin:.6em 0 .3em}
-.md code{font:12.5px ui-monospace,Menlo,monospace;background:rgba(0,0,0,.28);padding:1px 4px;border-radius:3px}
-.md pre{background:#0b0d10;border:1px solid var(--line);padding:8px;border-radius:6px;overflow-x:auto}
+.md p{margin:.45em 0}.md ul,.md ol{margin:.45em 0;padding-left:1.5em}.md li{margin:.2em 0}
+.md h1,.md h2,.md h3{font-size:16px;margin:.7em 0 .3em}
+.md code{font:13px ui-monospace,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+.md pre{background:var(--pre);border:1px solid var(--line);padding:10px;border-radius:8px;overflow-x:auto}
 .md pre code{background:none;padding:0}
-.md table{border-collapse:collapse;margin:.4em 0;font-size:13px}.md th,.md td{border:1px solid #3a3f46;padding:3px 8px;text-align:left}
-.md a{color:#9cc2ff}.user .md a{color:#fff}.md blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid #3a3f46;color:var(--muted)}
-#views{flex:1 1 55%;display:flex;flex-direction:column;gap:6px;padding:6px;min-width:0}
+.md table{border-collapse:collapse;margin:.5em 0;font:13px ui-sans-serif,-apple-system,sans-serif}
+.md th,.md td{border:1px solid var(--line);padding:4px 9px;text-align:left}
+.md a{color:var(--accent)}.md blockquote{margin:.5em 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
+.md strong{font-weight:650}
+#views{flex:1 1 55%;display:flex;flex-direction:column;gap:8px;padding:8px;min-width:0;background:var(--views)}
 #views figure{margin:0;flex:1 1 50%;min-height:0;display:flex;flex-direction:column}
-#views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0;border-radius:4px}
-figcaption{color:var(--muted);font-size:12px;padding:2px 4px}
+#views img{width:100%;height:100%;object-fit:contain;background:#000;min-height:0;border-radius:8px}
+figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
 @media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#chat{height:60vh}}
 </style></head><body>
-<div id='chat'><header><span class='dot'></span>Claude <small>FMB1 cell session</small></header><div id='log'></div></div>
+<div id='chat'><header><svg class='mark' viewBox='0 0 24 24' fill='currentColor'><path d='M12 2l1.6 6.9L20 6l-4.6 5.1L22 12l-6.6.9L20 18l-6.4-2.9L12 22l-1.6-6.9L4 18l4.6-5.1L2 12l6.6-.9L4 6l6.4 2.9z'/></svg>Claude <small>FMB1 cell session</small></header><div id='log'></div></div>
 <div id='views'>__FIGS__</div>
 <script src='https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js'></script>
 <script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
