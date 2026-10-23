@@ -35,6 +35,8 @@ CONTACT_N = 1.0              # first contact in the force record
 EDGE_IN_M = 0.004            # edge taps this far in from the CAD top-face edge
 END_IN_M = 0.008             # end taps this far in from the CAD top-face ends
 MAX_PRESSES = 6
+VALID_M = (-0.005, 0.012)    # a tap reading outside this is not on the part (line_green's neighbours stand +19.6 mm
+                             # over its top; the floor stops a seated part, so far below is a miss): never pressed
 Q_DOWN = (0.0, 1.0, 0.0, 0.0)
 
 
@@ -158,8 +160,14 @@ class Tapper:
                              peak_N=round(max([dF for _, dF in rec], default=0.0), 2)))
         return verdict
 
+    def valid(self, p: Point):
+        return p.err_m is not None and VALID_M[0] <= p.err_m <= VALID_M[1]
+
     def seated(self):
-        return all(p.err_m is not None and abs(p.err_m) <= self.band_m for p in self.points)
+        return all(self.valid(p) and abs(p.err_m) <= self.band_m for p in self.points)
+
+    def off_part(self):
+        return [p.name for p in self.points if p.err_m is not None and not self.valid(p)]
 
 
 def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None):
@@ -173,7 +181,10 @@ def tap_recover(obj, base_pose, base, say=print, tapper: Optional[Tapper] = None
         if tp.seated():
             say(f"  [taps] {obj}: seated by the taps ({time.time() - t0:.0f} s): {tp.log[-1] if tp.log else ''}")
             return True, tp
-        cand = [p for p in tp.points if p.err_m is not None and p.err_m > tp.band_m and p.blocked < 2]
+        if tp.off_part():
+            say(f"  [taps] {obj}: taps off the part {tp.off_part()} (the base pose is off) - not pressing")
+            return False, tp
+        cand = [p for p in tp.points if tp.valid(p) and p.err_m > tp.band_m and p.blocked < 2]
         if not cand:
             say(f"  [taps] {obj}: every high point is blocked - not pressing again ({[(p.name, round(1000 * p.err_m, 1)) for p in tp.points]})")
             return False, tp
