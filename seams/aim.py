@@ -72,6 +72,8 @@ class Correction:
     dyaw_rad: float                # turn of the aimed base frame
     about: str                     # base_origin | seat
     detail: str                    # the log line (same text the replay printed before)
+    dxy_base_m: Optional[Tuple[float, float]] = None   # the same shift in the base frame, when it was made there (follow):
+    #                                 re-applied on a base read later (drive-mate's servo) it turns with that base
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,8 @@ def _follow_general(obj, base, base_quat, f: AimFacts, cad: Cad):
     dw = R_.from_quat(base_quat).as_matrix()[:2, :2] @ m
     line = (f"  [follow] {obj}: interlocks with {parts} -> aim shifted ({m[0]:+.1f}, {m[1]:+.1f}) mm (base frame, mean of "
             f"their measured seat errors {[np.round(e, 1).tolist() for e in errs]})")
-    return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), 0.0, 'base_origin', line), None
+    return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), 0.0, 'base_origin', line,
+                      (float(m[0]) / 1000, float(m[1]) / 1000)), None
 
 
 def _follow_named(obj, base, base_quat, parts, f: AimFacts, cad: Cad):
@@ -209,7 +212,8 @@ def _follow_named(obj, base, base_quat, parts, f: AimFacts, cad: Cad):
         dw = Rb @ np.array([dx_b, 0.0])
         line = (f"  [follow] {obj}: slot x {dx_b:+.1f} mm, yaw {np.degrees(dyaw):+.2f} deg (base frame, from the {src}"
                 f", cap {cap:g} deg) — " + ", ".join(f"{p} x {d[0]:+.1f} mm" for p, d in zip(parts, (da, db))))
-        return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), dyaw, 'base_origin', line), note
+        return Correction('follow', (float(dw[0]) / 1000, float(dw[1]) / 1000), dyaw, 'base_origin', line,
+                          (dx_b / 1000, 0.0)), note
     except Exception as e:
         return None, f"  [follow] {obj}: {e} -> aim at the base"
 
@@ -265,3 +269,38 @@ def aim_for_insert(obj: str, base: str, measured: Pose, f: AimFacts, cad: Option
         oq = tuple((Rd * Rb_).as_quat())
     return Aim(obj=obj, pos=(float(ox), float(oy), float(oz)), quat=tuple(float(v) for v in oq),
                seat_dz_m=cad.seat_dz(obj), measured=measured, corrections=tuple(corr), notes=tuple(notes))
+
+
+def corrections_json(aim: Aim) -> str:
+    """The planner's corrections for drive-mate (DriveMate goal corrections_json)."""
+    import json
+    return json.dumps([dict(name=c.name, dxy_m=list(c.dxy_m), dyaw_rad=c.dyaw_rad, about=c.about,
+                            dxy_base_m=None if c.dxy_base_m is None else list(c.dxy_base_m)) for c in aim.corrections])
+
+
+def apply_corrections(base: Pose, corrections, seat_in_base=None) -> Pose:
+    """The aim from a base pose and corrections made for another read of it (drive-mate: the planner's corrections on
+    the base its own alignment arrived at), in aim_for_insert's order: follow / bias shifts (a follow made in the base
+    frame turns with this base), the follow's yaw about the base origin, the yaw experiment about the part's seat."""
+    (ox, oy, oz), oq = base
+    oq = tuple(float(v) for v in oq)
+    cs = [c if isinstance(c, dict) else dict(name=c.name, dxy_m=c.dxy_m, dyaw_rad=c.dyaw_rad, about=c.about,
+                                             dxy_base_m=c.dxy_base_m) for c in corrections]
+    Rb = R_.from_quat(oq).as_matrix()[:2, :2]
+    for c in cs:
+        if c['name'] == 'yaw_exp':
+            continue
+        d = Rb @ np.asarray(c['dxy_base_m'], float) if c.get('dxy_base_m') is not None else np.asarray(c['dxy_m'], float)
+        ox, oy = ox + float(d[0]), oy + float(d[1])
+    for c in cs:
+        if c['name'] != 'yaw_exp' and c.get('dyaw_rad'):
+            oq = tuple((R_.from_euler('z', c['dyaw_rad']) * R_.from_quat(oq)).as_quat())
+    for c in cs:
+        if c['name'] == 'yaw_exp' and c.get('dyaw_rad'):
+            Rb_ = R_.from_quat(oq); o_ = np.array([ox, oy, oz])
+            seat_w = o_ + Rb_.apply(np.asarray(seat_in_base, float))
+            Rd = R_.from_euler('z', c['dyaw_rad'])
+            o_new = seat_w + Rd.apply(o_ - seat_w)
+            ox, oy = float(o_new[0]), float(o_new[1])
+            oq = tuple((Rd * Rb_).as_quat())
+    return (float(ox), float(oy), float(oz)), oq

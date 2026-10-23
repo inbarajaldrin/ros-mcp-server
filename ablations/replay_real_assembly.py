@@ -1640,15 +1640,25 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     aim = getattr(STATE_REF.get('state'), 'aim', None)
     if '--final-base-pos' not in argv or aim is None or aim.obj != obj:   # the seam takes a VisionPose, never a default
         return {'result': 'failure', 'error': f'drive_mate: no observed {base} pose to aim at'}
-    pos, q = list(aim.pos), list(aim.quat)       # seam terms: no per-part seat z (the server adds it)
+    # the MEASURED base: drive-mate aligns on it and applies the corrections itself (AR3) - sending the aim would apply
+    # them twice. Seam terms: no per-part seat z (the server adds it)
+    pos, q = list(aim.measured[0]), list(aim.measured[1])
     gid = int(after('--grasp-id', 1)[0]); held_q = after('--current-object-orientation', 4)
     off_ = float(getattr(STATE_REF.get('state'), 'held_yaw_offset', 0.0) or 0.0)
     if off_:
         held_q = list((R_.from_euler('z', off_, degrees=True) * R_.from_quat(held_q)).as_quat())   # the measured part
     hp, hq = held_pose(obj, gid, held_q, tq, float(np.asarray(held_tool_offset())[2]))
-    say(f"  [drive_mate] {mate}: target ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}")
-    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq)], 1260)
+    from seams.aim import corrections_json
+    say(f"  [drive_mate] {mate}: measured base ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}) mm, grasp {gid}, corrections "
+        f"{[c.name for c in aim.corrections]}")
+    out = _seam_call(['drive', '--mate', mate, '--target', *map(str, pos + q), '--held', *map(str, hp + hq),
+                      '--corrections', corrections_json(aim)], 1860)
+    al_ = out.pop('align', None) or {}
+    say(f"  [drive_mate] {mate}: aligned by {al_.get('route')} (log {al_.get('log')}), aim "
+        f"{[round(1000 * v, 1) for v in (al_.get('aim') or [[float('nan')] * 3])[0][:2]]} mm")
     say(f"  [drive_mate] {mate}: {json.dumps(out)}")
+    if out.get('base_measured') and STATE_REF.get('args') is not None:
+        STATE_REF['args'].measured_base = (tuple(out['base_measured'][0]), tuple(out['base_measured'][1]))
     ok = bool(out.get('seated'))
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
                 error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
@@ -3081,13 +3091,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             # AIM, not the base. Start every insert from the last MEASURED base (10-22 13:04: the in-hand re-read failed
             # as a partial view, line_green inherited u_orange's aim - its yaw 2.4 deg off - and wedged in the U openings)
             mb_ = args.measured_base if getattr(args, 'measured_base', None) is not None else getattr(args, 'observed_base', None)
-            al = align_for_insert(obj, base_name or RUN_BASE['name'], mb_, state.held_quat, state.last_grasp_id or 1,
-                                  say, log_fh)
-            args.observed_base, args.measured_base = al['aim_base'], al['measured_base']
-            if al['held_quat'] is not state.held_quat:
-                state.held_quat = al['held_quat']                  # the wrist turned: the chained held pose turns with it
-            if al['tcp_quat'] is not None and STATE_REF.get('state'):
-                STATE_REF['state'].held_tcp_quat = al['tcp_quat']
+            # AR3 (decision 10-22): drive-mate aligns the part (in-hand base read + servo) - the planner aims from the
+            # measured base and sends its corrections; drive-mate returns the base it measured
+            args.observed_base = mb_
         if _SAFETY_STOP:
             # 10-22 01:18: a protective stop inside hover_servo did not stop the run - drive-mate was called on a stopped arm
             # and waited 650 s. Nothing more is sent once the robot has left NORMAL safety.
@@ -3136,6 +3142,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         snap_before = snapshot_robot_state()
         _record_snapshot(snap_fh, "before", label, snap_before)
         STATE_REF['state'] = state
+        STATE_REF['args'] = args
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and os.environ.get('SEAMS_DRIVE') == '1':
             result = insert_via_drive_mate(obj, base_name or RUN_BASE['name'], argv, snap_before, say)
         elif tool_name == 'translate_object' and kw.get('action') == 'insert' and getattr(state, 'held_yaw_offset', 0.0):

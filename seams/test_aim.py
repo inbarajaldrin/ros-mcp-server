@@ -95,3 +95,26 @@ def test_replay_sends_the_aim(obj, rec, sw, tmp_path, monkeypatch):
     assert np.allclose([float(v) for v in argv[i + 1:i + 4]], g['pos'], atol=2e-6)
     assert st.aim is not None and st.aim.obj == obj
     assert np.allclose(np.array(st.aim.pos) + [0, 0, st.aim.seat_dz_m], g['pos'], atol=2e-6)
+
+
+@pytest.mark.parametrize('obj,rec,sw', [(o, r, s) for o in PARTS for r in RECORDS for s in range(len(SWITCHES))])
+def test_corrections_reapplied_on_a_servoed_base(obj, rec, sw):
+    """drive-mate applies the planner's corrections (made on the measured base) to the base its servo arrived at: the
+    same aim as aim_for_insert run on that servoed base (what the replay did before AR3)."""
+    off, led, hist = RECORDS[rec]
+    f0 = A.load_facts(env=SWITCHES[sw], now=NOW)
+    f = A.AimFacts(seated_offsets=off, ledger=led, seat_history=hist, one_node=f0.one_node, no_aim_bias=f0.no_aim_bias,
+                   follow_yaw=f0.follow_yaw, yaw_exp_deg=f0.yaw_exp_deg, now=NOW)
+    from scipy.spatial.transform import Rotation as R
+    for dx, dy, dyaw in ((0.0, 0.0, 0.0), (-0.0089, 0.0009, -3.48), (0.0021, -0.0047, 2.1)):
+        servoed = ((BASE1[0][0] + dx, BASE1[0][1] + dy, BASE1[0][2]),
+                   tuple((R.from_euler('z', dyaw, degrees=True) * R.from_quat(BASE1[1])).as_quat()))
+        want = A.aim_for_insert(obj, 'base1', servoed, f)
+        made = A.aim_for_insert(obj, 'base1', BASE1, f)
+        seat = A.Cad().seat_pos('base1', obj)
+        got = A.apply_corrections(servoed, json.loads(A.corrections_json(made)), seat_in_base=seat)
+        # line_green's follow from the inserts projects WORLD seat offsets onto the base axes (and its slot yaw from
+        # them): on a base turned by the servo that projection differs - <= 0.08 mm / 0.10 deg here (servo turns <= 4 deg,
+        # the cap), inside the U corridor's +-1.1 mm. drive-mate cannot redo it (no seat records behind the seam)
+        assert np.allclose(got[0], want.pos, atol=1e-4), (got[0], want.pos)
+        assert np.degrees((R.from_quat(got[1]) * R.from_quat(want.quat).inv()).magnitude()) < 0.15
