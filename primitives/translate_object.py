@@ -50,7 +50,10 @@ import signal
 # CAD-stage rule. Exported so callers (the replay's hover servo) follow the same decision instead of keeping their own list.
 # inverted_u_yellow left 10-22: on a free base it seats by the depth servo + vertical touch lattice (in on dip 7), the
 # prismatic search slid it 14-19 mm along line_green at up to 20 N (9 of 10 attempts). UNI replaces this table.
-PRISMATIC_ROUTE_OBJECTS = ('line_green', 'line_brown', 'line_red', 'fork_orange', 'fork_yellow')
+# line_green left 10-22 23:20: on a free base its prismatic search slid the bar 15-23 mm and dragged base1 13 mm between
+# attempts (runs 28c, 29: 5 of 6 attempts jammed on the U tops); the touch route probes vertically (no lateral force),
+# across-first in the corridor between the U parts, and the taps judge the seat.
+PRISMATIC_ROUTE_OBJECTS = ('line_brown', 'line_red', 'fork_orange', 'fork_yellow')
 
 CHILD_CLEANUP_S = 30.0   # a force-mode child's own cleanup gets this long before SIGTERM; never SIGKILL (CLAUDE.md)
 
