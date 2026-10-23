@@ -1,0 +1,201 @@
+<title>FMB1 Cycle Trace</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an instrument readout - summary strip, then the cycle timeline (lanes over still-time shading), then the
+   still ledger and the producer -> consumer chain. */
+:root {
+  --bg: #f4f6f8; --panel: #ffffff; --fg: #1b2530; --muted: #5b6876; --rule: #d8dee5;
+  --accent: #2563a8;
+  --sense: #0f8b8d; --move: #3b6fd1; --grip: #c98a12; --seam: #8a94a1; --other: #8b5cc9;
+  --still: rgba(214, 69, 50, 0.13); --still-edge: #d64532; --no: #c23a2b; --partly: #b7791f; --yes: #2f855a;
+  --f-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12171d; --panel: #1a2129; --fg: #e3e9ef; --muted: #98a5b3; --rule: #2c3640; --accent: #6ea8ec;
+  --sense: #2bb3b5; --move: #6f97e8; --grip: #e0a93a; --seam: #7d8896; --other: #ad86e3;
+  --still: rgba(240, 98, 78, 0.16); --still-edge: #f0624e; --no: #ef6b5b; --partly: #e0a93a; --yes: #4fbf86; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12171d; --panel: #1a2129; --fg: #e3e9ef; --muted: #98a5b3; --rule: #2c3640; --accent: #6ea8ec;
+  --sense: #2bb3b5; --move: #6f97e8; --grip: #e0a93a; --seam: #7d8896; --other: #ad86e3;
+  --still: rgba(240, 98, 78, 0.16); --still-edge: #f0624e; --no: #ef6b5b; --partly: #e0a93a; --yes: #4fbf86; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px; }
+main { max-width: 1240px; margin: 0 auto; display: grid; gap: 22px; }
+h1, h2 { font-family: var(--f-display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: 0.01em; }
+h1 { font-size: 30px; } h2 { font-size: 20px; }
+.lede { color: var(--muted); max-width: 70ch; margin: 4px 0 0; }
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+.stat { background: var(--panel); padding: 12px 14px; display: grid; gap: 2px; min-width: 0; }
+.stat b { font-family: var(--f-mono); font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.stat.hot b { color: var(--still-edge); }
+section { display: grid; gap: 10px; min-width: 0; }
+.bar-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; color: var(--muted); font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.legend i { display: inline-block; width: 12px; height: 12px; vertical-align: -2px; margin-right: 5px; border-radius: 2px; }
+button { font: 500 12px var(--f-body); color: var(--fg); background: var(--panel); border: 1px solid var(--rule); padding: 4px 10px; cursor: pointer; border-radius: 3px; }
+button:hover { border-color: var(--accent); } button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tl-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+.tl-wrap svg { display: block; }
+svg text { fill: var(--muted); font-family: var(--f-mono); font-size: 10px; }
+svg .lane-name { fill: var(--fg); font-family: var(--f-body); font-size: 11px; font-weight: 500; }
+#tip { position: fixed; pointer-events: none; z-index: 20; max-width: 380px; background: var(--panel); color: var(--fg); border: 1px solid var(--rule);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15); padding: 8px 10px; font-size: 12px; line-height: 1.45; }
+#tip b { font-family: var(--f-mono); font-weight: 500; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 500; }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+td.act { font-family: var(--f-mono); font-size: 12px; }
+.pill { display: inline-block; font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.no { color: var(--no); } .pill.partly { color: var(--partly); } .pill.yes { color: var(--yes); } .pill.unclear { color: var(--muted); }
+.meter { height: 6px; background: var(--still); position: relative; min-width: 60px; }
+.meter i { position: absolute; inset: 0 auto 0 0; background: var(--still-edge); }
+.why { color: var(--muted); font-size: 12.5px; }
+.chain { border: 1px solid var(--rule); background: var(--panel); padding: 12px; overflow-x: auto; }
+.empty { color: var(--muted); font-style: italic; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<main>
+  <header>
+    <h1 id="title">FMB1 Cycle Trace</h1>
+    <p class="lede">Every action of one cycle (reset and assembly) on one clock, the arm's still time shaded behind them, and what each action is for. Hover a bar or a row for detail.</p>
+  </header>
+  <div class="strip" id="strip"></div>
+  <section>
+    <h2>Timeline</h2>
+    <div class="bar-tools">
+      <div class="legend" id="legend"></div>
+      <span>zoom</span><button id="zout" type="button">−</button><button id="zin" type="button">+</button>
+    </div>
+    <div class="tl-wrap" id="tlwrap"></div>
+  </section>
+  <section>
+    <h2>Where the arm stood still</h2>
+    <p class="lede">Still seconds attributed to the innermost action running at that moment, largest first. "Needed" and "used for" come from the purpose map read from the code.</p>
+    <div class="table-wrap"><table id="ledger"><thead><tr><th>Action</th><th>Still s</th><th></th><th>Wall s</th><th>Count</th><th>Needed</th><th>Used for</th></tr></thead><tbody></tbody></table></div>
+  </section>
+  <section>
+    <h2>Chain of events</h2>
+    <p class="lede">Producer → consumer: what each action hands to the next. Red: nothing needs its output (or an earlier result already gives it). Amber: needed in part. Shown: the links that touch an action not marked needed.</p>
+    <div class="bar-tools"><button id="chainToggle" type="button">Show the whole chain</button></div>
+    <div class="chain" id="chain"></div>
+  </section>
+</main>
+<div id="tip" hidden></div>
+<script>
+const D = /*DATA*/null;
+const $ = (s) => document.querySelector(s);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const CAT = { sense: '--sense', move: '--move', gripper: '--grip', seam: '--seam', other: '--other' };
+const CATNAME = { sense: 'sensing', move: 'arm motion', gripper: 'gripper', seam: 'seam call', other: 'other' };
+const fmt = (s) => s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${s.toFixed(1)} s`;
+const norm = (s) => (s || '').toLowerCase().replace(/<part>|[^a-z_ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+function purposeFor(label) {
+  const L = norm(label); let best = null, score = 0;
+  for (const [k, e] of Object.entries(D.purpose || {})) {
+    const words = norm(k).split(' ').filter(w => w.length > 2);
+    if (!words.length) continue;
+    const hit = words.filter(w => L.includes(w)).length / words.length;
+    if (hit > score) { score = hit; best = e; }
+  }
+  return score >= 0.6 ? best : null;
+}
+
+function stats() {
+  const still = D.still.reduce((a, [s, e]) => a + (e - s), 0);
+  const [a0, a1] = D.assembly;
+  const stillA = D.still.reduce((a, [s, e]) => a + Math.max(0, Math.min(e, a1) - Math.max(s, a0)), 0);
+  const top = D.per[0];
+  const cells = [
+    ['cycle', fmt(D.span)], ['reset', fmt(Math.max(0, a0))], ['assembly', fmt(a1 - a0)],
+    ['arm still, whole cycle', `${Math.round(100 * still / D.span)} %`, true],
+    ['arm still, assembly', `${Math.round(100 * stillA / Math.max(1, a1 - a0))} %`, true],
+    ['largest still item', top ? `${top.still.toFixed(0)} s` : '–', true],
+  ];
+  $('#strip').innerHTML = cells.map(([k, v, hot]) => `<div class="stat${hot ? ' hot' : ''}"><b>${v}</b><span>${k}</span></div>`).join('');
+  if (D.title) { $('#title').textContent = D.title; }
+}
+
+let pps = 1.2;   // pixels per second
+function timeline() {
+  const W = Math.max(600, Math.ceil(D.span * pps) + 170), LANE = 30, TOP = 34;
+  const H = TOP + D.lanes.length * (LANE + 8) + 24;
+  const x = (t) => 160 + t * pps;
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cycle timeline">`;
+  for (const [a, b] of D.still) s += `<rect x="${x(a)}" y="${TOP - 6}" width="${Math.max(0.5, (b - a) * pps)}" height="${H - TOP - 12}" fill="${css('--still')}"/>`;
+  const step = pps > 3 ? 10 : pps > 1 ? 30 : 60;
+  for (let t = 0; t <= D.span; t += step) s += `<line x1="${x(t)}" x2="${x(t)}" y1="${TOP - 10}" y2="${H - 18}" stroke="${css('--rule')}"/><text x="${x(t) + 2}" y="${H - 6}">${t}s</text>`;
+  for (const p of D.parts) s += `<rect x="${x(p.t0)}" y="4" width="${(p.t1 - p.t0) * pps}" height="14" fill="none" stroke="${css('--accent')}"/><text x="${x(p.t0) + 4}" y="15" style="fill:${css('--accent')}">${p.label}</text>`;
+  if (D.assembly[0] > 1) s += `<text x="${x(1)}" y="15">reset</text>`;
+  D.lanes.forEach((lane, i) => {
+    const y = TOP + i * (LANE + 8);
+    s += `<text class="lane-name" x="8" y="${y + LANE / 2 + 4}">${lane.name}</text>`;
+    const bars = [...lane.bars].sort((a, b) => (b.t1 - b.t0) - (a.t1 - a.t0));
+    for (const b of bars) {
+      const w = Math.max(1, (b.t1 - b.t0) * pps), nested = b.k === 'seam' || b.k === 'part';
+      s += `<rect class="bar" data-l="${encodeURIComponent(b.l)}" data-k="${encodeURIComponent(b.kk)}" data-d="${(b.t1 - b.t0).toFixed(1)}" data-t="${b.t0}"
+        x="${x(b.t0)}" y="${nested ? y : y + 4}" width="${w}" height="${nested ? LANE : LANE - 8}" fill="${css(CAT[b.c] || '--other')}" fill-opacity="${nested ? 0.18 : 0.85}" stroke="${css('--panel')}" stroke-width="0.5"/>`;
+    }
+  });
+  s += '</svg>';
+  $('#tlwrap').innerHTML = s;
+  $('#legend').innerHTML = Object.entries(CAT).map(([k, v]) => `<span><i style="background:${css(v)}"></i>${CATNAME[k]}</span>`).join('') + `<span><i style="background:${css('--still')};outline:1px solid ${css('--still-edge')}"></i>arm still</span>`;
+}
+
+function ledger() {
+  const max = Math.max(1, ...D.per.map(p => p.still));
+  $('#ledger tbody').innerHTML = D.per.filter(p => p.still >= 0.5).map(p => {
+    const e = purposeFor(p.k); const need = e ? (e.needed || 'unclear') : '';
+    const why = e ? `${e.produces ? `<b>gives</b> ${e.produces}. ` : ''}${e.consumed_by ? `<b>used by</b> ${[].concat(e.consumed_by).join(', ')}. ` : ''}${need !== 'yes' && e.cheaper_alternative ? `<b>instead</b> ${e.cheaper_alternative}` : ''}` : '<span class="empty">not in the purpose map yet</span>';
+    return `<tr><td class="act">${p.k.replace(/</g, '&lt;')}</td><td class="num">${p.still.toFixed(1)}</td><td><div class="meter"><i style="width:${100 * p.still / max}%"></i></div></td>
+      <td class="num">${p.wall.toFixed(1)}</td><td class="num">${p.n}</td><td>${need ? `<span class="pill ${need}">${need}</span>` : ''}</td><td class="why">${why}</td></tr>`;
+  }).join('');
+}
+
+function mermaidOf(E) {
+  const P = D.purpose || {};
+  const id = {}; let n = 0; const key = (s) => (id[s] ??= `n${n++}`);
+  const lab = (s) => (s || '').replace(/["<>|]/g, '').slice(0, 48);
+  let m = 'flowchart LR\n';
+  for (const [a, b, what] of E) m += `  ${key(a)}["${lab(a)}"] -->|${lab(what).slice(0, 30) || ' '}| ${key(b)}["${lab(b)}"]\n`;
+  for (const [name, e] of Object.entries(P)) {
+    if (!(name in id)) continue;
+    if (e.needed === 'no') m += `  style ${id[name]} stroke:${css('--no')},stroke-width:3px\n`;
+    if (e.needed === 'partly') m += `  style ${id[name]} stroke:${css('--partly')},stroke-width:3px\n`;
+  }
+  return m;
+}
+function chain() {
+  const P = D.purpose || {};
+  const all = D.edges || [];
+  if (!all.length) { $('#chain').innerHTML = '<p class="empty">The purpose map has not been attached to this page yet.</p>'; $('#chainToggle').hidden = true; return; }
+  const flagged = (s) => P[s] && P[s].needed && P[s].needed !== 'yes';
+  const some = all.filter(([a, b]) => flagged(a) || flagged(b));
+  $('#chain').innerHTML = `<pre class="mermaid" id="chainSome">${mermaidOf(some)}</pre><pre class="mermaid" id="chainAll" hidden>${mermaidOf(all)}</pre>`;
+  $('#chainToggle').textContent = `Show the whole chain (${all.length} links)`;
+}
+
+const tip = $('#tip');
+document.addEventListener('mousemove', (ev) => {
+  const r = ev.target.closest && ev.target.closest('rect.bar');
+  if (!r) { tip.hidden = true; return; }
+  const l = decodeURIComponent(r.dataset.l), k = decodeURIComponent(r.dataset.k), e = purposeFor(k);
+  tip.innerHTML = `<b>${l.replace(/</g, '&lt;')}</b><br>${r.dataset.d} s at +${(+r.dataset.t).toFixed(0)} s` + (e ? `<br>${e.needed ? `<span class="pill ${e.needed}">${e.needed}</span> ` : ''}${e.why || ''}` : '');
+  tip.hidden = false;
+  tip.style.left = Math.min(ev.clientX + 14, innerWidth - 400) + 'px'; tip.style.top = (ev.clientY + 14) + 'px';
+});
+$('#chainToggle').onclick = () => {
+  const allShown = !$('#chainAll').hidden;
+  $('#chainAll').hidden = allShown; $('#chainSome').hidden = !allShown;
+  $('#chainToggle').textContent = allShown ? `Show the whole chain (${(D.edges || []).length} links)` : 'Show only links touching flagged actions';
+};
+$('#zin').onclick = () => { pps = Math.min(12, pps * 1.6); timeline(); };
+$('#zout').onclick = () => { pps = Math.max(0.4, pps / 1.6); timeline(); };
+if (D) { stats(); timeline(); ledger(); chain(); }
+</script>

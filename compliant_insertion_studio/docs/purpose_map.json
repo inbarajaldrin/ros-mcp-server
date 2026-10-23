@@ -1,0 +1,1544 @@
+{
+ "run": "FMB1 run 44 (replay_20261023_083639, 687 s, 411 s still in intervals >= 0.8 s) + its reset (08:25:06-08:36:38, 692 s: disassemble x4 543 s, move_base ~142 s)",
+ "sources": [
+  "ablations/logs/replay_20261023_083639.{timing,motion}.jsonl",
+  "/tmp/fmb1_44.log",
+  "compliant_insertion_studio/logs/drive_align_*_20261023_08{38,41,43,46}*.{log,timing.jsonl}",
+  "compliant_insertion_studio/logs/drive_mate_*_20261023_08*.log",
+  "/tmp/execute_mate.log ([certify timing])",
+  "/tmp/drive_mate.log",
+  "ablations/logs/disassemble_20261023_0825*/0827*/0830*/0832*.{timing,motion}.jsonl"
+ ],
+ "caveats": [
+  "arm_still_seconds = TCP translation still (motion recorder). A wrist turn in place counts as still.",
+  "seconds_per_run sums over the run (per cycle for 'reset:' rows). Values marked estimate in 'why' are not timed (drive_align had no read_icp/turn_wrist rows before 255d950; move_base has no timing file).",
+  "needed='partly' means the output is used but the same output is available cheaper; 'unclear' means the effect on seating was not measured."
+ ],
+ "entries": [
+  {
+   "action": "startup move_home",
+   "where": "ablations/replay_real_assembly.py:main (startup_steps ~4096)",
+   "per_run_count": 1,
+   "seconds_per_run": 4.4,
+   "arm_still_seconds": 1.0,
+   "produces": "arm at home, camera over the home-visible table",
+   "consumed_by": [
+    "derive-sequence observe_many (home)"
+   ],
+   "needed": "yes",
+   "why": "Start pose for the up-front planning observe (it saw u_orange there: 'derive-sequence u_orange: observed rpy... 1 pass').",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "startup gripper-open (control_gripper 100)",
+   "where": "ablations/replay_real_assembly.py:main (startup_steps)",
+   "per_run_count": 1,
+   "seconds_per_run": 2.8,
+   "arm_still_seconds": 2.8,
+   "produces": "fingers fully open (move_base left them closed at 0.5 mm)",
+   "consumed_by": [
+    "derive-sequence observe_many (home)",
+    "view the clear area",
+    "staging view",
+    "depth-pick view above <part>",
+    "move_to_grasp"
+   ],
+   "needed": "partly",
+   "why": "Needed after move_base (fingers closed for pushing). But move_to_grasp then commands the pre-grasp width (35 mm) before the descent, a second gripper call (2.4 s, log 'Restoring gripper to initial width (35mm)').",
+   "cheaper_alternative": "Open to the first part's pre-grasp opening only if the views do not need a fully open hand; otherwise keep. Small (~2.4 s)."
+  },
+  {
+   "action": "derive-sequence observe_many (home)",
+   "where": "ablations/replay_real_assembly.py:main:4133",
+   "per_run_count": 1,
+   "seconds_per_run": 3.1,
+   "arm_still_seconds": 3.1,
+   "produces": "pass count per part seen from home (u_orange) + LAST_SEEN_XY",
+   "consumed_by": [
+    "replay_object step list",
+    "part view above <part>"
+   ],
+   "needed": "yes",
+   "why": "Arm passes home anyway; one shared still window (CLAUDE.md: plan every part up front).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "view the clear area (+1.5 s sleep + observe_many)",
+   "where": "ablations/replay_real_assembly.py:main:_clear_view 4164-4167",
+   "per_run_count": 1,
+   "seconds_per_run": 8.5,
+   "arm_still_seconds": 6.0,
+   "produces": "u_brown pass count (rpy -90,0,21.6 -> 1 pass) + LAST_SEEN_XY",
+   "consumed_by": [
+    "replay_object step list (u_brown)"
+   ],
+   "needed": "partly",
+   "why": "u_brown is picked first, from the clear area: the depth-pick view above it 1 min later (0.52 m, same part) could plan it. The only reason to plan up front is a part the per-part view cannot see, and every part now gets a straight-down view before its pick (_part_view / depth-pick view).",
+   "cheaper_alternative": "Plan u_brown at its depth-pick view (derive_sequence_for with the depth-pick samples), drop this view."
+  },
+  {
+   "action": "staging view (planning; +1.5 s sleep + observe_many)",
+   "where": "ablations/replay_real_assembly.py:_staging_view 618-626, main 4170",
+   "per_run_count": 1,
+   "seconds_per_run": 16.0,
+   "arm_still_seconds": 6.4,
+   "produces": "line_green pass count; inverted_u_yellow NOT seen ('not seen from any view -> recorded sequence') -> _planned_blind",
+   "consumed_by": [
+    "replay_object step list (line_green)",
+    "yellow planned-blind re-plan"
+   ],
+   "needed": "partly",
+   "why": "11.4 s move (0.78 m Cartesian, commanded 10 s) for one part's pass count; the yellow is not seen from it (also unseen in all 3 reset landing checks: spacing 'unseen': ['inverted_u_yellow']) and gets re-planned at its own view anyway. line_green gets its own 'view above line_green' 3 min later.",
+   "cheaper_alternative": "Plan each part at its own view above it (as the yellow already is), or from the disassembly's recorded set-down pose (record_staged keeps the stance; staged_parts.json is loaded at 4113). Saves ~16 s."
+  },
+  {
+   "action": "base-view move (startup)",
+   "where": "ablations/replay_real_assembly.py:main:4236",
+   "per_run_count": 1,
+   "seconds_per_run": 5.7,
+   "arm_still_seconds": 1.6,
+   "produces": "camera 0.56 m over the last base read",
+   "consumed_by": [
+    "observe base1 (markers, startup)",
+    "depth outline (base_depth.measure)",
+    "read_icp (startup base fit)"
+   ],
+   "needed": "yes",
+   "why": "The one empty-gripper whole-base view of the run (BASE_FROM=icp needs the base beyond the D415 0.45 m depth floor).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "observe base1 (markers, startup ICP seed)",
+   "where": "ablations/replay_real_assembly.py:observe_base_pose 519-560, main:4238",
+   "per_run_count": 1,
+   "seconds_per_run": 6.0,
+   "arm_still_seconds": 6.0,
+   "produces": "marker base pose (15 samples)",
+   "consumed_by": [
+    "read_icp (startup base fit) as seed",
+    "depth outline (base_depth.measure) as seed"
+   ],
+   "needed": "partly",
+   "why": "With BASE_FROM=icp the markers only seed the CAD fit. seams/vision_ops.py:pose 77-93 already seeds from last_base_pose.json for this reason ('A certify spent 15.2 s here (10-23): markers 5.5 + a depth outline only a refused fallback used 3.3 + the fit 4.3'). Here the last read is move_base's final read, 2 min old.",
+   "cheaper_alternative": "Seed read_icp from _last_base_pose (move_base's final read); markers only if that fit fails. ~5 s."
+  },
+  {
+   "action": "depth outline (base_depth.measure) + 1.0 s sleep (startup)",
+   "where": "ablations/replay_real_assembly.py:main:4240-4241",
+   "per_run_count": 1,
+   "seconds_per_run": 4.6,
+   "arm_still_seconds": 4.6,
+   "produces": "outline base pose (fallback only)",
+   "consumed_by": [
+    "choose_base_read (only if read_icp fails)"
+   ],
+   "needed": "no",
+   "why": "_choose_base_read 975-991: with BASE_FROM=icp the outline is returned only when the ICP fit fails; run 44's fit succeeded (rms 1.17 mm), so the 4.6 s gap before base_read bought nothing. The 1 s sleep is also redundant: capture() waits for frames >= 1.2 s after the TCP stopped (handeye_icp_survey.py:capture 73-79).",
+   "cheaper_alternative": "Compute the outline lazily, only when read_icp returns None."
+  },
+  {
+   "action": "read_icp (startup base fit)",
+   "where": "ablations/replay_real_assembly.py:_choose_base_read 975-991 -> ablations/base_icp.py:read_icp 156",
+   "per_run_count": 1,
+   "seconds_per_run": 5.0,
+   "arm_still_seconds": 5.0,
+   "produces": "args.observed_base + last_base_pose.json (base1 at 145.9,-485.3 mm, 19.23 deg)",
+   "consumed_by": [
+    "drive --mate (measured base for mate:00 -> track_base_in_hand view position / seed)",
+    "execute_mate: certify base fit (seed via last_base_pose.json)",
+    "_pick_room / spacing (not in --part-at-staging)"
+   ],
+   "needed": "yes",
+   "why": "The base pose every first aim starts from; the in-hand read then moved it 5.1 mm (drive_align_u_brown log).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "base-view return to staging (move_to_clear_area) + _seen_here(u_brown)",
+   "where": "ablations/replay_real_assembly.py:main:4255, 4376",
+   "per_run_count": 1,
+   "seconds_per_run": 6.5,
+   "arm_still_seconds": 4.0,
+   "produces": "arm over the clear area; u_brown confirmed there (brightness + observe)",
+   "consumed_by": [
+    "depth-pick view above u_brown"
+   ],
+   "needed": "partly",
+   "why": "The depth-pick view above u_brown follows straight after (5.0 s move from 0.32 m back up to 0.52 m) and fits the part there; that view would also say 'not here'.",
+   "cheaper_alternative": "Return straight to the depth-pick view above u_brown (one move, no _seen_here). ~6 s."
+  },
+  {
+   "action": "unwind wrist_3 if wound",
+   "where": "ablations/replay_real_assembly.py:replay_object (primitives.core.unwind_wrist)",
+   "per_run_count": 1,
+   "seconds_per_run": 1.0,
+   "arm_still_seconds": 1.0,
+   "produces": "wrist_3 within its cable range ('unwound_turns': 0)",
+   "consumed_by": [
+    "every later wrist turn"
+   ],
+   "needed": "yes",
+   "why": "Cable safety (memory: wrist_3 wind-up). 1 s is mostly process start.",
+   "cheaper_alternative": "Check wrist_3 from the state tap in process; call the primitive only when it is wound."
+  },
+  {
+   "action": "between-parts move_home (u_orange)",
+   "where": "ablations/replay_real_assembly.py:main:4348",
+   "per_run_count": 1,
+   "seconds_per_run": 4.2,
+   "arm_still_seconds": 1.7,
+   "produces": "arm at home ('camera view of the table')",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "Nothing reads the home view: with --part-at-staging and u_orange last seen away from the clear area the next step is _part_view (4370), which flies above u_orange. line_green/yellow already skip it (NOT_FROM_HOME).",
+   "cheaper_alternative": "Skip move_home when the next step is _part_view (same condition as 4365-4370)."
+  },
+  {
+   "action": "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "where": "ablations/replay_real_assembly.py:_part_view 826-870",
+   "per_run_count": 3,
+   "seconds_per_run": 36.3,
+   "arm_still_seconds": 20.9,
+   "produces": "part confirmed under the camera; LAST_SEEN_XY / tracker xy (moves the target 6-12 mm)",
+   "consumed_by": [
+    "depth-pick view above <part>",
+    "depth_pick: marker seed observe (part_depth.read)",
+    "yellow planned-blind re-plan"
+   ],
+   "needed": "partly",
+   "why": "The view itself is needed (the part is out of view from where the last insert left the arm). But it is the SAME pose as the depth-pick view (0.52 m top-down over the part) except for the 6-12 mm the observe moved LAST_SEEN_XY, and its samples are thrown away: part_depth.read observes again 1-2 s later.",
+   "cheaper_alternative": "Make the part view the depth-pick view: keep its samples as the fit seed; widen depth_pick_target's 'already there' test (2579: 5 mm) to the fit's crop (CROP_R_M 0.11 m)."
+  },
+  {
+   "action": "yellow planned-blind re-plan (_seen_here x2 + derive observe)",
+   "where": "ablations/replay_real_assembly.py:main:4419-4426",
+   "per_run_count": 1,
+   "seconds_per_run": 7.0,
+   "arm_still_seconds": 7.0,
+   "produces": "inverted_u_yellow tool_sequence (1 pass, RESHAPED)",
+   "consumed_by": [
+    "replay_object step list (yellow)"
+   ],
+   "needed": "partly",
+   "why": "_part_view returned True only after _seen_here saw it (852); then 4421 _seen_here(4 s), 4423 _seen_here(8 s) and derive_sequence_for's own observe ran again from the same still pose: 3 brightness + 4 observes in 7 s (timing +330.5..337.5). Root cause: the reset puts the yellow where the staging view never detects it.",
+   "cheaper_alternative": "Pass the _part_view samples to derive_sequence_for(samples=...); skip both extra _seen_here calls. ~6 s."
+  },
+  {
+   "action": "depth-pick view above <part> at 0.52 m",
+   "where": "ablations/replay_real_assembly.py:depth_pick_target 2568-2590",
+   "per_run_count": 3,
+   "seconds_per_run": 12.7,
+   "arm_still_seconds": 5.2,
+   "produces": "camera straight above the part at depth height",
+   "consumed_by": [
+    "depth_pick: marker seed observe (part_depth.read)",
+    "depth_pick: depth capture + CAD fit"
+   ],
+   "needed": "partly",
+   "why": "u_brown: needed (arm was at 0.32 m over the clear area). u_orange and yellow: re-centring moves of 7.9 mm / 12.1 mm ('distance_m': 0.0079 / 0.0121) taking 3.9 / 3.8 s because the 'already there' test is 5 mm; line_green (within 5 mm) skipped it.",
+   "cheaper_alternative": "Skip the re-centre when within the fit crop (0.11 m); for u_brown come straight here from the base view. ~8-12 s."
+  },
+  {
+   "action": "depth_pick: marker seed observe (part_depth.read)",
+   "where": "ablations/part_depth.py:read 83-92",
+   "per_run_count": 4,
+   "seconds_per_run": null,
+   "arm_still_seconds": null,
+   "produces": "marker pose of the part (8 still samples) to seed the CAD fit",
+   "consumed_by": [
+    "depth_pick: depth capture + CAD fit"
+   ],
+   "needed": "partly",
+   "why": "The part view observed the same part from the same pose 1-5 s earlier (_seen_here) and the startup observes produced samples too; this is a third/fourth marker read. Not separately timed: inside the 7.5-9.3 s still gap before each move_to_grasp.",
+   "cheaper_alternative": "part_depth.read(part, seed=<samples from the view>) - the seed parameter already exists (83)."
+  },
+  {
+   "action": "depth_pick: depth capture + CAD fit",
+   "where": "ablations/part_depth.py:read 94-106 (handeye_icp_survey.capture + fit)",
+   "per_run_count": 4,
+   "seconds_per_run": 32.8,
+   "arm_still_seconds": 32.8,
+   "produces": "grasp point xyz + object quat from the depth fit (moved 1.3-3.3 mm from the marker seed)",
+   "consumed_by": [
+    "move_to_grasp (--target-xyz/--target-xyzw)",
+    "LAST_SEEN_XY"
+   ],
+   "needed": "yes",
+   "why": "Operator rule 10-21: picks from depth (finger landed on line_green from a 9-10 mm marker error). The 32.8 s is the whole still gap incl. the seed observe above; the capture alone waits for frames >= 1.2 s after the stop.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "move_to_grasp (hover + straight descent)",
+   "where": "primitives/move_to_grasp.py (step 1 hover, step 2 fine positioning; step 3 skipped with --target-xyz)",
+   "per_run_count": 4,
+   "seconds_per_run": 54.7,
+   "arm_still_seconds": 28.4,
+   "produces": "part between the open fingers at the grasp; current_object_orientation (chained)",
+   "consumed_by": [
+    "control_gripper close",
+    "rotate_object (--current-object-orientation)",
+    "drive --mate (held pose)"
+   ],
+   "needed": "yes",
+   "why": "The pick itself. Its still time includes the two gripper subprocesses below and ~1 s process start.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "control_gripper open (inside move_to_grasp)",
+   "where": "primitives/move_to_grasp.py:~1015 ('opening for a clear view')",
+   "per_run_count": 3,
+   "seconds_per_run": 7.2,
+   "arm_still_seconds": 7.2,
+   "produces": "fingers at 100 mm for a camera view",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "With --target-xyz from the depth fit move_to_grasp never looks ('Skipping step 3 (explicit --target-xyz from the depth fit)'). FIXED after run 44 by 0a9229f.",
+   "cheaper_alternative": "Done (0a9229f)."
+  },
+  {
+   "action": "control_gripper pre-grasp width (inside move_to_grasp, before the descent)",
+   "where": "primitives/move_to_grasp.py step 2 ('Restoring gripper to initial width')",
+   "per_run_count": 4,
+   "seconds_per_run": 9.7,
+   "arm_still_seconds": 9.7,
+   "produces": "fingers at the pre-grasp opening",
+   "consumed_by": [
+    "move_to_grasp descent"
+   ],
+   "needed": "partly",
+   "why": "Needed for u_brown (100 mm after the startup open). For u_orange/line_green/yellow it only undid the open-for-view above. The trajectory waits for it (log: control_gripper 882.66 -> 885.08, then 'Step 2 trajectory sent'). 0a9229f now skips it when the fingers are within 3 mm.",
+   "cheaper_alternative": "Done for 3 of 4 parts (0a9229f). For the first part: open to the pre-grasp width at startup, or send it during step 1's hover move."
+  },
+  {
+   "action": "control_gripper close",
+   "where": "ablations/replay_real_assembly.py:replay_object -> primitives.control_gripper close",
+   "per_run_count": 4,
+   "seconds_per_run": 6.9,
+   "arm_still_seconds": 6.9,
+   "produces": "part gripped; final_width_mm",
+   "consumed_by": [
+    "grip-width guard (replay_object 3655-3666)",
+    "move_to_safe_height (after pick)"
+   ],
+   "needed": "yes",
+   "why": "The grasp. ~1 s of each 1.7 s is process start.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "move_to_safe_height (after pick)",
+   "where": "primitives/move_to_safe_height.py",
+   "per_run_count": 4,
+   "seconds_per_run": 17.0,
+   "arm_still_seconds": 6.7,
+   "produces": "part lifted to 0.32 m flange",
+   "consumed_by": [
+    "rotate_object"
+   ],
+   "needed": "yes",
+   "why": "CLAUDE.md: reorient at safe height.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "rotate_object (incl. verify_grasp subprocess)",
+   "where": "primitives/rotate_object.py (verify_grasp, IK, one joint move)",
+   "per_run_count": 4,
+   "seconds_per_run": 25.0,
+   "arm_still_seconds": 15.6,
+   "produces": "part at its target orientation relative to an IDENTITY base yaw; final_object_orientation (snapped fold branch)",
+   "consumed_by": [
+    "drive --mate (held quat)",
+    "turn_wrist to base yaw (drive_align)"
+   ],
+   "needed": "partly",
+   "why": "The reorient is needed (its snapped quaternion is what the insert chain was validated with - replay 3523-3532). But in real mode it ignores the measured base yaw (rotate_object.py:1188-1192 'Real mode: always use default [0, 0, 0, 1]'), so every part arrives ~19-20 deg off the base and drive_align turns the wrist (+19.79, +20.26, +19.08, +18.75 deg in run 44). The verify_grasp inside (~1.2 s, width only) repeats the close's own width check.",
+   "cheaper_alternative": "Pass the measured base yaw into rotate_object (primitive outside compliant_insertion_studio - ask the operator) so the base-yaw turn disappears; --skip-verify-grasp exists (rotate_object.py:1881)."
+  },
+  {
+   "action": "pre_insert_read",
+   "where": "ablations/replay_real_assembly.py:pre_insert_base_read 994",
+   "per_run_count": 4,
+   "seconds_per_run": 0.0,
+   "arm_still_seconds": 0.0,
+   "produces": "nothing (PRE_INSERT_READ=off)",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "Disabled in this recipe; the in-hand read inside drive-mate replaces it.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "drive --mate seam overhead (client + server + drive_align / translate_object / touch_insert process starts)",
+   "where": "ablations/replay_real_assembly.py:_seam_call 1626 -> seams/client.py -> seams/drive_mate_server.py:_align 162 / execute 255-300",
+   "per_run_count": 4,
+   "seconds_per_run": 18.0,
+   "arm_still_seconds": null,
+   "produces": "plumbing",
+   "consumed_by": [],
+   "needed": "partly",
+   "why": "Per part: ~1.6 s before the first align row (depth route; the marker route's 5.6 s includes a wrist turn), ~3.5-4.7 s between the align child's last row and 'aligned' in /tmp/drive_mate.log (drive_align imports the 4600-line replay module, 0.5 s poll), then translate_object spawns touch_insert (two more process starts). Estimate from row offsets.",
+   "cheaper_alternative": "One long-lived drive-mate worker that has the replay/align code imported (AR3 debt noted in seams/drive_align.py docstring); call touch_insert directly."
+  },
+  {
+   "action": "turn_wrist to base yaw (drive_align)",
+   "where": "compliant_insertion_studio/wrapper/align_at_hover.py:turn_wrist 85-101; replay hover_servo 2249-2253 / depth_servo 1915-1918",
+   "per_run_count": 4,
+   "seconds_per_run": 16.0,
+   "arm_still_seconds": 16.0,
+   "produces": "held part turned to the measured base yaw (held_q updated)",
+   "consumed_by": [
+    "base track view (part in hand)",
+    "servo/dservo rounds",
+    "touch_insert (HOVER_YAW_FIX=0)"
+   ],
+   "needed": "partly",
+   "why": "Needed only because rotate_object targets an identity base yaw (see above). Each turn is a move_cartesian SUBPROCESS (~1.5 s start + 2.5 s min duration). A pure wrist turn does not translate the TCP, so the motion recorder counts it as still. Estimate 4 x ~4 s (gaps of 4.1-4.3 s around turns in the drive_align timing).",
+   "cheaper_alternative": "Fold the yaw into rotate_object's target, or into the next in-process move (_move_unless_there to the base track view can carry the turned quaternion)."
+  },
+  {
+   "action": "turn_wrist (image yaw, servo rounds)",
+   "where": "ablations/replay_real_assembly.py:hover_servo 2416-2430, depth_servo 1996-2006",
+   "per_run_count": 4,
+   "seconds_per_run": 16.0,
+   "arm_still_seconds": 16.0,
+   "produces": "wrist turned by the image yaw; another measuring round",
+   "consumed_by": [
+    "servo/dservo rounds"
+   ],
+   "needed": "unclear",
+   "why": "u_brown -1.55 and -0.47 deg, u_orange -1.93, yellow -0.41 deg. SERVO_YAW_MIN_TURN_DEG = 0.4 is the stated noise floor (seams/servo_law.py:26); the -0.47/-0.41 turns cleared it by <0.1 deg and each cost a turn (~4 s) + a re-measure round (u_brown: up 2.7 + hover 3.0 + frame 1.3 s). Whether such turns change the seat is not measured.",
+   "cheaper_alternative": "Do the turn in process (no subprocess); test a 0.6-0.8 deg threshold against the seat outcome before changing it."
+  },
+  {
+   "action": "base track view (part in hand) - marker route",
+   "where": "ablations/replay_real_assembly.py:hover_servo 2255 -> track_base_in_hand 1705-1765",
+   "per_run_count": 2,
+   "seconds_per_run": 12.6,
+   "arm_still_seconds": 1.1,
+   "produces": "camera 0.56 m over the base with the part in hand",
+   "consumed_by": [
+    "read_icp (in-hand base fit)"
+   ],
+   "needed": "unclear",
+   "why": "The marker servo then measures part vs socket against the base's own markers IN THE SAME FRAME every round (base_pose_same_frame), and the aim returned is the servoed xy (aim = base + total servo move), so the in-hand read mostly sets the starting guess, rim heights and drive-mate's measured base. It did move the base 5.1 / 2.8 mm (u_brown / u_orange) since the startup read.",
+   "cheaper_alternative": "Not tested: start the servo from the previous measured base and keep the same-frame base read; compare rounds and seat error over a few runs before dropping it."
+  },
+  {
+   "action": "read_icp (in-hand base fit)",
+   "where": "ablations/base_icp.py:read_icp 156 (via track_base_in_hand 1731-1748)",
+   "per_run_count": 6,
+   "seconds_per_run": 22.0,
+   "arm_still_seconds": 22.0,
+   "produces": "base pose fitted to depth with the seated parts (drive-mate's measured base)",
+   "consumed_by": [
+    "servo/dservo rounds (predicted seat)",
+    "drive --mate result base_measured -> next part's start base"
+   ],
+   "needed": "partly",
+   "why": "Each read = still_frame for the marker seed (~1.0 s) + depth capture (>= 1.2 s after stop) + fit; the 6.2-8.8 s still gaps after the base-track rows include it. For line_green it FAILED both times ('CAD fit failed in hand ... partial view' / 'tilted fit') - and in 31 of 34 line_green reads in today's drive_align logs - so it fell back to 'aiming at the previous read'. Estimate ~3.5 s per read x 6.",
+   "cheaper_alternative": "line_green: skip the in-hand base read (it fails by construction with the U parts seated; held_axial_correction from the outline is what it actually uses)."
+  },
+  {
+   "action": "base track view #1 (depth route, before the outline)",
+   "where": "ablations/replay_real_assembly.py:align_for_insert 2101 (then depth_servo 1939 reads again)",
+   "per_run_count": 2,
+   "seconds_per_run": 13.7,
+   "arm_still_seconds": 1.3,
+   "produces": "first in-hand base read (line_green: failed; yellow: ok)",
+   "consumed_by": [
+    "depth_servo wrist turn to base yaw (only)"
+   ],
+   "needed": "no",
+   "why": "depth_servo re-reads the base itself after the outline view (1939). Yellow's second read moved only 0.7 mm / +0.56 deg from the first; line_green's both failed. The same redundancy was already removed for the marker route (2094-2097 'a read here first, before the turn, only fed that turn (run 34: ~15 s per U part)'). Move 7.65 / 6.09 s + frame 1.1 s + fit.",
+   "cheaper_alternative": "For the depth route turn the wrist from the measured base and go straight to the outline view (as the marker route does). ~10-12 s per depth-route part."
+  },
+  {
+   "action": "servo/dservo: outline view over table (+ still_frame + held_outline_px)",
+   "where": "ablations/replay_real_assembly.py:hover_servo 2262-2273, depth_servo 1920-1928",
+   "per_run_count": 4,
+   "seconds_per_run": 24.2,
+   "arm_still_seconds": 3.7,
+   "produces": "held part's outline in the image over bare table (camera rigid with the gripper)",
+   "consumed_by": [
+    "servo/dservo rounds (socket_shift_world)",
+    "held_axial_correction (line_green aim -4.0/+3.9 mm)"
+   ],
+   "needed": "yes",
+   "why": "The only read of where the part sits in the hand; line_green's insert aim came from it.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "_emitter toggles (D415 projector on/off via ros2 param CLI)",
+   "where": "ablations/replay_real_assembly.py:_emitter 2458-2472, depth_servo 1921/1925/1940, hover_servo 2264/2275, release 2147/2166",
+   "per_run_count": 12,
+   "seconds_per_run": 26.0,
+   "arm_still_seconds": 26.0,
+   "produces": "projector state (colour frames without the dot pattern)",
+   "consumed_by": [
+    "still_frame (outline / servo rounds)",
+    "read_icp / certify depth capture (projector back on)"
+   ],
+   "needed": "partly",
+   "why": "Each set is a `ros2 param set` process + 0.8 s sleep (~2.2 s; 2.2-2.4 s gaps around the dservo outline still_frame: line_green +24.3->26.7 and +27.6->29.8 s). Marker route: 2 sets per part; depth route: 4 (off/on around the outline frame, off again for the rounds, on at release). The reason is a DARK room (docstring 10-21); run 44 ran with the lights on.",
+   "cheaper_alternative": "Set the parameter in process (rclpy param client, no CLI start); skip when ensure_exposure's brightness is normal; in depth_servo read the base first, then outline + rounds in one off-window (2 sets instead of 4). Estimate 12 x 2.2 s."
+  },
+  {
+   "action": "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "where": "ablations/replay_real_assembly.py:hover_servo 2318-2433, depth_servo 1965-2021",
+   "per_run_count": 4,
+   "seconds_per_run": 45.0,
+   "arm_still_seconds": 18.0,
+   "produces": "aim correction (u_brown -4.1,-7.7 mm; u_orange -1.9,-0.4 mm; yellow converged -3.0/+0.1 mm)",
+   "consumed_by": [
+    "touch_insert (aim base)"
+   ],
+   "needed": "yes",
+   "why": "u_brown round 0 read 8.6 mm off - the grasp error the insert cannot absorb blind. Estimate from the drive_align rows.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "servo done: clear",
+   "where": "ablations/replay_real_assembly.py:hover_servo 2437",
+   "per_run_count": 2,
+   "seconds_per_run": 4.0,
+   "arm_still_seconds": 0.8,
+   "produces": "arm at the clear height over the aim",
+   "consumed_by": [
+    "touch_insert"
+   ],
+   "needed": "partly",
+   "why": "touch_insert's first move is to its own hover at the same xy (drive_mate log 'FK current [0.1825,-0.5252,0.2880] -> Target [0.1823,-0.5253,0.2880]'), so this move is the hover; fine, but u_orange's servo 'clear 1' then 'done' moved to the same place twice.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "touch_insert (drive-mate insert)",
+   "where": "compliant_insertion_studio/wrapper/touch_insert.py via primitives/translate_object.py",
+   "per_run_count": 4,
+   "seconds_per_run": 82.0,
+   "arm_still_seconds": null,
+   "produces": "seated part; slide / measured_correction; insert CSV/meta",
+   "consumed_by": [
+    "record_seat_offset",
+    "execute_mate certify",
+    "control_gripper release"
+   ],
+   "needed": "yes",
+   "why": "13.6 / 13.6 / 38.7 / 16.1 s. line_green needed 9 probes (8 stopped +34 mm on the U tops) because its aim came from the outline only (in-hand base fit failed).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "control_gripper release (to grasp width)",
+   "where": "replay_object step 7",
+   "per_run_count": 4,
+   "seconds_per_run": 8.7,
+   "arm_still_seconds": 8.7,
+   "produces": "part released at rest",
+   "consumed_by": [
+    "move_to_safe_height (after release)",
+    "execute_mate (not_at_rest premise)"
+   ],
+   "needed": "yes",
+   "why": "A free mate is judged after release (execute_mate_server premise 4).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "move_to_safe_height (after release)",
+   "where": "replay_object step 8",
+   "per_run_count": 4,
+   "seconds_per_run": 16.5,
+   "arm_still_seconds": 6.6,
+   "produces": "fingers lifted clear of the seated part",
+   "consumed_by": [
+    "execute_mate: seat view"
+   ],
+   "needed": "yes",
+   "why": "Straight up out of the seated part (CLAUDE.md safe height rule).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "seat_check (depth) line_green",
+   "where": "ablations/replay_real_assembly.py:3895-3901 -> seat_check_and_reseat 3102",
+   "per_run_count": 1,
+   "seconds_per_run": 13.1,
+   "arm_still_seconds": 9.0,
+   "produces": "depth seat verdict (pitch -0.84, height +0.79 mm) + seat error [-0.9, 0.0] mm + a re-fitted base",
+   "consumed_by": [
+    "yellow follow correction (aim shifted -0.9 mm)",
+    "execute_mate: seat view (outer)"
+   ],
+   "needed": "partly",
+   "why": "ExecuteMate measures the same seat with the same depth seat check (seams/vision_ops.py:certify_many 236) from the same 'outer' view seconds later (the seat view move was 2.1 mm). The non-one-node branch (3916-3926) already runs the ladder only on a measured not_at_seat.",
+   "cheaper_alternative": "Certify first; run the seat-check ladder only on not_at_seat; take the yellow's follow error from the certify's depth result. ~13 s."
+  },
+  {
+   "action": "execute_mate: seat view",
+   "where": "ablations/replay_real_assembly.py:certify_via_execute_mate 2516-2540 (seat_check.view_pose)",
+   "per_run_count": 4,
+   "seconds_per_run": 22.3,
+   "arm_still_seconds": 9.0,
+   "produces": "camera at the side view that measured this mate last time",
+   "consumed_by": [
+    "execute_mate: certify base fit",
+    "execute_mate: depth capture + measure"
+   ],
+   "needed": "yes",
+   "why": "The seat height is only measurable from a side view. line_green's 2.1 mm move still took 3.9 s (2.5 s min duration + process start).",
+   "cheaper_alternative": "Skip moves under ~3 mm (as _move_unless_there does for servo moves)."
+  },
+  {
+   "action": "execute_mate: certify base fit (vision_ops.pose base)",
+   "where": "seams/vision_ops.py:certify_many 215-221 -> pose 77-93 (read_icp, own depth capture)",
+   "per_run_count": 4,
+   "seconds_per_run": 19.4,
+   "arm_still_seconds": 19.4,
+   "produces": "base pose for the seat measurement",
+   "consumed_by": [
+    "execute_mate: depth capture + measure (seat height vs CAD)"
+   ],
+   "needed": "partly",
+   "why": "4.3-5.5 s per certify ([certify timing] base_pose). From the mate:01 and mate:02 views the fit FAILS ('fit -3.1 / +3.5 mm off the table height') and the certify uses the last saved read anyway - those ~10 s produce nothing. It also takes its own depth capture, then capture_world takes a second one from the same still pose.",
+   "cheaper_alternative": "Fit the base on the capture_world frames (one capture); or seed/accept drive-mate's measured base when the fit is refused from this view. ~11-20 s."
+  },
+  {
+   "action": "execute_mate: depth capture + per-mate measure (+ marker xy read)",
+   "where": "seams/vision_ops.py:certify_many 222-255",
+   "per_run_count": 4,
+   "seconds_per_run": 18.8,
+   "arm_still_seconds": 18.8,
+   "produces": "seat height/tilt of this mate and every predecessor; placed / refusal",
+   "consumed_by": [
+    "SEATED ledger",
+    "next execute_mate (order check)"
+   ],
+   "needed": "yes",
+   "why": "The certification the operator asked for after every seat (memory per-seat-check). Predecessor re-reads are 0.5 s each (contract: 'every predecessor still passes NOW').",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "brightness (ensure_exposure)",
+   "where": "ablations/replay_real_assembly.py:ensure_exposure 493, _part_view 832, _seen_here 638",
+   "per_run_count": 9,
+   "seconds_per_run": 9.2,
+   "arm_still_seconds": 9.2,
+   "produces": "colour-frame brightness (exposure guard)",
+   "consumed_by": [
+    "exposure change (none needed in run 44)"
+   ],
+   "needed": "partly",
+   "why": "One camera process per call (~1 s), 9 calls. FIXED after run 44 by 255d950 (a normal reading under 60 s old is reused).",
+   "cheaper_alternative": "Done (255d950)."
+  },
+  {
+   "action": "inter-step sleep 0.5 s",
+   "where": "ablations/replay_real_assembly.py:replay_object 3886 'Tiny pause between primitives to let TF + topics settle'",
+   "per_run_count": 28,
+   "seconds_per_run": 14.0,
+   "arm_still_seconds": 14.0,
+   "produces": "nothing measurable",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "Every primitive is a subprocess that already waited for its own completion; reads that need stillness use the still-window rule (observe_many settle(), still_frame, capture). 28 x 0.5 s gaps in the timing (e.g. 888.01 -> 888.53).",
+   "cheaper_alternative": "Remove, or keep only before a read that does not apply the still rule."
+  },
+  {
+   "action": "fixed settle sleeps before still-window reads",
+   "where": "ablations/replay_real_assembly.py:626, 851, 878, 4167, 4240",
+   "per_run_count": 6,
+   "seconds_per_run": 8.5,
+   "arm_still_seconds": 8.5,
+   "produces": "time",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "observe_many/_OBSERVE_*_HELPER and capture() already accept only samples taken after the TCP was still (memory depth-timing: 'stamp rule >=0.25 s after still replaces sleeps'). 1.5 s gaps before observe_many in the timing (+15.8, +31.7 s).",
+   "cheaper_alternative": "Drop the sleeps; rely on the still-window rule."
+  },
+  {
+   "action": "cleanup move_to_safe_height",
+   "where": "ablations/replay_real_assembly.py:main:4487",
+   "per_run_count": 1,
+   "seconds_per_run": 4.9,
+   "arm_still_seconds": 1.9,
+   "produces": "flange moved DOWN from 0.4716 to 0.2986 m",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "The arm is at the last certify seat view, 0.47 m up, gripper empty ('FK current: [0.0428, -0.2487, 0.4716]', target flange Z 0.2986). The safe-height rule is for a gripped part in the base.",
+   "cheaper_alternative": "Skip when the gripper is empty and the flange is already above SAFE_HEIGHT."
+  },
+  {
+   "action": "cleanup move_home",
+   "where": "ablations/replay_real_assembly.py:main:4491",
+   "per_run_count": 1,
+   "seconds_per_run": 4.2,
+   "arm_still_seconds": 1.7,
+   "produces": "arm at home (end state)",
+   "consumed_by": [
+    "reset: home (start of each disassemble)"
+   ],
+   "needed": "partly",
+   "why": "The next disassembly starts with its own move_home (disassemble.py:828), which then takes 4.0 s for a zero-distance move.",
+   "cheaper_alternative": "Keep one of the two."
+  },
+  {
+   "action": "reset: home (start of each disassemble process)",
+   "where": "ablations/disassemble.py:main 828",
+   "per_run_count": 4,
+   "seconds_per_run": 17.0,
+   "arm_still_seconds": 6.0,
+   "produces": "arm at home",
+   "consumed_by": [],
+   "needed": "no",
+   "why": "The next move is the base view (observe_base 394). The first call followed run 43's cleanup move_home (already home); the other three follow the previous process's staging-view landing check.",
+   "cheaper_alternative": "Go straight to the base view; or run all four parts in ONE disassemble process (no per-process start/end)."
+  },
+  {
+   "action": "reset: open (start of each disassemble process)",
+   "where": "ablations/disassemble.py:main 830",
+   "per_run_count": 4,
+   "seconds_per_run": 9.8,
+   "arm_still_seconds": 9.8,
+   "produces": "fingers fully open",
+   "consumed_by": [
+    "reset: base view move"
+   ],
+   "needed": "partly",
+   "why": "The seat grasp sets 'open to release width' before the descent anyway (1063); the open only keeps the fingers out of the base view. After the previous part's release the fingers are already at w+6 mm.",
+   "cheaper_alternative": "Skip when the fingers are already open wider than the part (one gripper read)."
+  },
+  {
+   "action": "reset: base view move",
+   "where": "ablations/disassemble.py:observe_base 394",
+   "per_run_count": 7,
+   "seconds_per_run": 34.7,
+   "arm_still_seconds": 11.3,
+   "produces": "camera 0.56 m over the base",
+   "consumed_by": [
+    "reset: observe base1 (markers)",
+    "reset: read_icp"
+   ],
+   "needed": "partly",
+   "why": "Needed once per part for the seat grasp; the second per --to-free-spot part only re-reads an untouched base (see below).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: observe base1 (markers, ICP seed)",
+   "where": "ablations/disassemble.py:observe_base 398 -> replay observe_base_pose 519",
+   "per_run_count": 7,
+   "seconds_per_run": 44.7,
+   "arm_still_seconds": 44.7,
+   "produces": "marker base pose (seed)",
+   "consumed_by": [
+    "reset: read_icp",
+    "reset: depth outline"
+   ],
+   "needed": "partly",
+   "why": "6.1-6.8 s each; with BASE_FROM=icp only a seed. vision_ops already seeds from the last saved read instead.",
+   "cheaper_alternative": "Seed read_icp from _last_base_pose (seconds old within a reset); markers only when that fit fails. ~40 s per reset."
+  },
+  {
+   "action": "reset: depth outline (base_depth.measure) + 1.0 s sleep",
+   "where": "ablations/disassemble.py:observe_base 412-413",
+   "per_run_count": 7,
+   "seconds_per_run": 30.1,
+   "arm_still_seconds": 30.1,
+   "produces": "outline base pose (fallback only)",
+   "consumed_by": [
+    "choose_base_read (only if read_icp fails)"
+   ],
+   "needed": "no",
+   "why": "Every reset read's ICP succeeded (rms 1.17-1.21 mm); the 4.1-4.6 s gap before each base_read row was spent on an unused fallback.",
+   "cheaper_alternative": "Compute only when read_icp fails. ~30 s per reset."
+  },
+  {
+   "action": "reset: read_icp (base fit)",
+   "where": "ablations/disassemble.py:observe_base 414 -> _choose_base_read",
+   "per_run_count": 7,
+   "seconds_per_run": 27.9,
+   "arm_still_seconds": 27.9,
+   "produces": "base pose for the seat grasp + obstacle for the free-spot choice + last_base_pose.json",
+   "consumed_by": [
+    "reset: staging_spot (free-spot choice)",
+    "reset: hover above the seated grasp (seat_grasp)",
+    "reset: move_base (seed via last pose)"
+   ],
+   "needed": "yes",
+   "why": "One read per part is the seat-grasp reference (the pull-out can creep the base/slider - disassemble.py 987-991).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: second base read per part (back over the base after the staging view)",
+   "where": "ablations/disassemble.py:main 1036",
+   "per_run_count": 3,
+   "seconds_per_run": 61.3,
+   "arm_still_seconds": 49.0,
+   "produces": "the same base pose again (moved 0.3-3.9 mm vs the read ~50 s earlier)",
+   "consumed_by": [
+    "reset: hover above the seated grasp"
+   ],
+   "needed": "no",
+   "why": "Between the read at 936/993 and this one the arm only went to the staging view and back - nothing touched the base. Base view move + markers + outline + ICP = 20.1-21.2 s each (observe_base rows at +54.3, +55.5, +56.9 s). The reported shifts (e.g. 148.1 -> 148.3 mm, yaw 19.90 -> 20.22) are read scatter, not motion.",
+   "cheaper_alternative": "From the staging view go straight to 'hover above the seated grasp' with the first read (the hover's own seat read corrects the grasp anyway). ~60 s per reset."
+  },
+  {
+   "action": "reset: unwind wrist_3 if wound",
+   "where": "ablations/disassemble.py:main 982",
+   "per_run_count": 4,
+   "seconds_per_run": 4.4,
+   "arm_still_seconds": 4.4,
+   "produces": "wrist_3 in range",
+   "consumed_by": [
+    "reset: wrist turns / carries"
+   ],
+   "needed": "yes",
+   "why": "Cable safety; mostly process start.",
+   "cheaper_alternative": "In-process check from the state tap."
+  },
+  {
+   "action": "reset: staging view (choose a free spot) + 1.5 s sleep + observe_parts",
+   "where": "ablations/disassemble.py:main 1005-1009",
+   "per_run_count": 3,
+   "seconds_per_run": 45.8,
+   "arm_still_seconds": 33.6,
+   "produces": "poses of the parts already in the staging region (obstacles)",
+   "consumed_by": [
+    "reset: staging_spot (free-spot choice)"
+   ],
+   "needed": "partly",
+   "why": "The previous process ended ~25 s earlier with 'staging view (check the landings)' + observe of the same, unchanged scene (only the base view happened in between). The yellow is never seen from here (kept as an obstacle from staged_parts.json).",
+   "cheaper_alternative": "Reuse the landing check's observation (write it to staged_parts.json with poses) when nothing was set down since; or run all parts in one process. ~45 s per reset."
+  },
+  {
+   "action": "reset: staging_spot (free-spot choice, CPU)",
+   "where": "ablations/disassemble.py:staging_spot 537-580",
+   "per_run_count": 3,
+   "seconds_per_run": 41.7,
+   "arm_still_seconds": 41.7,
+   "produces": "flange target (x, y) for the set-down + gap",
+   "consumed_by": [
+    "reset: carry to spot"
+   ],
+   "needed": "partly",
+   "why": "A 10 mm grid over the staging region, polygon gaps to every obstacle and finger outline per cell, in Python on the i5-8500T: 12.7-15.6 s of still gap after each observe_parts. Its result is consumed only by 'carry to spot', ~45-55 s later (after base view, hover, descend, close, pull-out).",
+   "cheaper_alternative": "Compute it in a thread while the arm does the seat grasp; and/or coarse-to-fine grid / vectorised gaps. ~40 s per reset."
+  },
+  {
+   "action": "reset: hover above the seated grasp + 1 s sleep + seat read (observe part)",
+   "where": "ablations/disassemble.py:main 1046-1058",
+   "per_run_count": 4,
+   "seconds_per_run": 51.8,
+   "arm_still_seconds": 35.6,
+   "produces": "the seated part's own pose (seen -3.2..-5.7 mm, +7.4 mm from its CAD seat)",
+   "consumed_by": [
+    "reset: descend onto the seated grasp"
+   ],
+   "needed": "yes",
+   "why": "Grasping a seated part 3-7 mm off its CAD seat needs the measurement. The 1 s sleep is redundant with the still-window rule.",
+   "cheaper_alternative": "Drop the sleep."
+  },
+  {
+   "action": "reset: open to release width",
+   "where": "ablations/disassemble.py:main 1063",
+   "per_run_count": 4,
+   "seconds_per_run": 9.9,
+   "arm_still_seconds": 9.9,
+   "produces": "fingers at the release width",
+   "consumed_by": [
+    "reset: descend onto the seated grasp"
+   ],
+   "needed": "yes",
+   "why": "Fingers must fit between seated parts.",
+   "cheaper_alternative": "Could be issued during the hover move (async) instead of after it."
+  },
+  {
+   "action": "reset: descend onto the seated grasp (min-duration 6 s, 5 N guard)",
+   "where": "ablations/disassemble.py:main 1065-1067",
+   "per_run_count": 4,
+   "seconds_per_run": 31.1,
+   "arm_still_seconds": 8.9,
+   "produces": "fingers around the seated part",
+   "consumed_by": [
+    "reset: close"
+   ],
+   "needed": "yes",
+   "why": "Guarded descent into the assembly.",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: close",
+   "where": "ablations/disassemble.py:main 1068",
+   "per_run_count": 4,
+   "seconds_per_run": 7.2,
+   "arm_still_seconds": 7.2,
+   "produces": "part gripped",
+   "consumed_by": [
+    "reset: verify_grasp",
+    "reset: pull out"
+   ],
+   "needed": "yes",
+   "why": "",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: verify_grasp x2 (after close, after pull-out)",
+   "where": "ablations/disassemble.py:verify_held 114, main 1072-1076",
+   "per_run_count": 8,
+   "seconds_per_run": 11.8,
+   "arm_still_seconds": 11.8,
+   "produces": "width-only 'still held' verdict",
+   "consumed_by": [
+    "stop/continue decision"
+   ],
+   "needed": "partly",
+   "why": "The one after the pull-out catches a part that came out of the jaws (2026-10-15 incident). The one right after close repeats what the close's own result (final_width_mm) already says. Each is a process (~1.5 s).",
+   "cheaper_alternative": "Check the close result's width in process; keep the post-pull-out check (in process, from /gripper_width). ~6-10 s."
+  },
+  {
+   "action": "reset: pull out to safe height",
+   "where": "ablations/disassemble.py:main 1069",
+   "per_run_count": 4,
+   "seconds_per_run": 16.9,
+   "arm_still_seconds": 7.0,
+   "produces": "part lifted out of the base",
+   "consumed_by": [
+    "reset: carry to spot"
+   ],
+   "needed": "yes",
+   "why": "",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: carry to spot",
+   "where": "ablations/disassemble.py:place_at",
+   "per_run_count": 4,
+   "seconds_per_run": 27.6,
+   "arm_still_seconds": 7.0,
+   "produces": "part over its set-down spot",
+   "consumed_by": [
+    "reset: lower + land"
+   ],
+   "needed": "yes",
+   "why": "",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: lower to 15 mm above the touch + land (slow, until 5 N)",
+   "where": "ablations/disassemble.py:place_at (move_down + guarded move_cartesian)",
+   "per_run_count": 8,
+   "seconds_per_run": 46.9,
+   "arm_still_seconds": 25.1,
+   "produces": "part resting on the table (touchdown at |dF| 5 N)",
+   "consumed_by": [
+    "reset: release"
+   ],
+   "needed": "yes",
+   "why": "Operator's 5 N limit on parts; slow last 15 mm so it does not bounce/tip (move_down alone landed at 17-44 N, place_at docstring).",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: release + lift clear",
+   "where": "ablations/disassemble.py:place_at",
+   "per_run_count": 8,
+   "seconds_per_run": 26.4,
+   "arm_still_seconds": 16.0,
+   "produces": "part set down, gripper clear; staged_parts.json record",
+   "consumed_by": [
+    "replay: LAST_SEEN_XY (staged_parts.json)",
+    "reset: home (end)"
+   ],
+   "needed": "yes",
+   "why": "",
+   "cheaper_alternative": null
+  },
+  {
+   "action": "reset: home (end of each --to-free-spot process)",
+   "where": "ablations/disassemble.py:main 1098",
+   "per_run_count": 3,
+   "seconds_per_run": 12.4,
+   "arm_still_seconds": 5.3,
+   "produces": "arm at home",
+   "consumed_by": [
+    "reset: staging view (check the landings)"
+   ],
+   "needed": "no",
+   "why": "Immediately followed by the staging-view move; the next process then starts with another home.",
+   "cheaper_alternative": "Lift straight to the staging view."
+  },
+  {
+   "action": "reset: staging view (check the landings) + brightness + observe_parts",
+   "where": "ablations/disassemble.py:main 1105-1117",
+   "per_run_count": 3,
+   "seconds_per_run": 42.4,
+   "arm_still_seconds": 26.2,
+   "produces": "spacing verdict ([spacing] ok) - parts seen in the staging region",
+   "consumed_by": [
+    "fail-closed stop decision only"
+   ],
+   "needed": "partly",
+   "why": "A real guard (a tipped/slid part), but its observation is discarded and the next process re-observes the unchanged scene ~25 s later; the yellow is 'unseen' in all three checks, so it never checked the yellow.",
+   "cheaper_alternative": "One landing check after the LAST set-down (single process), and feed its poses to the next spot choice and to the replay's planning (staged_parts.json with poses)."
+  },
+  {
+   "action": "reset: move_base initial reads (read at the clear area -> view -> read -> view -> read)",
+   "where": "ablations/move_base.py:main 166-176",
+   "per_run_count": 1,
+   "seconds_per_run": 25.0,
+   "arm_still_seconds": 20.0,
+   "produces": "base pose before the pushes",
+   "consumed_by": [
+    "reset: move_base push"
+   ],
+   "needed": "partly",
+   "why": "u_brown's --to-staging left the arm over the clear area; read_base there failed ('markers not read -> depth CAD fit from the last pose: only 368 points'), then view + read, then view(ob) + 1.5 s + read AGAIN at the same pose (176). Not timed; estimate from subprocess minimums.",
+   "cheaper_alternative": "Check the TCP against _last_base_pose first and fly to it (no blind read); drop the second view+read at 176. ~15 s."
+  },
+  {
+   "action": "reset: move_base push (close, safe height, over start, lower beside the face, push, back off, lift)",
+   "where": "ablations/move_base.py:push 79-138",
+   "per_run_count": 2,
+   "seconds_per_run": 80.0,
+   "arm_still_seconds": null,
+   "produces": "base slid/turned toward the layout pose",
+   "consumed_by": [
+    "reset: move_base re-read after push",
+    "replay: base-view move (startup) location"
+   ],
+   "needed": "partly",
+   "why": "The layout pose is a reset target, not an assembly need: the assembly measures the base (startup read, in-hand reads, servo). Tolerance 5 mm / 1 deg makes it run every cycle (base drifts +8-11 mm / +2 deg per assembly: runs 42/43/44 started at -10.6, -7.8, -8.8 mm). Pushes are systematically short: in runs 42/43 the 5-7 mm turn pushes moved the base 0.2-1.3 mm each until the 'did not move it -> 4 mm further' boost (move_base.py 216-219) - 4 pushes per cycle. Total move_base 142 s in run 44 (2 pushes), ~4 min in runs 42/43.",
+   "cheaper_alternative": "Widen the tolerance to what the assembly region/view actually needs (e.g. only when the base nears the region edge); start pushes with the measured ~4 mm shortfall; keep the boost across cycles. Saves most of 2-4 min per cycle."
+  },
+  {
+   "action": "reset: move_base re-read after push (view + 1.5 s + markers + ICP)",
+   "where": "ablations/move_base.py:main 243-247, read_base 47-58",
+   "per_run_count": 2,
+   "seconds_per_run": 30.0,
+   "arm_still_seconds": 25.0,
+   "produces": "base pose after the push",
+   "consumed_by": [
+    "reset: move_base push (next)",
+    "last_base_pose.json -> replay startup base view"
+   ],
+   "needed": "partly",
+   "why": "Needed to close the loop, but the markers (up to 8 s) only seed the ICP; the pre-push pose + the push displacement is a better seed. Estimate.",
+   "cheaper_alternative": "Seed read_icp from the previous read shifted by the commanded push; no markers, no 1.5 s sleep."
+  }
+ ],
+ "edges": [
+  [
+   "startup move_home",
+   "derive-sequence observe_many (home)",
+   "camera over the home-visible table"
+  ],
+  [
+   "startup gripper-open (control_gripper 100)",
+   "view the clear area (+1.5 s sleep + observe_many)",
+   "unobstructed view"
+  ],
+  [
+   "derive-sequence observe_many (home)",
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "LAST_SEEN_XY / pass count (u_orange)"
+  ],
+  [
+   "view the clear area (+1.5 s sleep + observe_many)",
+   "depth-pick view above <part> at 0.52 m",
+   "u_brown pass count + xy"
+  ],
+  [
+   "staging view (planning; +1.5 s sleep + observe_many)",
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "line_green pass count + xy"
+  ],
+  [
+   "staging view (planning; +1.5 s sleep + observe_many)",
+   "yellow planned-blind re-plan (_seen_here x2 + derive observe)",
+   "'not seen' -> _planned_blind"
+  ],
+  [
+   "base-view move (startup)",
+   "observe base1 (markers, startup ICP seed)",
+   "camera over base"
+  ],
+  [
+   "observe base1 (markers, startup ICP seed)",
+   "read_icp (startup base fit)",
+   "seed pose"
+  ],
+  [
+   "observe base1 (markers, startup ICP seed)",
+   "depth outline (base_depth.measure) + 1.0 s sleep (startup)",
+   "seed pose"
+  ],
+  [
+   "depth outline (base_depth.measure) + 1.0 s sleep (startup)",
+   "read_icp (startup base fit)",
+   "fallback only (unused when the fit succeeds)"
+  ],
+  [
+   "read_icp (startup base fit)",
+   "drive --mate seam overhead (client + server + drive_align / translate_object / touch_insert process starts)",
+   "measured base for mate:00"
+  ],
+  [
+   "read_icp (startup base fit)",
+   "execute_mate: certify base fit (vision_ops.pose base)",
+   "seed via last_base_pose.json"
+  ],
+  [
+   "base-view return to staging (move_to_clear_area) + _seen_here(u_brown)",
+   "depth-pick view above <part> at 0.52 m",
+   "arm near u_brown (presence only)"
+  ],
+  [
+   "between-parts move_home (u_orange)",
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "nothing (the view flies elsewhere)"
+  ],
+  [
+   "brightness (ensure_exposure)",
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "view height (0.52 vs 0.40 m in low light)"
+  ],
+  [
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "depth-pick view above <part> at 0.52 m",
+   "updated xy (6-12 mm) -> re-centring move"
+  ],
+  [
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "yellow planned-blind re-plan (_seen_here x2 + derive observe)",
+   "part confirmed in view"
+  ],
+  [
+   "yellow planned-blind re-plan (_seen_here x2 + derive observe)",
+   "move_to_grasp (hover + straight descent)",
+   "yellow tool_sequence (1 pass)"
+  ],
+  [
+   "depth-pick view above <part> at 0.52 m",
+   "depth_pick: marker seed observe (part_depth.read)",
+   "camera above part"
+  ],
+  [
+   "depth_pick: marker seed observe (part_depth.read)",
+   "depth_pick: depth capture + CAD fit",
+   "seed pose"
+  ],
+  [
+   "depth_pick: depth capture + CAD fit",
+   "move_to_grasp (hover + straight descent)",
+   "--target-xyz / --target-xyzw"
+  ],
+  [
+   "control_gripper open (inside move_to_grasp)",
+   "control_gripper pre-grasp width (inside move_to_grasp, before the descent)",
+   "fingers at 100 mm -> set back (no view used)"
+  ],
+  [
+   "control_gripper pre-grasp width (inside move_to_grasp, before the descent)",
+   "move_to_grasp (hover + straight descent)",
+   "fingers at pre-grasp opening"
+  ],
+  [
+   "move_to_grasp (hover + straight descent)",
+   "control_gripper close",
+   "part between the fingers"
+  ],
+  [
+   "move_to_grasp (hover + straight descent)",
+   "rotate_object (incl. verify_grasp subprocess)",
+   "current_object_orientation (chain)"
+  ],
+  [
+   "control_gripper close",
+   "move_to_safe_height (after pick)",
+   "part gripped (width checked by the grip guard)"
+  ],
+  [
+   "move_to_safe_height (after pick)",
+   "rotate_object (incl. verify_grasp subprocess)",
+   "part at safe height"
+  ],
+  [
+   "rotate_object (incl. verify_grasp subprocess)",
+   "turn_wrist to base yaw (drive_align)",
+   "orientation for an identity base yaw (~20 deg off the real base)"
+  ],
+  [
+   "rotate_object (incl. verify_grasp subprocess)",
+   "drive --mate seam overhead (client + server + drive_align / translate_object / touch_insert process starts)",
+   "held quat (snapped fold branch)"
+  ],
+  [
+   "drive --mate seam overhead (client + server + drive_align / translate_object / touch_insert process starts)",
+   "turn_wrist to base yaw (drive_align)",
+   "align child started"
+  ],
+  [
+   "turn_wrist to base yaw (drive_align)",
+   "base track view (part in hand) - marker route",
+   "wrist at base yaw"
+  ],
+  [
+   "base track view #1 (depth route, before the outline)",
+   "turn_wrist to base yaw (drive_align)",
+   "base yaw for the depth_servo turn (only use)"
+  ],
+  [
+   "base track view (part in hand) - marker route",
+   "read_icp (in-hand base fit)",
+   "camera over base"
+  ],
+  [
+   "base track view #1 (depth route, before the outline)",
+   "read_icp (in-hand base fit)",
+   "camera over base (line_green: fails)"
+  ],
+  [
+   "read_icp (in-hand base fit)",
+   "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "predicted seat start, rim heights"
+  ],
+  [
+   "read_icp (in-hand base fit)",
+   "drive --mate seam overhead (client + server + drive_align / translate_object / touch_insert process starts)",
+   "base_measured -> next part's start base"
+  ],
+  [
+   "_emitter toggles (D415 projector on/off via ros2 param CLI)",
+   "servo/dservo: outline view over table (+ still_frame + held_outline_px)",
+   "projector off for colour"
+  ],
+  [
+   "_emitter toggles (D415 projector on/off via ros2 param CLI)",
+   "read_icp (in-hand base fit)",
+   "projector on for depth"
+  ],
+  [
+   "servo/dservo: outline view over table (+ still_frame + held_outline_px)",
+   "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "held outline px"
+  ],
+  [
+   "servo/dservo: outline view over table (+ still_frame + held_outline_px)",
+   "touch_insert (drive-mate insert)",
+   "line_green aim via held_axial_correction (-4.0/+3.9 mm)"
+  ],
+  [
+   "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "turn_wrist (image yaw, servo rounds)",
+   "image yaw > 0.4 deg"
+  ],
+  [
+   "turn_wrist (image yaw, servo rounds)",
+   "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "re-measure after the turn"
+  ],
+  [
+   "servo rounds (clear / hover / still_frame / base_pose_same_frame / socket_shift_world)",
+   "touch_insert (drive-mate insert)",
+   "aim base (servoed xy + image yaw)"
+  ],
+  [
+   "servo done: clear",
+   "touch_insert (drive-mate insert)",
+   "arm at clear height over aim"
+  ],
+  [
+   "touch_insert (drive-mate insert)",
+   "control_gripper release (to grasp width)",
+   "seated, still gripped"
+  ],
+  [
+   "control_gripper release (to grasp width)",
+   "move_to_safe_height (after release)",
+   "fingers open"
+  ],
+  [
+   "move_to_safe_height (after release)",
+   "seat_check (depth) line_green",
+   "arm clear (line_green only: wedge_possible)"
+  ],
+  [
+   "move_to_safe_height (after release)",
+   "execute_mate: seat view",
+   "arm clear"
+  ],
+  [
+   "seat_check (depth) line_green",
+   "execute_mate: seat view",
+   "arm already at the outer view (2.1 mm move)"
+  ],
+  [
+   "seat_check (depth) line_green",
+   "touch_insert (drive-mate insert)",
+   "seat error [-0.9, 0] mm -> yellow follow aim"
+  ],
+  [
+   "execute_mate: seat view",
+   "execute_mate: certify base fit (vision_ops.pose base)",
+   "side view"
+  ],
+  [
+   "execute_mate: certify base fit (vision_ops.pose base)",
+   "execute_mate: depth capture + per-mate measure (+ marker xy read)",
+   "base pose (or last saved read when refused)"
+  ],
+  [
+   "execute_mate: depth capture + per-mate measure (+ marker xy read)",
+   "between-parts move_home (u_orange)",
+   "placed=True -> next part"
+  ],
+  [
+   "execute_mate: depth capture + per-mate measure (+ marker xy read)",
+   "cleanup move_to_safe_height",
+   "last mate placed"
+  ],
+  [
+   "cleanup move_to_safe_height",
+   "cleanup move_home",
+   "flange lowered 0.47 -> 0.30 m (unneeded)"
+  ],
+  [
+   "cleanup move_home",
+   "reset: home (start of each disassemble process)",
+   "arm at home (repeated)"
+  ],
+  [
+   "reset: home (start of each disassemble process)",
+   "reset: open (start of each disassemble process)",
+   "arm at home"
+  ],
+  [
+   "reset: open (start of each disassemble process)",
+   "reset: base view move",
+   "fingers open"
+  ],
+  [
+   "reset: base view move",
+   "reset: observe base1 (markers, ICP seed)",
+   "camera over base"
+  ],
+  [
+   "reset: observe base1 (markers, ICP seed)",
+   "reset: read_icp (base fit)",
+   "seed"
+  ],
+  [
+   "reset: observe base1 (markers, ICP seed)",
+   "reset: depth outline (base_depth.measure) + 1.0 s sleep",
+   "seed"
+  ],
+  [
+   "reset: depth outline (base_depth.measure) + 1.0 s sleep",
+   "reset: read_icp (base fit)",
+   "fallback only (unused)"
+  ],
+  [
+   "reset: read_icp (base fit)",
+   "reset: staging_spot (free-spot choice, CPU)",
+   "base outline as obstacle + seat pose of the part"
+  ],
+  [
+   "reset: read_icp (base fit)",
+   "reset: hover above the seated grasp + 1 s sleep + seat read (observe part)",
+   "seat-grasp estimate"
+  ],
+  [
+   "reset: unwind wrist_3 if wound",
+   "reset: staging view (choose a free spot) + 1.5 s sleep + observe_parts",
+   "wrist in range"
+  ],
+  [
+   "reset: staging view (choose a free spot) + 1.5 s sleep + observe_parts",
+   "reset: staging_spot (free-spot choice, CPU)",
+   "obstacle poses"
+  ],
+  [
+   "reset: staging_spot (free-spot choice, CPU)",
+   "reset: carry to spot",
+   "flange target (consumed ~50 s later)"
+  ],
+  [
+   "reset: staging_spot (free-spot choice, CPU)",
+   "reset: second base read per part (back over the base after the staging view)",
+   "(sequencing only: the arm returns over the base)"
+  ],
+  [
+   "reset: second base read per part (back over the base after the staging view)",
+   "reset: hover above the seated grasp + 1 s sleep + seat read (observe part)",
+   "the same base pose again"
+  ],
+  [
+   "reset: hover above the seated grasp + 1 s sleep + seat read (observe part)",
+   "reset: open to release width",
+   "seen seat grasp"
+  ],
+  [
+   "reset: open to release width",
+   "reset: descend onto the seated grasp (min-duration 6 s, 5 N guard)",
+   "fingers at release width"
+  ],
+  [
+   "reset: descend onto the seated grasp (min-duration 6 s, 5 N guard)",
+   "reset: close",
+   "fingers around part"
+  ],
+  [
+   "reset: close",
+   "reset: verify_grasp x2 (after close, after pull-out)",
+   "width"
+  ],
+  [
+   "reset: close",
+   "reset: pull out to safe height",
+   "part gripped"
+  ],
+  [
+   "reset: pull out to safe height",
+   "reset: verify_grasp x2 (after close, after pull-out)",
+   "still held?"
+  ],
+  [
+   "reset: pull out to safe height",
+   "reset: carry to spot",
+   "part out of base"
+  ],
+  [
+   "reset: carry to spot",
+   "reset: lower to 15 mm above the touch + land (slow, until 5 N)",
+   "over spot"
+  ],
+  [
+   "reset: lower to 15 mm above the touch + land (slow, until 5 N)",
+   "reset: release + lift clear",
+   "part on table"
+  ],
+  [
+   "reset: release + lift clear",
+   "reset: home (end of each --to-free-spot process)",
+   "gripper clear"
+  ],
+  [
+   "reset: release + lift clear",
+   "part view: view above <part> at 0.52 m (+1.5 s sleep, brightness, _seen_here observe)",
+   "staged_parts.json xy (and pose) -> LAST_SEEN_XY"
+  ],
+  [
+   "reset: home (end of each --to-free-spot process)",
+   "reset: staging view (check the landings) + brightness + observe_parts",
+   "arm at home (then flies on)"
+  ],
+  [
+   "reset: staging view (check the landings) + brightness + observe_parts",
+   "reset: home (start of each disassemble process)",
+   "spacing ok -> next process (observation discarded)"
+  ],
+  [
+   "reset: staging view (check the landings) + brightness + observe_parts",
+   "reset: staging view (choose a free spot) + 1.5 s sleep + observe_parts",
+   "SAME unchanged scene, re-observed ~25 s later"
+  ],
+  [
+   "reset: release + lift clear",
+   "reset: move_base initial reads (read at the clear area -> view -> read -> view -> read)",
+   "arm left over the clear area (u_brown --to-staging)"
+  ],
+  [
+   "reset: read_icp (base fit)",
+   "reset: move_base initial reads (read at the clear area -> view -> read -> view -> read)",
+   "last_base_pose.json seed"
+  ],
+  [
+   "reset: move_base initial reads (read at the clear area -> view -> read -> view -> read)",
+   "reset: move_base push (close, safe height, over start, lower beside the face, push, back off, lift)",
+   "error to the layout pose"
+  ],
+  [
+   "reset: move_base push (close, safe height, over start, lower beside the face, push, back off, lift)",
+   "reset: move_base re-read after push (view + 1.5 s + markers + ICP)",
+   "base moved (often < 1.3 mm)"
+  ],
+  [
+   "reset: move_base re-read after push (view + 1.5 s + markers + ICP)",
+   "reset: move_base push (close, safe height, over start, lower beside the face, push, back off, lift)",
+   "remaining error (+4 mm boost if no progress)"
+  ],
+  [
+   "reset: move_base re-read after push (view + 1.5 s + markers + ICP)",
+   "base-view move (startup)",
+   "last_base_pose.json -> where the startup base view flies"
+  ],
+  [
+   "reset: move_base push (close, safe height, over start, lower beside the face, push, back off, lift)",
+   "startup gripper-open (control_gripper 100)",
+   "fingers left closed"
+  ]
+ ],
+ "top10_unnecessary_or_redundant": [
+  {
+   "rank": 1,
+   "action": "reset: move_base push loop (+ its reads)",
+   "seconds_per_cycle": "142 (run 44); ~240 (runs 42/43)",
+   "evidence": "tolerance 5 mm/1 deg triggers it every cycle (base drifts 8-11 mm per assembly); 5-7 mm pushes moved the base 0.2-1.3 mm until the +4 mm boost (runs 42/43 logs); the assembly measures the base anyway; move_base.py:176 re-views and re-reads right after reading"
+  },
+  {
+   "rank": 2,
+   "action": "reset: base reads - markers seed + unused outline (7 reads) and the second read per part",
+   "seconds_per_cycle": "~75 (seed 44.7 + outline 30.1) overlapping with ~61 for the 3 second reads; ~90-100 combined",
+   "evidence": "disassemble timing rows: observe 6.1-6.8 s, 4.1-4.6 s gap (sleep + outline), base_read 3.6-4.4 s; ICP succeeded every time (outline unused); disassemble.py:1036 re-reads a base nothing touched since 936/993"
+  },
+  {
+   "rank": 3,
+   "action": "reset: per-part processes - landing check + next process's home/open + choose-a-free-spot view of the same scene",
+   "seconds_per_cycle": "~60-80",
+   "evidence": "3 x (home 4.1 + staging view 7.1 + brightness 1 + observe 6.1) at the end, then home 4.2 + open 2.4 at the next start and staging view 5.8 + 1.5 + observe 5.5-8.9 ~25 s later; nothing on the table changed in between"
+  },
+  {
+   "rank": 4,
+   "action": "reset: staging_spot CPU search",
+   "seconds_per_cycle": "41.7",
+   "evidence": "12.7-15.6 s still gap after each observe_parts (disassemble 082507/082739/083013); result used only by 'carry to spot' ~50 s later"
+  },
+  {
+   "rank": 5,
+   "action": "drive: in-hand base track for the depth route (line_green both, yellow first)",
+   "seconds_per_cycle": "~30-35",
+   "evidence": "line_green in-hand CAD fit failed 31/34 reads today ('partial view', 'tilted fit') -> 'aiming at the previous read'; yellow's 2nd read moved 0.7 mm from its 1st; align_for_insert:2101 + depth_servo:1939 read twice (the marker route already dropped the first read)"
+  },
+  {
+   "rank": 6,
+   "action": "drive: turn_wrist subprocesses (8 per run), 4 of them only because rotate_object uses an identity base yaw",
+   "seconds_per_cycle": "~32 (16 avoidable outright)",
+   "evidence": "rotate_object.py:1188-1192; drive_align logs 'wrist turned +19.79/+20.26/+19.08/+18.75 deg to the base yaw'; align_at_hover.turn_wrist spawns move_cartesian (4.1-4.3 s gaps); wrist turns show as 'still' to the TCP motion recorder"
+  },
+  {
+   "rank": 7,
+   "action": "drive: _emitter toggles (12 x ros2 param CLI + 0.8 s)",
+   "seconds_per_cycle": "~26",
+   "evidence": "2.2-2.4 s gaps on both sides of the dservo outline still_frame; marker route 2, depth route 4 per part; projector off only matters in a dark room"
+  },
+  {
+   "rank": 8,
+   "action": "assembly startup planning views (clear area + staging view) + base-view return + u_brown presence check",
+   "seconds_per_cycle": "~31",
+   "evidence": "view the clear area 8.5 s, staging view 16.0 s (11.4 s move), return 4.1 + _seen_here 2.4 s; every part gets its own view above it before the pick, and the yellow is unseen from the staging view anyway"
+  },
+  {
+   "rank": 9,
+   "action": "execute_mate certify: separate base fit + second depth capture",
+   "seconds_per_cycle": "~11-20",
+   "evidence": "[certify timing] base_pose 4.3-5.5 s + capture 2.6-3.9 s per mate; the fit is refused from the mate:01/02 views ('fit -3.1/+3.5 mm off the table height') and the last saved read is used anyway"
+  },
+  {
+   "rank": 10,
+   "action": "depth-pick duplicates (re-centre move 6-12 mm + re-observed marker seed)",
+   "seconds_per_cycle": "~15-18",
+   "evidence": "depth-pick view moves of 7.9/12.1 mm took 3.9/3.8 s (5 mm 'already there' test, replay:2579); part_depth.read observes the part again (part_depth.py:89) right after _part_view's observe"
+  }
+ ],
+ "smaller_items": [
+  "replay 0.5 s inter-step sleeps: 14 s/run (replay:3886)",
+  "line_green seat_check before certify from the same view: 13.1 + 3.9 s (2.1 mm view move)",
+  "fixed settle sleeps before still-window reads: ~8.5 s assembly, ~20 s reset",
+  "reset verify_grasp x8 (one per part repeats the close's width): ~6-10 s",
+  "cleanup move_to_safe_height moves DOWN 0.47 -> 0.30 m: 4.9 s; between-parts move_home (u_orange) unused: 4.2 s",
+  "yellow planned-blind triple observe: ~6 s (root cause: reset puts the yellow where the staging view never sees it)",
+  "already fixed after run 44: move_to_grasp open-for-view + width restore (0a9229f, ~14 s), ensure_exposure cache (255d950, ~8 s)"
+ ]
+}
