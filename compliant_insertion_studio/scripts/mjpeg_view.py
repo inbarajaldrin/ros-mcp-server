@@ -174,7 +174,13 @@ figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
 <script>
 let since=-1;const log=document.getElementById('log');
 const q=new URLSearchParams(location.search).get('fps');
-if(q)document.querySelectorAll('#views img').forEach(im=>im.src=im.getAttribute('src')+'?fps='+encodeURIComponent(q));
+// an MJPEG stream through the proxy can stall or be cut, and an <img> never reconnects by itself (operator 10-23: the
+// views froze until a reload): reconnect each stream every 40 s, on an error, and when the tab comes back into view
+const imgs=[...document.querySelectorAll('#views img')];imgs.forEach(im=>im.dataset.base=im.getAttribute('src'));
+function connect(im){im.src=im.dataset.base+'?'+(q?'fps='+encodeURIComponent(q)+'&':'')+'t='+Date.now()}
+imgs.forEach(im=>{im.addEventListener('error',()=>setTimeout(()=>connect(im),2000));connect(im)});
+setInterval(()=>imgs.forEach(connect),40000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)imgs.forEach(connect)});
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}
 function add(e){
@@ -239,8 +245,9 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
             self.end_headers()
+            t_end = time.time() + 90                        # the page reconnects every 40 s; a dropped viewer frees its thread
             try:
-                while True:
+                while time.time() < t_end:
                     jpg = frame(i)
                     if jpg:
                         self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
