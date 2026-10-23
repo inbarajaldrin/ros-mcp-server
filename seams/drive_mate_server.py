@@ -243,6 +243,12 @@ class DriveMateServer(Node):
                 aim = (tuple(align['aim_base'][0]), tuple(align['aim_base'][1]))
             if align.get('measured_base'):
                 measured = (tuple(align['measured_base'][0]), tuple(align['measured_base'][1]))
+            if align.get('grasp_depth_fix_m'):
+                # the align step's touchdown measured the grasp depth: insert with it (seat, rim, entering heights)
+                depth += float(align['grasp_depth_fix_m'])
+                env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'
+                self.get_logger().info(f"{g.mate_id}: grasp depth measured by the align touchdown: {1000 * depth:.1f} mm "
+                                       f"({1000 * align['grasp_depth_fix_m']:+.1f})")
             tq = self.tcp.orientation                        # the wrist may have turned: the part turned with it
             held_world = (R.from_quat([tq.x, tq.y, tq.z, tq.w]) * R.from_quat(q_fo)).as_quat()
         try:

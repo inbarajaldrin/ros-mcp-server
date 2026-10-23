@@ -2057,6 +2057,11 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
     return out
 
 
+GRASP_DEPTH_MEAS_MIN_M = 0.003   # a servo touchdown this far over the CAD rim is the grasp depth, not noise ...
+GRASP_DEPTH_MEAS_MAX_M = 0.012   # ... and up to this (more is a part on something else - the yellow met line_green's top +18 mm)
+GRASP_DEPTH_FIX = {}             # obj -> depth correction (m) measured this grasp; drive_align reports it to drive-mate
+
+
 def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
     """A servo move, skipped when the arm is already there (within 0.3 mm, same orientation): the 10-22 motion trace
     counted 15 servo moves to exactly the previous target (hover from the clear height = clear, up for a turn, done) at
@@ -2171,6 +2176,22 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 law.measuring_low()
                 say(f"  [servo] {obj}: touched down {1000*(z_meas - 0.002 - rim_z):+.1f} mm over the CAD rim - measuring "
                     f"from 2 mm above the contact")
+                # the touchdown MEASURES the grasp depth: the part hangs that much lower in the jaws than the chain says.
+                # Carry it everywhere the depth matters - the seat and rim heights here (the image projects the target
+                # at the part's real lift), and the insert (drive_align reports it; drive-mate inserts with it).
+                # Attempt 26 (10-22 18:01): u_orange touched down +7.4 mm; the servo projected at the chain's lift and
+                # oscillated (+10.6 -> +1.1 -> -3.0 -> +5.1 mm), the insert's 61 probes all met the rim +7.2 mm high
+                # and its rim-measured depth fix (capped at 6 mm) ignored it.
+                dz_ = (z_meas - 0.002) - rim_z
+                if GRASP_DEPTH_MEAS_MIN_M < dz_ <= GRASP_DEPTH_MEAS_MAX_M and obj not in GRASP_DEPTH_FIX:
+                    from primitives.shared.config import held_tool_offset_for
+                    d0 = float(held_tool_offset_for(obj)[2])
+                    os.environ['GRASP_TOOL_OFFSET_M'] = f"{d0 + dz_:.5f}"
+                    GRASP_DEPTH_FIX[obj] = dz_
+                    st = st + np.array([0.0, 0.0, dz_]); rim_z += dz_
+                    z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
+                    say(f"  [servo] {obj}: grasp depth {1000*d0:.1f} -> {1000*(d0 + dz_):.1f} mm (measured by the touchdown); "
+                        f"seat and rim raised {1000*dz_:+.1f} mm")
         if r.get('result') == 'failure':
             say(f"  [servo] {obj}: hover not reached ({r.get('error', '')})")
             if _SAFETY_STOP:
