@@ -2631,11 +2631,15 @@ NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real
                                    # step 1 missed the bar entirely (operator, 2026-10-15)
 
 
+LAST_SEAT_RES = {}             # obj -> the last depth seat check (the ladder's final word when it runs out)
+
+
 def _seat_check_accepted(obj, ob, **kw):
     """seat_check.check, passing only what ExecuteMate would certify, one read-sigma inside its band (seams.acceptance:
     one rule for both - attempt 24 stopped its recovery at an end +2.0 mm the certifier then refused)."""
     from seat_check import check as _check
     res = _check(obj, ob, **kw)
+    LAST_SEAT_RES[obj] = res
     if res.get('ok') and res.get('height_err_mm') is not None:
         from seams.acceptance import margin_m, seat_inside
         inside, why = seat_inside(kw.get('base') or RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0,
@@ -2835,6 +2839,13 @@ def _seat_by_taps(obj, args, say):
         args.observed_base = args.measured_base = ob2
         ok, tp = tap_recover(obj, ob2, RUN_BASE['name'], say)
         if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
+            # a point off the part right after a push: the base read lags the push (run 31: end+ on a U arm, +13.7 mm,
+            # the other three points seated) - one more base read from its own view, one more map
+            ob3 = observe_base_pose(RUN_BASE['name'])
+            if ob3 is not None:
+                args.observed_base = args.measured_base = ob3
+                ok, tp = tap_recover(obj, ob3, RUN_BASE['name'], say)
+        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
             return None
     if ok and (res.get('cross') or {}).get('centre_mm') is not None:
         _record_seat_check_error(obj, res)                   # the across error the parts over it follow
@@ -2857,6 +2868,17 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
             return ok_t
         say(f"  [seat-check] {obj}: the taps could not judge it -> the depth ladder")
     ok = _seat_check_and_reseat(obj, state, args, say)
+    if not ok:
+        # the recovery ladder stops one read-sigma inside the certifier's band; when it has run out, a last reading inside
+        # the band itself goes on to ExecuteMate, which decides (run 31: an end at +1.53 mm stopped the run, 0.03 mm over
+        # the ladder's +-1.5)
+        r_ = LAST_SEAT_RES.get(obj) or {}
+        if r_.get('height_err_mm') is not None:
+            from seams.acceptance import seat_inside
+            inside, why = seat_inside(RUN_BASE['name'], obj, float(r_['height_err_mm']) / 1000.0, r_.get('end_heights_mm') or [])
+            if inside:
+                say(f"  [seat-check] {obj}: the ladder ran out inside the certifier's band ({why}) - ExecuteMate decides")
+                ok = True
     if ok:
         SEATED.mark(obj, True, how='depth seat check')                  # merged: keeps rel_err_mm
     return ok
