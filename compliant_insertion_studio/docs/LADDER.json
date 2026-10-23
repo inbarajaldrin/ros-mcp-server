@@ -1,6 +1,6 @@
 {
  "_doc": "The ladder the 'ladder' plugin draws (band above the prompt + /ladder pane). status: done | active | next | blocked. Claude updates this as work lands; milestones from ARCHITECTURE_SEAMS.md.",
- "updated": "2026-10-22 21:40",
+ "updated": "2026-10-22 22:12",
  "goal": "Any FMB assembly hands-off on a base that is not fixed, through clean seams (vision / drive-mate / execute-mate) so prompt2assembly's planner and later an RL driver plug in",
  "tracks": [
   {
@@ -22,7 +22,7 @@
      "id": "M2",
      "title": "Base free + measured errors",
      "status": "next",
-     "note": "PAUSED by the operator 10-20 (M3a first, on FMB1). CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8"
+     "note": "PAUSED by the operator 10-20 (M3a first, on FMB1). CLEARS AT: 3 consecutive unattended FMB3 cycles (one assembly_cycle.sh run each, rc 0, base moved ~3 cm / turned ~5 deg by the arm, every part depth-confirmed; automatic recoveries allowed) + sigmas from the recorded reads. Count: 0/3 (cycles 1-5 each needed a code fix mid-run). Next qualifying runs: cycles 6-8 | 10-22 22:10 FOUND: the aim depends on where the base sits. Base dragged to (160, -483) mm: u_brown missed 3x (marker AND depth servo agreed it was over its socket, aim vs base identical to the good runs within 1.4 mm, 61 probes +-2.5 mm flat on the rim each time); pushed back to (143, -485) by move_base: in first insert. A position-dependent error in the vision chain (hand-eye / base fit vs workspace position) > 2.5 mm over ~20 mm - must be mapped before M2's 3 cm moves"
     },
     {
      "id": "M3a",
