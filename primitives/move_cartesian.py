@@ -63,11 +63,13 @@ class Mover(Node):
 
 
 def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, min_z=SAFE_HEIGHT - 0.10,
-              max_joint_step=1.5, max_wrist3_step=3.2, min_radius=0.25, duration=None):
+              max_joint_step=1.5, max_wrist3_step=3.2, min_radius=0.25, duration=None, on_sample=None):
     """One straight Cartesian move on a live Mover node (the CLI's whole behaviour, 2026-10-22: callers that make many
     small moves - the touch insert's probes - keep one node instead of a process, rclpy init and joint wait per move).
     orient: ('quat', [qx, qy, qz, qw]) | ('keep', None) | ('yaw', deg or None). duration: exact seconds, for guarded
-    probe moves of a few mm (otherwise compute_duration's floor, >= min_duration). Returns the result dict."""
+    probe moves of a few mm (otherwise compute_duration's floor, >= min_duration). on_sample(t, dF, F, q): called with
+    each guarded-loop sample (s since the goal, |F - baseline|, F, joints) - the force record of a tap or press.
+    Returns the result dict."""
     target = np.array(xyz, dtype=float)
     out = {"result": "failure", "mode": "real", "movement_type": "move_cartesian", "target": list(map(float, xyz))}
     if target[2] < min_z:
@@ -152,7 +154,10 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
         end = time.time() + dur + 15.0; t_go = time.time()
         while not res.done() and time.time() < end:
             rclpy.spin_once(n, timeout_sec=0.005)
-            dF = float(np.linalg.norm(np.median(np.array(n.F), axis=0) - F0))
+            Fm_ = np.median(np.array(n.F), axis=0)
+            dF = float(np.linalg.norm(Fm_ - F0))
+            if on_sample is not None:
+                on_sample(time.time() - t_go, dF, Fm_, n.q)
             if dF > max_force:
                 cf = gh.cancel_goal_async(); rclpy.spin_until_future_complete(n, cf, timeout_sec=3.0)
                 T = forward_kinematics(dh_params, n.q)
