@@ -291,6 +291,12 @@ def tap_recover_(obj, base_pose, base, say=print, tapper: Optional[Tapper] = Non
         p = max(cand, key=lambda q: q.err_m)
         v = tp.press(p)
         say(f"  [taps] {obj}: press {p.name} -> {tp.log[-1]}")
+        if v == 'blocked':
+            # the highest point does not give under a vertical press: the lower ones will not seat it either (runs 31 and
+            # 32: line_green end- blocked, then every edge press blocked too - 6 presses, ~60 s - and one lateral nudge
+            # seated it). Hand it to the caller's lateral recovery now.
+            say(f"  [taps] {obj}: the highest point {p.name} is blocked - not pressing the lower ones")
+            return False, tp
         if v != 'blocked':
             for q in tp.points:                               # the part moved: re-measure the others
                 if q is not p:
