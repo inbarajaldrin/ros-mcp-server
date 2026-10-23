@@ -1,0 +1,96 @@
+schema_version: 1
+calibration_type: ft_payload_kubus_2007_stationary
+gripper_id: onrobot_rg2_with_camera
+timestamp_iso: '2026-05-03T11:43:13+00:00'
+expected_mass_kg: null
+num_poses_used: 8
+pose_names:
+- face_down_canonical
+- face_forward_w2_zero
+- side_pointing_pos_x
+- side_pointing_neg_x
+- tilted_w1_neg_pi4
+- tilted_w1_neg_3pi4
+- oblique_w2_neg_pi4
+- oblique_w1w2_pi4
+pose_joint_configs_rad:
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -1.5707963267948966
+  - -1.5707963267948966
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -1.5707963267948966
+  - 0.0
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - 0.0
+  - -1.5707963267948966
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - 0.0
+  - 1.5707963267948966
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -0.7853981633974483
+  - -1.5707963267948966
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -2.356194490192345
+  - -1.5707963267948966
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -1.5707963267948966
+  - -0.7853981633974483
+  - 0.0
+- - 1.5707963267948966
+  - -1.5707963267948966
+  - 1.5707963267948966
+  - -0.7853981633974483
+  - -0.7853981633974483
+  - 0.0
+result:
+  mass_kg: 2.1109
+  cog_xyz_m:
+  - -0.0032
+  - 0.0031
+  - -0.0318
+  bias_force_N:
+  - 0.6751
+  - -0.1586
+  - 20.7845
+  bias_torque_Nm:
+  - 0.0498
+  - 0.0797
+  - -0.1165
+diagnostics:
+  residual_per_axis:
+    Fx_N: 0.8590310984701581
+    Fy_N: 0.6639263053629945
+    Fz_N: 0.6932926395329744
+    Tx_Nm: 0.0258911795465225
+    Ty_Nm: 0.0617142831628524
+    Tz_Nm: 0.03977899035720671
+  matrix_rank: 10
+  condition_number: 16.3
+set_target_payload_line_for_bringup: set_target_payload(2.1109, [-0.0032, 0.0031,
+  -0.0318])
+notes:
+- Paste set_target_payload(...) into the bringup launch file at robot startup.
+- Restart bringup once after pasting; payload persists across sessions until gripper
+  changes.
+- Re-run this calibration whenever the gripper, jig, or sensor mount changes.
+- See compliant_insertion_studio/docs/ft_calibration_sop.md for the full workflow.

@@ -1,0 +1,44 @@
+{
+ "name": "fmb1-2026-10-23-run48",
+ "created": "2026-10-23T10:53:32",
+ "repo": {
+  "path": "/home/aldrin/Documents/ros-mcp-server-verified",
+  "branch": "dev",
+  "commit": "41ff77e518c951ef383c3b0cc1342081a4474017"
+ },
+ "ros2_ws": {
+  "aruco_camera_localizer": {
+   "git": "7d2a85cdc0f30e4e458d3aeb7929ef5f45a8400a",
+   "remote": "git@github.com:inbarajaldrin/aruco_camera_localizer.git",
+   "patch": "ws/aruco_camera_localizer.patch"
+  },
+  "max_camera_msgs": {
+   "git": "86be3581b0816f1f766560b2852056d32b6d179c",
+   "remote": "git@github.com:inbarajaldrin/max_camera_msgs.git"
+  },
+  "onrobot_quick_changer_description": {
+   "git": "234233a341d06243b4f79a225575c29294dac7b8",
+   "remote": "git@github.com:DIME-LAB/onrobot_quick_changer_description.git"
+  },
+  "onrobot_rg2_control": {
+   "git": "3385cea1a426323b23bff88aa117c17f32f90c88",
+   "remote": "git@github.com:DIME-LAB/onrobot_rg2_control.git"
+  },
+  "onrobot_rg2_description": {
+   "git": "5ee59d67d09fd8f5095b9de9560d5607c82ddb31",
+   "remote": "git@github.com:DIME-LAB/onrobot_rg2_description.git"
+  },
+  "onrobot_rg2_sim_control": {
+   "tarball": "ws/onrobot_rg2_sim_control.tar.gz"
+  },
+  "onrobot_ros": {
+   "git": "f6964fb05e3a18cfba2d22c5d334acf8da0a19b0",
+   "remote": "https://github.com/karishmapatnaik/onrobot_ros.git",
+   "patch": "ws/onrobot_ros.patch"
+  },
+  "pa_msgs": {
+   "tarball": "ws/pa_msgs.tar.gz"
+  }
+ },
+ "run": "ablations/logs/replay_20261023_104012.timing.jsonl"
+}
