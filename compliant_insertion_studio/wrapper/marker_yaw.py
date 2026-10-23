@@ -555,9 +555,15 @@ def socket_shift_world(obj, base, base_pose_world, lift_m, outline, img=None, tc
     Rwc = (_T(tcp_pose[0], tcp_pose[1]) @ X_CAM)[:3, :3]
     d_world = Rwc @ d_cam
     d_far_only = Rwc @ np.array([0.0, shift[1] * Z / K[1, 1], 0.0])    # the far edge's (image-y) component alone
+    def _mad(v):
+        v = np.asarray(v, float); return float(1.4826 * np.median(np.abs(v - np.median(v))))
     info = {'d_far_only_mm': [round(1000 * float(v), 1) for v in d_far_only[:2]],
             'shift_px': [round(float(v), 1) for v in shift],
             'spread_px': [round(float(np.std(dx)), 1), round(float(np.std(dy)), 1)], 'depth_m': round(Z, 3),
+            # robust spreads and the far edge's residuals per column (10-23: line_green's far edge read std 101.7 px with
+            # a clean-looking edge - which columns disagree, and is the median sound?)
+            'spread_mad_px': [round(_mad(dx), 1), round(_mad(dy), 1)],
+            'far_dy_px': [round(float(v), 1) for v in dy], 'far_x_px': [round(float(v), 1) for v in fx],
             'dxy_mm': [round(1000 * float(v), 1) for v in d_world[:2]],
             'yaw_img_deg': None if yaw_img is None else round(yaw_img, 2)}
     if debug_path:

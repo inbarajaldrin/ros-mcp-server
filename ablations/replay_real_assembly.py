@@ -1831,6 +1831,9 @@ DSERVO_SPREAD_YAW_PX = 20.0     # a yaw slopes the far edge and spreads the fit:
 DSERVO_ITERS = 6
 
 
+DSERVO_ROBUST = os.environ.get('DSERVO_ROBUST', '0') == '1'   # far edge by its median when only its std is spread (trial)
+
+
 def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Observe -> move -> observe with the target in the SAME frame as the image (10-22 11:16, the yellow seated by it):
     (1) wrist to the base yaw, (2) the held part's outline over bare table, (3) base1 fitted to depth with the camera
@@ -1896,7 +1899,19 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         rounds.append({'k': k, 'tcp': [tp[0].tolist(), tp[1].tolist()], 'seat_tcp': st.tolist(), 'info': info})
         say(f"  [dservo] {obj} round {k}: {info.get('dxy_mm')} mm, yaw {info.get('yaw_img_deg')} deg, spread "
             f"{info.get('spread_px')} px" + (f" ({info.get('error')})" if d is None else ""))
-        if d is None or info['spread_px'][1] > DSERVO_SPREAD_YAW_PX:
+        far_bad = d is not None and info['spread_px'][1] > DSERVO_SPREAD_YAW_PX
+        if (far_bad and DSERVO_ROBUST and (info.get('spread_mad_px') or [99, 99])[1] <= SERVO_MAX_SPREAD_PX):
+            # the far edge's columns disagree in std but agree in MAD: its median holds, its slope (the yaw) does not -
+            # step along the far edge's component only (10-23 line_green: std 101.7 px, median -14.4 px = 2.25 mm along
+            # the bar toward -y, the overhang that wedged 16 of 19 inserts)
+            d = np.asarray(info['d_far_only_mm'], float) / 1000.0
+            say(f"  [dservo] {obj}: far edge std {info['spread_px'][1]} px but MAD {info['spread_mad_px'][1]} px - its "
+                f"median only: {info['d_far_only_mm']} mm")
+            if np.hypot(*d) <= SERVO_TOL_M:
+                xy = xy - d; ok = True; break
+            xy = xy - d
+            continue
+        if d is None or far_bad:
             break                                                    # the far edge decides; a spread left edge is handled below
         yi = info.get('yaw_img_deg') or 0.0
         if abs(yi) > SERVO_YAW_MIN_TURN_DEG:
