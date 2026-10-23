@@ -2748,7 +2748,7 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
 
 EDGE_OFFSET_MM = 8.0                 # tap/press point off the bar's centreline (26 mm bar, 20 mm block)
 EDGE_TAP_N = 3.0                     # measuring tap: a 3 N centre tap did not move the wedged bar
-EDGE_PRESS_N = 5.0                   # operator's limit for pressing parts in the base
+EDGE_PRESS_N = 4.0                   # guard under the operator's 5 N limit: presses overshoot by up to 0.7 N (run 32)
 EDGE_DIFF_MIN_MM = 0.8               # edges closer than this: no roll to fix -> do not guess
 ROLL_PRESS_DEG = 5.0                 # depth roll this large: a cocked bar -> edge press (a seated bar reads ~-3 deg: bias)
 
@@ -2888,11 +2888,14 @@ def seat_check_and_reseat(obj, state, args, say) -> bool:
     if (os.environ.get('SEAT_BY_TAPS', '1') == '1' and not BASE_FIXED_CFG()
             and getattr(args, 'observed_base', None) is not None):
         ok_t = _seat_by_taps(obj, args, say)
-        if ok_t is not None:
-            if not ok_t:
-                say(f"\n!!! {obj}: the taps could not seat it")
-            return ok_t
-        say(f"  [seat-check] {obj}: the taps could not judge it -> the depth ladder")
+        if ok_t:
+            return True
+        if ok_t is None:
+            say(f"  [seat-check] {obj}: the taps could not judge it -> the depth ladder")
+        else:
+            # run 33: after the nudge line_green sat +4.8 mm level and rolled (a long edge on the channel lip), its high
+            # edge blocked at 4 N - the ladder's reseat with the insert grasp is the recovery left (run 31: it worked)
+            say(f"  [seat-check] {obj}: the taps could not seat it -> the depth ladder (edge press, reseat)")
     ok = _seat_check_and_reseat(obj, state, args, say)
     if not ok:
         # the recovery ladder stops one read-sigma inside the certifier's band; when it has run out, a last reading inside
