@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 
 TIP_ABOVE_TABLE_M = 0.008       # fingertips over the table during the push (base is 35 mm tall)
 GAP_M = 0.012                   # finger face this far off the base face before the push
+NO_PROGRESS_MM, NO_PROGRESS_DEG, BOOST_MM = 1.0, 0.25, 4.0   # a push that moved it less than this: +4 mm next
 STEP_MAX_MM = 50.0              # one push moves the finger face at most this far past the base face
 PUSH_SPEED_M_S = 0.008          # slow enough that the base stops when the fingers stop
 MAX_FORCE_N = 12.0              # guard for the push (the empty base slides at a few N)
@@ -183,12 +184,22 @@ def main():
     if not (in_staging or in_assembly):         # the base lives in the assembly region of the active layout too
         print("  !!! target outside the staging/assembly area - not moving"); return 1
     first_dir = None
+    prev, boost = None, 0.0
     for k in range(1, a.max_pushes + 1):
         (x, y, _), q = ob
         yaw = float(R.from_quat(q).as_euler('xyz', degrees=True)[2])
         ex, ey = tgt[0] - 1000 * x, tgt[1] - 1000 * y
         eyaw = (tgt[2] - yaw + 180) % 360 - 180
         print(f"[move_base] {k}: error ({ex:+.1f}, {ey:+.1f}) mm, {eyaw:+.2f} deg", flush=True)
+        if prev is not None:
+            # a push that did not move the base reached its face short (10-23 run 33: seven 5.4 mm turn pushes left it at
+            # -6.7 mm / -1.1..-1.6 deg; an 8 mm one then moved it 3.8 mm) - the next push goes further, not the same
+            if np.hypot(ex - prev[0], ey - prev[1]) < NO_PROGRESS_MM and abs(eyaw - prev[2]) < NO_PROGRESS_DEG:
+                boost = min(boost + BOOST_MM, STEP_MAX_MM)
+                print(f"[move_base] the last push did not move it -> {boost:g} mm further this time", flush=True)
+            else:
+                boost = 0.0
+        prev = (ex, ey, eyaw)
         if np.hypot(ex, ey) <= a.tol_mm and abs(eyaw) <= a.tol_deg:
             print(f"[move_base] DONE in {k-1} pushes: ({1000*x:.1f}, {1000*y:.1f}) mm {yaw:.2f} deg"); return 0
         Rb = R.from_euler('z', yaw, degrees=True)
@@ -217,6 +228,7 @@ def main():
                 first_dir = d.copy()
             elif np.dot(d, first_dir) < 0:
                 print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); return 0
+        step = float(min(step + boost, STEP_MAX_MM))
         if not push(a.base, ob, d, lever, step, a.dry_run):
             print("  !!! push failed - stopping"); return 1
         if lever != 0.0 and np.hypot(*e_b) <= a.tol_mm:          # pure turn: couple; with a slide still owed, the
