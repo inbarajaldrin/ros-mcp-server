@@ -2894,8 +2894,10 @@ def _seat_by_taps(obj, args, say):
                 ok, tp = tap_recover(obj, ob3, RUN_BASE['name'], say)
         if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
             return None
-    if ok and (res.get('cross') or {}).get('centre_mm') is not None:
-        _record_seat_check_error(obj, res)                   # the across error the parts over it follow
+    if ok and not blocked and (res.get('cross') or {}).get('centre_mm') is not None:
+        # the across error the parts over it follow - from this depth read only if nothing moved the part since (after a
+        # nudge it is the pre-nudge read: run 32 recorded [-0.2, -3.0] mm of a wedged bar the taps then found seated)
+        _record_seat_check_error(obj, res)
     if ok:
         # with its own time and the points' places along the bar: ExecuteMate judges the ends from it while nothing has
         # moved since (seams.vision_ops.tap_ends)

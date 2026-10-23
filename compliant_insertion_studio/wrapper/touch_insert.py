@@ -53,6 +53,12 @@ GRID_RMAX_M = float(os.environ.get('TOUCH_RMAX_MM', '2.5')) / 1000.0
 CORRIDOR_PITCH_M = 0.0005
 CORRIDOR_ALONG_M = 0.003
 CORRIDOR_ACROSS_M = 0.0025      # retracts ride over the measured contact (guarded), so across steps are safe
+# A part CAD says can wedge (FMB1: line_green) searches ALONG its own long axis: base1's pocket gives the 140 mm bar
+# +-1.4 mm along (+-0.8..1.4 across), and 59 of 74 line_green inserts (10-14..10-23) were released with one end on the
+# base top (+7 mm), the bar 2-8 mm off along its axis - never touching anything: its rim is only 7 mm over the seat, so
+# the descent's end (rim - 5 mm = seat + 2 mm) counted as 'in'. Steps under twice the play, out to the errors seen.
+WEDGE_ALONG_PITCH_M = 0.002
+WEDGE_ALONG_M = 0.006
 
 
 def corridor_grid(axis_xy, pitch, along, across):
@@ -279,10 +285,24 @@ def main():
               f"({np.round(ax, 3).tolist()}), +-{1000*CORRIDOR_ACROSS_M:.1f} across", flush=True)
     else:
         pts = hex_grid(GRID_PITCH_M, rmax)
+    try:
+        from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
+        wedge_search = not over and wedge_possible(a.base_name, a.object_name)
+    except Exception:
+        wedge_search = False
+    if wedge_search:
+        ax = _corridor_axis_world(a.base_name, [a.object_name], a.final_base_orientation)
+        pts = corridor_grid(ax, WEDGE_ALONG_PITCH_M, WEDGE_ALONG_M, 0.0)
+        rmax = WEDGE_ALONG_M
+        print(f"[touch] can wedge (CAD): along its own axis {np.round(ax, 3).tolist()} +-{1000*WEDGE_ALONG_M:.0f} mm "
+              f"every {1000*WEDGE_ALONG_PITCH_M:.0f} mm, each probe pushed to the seat", flush=True)
     print(f"[touch] {len(pts)} probe points, out to {1000*rmax:.1f} mm", flush=True)
+    pushes = []                                         # (z after the entering push, dx, dy) - the wedge search's fallback
     for dx, dy in pts:
         z = probe(dx, dy)
         st = outcome(z)
+        if st == 'in' and z is not None and not meta['probes'][-1]['contact'] and z > seat_z() + 0.0005:
+            st = 'entering'                             # stopped over the seat touching nothing proves nothing: push on
         if st == 'in':
             return finish(stem, meta, 'success')
         if st == 'entering':
@@ -293,7 +313,12 @@ def main():
             meta['probes'].append({'dx_mm': round(1000 * dx, 2), 'dy_mm': round(1000 * dy, 2), 'dyaw_deg': 0.0, 'push': True,
                                    'z_above_seat_mm': round(1000 * (z2 - seat[2]), 2), 'contact': bool(r3.get('contact')), 'error': r3.get('error')})
             print(f"[touch] entered at ({1000*dx:+.1f}, {1000*dy:+.1f}) mm: pushed to {1000*(z2 - seat[2]):+.1f} mm above the seat", flush=True)
-            return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
+            if outcome(z2) == 'in' or not wedge_search:
+                return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
+            # held up short of the seat: an end on the base top - the next point along the bar (straight up first)
+            pushes.append((z2, dx, dy))
+            move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None)
+            continue
         if z is None:
             return finish(stem, meta, 'failure')
         if best is None or z < best[0]:
@@ -312,6 +337,16 @@ def main():
         up = cur is not None and start_z > float(cur[2])
         move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None if up else MAX_FORCE_N,
              duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)   # retract before any step
+    if pushes:
+        # nothing seated along the bar: back to the lowest push and leave it there - the seat check's recovery (nudge)
+        # takes it from the state the insert always left before
+        z2, dx, dy = min(pushes)
+        q = R.from_quat(q_seat).as_quat()
+        move([seat[0] + dx, seat[1] + dy, start_z], q_seat)
+        move([seat[0] + dx, seat[1] + dy, seat[2] - 0.002], q, max_force=6.0, min_duration=8.0)
+        print(f"[touch] no point along the bar seated - left at the lowest ({1000*dx:+.1f}, {1000*dy:+.1f}) mm, "
+              f"{1000*(z2 - seat[2]):+.1f} mm above the seat", flush=True)
+        return finish(stem, meta, 'entering')
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:
         z = probe(bx, by, dyaw)
