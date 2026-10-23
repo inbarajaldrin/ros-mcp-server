@@ -380,6 +380,20 @@ def seat_grasp(name, gid, observed_base, base_name=None, observed_part=None):
     return tcp
 
 
+def base_view(base_name=None):
+    """The arm over the base at the base-view height (where observe_base reads it), without reading it."""
+    sys.path.insert(0, str(REPO / 'ablations'))
+    from replay_real_assembly import _last_base_pose
+    from primitives.shared.config import ASSEMBLY_REGION_CENTER as DBP
+    from base_depth import VIEW_FLANGE_Z
+    _lb = _last_base_pose(base_name or RUN['base'])
+    if _lb is not None:
+        DBP = (_lb[0][0], _lb[0][1])
+    ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{DBP[0]:.4f}", f"{DBP[1]:.4f}",
+                   f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view', 60)
+    return ok
+
+
 def observe_base(base_name=None):
     """Read the base from straight above (as the replay's startup), then stay there: x, y and
     yaw from the depth outline of its top face (base_depth.py), the marker read as fallback."""
@@ -395,6 +409,23 @@ def observe_base(base_name=None):
                    f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view', 60)
     if not ok:
         return None
+    if os.environ.get('BASE_FROM', 'marker') == 'icp' and _lb is not None:
+        # the depth CAD fit is the read; the last saved read seeds it (purpose map 10-23: each reset read took a marker
+        # read only to seed the fit, 6.1-6.8 s, and a depth outline nothing used, 4.1-4.6 s - 7 reads a reset)
+        import json as _j
+        try:
+            _t = float(_j.load(open(REPO / 'ablations' / 'logs' / 'last_base_pose.json'))[base_name][2])
+        except Exception:
+            _t = 0.0
+        if time.time() - _t < 900:
+            from base_icp import read_icp
+            oi, info_i = read_icp(base_name, _lb)
+            print(f"  [base] CAD fit (seeded by the last read): {json.dumps(info_i)}", flush=True)
+            if oi is not None:
+                choose_base_read.source = 'icp'
+                from replay_real_assembly import _save_base_pose
+                _save_base_pose(base_name, oi)                 # the next read's seed
+                return oi
     ob = observe_base_pose(base_name)
     if ob is None:
         # dark room (10-22 06:12: brightness 40 on the dark exposure): the markers read from 0.40 m, not from the base
@@ -409,6 +440,10 @@ def observe_base(base_name=None):
                    f"{VIEW_FLANGE_Z:.2f}", '--quat', *map(str, SEAT_EE_QUAT)), 'base view (back up for depth)', 60)
     if ob is None:
         return None
+    if os.environ.get('BASE_FROM', 'marker') == 'icp':
+        oi = choose_base_read(base_name, ob, None, lambda m: print(m, flush=True))    # the fit; outline only if it fails
+        if choose_base_read.source == 'icp':
+            return oi
     time.sleep(1.0)                                            # settle before the depth frames
     ob_d, info = measure(ob, base_name)                        # x, y, yaw from the depth outline
     print(f"[base] depth outline: {json.dumps(info)}", flush=True)
@@ -1033,9 +1068,10 @@ def main():
             placed_pose = _translated_to(name, seen[name], gid, (fx, fy))
             print(f"[spot] {name}: free spot in the staging region -> flange ({1000*sx:.0f}, {1000*sy:.0f}) mm, "
                   f"{gap:.0f} mm from the nearest part; seen there: {sorted(n for n in seen if n != name)}", flush=True)
-            ob = observe_base()                      # back over the base for the seat grasp (and a fresh read)
-            if ob is None:
-                print("base1 not observed — stopping"); return 1
+            # back over the base for the seat grasp: the move only - the read before the staging view still holds,
+            # nothing has touched the base since (purpose map 10-23: this re-read cost ~20 s on 3 of 4 parts)
+            if not base_view():
+                print("base view not reached — stopping"); return 1
         tcp = seat_grasp(name, gid, ob) if not (i == start and a.resume_held) else None
         if tcp is not None:
             print(f"    seat grasp flange ({1000*tcp[0]:.1f}, {1000*tcp[1]:.1f}, {1000*tcp[2]:.1f}) mm", flush=True)
