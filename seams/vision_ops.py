@@ -91,7 +91,9 @@ def pose(name, kind, timeout=15.0):
                 log(f'[vision] saved base read {time.time() - float(t_):.0f} s old - markers seed the fit')
         except Exception as e:
             log(f'[vision] no saved base read ({e})')
-        if oi is None:
+        if oi is None and seed_src is None:
+            # no recent saved read: the markers seed it. A seeded fit that FAILED means this view does not hold the whole
+            # base (a seat view): a marker seed fails the same way (+10 s), and the caller falls back to the saved read
             ob = rr.observe_base_pose(name, timeout_s=timeout)
             if ob is None:
                 return {'ok': False, 'error': f'{name}: not seen from this view'}

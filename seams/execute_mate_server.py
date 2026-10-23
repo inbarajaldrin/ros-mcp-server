@@ -83,6 +83,9 @@ def certified(ep, mate_id):
 def certify(mates):
     p = subprocess.run(['python3', '-u', '-m', 'seams.vision_ops', 'certify', '--mate', *mates], cwd=str(REPO),
                        capture_output=True, text=True, timeout=120 + 90 * len(mates))
+    for l in p.stderr.splitlines():                  # the certify's own timing and base-fit lines (TGOAL)
+        if l.startswith('[certify timing]') or l.startswith('[vision]'):
+            print(l[:400], flush=True)
     line = next((l for l in reversed(p.stdout.splitlines()) if l.startswith('__VISION__ ')), None)
     if line is None:
         return None
