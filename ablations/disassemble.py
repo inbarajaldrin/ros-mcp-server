@@ -80,7 +80,7 @@ def run(argv, label, timeout=180, _retried=False):
     if p.returncode != 0 and not _retried and any(k in out for k in PROGRAM_DROPPED):
         # the external-control program dropped (2026-10-20, no safety event): re-send it and retry once
         r = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], capture_output=True, text=True,
-                           timeout=60, env=env(), cwd=str(REPO))
+                           timeout=180, env=env(), cwd=str(REPO))
         print(f"    [program] dropped -> re-sent: {(r.stdout.strip().splitlines() or [''])[-2:]}", flush=True)
         if r.returncode == 0:
             return run(argv, label, timeout, _retried=True)

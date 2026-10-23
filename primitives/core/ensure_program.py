@@ -42,16 +42,21 @@ def main():
         result({'result': 'success', 'was_running': True, 'recovered': False}); return 0
     if not safety_normal():
         result({'result': 'failure', 'was_running': False, 'error': 'safety status not NORMAL - not re-sending'}); return 1
-    subprocess.run(['ros2', 'service', 'call', '/io_and_status_controller/resend_robot_program', 'std_srvs/srv/Trigger', '{}'],
-                   capture_output=True, text=True, timeout=20)
-    time.sleep(3.0)
-    subprocess.run(['ros2', 'control', 'switch_controllers', '--activate', 'scaled_joint_trajectory_controller'],
-                   capture_output=True, text=True, timeout=20)
     ok = False
-    for _ in range(5):                          # the program reports running a few seconds after the re-send
-        time.sleep(2.0)
-        if program_running():
-            ok = True; break
+    # 10-23 02:21: one re-send + 13 s of polling gave up; the driver reported the program back 28 s after the drop -
+    # re-send up to three times, polling ~10 s after each
+    for _attempt in range(3):
+        subprocess.run(['ros2', 'service', 'call', '/io_and_status_controller/resend_robot_program', 'std_srvs/srv/Trigger',
+                        '{}'], capture_output=True, text=True, timeout=20)
+        time.sleep(3.0)
+        subprocess.run(['ros2', 'control', 'switch_controllers', '--activate', 'scaled_joint_trajectory_controller'],
+                       capture_output=True, text=True, timeout=20)
+        for _ in range(4):                      # the program reports running a few seconds after the re-send
+            time.sleep(2.0)
+            if program_running():
+                ok = True; break
+        if ok:
+            break
     result({'result': 'success' if ok else 'failure', 'was_running': False, 'recovered': ok})
     return 0 if ok else 1
 

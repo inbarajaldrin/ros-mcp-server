@@ -1383,7 +1383,7 @@ def run_subprocess(argv: list[str], label: str, timeout_s: int = 600, log_fh=Non
     r = _run_subprocess_once(argv, label, timeout_s, log_fh)
     if r.get('result') == 'failure' and any(k in json.dumps(r) for k in PROGRAM_DROPPED) and not _SAFETY_STOP:
         rr = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], capture_output=True, text=True,
-                            timeout=60, env=make_env(), cwd=str(REPO_ROOT))
+                            timeout=180, env=make_env(), cwd=str(REPO_ROOT))
         msg = f"  [program] dropped during '{label}' -> re-sent ({'ok' if rr.returncode == 0 else 'FAILED'}), retrying once"
         print(msg, flush=True)
         if log_fh: log_fh.write(msg + "\n")
