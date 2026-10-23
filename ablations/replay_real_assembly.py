@@ -1709,9 +1709,7 @@ def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
     Rt = R_.from_quat(tcp['quat_xyzw']).as_matrix()
     cam = Rt @ np.asarray(X_CAM)[:3, 3]                            # camera offset from the flange, world frame
     tx, ty = bx - cam[0], by - cam[1]                               # camera straight over the base centre
-    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tx:.4f}",
-                        f"{ty:.4f}", f"{TRACK_VIEW_Z:.3f}", '--quat', *[f"{v:.6f}" for v in tcp['quat_xyzw']],
-                        '--min-z', '0.15'], label=f'base track view (part in hand)', timeout_s=60, log_fh=log_fh)
+    r = _move_unless_there((tx, ty, TRACK_VIEW_Z), list(tcp['quat_xyzw']), 'base track view (part in hand)', log_fh)
     if r.get('result') == 'failure':
         say(f"  [base-track] view not reached ({r.get('error', '')}) - aiming at the previous read"); return observed_base
     # The pose comes from the 6-dof CAD fit to the depth cloud (operator 10-21: depth + CAD carry far more than the
@@ -1908,9 +1906,7 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         held_q = list((R_.from_euler('z', err, degrees=True) * R_.from_quat(held_q)).as_quat())
         say(f"  [dservo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
     q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw')
-    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx + 0.17:.5f}",
-                        f"{by:.5f}", '0.32000', '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                       label='dservo: outline view over table', timeout_s=60, log_fh=log_fh)
+    r = _move_unless_there((bx + 0.17, by, 0.32), list(q), 'dservo: outline view over table', log_fh)   # in process
     _emitter(False)
     try:
         img_, _ = still_frame(n_avg=4)
@@ -2255,9 +2251,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); q = tcp['quat_xyzw']
     # the held part's place in the image, once per grasp, over bare table beside the base (camera rigid with the gripper)
     _emitter_hold()                                     # colour-only from the outline on (the base was read before it)
-    r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx + 0.17:.5f}",
-                        f"{by:.5f}", '0.32000', '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
-                       label='servo: outline view over table', timeout_s=60, log_fh=log_fh)
+    r = _move_unless_there((bx + 0.17, by, 0.32), list(q), 'servo: outline view over table', log_fh)   # in process
     _emitter(False)
     try:
         img_, _ = still_frame(n_avg=4)
