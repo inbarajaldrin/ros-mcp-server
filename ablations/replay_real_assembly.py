@@ -2034,10 +2034,10 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     # leg to the measuring height is vertical, at 4 N guard.
     z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
-    xy = st[:2].copy()
-    yaw_total = 0.0
-    gain, last_move, last_d, best_meas, final_reading = 1.0, None, None, None, None
-    for k in range(SERVO_ITERS + 1):
+    from seams import servo_law as SL
+    law = SL.HoverServoLaw(st[:2])              # the decisions (AR3 step 1); this function moves and reads
+    xy = law.xy
+    for k in range(SL.SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
         if cur and cur[2] < z_clear - 0.002:                       # straight up first, never sideways at low height
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{cur[0]:.5f}",
@@ -2062,6 +2062,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                                     f"{xy[0]:.5f}", f"{xy[1]:.5f}", f"{z_meas:.5f}", '--quat', *[f"{v:.6f}" for v in q],
                                     '--min-z', '0.15'], label=f'servo off the contact {k}', timeout_s=60, log_fh=log_fh)
+                law.measuring_low()
                 say(f"  [servo] {obj}: touched down {1000*(z_meas - 0.002 - rim_z):+.1f} mm over the CAD rim - measuring "
                     f"from 2 mm above the contact")
         if r.get('result') == 'failure':
@@ -2085,9 +2086,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # Measure from there instead (the hand-eye tilt lever grows to ~1.7 mm/deg; the dip grid covers +-1.5 mm)
             say(f"  [servo] {obj} round {k}: {sfinfo.get('error')} over the rim - measuring from the clear height instead")
             z_meas = z_clear
-            # from the clear height the reading moves ~2.4 mm per mm of step (u_orange twice, 10-22 03:28 and 04:39: a 1:1
-            # first step overshot 7.6 -> -10.3 mm); start the gain there and keep learning it
-            gain = SERVO_GAIN_CLEAR
+            law.measuring_from_clear()                 # the reading moves ~2.4 mm per mm of step from there
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                                 f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                                label=f'servo up to measure {k}', timeout_s=60, log_fh=log_fh)
@@ -2108,74 +2107,49 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
             # path - and its 27-70 px-spread fits turned u_orange's wrist 6 x -5 deg = -30 deg into the insert)
             say(f"  [servo] {obj} round {k}: base not read in the frame ({sfinfo.get('error')}) - no correction, aiming as read")
             break
-        if d is None:
+        act = law.reading(d, info)
+        for n_ in law.notes:
+            say(f"  [servo] {obj} {n_}")
+        law.notes.clear()
+        if isinstance(act, SL.Stop) and act.why.startswith('not measured'):
             say(f"  [servo] {obj} round {k}: not measured ({info.get('error')})"); break
-        sp_x, sp_y = (info.get('spread_px') or [0, 0])[:2]
-        if sp_y > SERVO_MAX_SPREAD_PX:
-            say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SERVO_MAX_SPREAD_PX} - the outline does not "
-                f"match the target, no correction"); break
-        if sp_x > SERVO_MAX_SPREAD_PX:
-            # the far edge fits, the left one does not (u_orange's slanted side face, 10-22): correct along the far edge's
-            # image-y only; the other axis stays as read (the dip grid covers +-1.5 mm)
-            d = np.asarray(info['d_far_only_mm'], float) / 1000.0
-            say(f"  [servo] {obj} round {k}: left-edge spread {sp_x} px > {SERVO_MAX_SPREAD_PX} - far-edge component only "
-                f"{info['d_far_only_mm']} mm")
-        yi = info.get('yaw_img_deg')
-        final_reading = np.asarray(d, float)                    # every measured reading, before any turn or step
-        if best_meas is None or np.hypot(*final_reading) < np.hypot(*best_meas[1]):
-            best_meas = (xy.copy(), final_reading.copy())
-        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {yi} deg in the image "
+        if isinstance(act, SL.Stop) and act.why.startswith('fit spread'):
+            say(f"  [servo] {obj} round {k}: fit spread {info.get('spread_px')} px > {SL.SERVO_MAX_SPREAD_PX} - the outline "
+                f"does not match the target, no correction"); break
+        say(f"  [servo] {obj} round {k}: part {info['dxy_mm']} mm from over its socket, yaw {info.get('yaw_img_deg')} deg in the image "
             f"(shift {info['shift_px']} px, spread {info['spread_px']} px; base in frame {json.dumps(sfinfo)})")
-        # 10-22 00:12: four turns of -0.31..-0.35 deg left the reading at -0.3 (noise floor ~0.3 deg): a turn below
-        # SERVO_YAW_MIN_TURN_DEG is not worth a round
-        yaw_ok = yi is None or abs(yi) <= SERVO_YAW_TOL_DEG or abs(yi / SERVO_YAW_GAIN) < SERVO_YAW_MIN_TURN_DEG
-        if (np.hypot(*d) <= SERVO_TOL_M and yaw_ok) or k == SERVO_ITERS:
+        if isinstance(act, SL.Converged):
             break
-        if not yaw_ok:
-            # image yaw of the far edge vs the socket's; the wrist turns about the TCP (0.5 mm of part per degree), xy is
-            # re-measured after it. Effective gain 0.7-1.1 deg of reading per degree of wrist (10-21): turn 1:1, iterate
-            t = float(np.clip(yi / SERVO_YAW_GAIN, -5.0, 5.0))
-            if abs(yaw_total + t) > SERVO_MAX_YAW_DEG:
-                say(f"  [servo] {obj}: image yaw {yi} deg would turn the wrist {yaw_total + t:+.1f} deg in all (> "
-                    f"{SERVO_MAX_YAW_DEG}) - more than the reads can be off, stopping the servo"); break
+        if isinstance(act, SL.Stop):
+            say(f"  [servo] {obj}: {act.why} - more than the reads can be off, stopping the servo"); break
+        if isinstance(act, SL.Turn):
             run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                             f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                            label=f'servo up for turn {k}', timeout_s=60, log_fh=log_fh)   # vertical: xy is where we measured
             if _SAFETY_STOP:
                 return observed_base, held_q
-            if turn_wrist(t):
-                last_move, last_d = None, None                      # a turn moves the reading too: re-learn the xy gain
-                yaw_total += t
-                held_q = list((R_.from_euler('z', t, degrees=True) * R_.from_quat(held_q)).as_quat())
+            if turn_wrist(act.deg):
+                law.turned(act.deg)
+                held_q = list((R_.from_euler('z', act.deg, degrees=True) * R_.from_quat(held_q)).as_quat())
                 q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw') or q
-                say(f"  [servo] {obj}: wrist turned {t:+.2f} deg (image yaw)")
+                say(f"  [servo] {obj}: wrist turned {act.deg:+.2f} deg (image yaw)")
+            law.next_round()
             continue                                                # re-measure xy after the turn
-        # learn the move->reading gain from the previous xy step (10-22 03:28: measured from the clear height a 2.1 mm
-        # move changed u_orange's reading by ~5 mm - the px->mm scale at the target depth was off ~2.4x - and the servo
-        # oscillated); clamp it to [0.4, 3]
-        dv = np.asarray(d, float)
-        if last_move is not None and last_d is not None:
-            m_ = np.asarray(last_move); resp = last_d - dv                    # how much the reading moved for that step
-            if np.dot(m_, m_) > 1e-8:
-                gain = float(np.clip(np.dot(resp, m_) / np.dot(m_, m_), 0.4, 3.0))
-        step = dv / gain
-        xy = xy - step
-        last_move, last_d = step, dv
-    if best_meas is not None and final_reading is not None and np.hypot(*final_reading) > np.hypot(*best_meas[1]) + 0.0005:
-        # the last step made the reading worse (an overshoot): aim from the best measurement with the learned gain
-        xy = best_meas[0] - best_meas[1] / max(gain, 0.4)
-        say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*best_meas[1][0]:+.1f}, "
-            f"{1000*best_meas[1][1]:+.1f}) mm at gain {gain:.2f}")
+        xy = np.array(act.xy)                                       # SL.Step: the next place to measure
+        law.next_round()
+    out = law.finish()
+    xy = law.xy
+    if isinstance(out, SL.Aim) and out.overshot:
+        say(f"  [servo] {obj}: last step overshot - aiming from the best reading ({1000*out.overshot[0]:+.1f}, "
+            f"{1000*out.overshot[1]:+.1f}) mm at gain {out.overshot[2]:.2f}")
     run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{xy[0]:.5f}",
                     f"{xy[1]:.5f}", f"{z_clear:.5f}", '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                    label='servo done: clear', timeout_s=60, log_fh=log_fh)
-    # the residual bias differs by measuring height: from just over the rim (-0.5, +0.9) mm (u_brown, by hand and pipeline);
-    # from the clear height (+0.2, -2.1) and (-1.1, -1.8) mm (u_orange, 10-22 04:47 and 03:55) - hand-eye tilt x the lever
-    SERVO_MEASURED[obj] = final_reading is not None
-    c = xy - st[:2] + (SERVO_BIAS_CLEAR_M if z_meas >= z_clear - 0.001 else SERVO_BIAS_M)
-    if np.hypot(*c) > SERVO_MAX_M:
-        say(f"  [servo] {obj}: correction {1000*np.hypot(*c):.1f} mm is more than the reads can be off - not applied")
+    SERVO_MEASURED[obj] = law.final_reading is not None
+    if isinstance(out, SL.Stop):
+        say(f"  [servo] {obj}: {out.why} - not applied")
         return observed_base, held_q
+    c = np.array(out.dxy); yaw_total = out.yaw_deg
     if yaw_total:
         # the image yaw becomes the base's yaw for the insert, turned about the SEAT point (the pocket stays put): the
         # insert's own yaw step (held part vs base x seat) then has nothing to undo
@@ -2189,21 +2163,11 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     return ((bx + c[0], by + c[1], bz), bq), held_q
 
 
-SERVO_ITERS = 6
-SERVO_YAW_TOL_DEG = 0.3
-SERVO_YAW_MIN_TURN_DEG = 0.4   # the image-yaw noise floor; smaller turns did not change the reading (10-22)
-SERVO_MAX_SPREAD_PX = 12.0     # a fit whose edge residuals spread more than this does not match the part (good fits: 1-4 px)
-SERVO_MAX_YAW_DEG = 4.0        # the whole servo may turn the wrist this much; base and grasp reads are within ~3 deg
-SERVO_GAIN_CLEAR = 2.4         # reading change per mm of xy step when measured from the clear height (measured twice)
-SERVO_YAW_GAIN = 1.0           # image-yaw change per +1 deg of wrist turn (measured 0.7-1.14, 10-21): turn 1:1 and iterate
+from seams.servo_law import (SERVO_ITERS, SERVO_YAW_TOL_DEG, SERVO_YAW_MIN_TURN_DEG, SERVO_MAX_SPREAD_PX,  # noqa: E402,F401
+                             SERVO_MAX_YAW_DEG, SERVO_GAIN_CLEAR, SERVO_YAW_GAIN, SERVO_BIAS_M, SERVO_BIAS_CLEAR_M,
+                             SERVO_TOL_M, SERVO_MAX_M)   # one definition (the law's); depth_servo uses them too
 SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the real rim reads ~1.5 mm higher: ~2.5 mm clear)
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
-# the pocket was entered at (-0.5, +0.9) mm from the converged aim in both seats so far (by hand 10-21 23:50, pipeline
-# 10-22 00:13): the target's residual bias (hand-eye tilt x the 35 mm lift); the dip grid still covers +-1.5 mm around it
-SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5,0.9').split(',')]) / 1000.0
-SERVO_BIAS_CLEAR_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_MM', '-0.5,-2.0').split(',')]) / 1000.0
-SERVO_TOL_M = 0.001
-SERVO_MAX_M = 0.015
 
 
 def _emitter(on):
