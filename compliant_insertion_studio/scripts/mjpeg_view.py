@@ -121,6 +121,8 @@ def log_entries(since):
 
 
 PAGE_SPLIT = """<html><head><title>FMB1 cell</title><meta name='viewport' content='width=device-width'>
+<meta property='og:title' content='FMB1 cell - live'><meta property='og:description' content='Claude at work on the UR5e: chat, annotated camera, depth'>
+<meta property='og:image' content='snap/0'>
 <style>
 :root{--bg:#f5f4ed;--chat:#faf9f5;--line:#e5e2d6;--text:#2d2b27;--muted:#8a8578;--accent:#d97757;--me:#ece9df;--metext:#2d2b27;
   --tool:#8a8578;--event:#9a5a3a;--eventbg:#f6ebe3;--code:#efece3;--pre:#f1eee5;--views:#e9e6dc}
@@ -209,6 +211,16 @@ class H(BaseHTTPRequestHandler):
             body = json.dumps({'entries': ent, 'next': nxt, 'first': since < 0}).encode()
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path.startswith('/snap'):
+            # one JPEG: link previews (WhatsApp) take a page's image as the thumbnail and an MJPEG stream never ends
+            try:
+                i = int(self.path.split('/')[2])
+            except (IndexError, ValueError):
+                i = 0
+            jpg = frame(min(max(i, 0), len(TOPICS) - 1)) or b''
+            self.send_response(200 if jpg else 503); self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(jpg))); self.end_headers(); self.wfile.write(jpg)
             return
         if self.path.startswith('/stream'):
             try:
