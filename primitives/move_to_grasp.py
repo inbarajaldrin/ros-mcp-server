@@ -836,6 +836,11 @@ class DirectObjectMove(Node):
         """Force/torque callback (WrenchStamped for both sim and real)"""
         self.current_force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
         self.current_torque = np.array([msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z])
+        import time as _t
+        buf = self.__dict__.setdefault('_wrench_buf', [])
+        buf.append((_t.time(), self.current_force.copy(), self.current_torque.copy()))
+        while buf and buf[0][0] < buf[-1][0] - 0.4:
+            buf.pop(0)
 
     def _gripper_width_callback(self, msg):
         """Gripper width callback (Float64 for sim, Float32 for real)"""
@@ -914,10 +919,23 @@ class DirectObjectMove(Node):
         # arm. See _start_force_monitoring for why the pre-motion sample is unsafe.
         if not getattr(self, '_baseline_rebased', True):
             self._baseline_rebased = True
-            self.baseline_force = self.current_force.copy()
-            self.baseline_torque = self.current_torque.copy()
-            self.get_logger().info(
-                f"Force baseline re-taken after settle: F={self.baseline_force}")
+            # the median of the last ~0.3 s, not one sample: the wrench carries ~100 ms robot-side glitches (10-23 run
+            # 45: one re-take read F=(-18.5, -44.6, +50.2) N against (1.6, -1.2, -0.1) a moment before, and the guard
+            # then stopped line_green's descent on a -50 N 'contact' with nothing touched)
+            import time as _t
+            buf = [b for b in getattr(self, '_wrench_buf', []) if b[0] >= _t.time() - 0.3]
+            if len(buf) >= 5:
+                f_med = np.median([b[1] for b in buf], axis=0); t_med = np.median([b[2] for b in buf], axis=0)
+            else:
+                f_med, t_med = self.current_force.copy(), self.current_torque.copy()
+            if np.linalg.norm(f_med - self.baseline_force) > 8.0:
+                self.get_logger().warn(
+                    f"Force re-take {np.round(f_med, 2)} is {np.linalg.norm(f_med - self.baseline_force):.1f} N off the "
+                    f"pre-motion baseline {np.round(self.baseline_force, 2)} - a glitch, keeping the pre-motion baseline")
+            else:
+                self.baseline_force, self.baseline_torque = f_med, t_med
+                self.get_logger().info(
+                    f"Force baseline re-taken after settle (median of {len(buf)}): F={self.baseline_force}")
             return
 
         # Step 2 is top-down vertical descent - check Z force delta magnitude for contact
