@@ -1930,6 +1930,7 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     except Exception:
         pass
     ob = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)   # depth fit, camera over the base
+    _emitter_hold()                                                   # the rounds are colour-only
     if ob is None or ob is observed_base:
         say(f"  [dservo] {obj}: base not re-read in hand")
         # no base in this frame - the hand still is: the held part's far edge over bare table against the CAD grasp
@@ -2133,7 +2134,10 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
         # threads over seated parts first (CAD): the depth-frame servo (10-22 11:16 seated the yellow), the close
         # marker read as the fallback when it cannot measure
         out['route'] = 'depth servo'
-        ds = depth_servo(obj, base, ob, held_quat, grasp_id, say, log_fh)
+        try:
+            ds = depth_servo(obj, base, ob, held_quat, grasp_id, say, log_fh)
+        finally:
+            _emitter_release()
         if ds is not None:
             ob, held_quat = ds
         else:
@@ -2149,13 +2153,19 @@ def align_for_insert(obj, base, measured_base, held_quat, grasp_id, say, log_fh=
         # servo converged and it entered on the lattice)
         out['route'] = 'marker servo'
         ob0_, hq0_ = ob, held_quat
-        ob, hq_ = hover_servo(obj, base, ob0_, hq0_, grasp_id, say, log_fh)
+        try:
+            ob, hq_ = hover_servo(obj, base, ob0_, hq0_, grasp_id, say, log_fh)
+        finally:
+            _emitter_release()
         if LAST_TRACK_READ.get('pose') is not None:
             out['measured_base'] = LAST_TRACK_READ['pose']           # the servo's in-hand read: drive-mate's measured base
         if not SERVO_MEASURED.get(obj) and not _SAFETY_STOP:
             out['route'] = 'marker servo -> depth servo'
             say(f"  [servo] {obj}: no marker reading - the depth-frame servo")
-            ds = depth_servo(obj, base, ob0_, hq_ if hq_ is not None else hq0_, grasp_id, say, log_fh)
+            try:
+                ds = depth_servo(obj, base, ob0_, hq_ if hq_ is not None else hq0_, grasp_id, say, log_fh)
+            finally:
+                _emitter_release()
             if ds is not None:
                 ob, hq_ = ds
         if hq_ is not None and held_quat is not None and hq_ is not held_quat:
@@ -2244,6 +2254,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                                flange_offset_m=float(held_tool_offset_for(obj)[2]))
     st = np.array(pred['predicted_tcp_at_seat']['xyz_m']); q = tcp['quat_xyzw']
     # the held part's place in the image, once per grasp, over bare table beside the base (camera rigid with the gripper)
+    _emitter_hold()                                     # colour-only from the outline on (the base was read before it)
     r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx + 0.17:.5f}",
                         f"{by:.5f}", '0.32000', '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15'],
                        label='servo: outline view over table', timeout_s=60, log_fh=log_fh)
@@ -2256,6 +2267,7 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if outline is None:
         say(f"  [servo] {obj}: held part not outlined over the table - aiming as read"); return observed_base, held_q
     say(f"  [servo] {obj}: held part outlined ({len(outline['far'])} far / {len(outline['left'])} left edge points)")
+    _emitter_hold()                                                   # colour-only from here: no depth read follows
     # evidence for every servo: the outline, the table frame and each round's overlay (target green, outline magenta)
     sv_stem = REPO_ROOT / 'compliant_insertion_studio' / 'logs' / f"servo_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
     try:
@@ -2435,14 +2447,36 @@ SERVO_MEAS_OVER_RIM_M = 0.004  # measuring height over the CAD rim contact (the 
 SERVO_CLEAR_OVER_RIM_M = 0.012 # lateral moves and wrist turns happen here
 
 
+_EMITTER = {'state': None, 'hold': False}
+
+
 def _emitter(on):
-    """The D415 projector's dots swamp the colour image in a dark room (10-21): off for colour-only reads."""
+    """The D415 projector's dots swamp the colour image in a dark room (10-21): off for colour-only reads. Each set is a
+    ros2 CLI call + 0.8 s settle (~2.2 s): it is skipped when the projector is already so, and held off through a servo's
+    colour-only rounds (_emitter_hold) - run 41's u_brown align toggled it 8 times (~18 s)."""
+    if on and _EMITTER['hold']:
+        return
+    if _EMITTER['state'] is not None and _EMITTER['state'] == bool(on):
+        return
     try:
         subprocess.run(['ros2', 'param', 'set', '/camera/camera', 'depth_module.emitter_enabled', '1' if on else '0'],
                        capture_output=True, timeout=10, env=make_env())
         time.sleep(0.8)
+        _EMITTER['state'] = bool(on)
     except Exception:
-        pass
+        _EMITTER['state'] = None
+
+
+def _emitter_hold():
+    """Projector off until _emitter_release: the frames from here on are colour-only (no depth read in between)."""
+    _EMITTER['hold'] = False
+    _emitter(False)
+    _EMITTER['hold'] = True
+
+
+def _emitter_release():
+    _EMITTER['hold'] = False
+    _emitter(True)
 
 
 def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
