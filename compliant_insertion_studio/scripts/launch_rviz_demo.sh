@@ -7,6 +7,8 @@
 #   ... --topic T        camera panel shows image topic T
 #   ... --split 0.4      camera gets 40% of the width (default 0.5)
 #   ... --camera-left    camera on the left, robot on the right
+#   ... --light          draw at 10 fps and run at the lowest CPU priority (nice 19): the cell PC is CPU-bound
+#                        and the driver dropped its robot connection with RViz + a live VNC screen (10-23 12:53)
 #   ... --depth          a depth panel under the camera: /depth_view (height above the table in colour,
 #                        compliant_insertion_studio/scripts/depth_view.py - started here if it is not running)
 #
@@ -29,7 +31,7 @@ RVIZ_DIR="$REPO/compliant_insertion_studio/rviz"
 RUN_DIR=/tmp/fmb1_rviz
 mkdir -p "$RUN_DIR"
 
-FG=false; TOPIC=/annotated_stream; SPLIT=0.5; SIDE=right; DEPTH=false
+FG=false; TOPIC=/annotated_stream; SPLIT=0.5; SIDE=right; DEPTH=false; LIGHT=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fg) FG=true; shift ;;
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --split) SPLIT="$2"; shift 2 ;;
         --camera-left) SIDE=left; shift ;;
         --depth) DEPTH=true; shift ;;
+        --light) LIGHT=true; shift ;;
         -h|--help) sed -n '2,22p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -76,6 +79,7 @@ fi
 
 CFG="$RUN_DIR/fmb1_demo_runtime.rviz"
 sed "s|Value: /annotated_stream|Value: $TOPIC|" "$RVIZ_DIR/fmb1_demo.rviz" > "$RUN_DIR/fmb1_demo_topic.rviz"
+[[ "$LIGHT" == true ]] && sed -i "s|Frame Rate: 30|Frame Rate: 10|" "$RUN_DIR/fmb1_demo_topic.rviz"
 SECOND=()
 if [[ "$DEPTH" == true ]]; then
     D=depth_view
@@ -108,5 +112,5 @@ nohup rviz2 -d "$CFG" >"$LOG" 2>&1 &
 PID=$!
 sleep 4
 kill -0 "$PID" 2>/dev/null || { tail -15 "$LOG" >&2; die "rviz2 exited during startup (log: $LOG)" 4; }
-renice -n 10 -p "$PID" >/dev/null 2>&1   # rendering must not starve the UR driver (stack_up.sh)
+renice -n "$([[ "$LIGHT" == true ]] && echo 19 || echo 10)" -p "$PID" >/dev/null 2>&1   # rendering must not starve the UR driver (stack_up.sh)
 ok "RViz up (pid $PID, log $LOG)"
