@@ -61,6 +61,10 @@ CORRIDOR_ACROSS_M = 0.0025      # retracts ride over the measured contact (guard
 # the descent's end (rim - 5 mm = seat + 2 mm) counted as 'in'. Steps under twice the play, out to the errors seen.
 WEDGE_ALONG_PITCH_M = 0.002
 WEDGE_ALONG_M = 0.006
+PUSH_SPRING_N = 3.0          # a push that reaches the floor WITHOUT its 6 N guard firing but carried this much: an end bearing
+                             # on something while the bar pivots in the jaws (10-23 wrench traces: line_green wedged in run 61
+                             # rose 1.0 N/mm from +1.3 mm to 4.5 N; its clean push in run 60 peaked 1.4 N; seats that bottom
+                             # rise 18-34 N/mm and trip the guard - u_brown/u_orange/yellow, 6 pushes). Wedge search only.
 
 
 
@@ -183,11 +187,12 @@ _WFH = {}   # the insert's wrench trace (<stem>.wrench.csv): every guarded-loop 
 
 def _wrench_sample(label):
     fh = _WFH.get('fh')
-    if fh is None:
-        return None
     n = _NODE.get('n')
 
     def rec(t, dF, F, q):
+        _WFH['dfmax'] = max(_WFH.get('dfmax', 0.0), float(dF))     # the push's peak load (PUSH_SPRING_N)
+        if fh is None:
+            return
         W = getattr(n, 'W', None) or (float('nan'),) * 6
         p = getattr(n, 'tcp', None)
         z = p.position.z if p is not None else float('nan')
@@ -393,12 +398,25 @@ def main():
             q = (R.from_euler('z', 0.0, degrees=True) * R.from_quat(q_seat)).as_quat()
             # timed by its distance (run 43: a fixed 8 s for ~28 mm, 3.5 mm/s); the 6 N guard still stops it on the floor
             cz_ = float(tcp_now()[0][2]) if IN_PROCESS else float(seat[2]) + 0.03
+            _WFH['dfmax'] = 0.0
             r3 = move([seat[0] + dx, seat[1] + dy, seat[2] - 0.002], q, max_force=6.0,
                       min_duration=max(PUSH_MIN_S, (cz_ - float(seat[2]) + 0.002) / PUSH_SPEED_M_S))
             pz, _ = tcp_now(); z2 = float(pz[2])
+            dfm = float(_WFH.get('dfmax', 0.0)) if IN_PROCESS else 0.0
+            spring = wedge_search and outcome(z2) == 'in' and not r3.get('contact') and dfm >= PUSH_SPRING_N
             meta['probes'].append({'dx_mm': round(1000 * dx, 2), 'dy_mm': round(1000 * dy, 2), 'dyaw_deg': 0.0, 'push': True,
-                                   'z_above_seat_mm': round(1000 * (z2 - seat[2]), 2), 'contact': bool(r3.get('contact')), 'error': r3.get('error')})
-            print(f"[touch] entered at ({1000*dx:+.1f}, {1000*dy:+.1f}) mm: pushed to {1000*(z2 - seat[2]):+.1f} mm above the seat", flush=True)
+                                   'z_above_seat_mm': round(1000 * (z2 - seat[2]), 2), 'contact': bool(r3.get('contact')),
+                                   'error': r3.get('error'), 'dF_max_N': round(dfm, 2), 'spring': bool(spring)})
+            print(f"[touch] entered at ({1000*dx:+.1f}, {1000*dy:+.1f}) mm: pushed to {1000*(z2 - seat[2]):+.1f} mm above the seat"
+                  f" (peak {dfm:.1f} N)", flush=True)
+            if spring:
+                # at the floor but it carried the load of an end on the rim: the bar pivoted in the jaws (looks seated, one end
+                # +8 mm high - runs 58/59/61) - the next point along the bar, as for a push held up short (straight up first)
+                print(f"[touch] the push carried {dfm:.1f} N without bottoming (>= {PUSH_SPRING_N:.0f} N): an end bearing, "
+                      f"the bar pivoting in the jaws - the next point along the bar", flush=True)
+                pushes.append((z2, dx, dy))                    # the fallback if no point along the bar seats clean
+                move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None)
+                continue
             if outcome(z2) == 'in' or not wedge_search:
                 return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
             # held up short of the seat: an end on the base top - the next point along the bar (straight up first)
