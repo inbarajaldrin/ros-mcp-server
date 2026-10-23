@@ -3045,6 +3045,21 @@ def _seat_by_taps(obj, args, say):
     return ok
 
 
+def _taps_mark(obj, args, say) -> bool:
+    """Tap the part where drive-mate last measured the base; True (and the timed tap map in the ledger, which ExecuteMate
+    judges the ends from) when the taps find it seated."""
+    from seams.tap_probe import tap_recover
+    ob_ = getattr(args, 'measured_base', None) or getattr(args, 'observed_base', None)
+    if ob_ is None:
+        return False
+    say(f"  [taps] {obj}: the certifier read an end over its band - contact measures the ends")
+    ok, tp = tap_recover(obj, ob_, RUN_BASE['name'], say)
+    if ok:
+        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points},
+                    tap_t=time.time(), tap_along_mm={p.name: round(1000 * p.along_m, 1) for p in tp.points})
+    return bool(ok)
+
+
 def seat_check_and_reseat(obj, state, args, say) -> bool:
     """The depth seat check (+ nudges / edge press); a pass is recorded in the verify ledger as a depth
     confirmation, which verify_seated accepts when the markers cannot see the part (2026-10-20: fork_orange,
@@ -3848,6 +3863,12 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if os.environ.get('SEAMS_CERTIFY') == '1':
             out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                            say, log_fh) or {}
+            if (not out.get('placed') and out.get('refusal') == 'not_at_seat' and wedge_possible(RUN_BASE['name'], obj)
+                    and _taps_mark(obj, args, say)):
+                # the seat check passed it by depth and skipped the taps; the certifier's own view read an end over the
+                # band (run 40: line_green +2.68 mm, depth reads its ends high) - contact measures the ends, then ask again
+                out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
+                                               say, log_fh) or {}
             if not out.get('placed'):
                 say(f"  [execute_mate] {obj}: {out.get('refusal') or 'no answer'} after the seat check - stopping")
                 return False
