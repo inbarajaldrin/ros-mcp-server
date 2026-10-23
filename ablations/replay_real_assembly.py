@@ -1502,6 +1502,13 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
                 "error": "no __RESULT_JSON__ block in output" if proc.returncode != 0 else None,
                 "label": label, "returncode": proc.returncode}
     rj.setdefault("label", label)
+    rj.setdefault("returncode", proc.returncode)
+    if ('-m' not in argv and proc.returncode == 0 and rj.get('result') == 'failure' and rj.get('contact')
+            and str(rj.get('error', '')).startswith('contact')):
+        # a script (not a primitive) echoes its children's JSON: a guarded landing's contact stop is its last block and
+        # reads 'failure' by design - judge the script by its exit code (run 33b: a pick-room relocation that had
+        # worked failed the run; disassemble.run applies the same rule to its children since 10-19)
+        rj = dict(rj, result='success', judged='exit code 0 (last JSON a contact stop)')
     return rj
 
 
