@@ -2065,6 +2065,9 @@ GRASP_DEPTH_MEAS_MAX_M = 0.012   # ... and up to this (more is a part on somethi
 GRASP_DEPTH_FIX = {}             # obj -> depth correction (m) measured this grasp; drive_align reports it to drive-mate
 
 
+SERVO_INPROC = os.environ.get('SERVO_INPROC', '0') == '1'   # servo moves in process (bench with nothing gripped first)
+
+
 def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
     """A servo move, skipped when the arm is already there (within 0.3 mm, same orientation): the 10-22 motion trace
     counted 15 servo moves to exactly the previous target (hover from the clear height = clear, up for a turn, done) at
@@ -2073,6 +2076,20 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
     if (tcp.get('xyz') and tcp.get('quat_xyzw') and np.linalg.norm(np.asarray(tcp['xyz']) - np.asarray(xyz, float)) < 0.0003
             and abs(float(np.dot(tcp['quat_xyzw'], q))) > 0.99999):
         return {'result': 'success', 'skipped': 'already there'}
+    if SERVO_INPROC and not extra:
+        # the same plan_move the CLI runs, on one node, released before the next camera read (which starts its own
+        # context): run 33's servo moves were ~4 s each, ~1.5 s of it a process start (u_brown: 8 moves / 99 s align)
+        from compliant_insertion_studio.wrapper.touch_insert import move as _tmove, close_node as _close
+        t0 = time.time()
+        try:
+            r = _tmove(list(map(float, xyz)), list(map(float, q)), min_z=0.15)
+        finally:
+            _close()
+        fh = _TIMING.get('fh')
+        if fh is not None:
+            fh.write(json.dumps({'kind': 'move_inproc', 'label': label, 't0': t0, 't1': time.time(),
+                                 'result': r.get('result')}) + '\n')
+        return r
     return run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                            *[f"{float(v):.5f}" for v in xyz], '--quat', *[f"{v:.6f}" for v in q], '--min-z', '0.15',
                            *extra], label=label, timeout_s=60, log_fh=log_fh)
