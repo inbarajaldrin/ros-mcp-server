@@ -2258,6 +2258,42 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
                            *extra], label=label, timeout_s=60, log_fh=log_fh)
 
 
+SERVO_PRIOR = os.environ.get('SERVO_PRIOR', '1') == '1'
+SERVO_PRIOR_LOG = REPO_ROOT / 'ablations' / 'logs' / 'servo_priors.jsonl'
+SERVO_PRIOR_MAD_M, SERVO_PRIOR_MAD_DEG = 0.001, 1.0
+
+
+def servo_prior(obj):
+    """The marker servo's measured correction for obj, in the BASE frame (so it holds at any base yaw): the median of its
+    last 6 converged servos (>= 3, agreeing within 1 mm / 1 deg MAD), or None. u_brown's servo moved its aim (-3.3..-4.5,
+    -6.7..-8.2) mm and turned -1..-4.5 deg in every run of 10-22/23 - round 0 always found it ~9 mm / ~2 deg off, and
+    each round is a lift, a turn, a step and a lowering (~13 s): the zigzag the operator saw. The servo still measures;
+    the prior only starts it nearer, so a pose where the prior is wrong costs the round it costs today."""
+    try:
+        rows = [json.loads(l) for l in open(SERVO_PRIOR_LOG) if l.strip()]
+    except Exception:
+        return None
+    rows = [r for r in rows if r.get('obj') == obj][-6:]
+    if len(rows) < 3:
+        return None
+    d = np.array([r['dxy_base_m'] for r in rows], float); y = np.array([r['yaw_deg'] for r in rows], float)
+    md, my = np.median(d, 0), float(np.median(y))
+    if (np.median(np.abs(d - md), 0) > SERVO_PRIOR_MAD_M).any() or np.median(np.abs(y - my)) > SERVO_PRIOR_MAD_DEG:
+        return None
+    return md, my, len(rows)
+
+
+def _record_servo(obj, c_world, yaw_deg, base_q, rounds):
+    try:
+        yb = float(R_.from_quat(base_q).as_euler('xyz')[2])
+        cb = R_.from_euler('z', -yb).apply([c_world[0], c_world[1], 0.0])[:2]
+        with open(SERVO_PRIOR_LOG, 'a') as f:
+            f.write(json.dumps({'obj': obj, 't': time.time(), 'dxy_base_m': [float(cb[0]), float(cb[1])],
+                                'yaw_deg': float(yaw_deg or 0.0), 'rounds': int(rounds)}) + '\n')
+    except Exception:
+        pass
+
+
 def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     """Operator 10-21 ("the yaw fix seemed to work but not the offset"): align the held part to its SOCKET in the image,
     the way the operator does by eye. Yaw the wrist to the measured base (fold-aware, base x CAD seat vs held part),
@@ -2274,9 +2310,14 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     from primitives.shared.config import held_tool_offset_for
     (bx, by, bz), bq = observed_base
     err, _t = rel_yaw_error(obj, base, R_.from_quat(bq), R_.from_quat(held_q))
-    if abs(err) > 0.3 and turn_wrist(err):
-        held_q = list((R_.from_euler('z', err, degrees=True) * R_.from_quat(held_q)).as_quat())
-        say(f"  [servo] {obj}: wrist turned {err:+.2f} deg to the base yaw")
+    prior = servo_prior(obj) if SERVO_PRIOR else None
+    prior_yaw = prior[1] if prior is not None else 0.0
+    if abs(err + prior_yaw) > 0.3 and turn_wrist(err + prior_yaw):
+        held_q = list((R_.from_euler('z', err + prior_yaw, degrees=True) * R_.from_quat(held_q)).as_quat())
+        say(f"  [servo] {obj}: wrist turned {err + prior_yaw:+.2f} deg to the base yaw"
+            + (f" ({prior_yaw:+.2f} of it the servo prior)" if prior is not None else ""))
+    elif prior is not None:
+        prior_yaw = 0.0                                     # no turn taken: none of the prior's yaw applied
     # the base read again WITH the turned wrist: the servo projects it from the hover with this same orientation, so the
     # hand-eye's translation error cancels between the read and the projection
     observed_base = track_base_in_hand(base, observed_base, say, log_fh, held_obj=obj)
@@ -2336,7 +2377,15 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     z_clear = max(float(st[2]) + HOVER_ALIGN_ABOVE_M, rim_z + SERVO_CLEAR_OVER_RIM_M)
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_same_frame
     from seams import servo_law as SL
-    law = SL.HoverServoLaw(st[:2])              # the decisions (AR3 step 1); this function moves and reads
+    xy0 = None
+    if prior is not None:
+        pw = R_.from_euler('z', float(R_.from_quat(bq).as_euler('xyz')[2])).apply([prior[0][0], prior[0][1], 0.0])[:2]
+        xy0 = st[:2] + pw
+        say(f"  [servo] {obj}: starting at the servo prior ({1000*pw[0]:+.1f}, {1000*pw[1]:+.1f}) mm, {prior_yaw:+.2f} deg "
+            f"(median of its last {prior[2]} servos)")
+    law = SL.HoverServoLaw(st[:2], xy=xy0)      # the decisions (AR3 step 1); this function moves and reads
+    if prior_yaw:
+        law.turned(prior_yaw)                       # the prior's turn is part of the image yaw the insert's base takes
     xy = law.xy
     for k in range(SL.SERVO_ITERS + 1):
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
@@ -2459,6 +2508,8 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
         say(f"  [servo] {obj}: {out.why} - not applied")
         return observed_base, held_q
     c = np.array(out.dxy); yaw_total = out.yaw_deg
+    if law.final_reading is not None:
+        _record_servo(obj, c, yaw_total, bq, law.k)
     if yaw_total:
         # the image yaw becomes the base's yaw for the insert, turned about the SEAT point (the pocket stays put): the
         # insert's own yaw step (held part vs base x seat) then has nothing to undo
