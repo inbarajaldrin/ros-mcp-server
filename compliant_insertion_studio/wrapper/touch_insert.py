@@ -59,8 +59,11 @@ def corridor_grid(axis_xy, pitch, along, across):
     """(dx, dy) points on a rectangle along/across a world unit axis, nearest first."""
     u = np.asarray(axis_xy, float) / np.linalg.norm(axis_xy); v = np.array([-u[1], u[0]])
     na, nc = int(round(along / pitch)), int(round(across / pitch))
-    pts = [tuple(i * pitch * u + j * pitch * v) for i in range(-na, na + 1) for j in range(-nc, nc + 1)]
-    return sorted(pts, key=lambda p: (round(math.hypot(*p), 6), math.atan2(p[1], p[0])))
+    # across first, along second (10-22 motion trace: astride the bar the part is held ACROSS it - the yellow entered at
+    # 0.0 mm along / 2.0 mm across on probe 46 of the radius order; this order reaches it on probe 9)
+    ij = sorted(((i, j) for i in range(-na, na + 1) for j in range(-nc, nc + 1)),
+                key=lambda t: (abs(t[0]), abs(t[1]), t[0] < 0, t[1] < 0))
+    return [tuple(i * pitch * u + j * pitch * v) for i, j in ij]
 
 
 def _corridor_axis_world(base, over, base_quat):
@@ -99,7 +102,33 @@ def _result(out):
         return {'result': 'failure', 'error': (lines[-1] if lines else 'no output')}
 
 
-def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15):
+IN_PROCESS = os.environ.get('TOUCH_INPROC', '1') == '1'
+_NODE = {}
+SHORT_MOVE_M = 0.005          # probe steps and retracts up to this: timed by distance, not the 2.5 s floor
+SHORT_SPEED_M_S = 0.005
+SHORT_MIN_S = 0.6
+
+
+def _node():
+    """One ROS node for every probe (10-22 motion trace: 3 processes per probe = ~4.5 s of a 9.5 s probe)."""
+    if 'n' not in _NODE:
+        import rclpy
+        from geometry_msgs.msg import PoseStamped
+        from primitives.move_cartesian import Mover
+        rclpy.init()
+        n = Mover(); n.tcp = None
+        n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: setattr(n, 'tcp', m.pose), 5)
+        _NODE['n'] = n
+    return _NODE['n']
+
+
+def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15, duration=None):
+    """A straight guarded/unguarded move. In process (one node, primitives.move_cartesian.plan_move) unless
+    TOUCH_INPROC=0. duration: exact seconds - given for the short probe moves (<= SHORT_MOVE_M) by distance."""
+    if IN_PROCESS:
+        from primitives.move_cartesian import plan_move
+        return plan_move(_node(), xyz, ('quat', list(quat)), max_force=max_force, min_duration=min_duration or 0.0,
+                         min_z=min_z, duration=duration)
     argv = [sys.executable, '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
             *[f"{v:.5f}" for v in xyz], '--quat', *[f"{v:.6f}" for v in quat], '--min-z', f"{min_z:.3f}"]
     if max_force is not None:
@@ -111,6 +140,14 @@ def move(xyz, quat, max_force=None, min_duration=None, min_z=0.15):
 
 
 def tcp_now():
+    if IN_PROCESS:
+        import rclpy
+        n = _node(); n.tcp = None; t = time.time()
+        while n.tcp is None and time.time() - t < 3:
+            rclpy.spin_once(n, timeout_sec=0.02)
+        p = n.tcp
+        return (np.array([p.position.x, p.position.y, p.position.z]),
+                np.array([p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]))
     import rclpy
     from geometry_msgs.msg import PoseStamped
     rclpy.init(); n = rclpy.create_node('touch_insert_tcp'); s = {}
@@ -170,11 +207,19 @@ def main():
     def probe(dx, dy, dyaw_deg=0.0):
         q = (R.from_euler('z', dyaw_deg, degrees=True) * R.from_quat(q_seat)).as_quat()
         x, y = seat[0] + dx, seat[1] + dy
-        r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N)            # guarded: 13:39 an unguarded descent here put the
-        if r1.get('result') == 'failure' and not r1.get('contact'):       # yellow onto line_green's top (protective stop)
+        cur, _ = tcp_now() if IN_PROCESS else (None, None)
+        d_ = float(np.linalg.norm(np.array([x, y, start_z]) - cur)) if cur is not None else 1.0
+        r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N,          # guarded: 13:39 an unguarded descent here put the
+                  duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)   # yellow on line_green
+        if r1.get('result') == 'failure' and not r1.get('contact'):
             return None
-        dur = (start_z - (seat[2] - 0.002)) / SPEED_M_S
-        r2 = move([x, y, seat[2] - 0.002], q, max_force=MAX_FORCE_N, min_duration=dur)
+        # down only as far as the rim can tell: ENTER_DZ (+1 mm) below the lowest rim known (measured, else CAD) - past it
+        # without contact the part is in the pocket mouth and the entering push takes it to the seat. The descent to
+        # 2 mm under the seat (36-54 mm) touched after ~1.5 mm, inside its slow start (10-22 motion trace)
+        rim_ = min(rim_z, best[0]) if best is not None else rim_z
+        z_end = max(float(seat[2]) - 0.002, rim_ - ENTER_DZ_M - 0.001) if IN_PROCESS else float(seat[2]) - 0.002
+        dur = (start_z - z_end) / SPEED_M_S
+        r2 = move([x, y, z_end], q, max_force=MAX_FORCE_N, min_duration=dur, duration=dur if IN_PROCESS else None)
         pz, _ = tcp_now()
         z = float(pz[2])
         rec = {'dx_mm': round(1000 * dx, 2), 'dy_mm': round(1000 * dy, 2), 'dyaw_deg': dyaw_deg,
@@ -246,7 +291,14 @@ def main():
         # lateral steps 1.5 mm over the lowest contact MEASURED - never below a contact (14:37: the first probe stopped on
         # line_green's top at +50.3, the retract went to the planned +34.5 into it, protective stop), guarded
         start_z = best[0] + 0.0015
-        move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=MAX_FORCE_N)   # retract before any sideways step
+        cur, _ = tcp_now() if IN_PROCESS else (None, None)
+        d_ = abs(float(cur[2]) - start_z) if cur is not None else 1.0
+        # straight UP off a contact needs no guard - and a guard cannot work there: its reference is taken while the
+        # part still presses at ~4 N, lifting off unloads it and trips it at once (probe bench 10-22: the retract moved
+        # 0.2 mm). A retract that is not upward stays guarded (14:37: one went below a contact on line_green's top).
+        up = cur is not None and start_z > float(cur[2])
+        move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None if up else MAX_FORCE_N,
+             duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)   # retract before any step
     bx, by = (best[1], best[2]) if best else (0.0, 0.0)
     for dyaw in YAWS_DEG:
         z = probe(bx, by, dyaw)
