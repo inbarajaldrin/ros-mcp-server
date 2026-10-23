@@ -2621,6 +2621,9 @@ RESEAT_MAX = 1
 NUDGE_MAX_FORCE_N = 4.0              # push until the bar is blocked (seated or stuck): operator's rule,
                                      # replaces fixed step distances that had to guess the end (2026-10-15)
 NUDGE_PUSH_PAST_MM = 15.0            # travel cap (operator): finger face at most this far past the estimated end
+NUDGE_SEAT_OVER_MM = 2.0             # ...and never past the seated CAD end by more than this: line_green has no axial
+                                     # stop - run 31's push met no force, ran the 15 mm cap and left the bar 18 mm past its
+                                     # seat, against the U at its far end (u_orange then read outside its seat)
 NUDGE_TRIES = 3
 NUDGE_SHIFT_MM = 3.0                 # axial shift that means an end rides past its pocket
 NUDGE_END_DIFF_MM = 2.5              # one end this much higher than the other: nudge, not reseat
@@ -2682,9 +2685,13 @@ def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
         sgn = 1.0 if ends[1] > ends[0] else -1.0                     # +1: the +y (base) end is high
         raw_mm = ext[1] if sgn > 0 else ext[0]                       # depth's end: never short of the real one
         end_mm = raw_mm - sgn * NUDGE_AXIAL_BIAS_MM                  # corrected (depth smears a raised end out)
-        push = world((end_mm - sgn * NUDGE_PUSH_PAST_MM + sgn * half) / 1000.0)
+        face_mm = end_mm - sgn * NUDGE_PUSH_PAST_MM
+        if f.get('half_long_m'):                                     # the seated end bounds it (no axial stop to meet)
+            face_mm = sgn * max(sgn * face_mm, 1000 * float(f['half_long_m']) - NUDGE_SEAT_OVER_MM)
+        push = world((face_mm + sgn * half) / 1000.0)
         say(f"  [nudge] try {k}: {'+y' if sgn > 0 else '-y'} end high, depth end {raw_mm:+.0f} mm (base) "
-            f"-> push toward the slot until {NUDGE_MAX_FORCE_N:g} N (cap {NUDGE_PUSH_PAST_MM:g} mm past {end_mm:+.0f})")
+            f"-> push toward the slot until {NUDGE_MAX_FORCE_N:g} N (finger face to {face_mm:+.0f}: at most "
+            f"{NUDGE_PUSH_PAST_MM:g} mm past {end_mm:+.0f}, {NUDGE_SEAT_OVER_MM:g} mm past the seated end)")
         for argv, label in [
                 (['primitives.control_gripper', 'close', '--mode', 'real'], 'nudge close'),
                 (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height')]:
