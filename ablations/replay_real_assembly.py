@@ -634,10 +634,15 @@ PART_VIEW_Z = 0.52                # flange height for a look straight above one 
 PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer view (2026-10-20)
 
 
+SEEN_SAMPLES: dict = {}           # obj -> (time, samples) of the last _seen_here that saw it
+
+
 def _seen_here(obj, timeout_s=5.0) -> bool:
     ensure_exposure(lambda m: print(m, flush=True))
     obs = observe_object_orientation(obj, timeout_s, n_samples=2)
     ok = bool(obs.get('samples')) and not obs.get('error')
+    if ok:
+        SEEN_SAMPLES[obj] = (time.time(), obs['samples'])
     if not ok:
         # dark room (10-22 01:49: brightness ~31): markers need the 0.40 m view - lower straight down (top-down camera,
         # flange still 0.40 m over the table) and look again before declaring the part absent
@@ -4565,6 +4570,12 @@ def main() -> int:
                     _part_view(obj, log_fh)
                 if _seen_here(obj, 8.0):
                     entry['tool_sequence'], note = derive_sequence_for(obj, seq0, bn0, timeout_s=10.0)
+                    ts_, smp_ = SEEN_SAMPLES.get(obj, (0.0, None))
+                    if note.startswith('observe failed') and smp_ and time.time() - ts_ < 30.0:
+                        # the look that just saw it, from this same still pose: its samples plan it (run 60: the second
+                        # look got none from a ~2 Hz localizer and the recorded 2 passes cost ~70 s on a 1-pass yellow)
+                        entry['tool_sequence'], note = derive_sequence_for(obj, seq0, bn0, samples=smp_)
+                        note += ' (from the samples of the look that saw it)'
                     msg = f"  [derive-sequence] {obj} (re-planned from the view above it): {note}"
                 else:
                     msg = f"  [derive-sequence] {obj}: still not seen above it - recorded sequence"
