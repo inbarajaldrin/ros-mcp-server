@@ -9,7 +9,7 @@ base is empty, nothing seated can tip.
     python3 -u ablations/move_base.py --base base3 --dy 30                # slide 30 mm along world +y
     python3 -u ablations/move_base.py --base base3 --dyaw 5               # turn +5 deg about its centre
     python3 -u ablations/move_base.py --base base3 --to X_MM Y_MM YAW_DEG # to an absolute pose
-    [--dry-run] [--tol-mm 4] [--tol-deg 1] [--max-pushes 12]
+    [--dry-run] [--tol-mm 10] [--tol-deg 3] [--max-pushes 12]
 
 Closed loop: read the base (6-dof CAD fit to depth, empty gripper, standard view) -> the remaining error ->
 one push -> read again. A push: closed fingers, wrist turned so the 20.2 mm side of the finger block faces
@@ -142,8 +142,10 @@ def main():
     ap.add_argument('--dy', type=float, default=0.0, help='mm, world')
     ap.add_argument('--dyaw', type=float, default=0.0, help='deg')
     ap.add_argument('--to', type=float, nargs=3, default=None, metavar=('X_MM', 'Y_MM', 'YAW_DEG'))
-    ap.add_argument('--tol-mm', type=float, default=5.0)
-    ap.add_argument('--tol-deg', type=float, default=1.0)
+    # 10 mm / 3 deg (was 5 / 1, 10-23): the assembly measures the base and aims from that read, so a closer push buys
+    # nothing - each cycle's base ends 8-11 mm off and the 5 mm band made every reset push for 2-4 min (purpose map)
+    ap.add_argument('--tol-mm', type=float, default=10.0)
+    ap.add_argument('--tol-deg', type=float, default=3.0)
     ap.add_argument('--max-pushes', type=int, default=4)
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()

@@ -79,6 +79,19 @@ DEFAULT_EE_TOPIC = "/tcp_pose_broadcaster/pose"
 # DEFAULT_BASE_ORIENTATION is imported from config
 
 
+
+def _measured_base_yaw(base_name, max_age_s=900.0):
+    """Yaw (rad) of the replay's last base read (ablations/logs/last_base_pose.json) when it is recent, else None."""
+    import json as _json, os as _os, time as _time
+    try:
+        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'ablations', 'logs', 'last_base_pose.json')
+        pos, quat, t = _json.load(open(p))[base_name]
+        if _time.time() - float(t) > max_age_s or _os.environ.get('ROTATE_TO_MEASURED_BASE', '1') != '1':
+            return None
+        return float(R.from_quat(quat).as_euler('xyz')[2])
+    except Exception:
+        return None
+
 class ExtendedCardinalOrientations:
     """24 extended cardinal orientations with intermediary angles"""
     
@@ -1189,7 +1202,15 @@ class ReorientForAssembly(Node):
         # Sim mode: read from ROS topic
         if self.mode == 'real':
             R_base = self.get_rotation_from_quat(DEFAULT_BASE_ORIENTATION)
-            self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
+            # the base's MEASURED yaw (the replay's last base read, minutes old): rotating to the default yaw left every
+            # insert's align to turn the wrist ~19 deg in a separate step (purpose map 10-23: 4 of 8 turn_wrist calls a
+            # run, ~4 s each). Without a fresh read the default stands and the align turns as before.
+            yaw_meas = _measured_base_yaw(base_name)
+            if yaw_meas is not None:
+                R_base = R.from_euler('z', yaw_meas).as_matrix() @ R_base
+                self.get_logger().info(f"Using the measured base yaw {np.degrees(yaw_meas):+.2f} deg (last base read)")
+            else:
+                self.get_logger().info(f"Using default base orientation: {DEFAULT_BASE_ORIENTATION}")
         else:
             if base_name not in self.current_poses:
                 self.error_message = f"Base {base_name} not found"
