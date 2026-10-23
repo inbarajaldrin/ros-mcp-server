@@ -286,6 +286,7 @@ N_DEPTH = 10                               # depth frames per free-spot map (med
 SPOT_TRIES = 24                            # candidates tried per part in the spot search
 SPOT_SEARCH_NODES = 2000                    # search budget (each node: one boxsum over the grid)
 SPOT_SEARCH_S = 60.0                       # and a wall-clock cap: a 3000-node python search ran 7+ min
+SPOT_GAP_ENOUGH_MM = 60.0                  # a staging spot with this much room is chosen for being in view, not for room
 VIEW_MARGIN_PX = 40                        # free spots stay this far inside the home image
 FINGER_BAND_PX = 100                       # ...and above this bottom band: move_to_grasp opens to the
                                            # pre-grasp width first and the fingertips hide it (yellow
@@ -520,12 +521,16 @@ def _staging_view_projector():
     except Exception:
         return None
 
-    def f(P2):
+    def f(P2, centrality=False):
         Pw = np.c_[P2, np.full(len(P2), float(TABLE_HEIGHT))]
         Pc = Pw @ Tcw[:3, :3].T + Tcw[:3, 3]
         u = K[0, 0] * Pc[:, 0] / Pc[:, 2] + K[0, 2]; v = K[1, 1] * Pc[:, 1] / Pc[:, 2] + K[1, 2]
-        return bool((u.min() >= VIEW_MARGIN_PX) and (u.max() <= W - VIEW_MARGIN_PX) and (v.min() >= VIEW_MARGIN_PX)
-                    and (v.max() <= H - FINGER_BAND_PX))
+        inside = bool((u.min() >= VIEW_MARGIN_PX) and (u.max() <= W - VIEW_MARGIN_PX) and (v.min() >= VIEW_MARGIN_PX)
+                      and (v.max() <= H - FINGER_BAND_PX))
+        if not centrality:
+            return inside
+        # 0 = the outline's farthest point at the image centre, 1 = at its edge (None: outside)
+        return float(max(np.abs(u - K[0, 2]).max() / K[0, 2], np.abs(v - K[1, 2]).max() / K[1, 2])) if inside else None
     return f
 
 
@@ -544,7 +549,7 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
     grip = Rr.from_quat(q).apply([g['position'][k] for k in 'xyz'])[:2] + np.asarray(p)[:2]
     obst = [base_outline(base_pose)] + [np.asarray(outline(n, seen[n]))[:, :2] for n in seen if n != name]
     c0 = (P.min(0) + P.max(0)) / 2
-    best = (None, None, 0.0)
+    best, best_key = (None, None, 0.0), None
     seen_in_view = _staging_view_projector()
     for cx in np.arange(REGION['x'][0], REGION['x'][1] + 1e-9, step):
         for cy in np.arange(REGION['y'][0], REGION['y'][1] + 1e-9, step):
@@ -560,11 +565,18 @@ def staging_spot(name, seen, base_pose, gid, open_mm, step=0.010):
                                                                # (560, -280) lay under the fingers' band, unseen by the
                                                                # planner -> recorded 2 passes on an upright part -> lost)
             gap = min(gap_mm(P2, o) for o in obst)
-            if gap < 1000 * CLEARANCE_M or gap <= best[2]:
+            if gap < 1000 * CLEARANCE_M:
+                continue
+            # enough room is enough: past SPOT_GAP_ENOUGH_MM the spot nearest the image centre wins, not the emptiest
+            # corner (10-22: the yellow went to (560, -330), the region's far corner at the image edge, and the staging
+            # view missed its markers in attempts 21-27 - a recorded-sequence fallback and ~25-57 s of extra looks)
+            c = seen_in_view(P2, centrality=True) if seen_in_view is not None else 0.0
+            key = (1, -c) if gap >= SPOT_GAP_ENOUGH_MM else (0, gap)
+            if best_key is not None and key <= best_key:
                 continue
             if min(gap_mm(f + t, o) for f in F for o in obst) < FINGER_GAP_MIN_MM:
                 continue
-            best = (float(grip[0] + t[0]), float(grip[1] + t[1]), float(gap))
+            best, best_key = (float(grip[0] + t[0]), float(grip[1] + t[1]), float(gap)), key
     return best
 
 
