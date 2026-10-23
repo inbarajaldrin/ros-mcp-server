@@ -187,7 +187,10 @@ def certify_many(mates):
                 tilt = abs(r['pitch_deg']) if r.get('pitch_deg') is not None else math.nan
         rr.RUN_BASE['name'] = base
         rr.VERIFY_MAX_READS = 1          # xy is reported, not judged: one marker read (Speed T1; up to 8 cost ~10 s)
-        v = rr._read_part(obj)
+        # ...and only for the mate being certified: a predecessor's marker xy is reported nowhere the verdict looks
+        # (its depth decides), and each read is a verify_assembly process (~2.5 s; mate:03 paid four)
+        is_last = (asm, addr, m) is R_[-1]
+        v = rr._read_part(obj) if is_last else {'result': 'skipped', 'error': 'predecessor: marker xy not read (depth decides)'}
         ex = ey = math.nan
         if not rr._not_detected(v) and isinstance(v.get('position_error_m'), dict):
             ex, ey = float(v['position_error_m']['x']), float(v['position_error_m']['y'])

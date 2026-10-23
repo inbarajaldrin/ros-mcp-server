@@ -35,11 +35,16 @@ SERVO_BIAS_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_MM', '-0.5
 SERVO_BIAS_CLEAR_M = np.array([float(v) for v in os.environ.get('SERVO_BIAS_CLEAR_MM', '-0.5,-2.0').split(',')]) / 1000.0
 SERVO_TOL_M = 0.001
 SERVO_MAX_M = 0.015
+# A wrist turn about the tool axis barely moves the part in xy (10-22: u_brown read 7.5 / 7.6 / 7.7 / 7.9 mm across three
+# turn rounds, then 0.4 after one step): step by the reading in the same round as the turn instead of re-measuring first
+# (1-3 rounds of ~10 s per part). SERVO_TURN_AND_STEP=0 restores the law the 10-21/22 logs were made with.
+TURN_AND_STEP = os.environ.get('SERVO_TURN_AND_STEP', '1') == '1'
 
 
 @dataclass(frozen=True)
 class Turn:
     deg: float
+    xy: Optional[Tuple[float, float]] = None   # with TURN_AND_STEP: where to measure next (the step taken with the turn)
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,9 @@ class HoverServoLaw:
             if abs(self.yaw_total + t) > SERVO_MAX_YAW_DEG:
                 return Stop(f"image yaw {yi} deg would turn the wrist {self.yaw_total + t:+.1f} deg in all "
                             f"(> {SERVO_MAX_YAW_DEG})")
+            if TURN_AND_STEP and np.hypot(*d) > SERVO_TOL_M:
+                self.xy = self.xy - d / self.gain             # no gain learned from it: turned() resets the learning
+                return Turn(t, (float(self.xy[0]), float(self.xy[1])))
             return Turn(t)
         if self.last_move is not None and self.last_d is not None:
             m_ = np.asarray(self.last_move); resp = self.last_d - d          # how much the reading moved for that step

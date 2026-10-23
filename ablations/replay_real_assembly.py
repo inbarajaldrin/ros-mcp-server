@@ -2253,9 +2253,13 @@ def hover_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
                 return observed_base, held_q
             if turn_wrist(act.deg):
                 law.turned(act.deg)
+                if act.xy is not None:
+                    xy = np.array(act.xy)                           # the step taken with the turn
                 held_q = list((R_.from_euler('z', act.deg, degrees=True) * R_.from_quat(held_q)).as_quat())
                 q = (snapshot_robot_state().get('tcp') or {}).get('quat_xyzw') or q
                 say(f"  [servo] {obj}: wrist turned {act.deg:+.2f} deg (image yaw)")
+            else:
+                law.xy = np.array(xy, float)                        # no turn, so no step either: re-measure here
             law.next_round()
             continue                                                # re-measure xy after the turn
         xy = np.array(act.xy)                                       # SL.Step: the next place to measure

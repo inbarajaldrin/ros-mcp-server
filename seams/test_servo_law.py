@@ -16,6 +16,8 @@ sys.path.insert(0, str(REPO))
 
 from seams import servo_law as L  # noqa: E402
 
+L.TURN_AND_STEP = False          # the logs were made by the law without it
+
 import re  # noqa: E402
 
 ALL = json.load(open(REPO / 'seams/testdata/servo_sessions.json'))
@@ -84,3 +86,15 @@ def test_law_reproduces_the_logged_servo(sess):
     assert isinstance(out, L.Aim)
     # readings are logged to 0.1 mm; a learned gain of 0.4 amplifies that rounding up to 2.5x
     assert np.allclose(np.array(out.dxy) * 1000, sess['aim'], atol=0.35), (np.round(np.array(out.dxy) * 1000, 2), sess['aim'])
+
+
+def test_turn_and_step_steps_with_the_turn(monkeypatch):
+    monkeypatch.setattr(L, 'TURN_AND_STEP', True)
+    law = L.HoverServoLaw(np.zeros(2))
+    act = law.reading(np.array([0.0075, 0.0005]), dict(spread_px=[2, 1], yaw_img_deg=-1.4))
+    assert isinstance(act, L.Turn) and np.allclose(act.xy, [-0.0075, -0.0005])
+    law.turned(act.deg); law.next_round()
+    act2 = law.reading(np.array([0.0004, 0.0001]), dict(spread_px=[2, 1], yaw_img_deg=-0.1))
+    assert isinstance(act2, L.Converged)
+    out = law.finish()
+    assert np.allclose(out.dxy, np.array([-0.0075, -0.0005]) + L.SERVO_BIAS_M)
