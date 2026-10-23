@@ -65,6 +65,9 @@ def _sym(name):
         return ''
 
 
+SEED_MAX_AGE_S = 900.0          # a saved base read this recent seeds the certify's CAD fit
+
+
 def pose(name, kind, timeout=15.0):
     import replay_real_assembly as rr
     t_req = time.time()
@@ -72,21 +75,32 @@ def pose(name, kind, timeout=15.0):
         # the held read needs its own view motion (held_yaw_calibration) and is log-only today (HELD_YAW_APPLY False)
         return {'ok': False, 'error': 'held: not served yet - the planner takes the held read (seam open)'}
     if kind == 'base':
-        ob = rr.observe_base_pose(name, timeout_s=timeout)
-        if ob is None:
-            return {'ok': False, 'error': f'{name}: not seen from this view'}
-        nd = None
+        # only the depth CAD fit carries a stated sigma, so it is the read: seeded by the last saved base read when it is
+        # recent (the base moves mm between inserts; the fit's own checks reject a bad convergence), by the markers
+        # otherwise. A certify spent 15.2 s here (10-23): markers 5.5 + a depth outline only a refused fallback used 3.3
+        # + the fit 4.3
+        from base_icp import read_icp
+        oi, info, seed_src = None, {}, None
         try:
-            from base_depth import measure as base_depth
-            nd, info = base_depth(ob, name); log('[vision] depth outline', json.dumps(info))
+            p_, q_, t_ = json.load(open(rr.LAST_BASE_POSE))[name]
+            if time.time() - float(t_) < SEED_MAX_AGE_S:
+                oi, info = read_icp(name, (tuple(p_), tuple(q_))); seed_src = 'last read'
+                if oi is None:
+                    log('[vision] CAD fit from the last read failed:', json.dumps(info, default=str))
+            else:
+                log(f'[vision] saved base read {time.time() - float(t_):.0f} s old - markers seed the fit')
         except Exception as e:
-            log('[vision] no depth outline:', e)
-        ob = rr.choose_base_read(name, ob, nd, say=log, tag='vision')
-        src = rr.choose_base_read.source
-        if src != 'icp':
-            # the marker / outline base reads come back as one median with no spread kept: no sigma -> refused
-            return {'ok': False, 'error': f'{name}: only a {src} read from this view (no stated sigma) - '
-                                          f'the depth CAD fit needs the whole base in view'}
+            log(f'[vision] no saved base read ({e})')
+        if oi is None:
+            ob = rr.observe_base_pose(name, timeout_s=timeout)
+            if ob is None:
+                return {'ok': False, 'error': f'{name}: not seen from this view'}
+            oi, info = read_icp(name, ob); seed_src = 'markers'
+        log('[vision] CAD fit', seed_src, json.dumps(info, default=str))
+        if oi is None:
+            return {'ok': False, 'error': f"{name}: the depth CAD fit failed from this view ({info.get('error')}) - "
+                                          f"it needs the whole base in view"}
+        ob = oi
         s_xy = B['sigma']['base_icp']['xy']
         sigma = [s_xy, s_xy, math.nan, math.nan]       # z and yaw repeatability of the fit not measured yet
         source = 'depth_cad'
@@ -192,13 +206,19 @@ def certify_many(mates):
     R_ = [resolve(m_) for m_ in mates]
     bases = {m['reference'] for _, _, m in R_}
     obs, bev = {}, {}
+    T = {'t0': time.time()}                     # where a certify's ~20 s goes (stderr; TGOAL)
+
+    def lap(k):
+        T[k] = round(time.time() - T.pop('_last', T['t0']), 2); T['_last'] = time.time()
     for base in bases:
         b = pose(base, 'base', timeout=8.0)
         if b['ok']:
             obs[base] = (tuple(b['xyz']), tuple(b['quat_xyzw'])); bev[base] = {'source': b['source'], 'xyz': b['xyz']}
         else:
             obs[base] = rr._last_base_pose(base); bev[base] = {'source': 'last saved read', 'why': b['error']}
+    lap('base_pose')
     cap = sc.capture_world() if any(v is not None for v in obs.values()) else None
+    lap('capture')
     out = []
     for asm, addr, m in R_:
         obj, base = m['mover'], m['reference']
@@ -273,6 +293,9 @@ def certify_many(mates):
             ev['verdict'] = ('inside' if inside else 'outside') + f" (xy implied by seat depth): {ev['why']}"
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
                     'tilt_deg': tilt, 'method': method, 'evidence': ev})
+        lap(f'mate {addr}')
+    T.pop('_last', None); T['total'] = round(time.time() - T.pop('t0'), 2)
+    print('[certify timing] ' + json.dumps(T), file=sys.stderr, flush=True)
     return out
 
 
