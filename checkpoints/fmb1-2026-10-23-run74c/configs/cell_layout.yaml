@@ -1,0 +1,67 @@
+# Where things go on the cell's table: one file for every region the assembly and disassembly use.
+# Robot (UR base) frame, metres; flange positions are top-down (quat 0 1 0 0).
+#
+#   assembly_region  where the run's base sits. The startup base read flies above `center` (at the depth
+#                    view height); the base itself is then measured, never taken from here.
+#   clear_area       the spot a part is set down on and regrasped when it has to be reoriented
+#                    (move_to_clear_area, the place-down pass, disassemble --to-staging).
+#   staging_region   where THIS assembly's parts wait to be assembled (disassemble --to-free-spot, the
+#                    generated layouts, and the view the assembly looks from for parts home cannot see).
+#   parked_region    where another assembly is parked: an obstacle, never scanned for this run's parts
+#                    (optional).
+#   base_fixed       true when the run's base is fixed to the table: planners must not push it (move_base refuses).
+#                    false (default): the arm may slide / turn the EMPTY base when a plan needs it.
+#
+# Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
+# only the clear area. Add a layout instead of editing one that a past run used.
+
+active: fmb1_home_2026_10_21   # 10-23: every run sets FMB_LAYOUT=fmb1_home_2026_10_21; the default now matches
+
+layouts:
+  # operator 2026-10-21 16:15: scene reset by hand - base1 empty near home (read (0.032, -0.450) from the
+  # staging view), the four FMB1 parts lying in the staging region (u_brown 258/-446, u_orange 456/-496,
+  # line_green 406/-341, yellow 568/-425 mm), FMB3 moved away (not part of this run)
+  fmb1_home_2026_10_21:
+    assembly_region: {center: [0.032, -0.450], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.19, 0.62], y: [-0.62, -0.25], view: [0.400, -0.450, 0.62]}
+    base_fixed: false
+
+
+  # 2026-10-21: FMB1 assembled where it was parked, FMB3 (seated) left under home. Every number measured from the
+  # camera before the run: base1 (taped) at (0.459, -0.490); its parts loose around it - u_brown (0.327, -0.605),
+  # inverted_u_yellow (0.332, -0.338), u_orange (0.590, -0.341), line_green (0.603, -0.588), all reachable top-down
+  # (IK elbow >= 0.68 rad at line_green); the staging view below sees all five 29-30/30; base3 at (0.07..0.10, -0.37)
+  # with its parts = the parked region; the taped clear area seen empty.
+  fmb1_parked_2026_10_21:
+    assembly_region: {center: [0.459, -0.490], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    # operator 2026-10-21: x to 0.70 put line_green at (680, -420), at the reach limit and next to the grey parts at
+    # the table's far edge (not FMB1 parts, so not obstacles to the spot choice) -> far edges pulled in
+    staging_region: {x: [0.24, 0.62], y: [-0.66, -0.25], view: [0.400, -0.420, 0.62]}
+    parked_region: {x: [-0.06, 0.22], y: [-0.52, -0.22]}
+    base_fixed: false               # operator 2026-10-21: base1 is not fixed (the tape does not hold it)
+
+  # 2026-10-20 (operator): FMB1's original arrangement, any assembly. The base under home (base3 read at
+  # (-0.005, -0.488) from home), its parts around it, the clear area empty (black tape), base1 and the
+  # FMB1 parts parked in the staging region.
+  # The parts wait AROUND the base (staging = the assembly region and its surroundings, operator 2026-10-20:
+  # "the fmb3 and fmb1 staging is the assembly region"); FMB1's old staging rectangle holds the parked set.
+  center_2026_10_20:
+    assembly_region: {center: [0.000, -0.480], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [-0.22, 0.20], y: [-0.70, -0.27], view: [0.000, -0.480, 0.62]}
+    parked_region: {x: [0.19, 0.51], y: [-0.54, -0.22]}
+
+  # FMB1 as run until 2026-10-19 (the 3/3 and M0 loops): same regions, base1 at DEFAULT_BASE_POSITION.
+  fmb1_2026_10_19:
+    assembly_region: {center: [0.058, -0.472], half: [0.120, 0.120]}
+    clear_area: [-0.320, -0.500]
+    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}
+
+  # Tried 2026-10-20 morning: base3 and its parts in FMB1's clear region, FMB1 in the staging region,
+  # the clear area moved to an empty patch beside it.
+  fmb3_in_clear_region_2026_10_20:
+    assembly_region: {center: [-0.389, -0.471], half: [0.120, 0.120]}
+    clear_area: [-0.300, -0.270]
+    staging_region: {x: [0.19, 0.51], y: [-0.54, -0.22], view: [0.35, -0.33, 0.62]}
