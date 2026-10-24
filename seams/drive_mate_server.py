@@ -162,12 +162,14 @@ class DriveMateServer(Node):
     def _sigma_gate(self, g, obj, base):
         """(servo?, note) - decision 2026-10-22: drive-mate moves on a vision read of the held part over its seat only when
         the target's xy sigma exceeds the part's CAD clearance (seams.clearance). The target's sigma is the VisionPose's;
-        NaN (not stated) -> the base fit's stated repeatability (bindings.yaml sigma.base_icp.xy). SIGMA_GATE=0: always."""
+        NaN or 0 (not stated) -> the base fit's stated repeatability (bindings.yaml sigma.base_icp.xy). SIGMA_GATE=0: always."""
         if os.environ.get('SIGMA_GATE', '1') != '1':
             return True, 'off (SIGMA_GATE=0) - servo'
         try:
             sg = [float(v) for v in list(g.target.sigma)[:2]]      # a numpy array from the message (run 73: 'or []' threw)
-            s_xy = max(sg) if sg and all(np.isfinite(sg)) else float('nan')
+            # NaN or 0 = not stated: the message's default sigma is zeros (run 74: u_brown's target arrived 0.00 mm, the gate
+            # skipped the servo and the insert missed) - no read is exact, so a zero never means "inside the clearance"
+            s_xy = max(sg) if sg and all(np.isfinite(sg)) and min(sg) > 0 else float('nan')
             src = 'the target read'
             if not np.isfinite(s_xy):
                 B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
