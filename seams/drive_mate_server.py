@@ -166,7 +166,7 @@ class DriveMateServer(Node):
         if os.environ.get('SIGMA_GATE', '1') != '1':
             return True, 'off (SIGMA_GATE=0) - servo'
         try:
-            sg = [float(v) for v in (g.target.sigma or [])[:2]]
+            sg = [float(v) for v in list(g.target.sigma)[:2]]      # a numpy array from the message (run 73: 'or []' threw)
             s_xy = max(sg) if sg and all(np.isfinite(sg)) else float('nan')
             src = 'the target read'
             if not np.isfinite(s_xy):
