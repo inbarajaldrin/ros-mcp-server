@@ -340,6 +340,9 @@ def output_result(result):
     print("__END_RESULT_JSON__")
 
 
+
+GRIP_DURING_HOVER = os.environ.get('GRIP_DURING_HOVER', '1') == '1'
+
 class DirectObjectMove(Node):
     def __init__(self, topic_name=None, object_name="blue_dot_0", height=None, target_xyz=None, target_xyzw=None, grasp_points_topic="/grasp_points", grasp_id=None, offset=None, mode=None,
                  base_name=None, pre_grasp_width=None, pad_center=False):
@@ -1023,9 +1026,18 @@ class DirectObjectMove(Node):
                 # wider (10-23: open + restore were two control_gripper processes, ~4.7 s of a ~14 s grasp)
                 w, pg = float(self.current_gripper_width), float(self.pre_grasp_width)
                 self.gripper_needs_restore = not (pg <= w <= pg + 3.0)
+                if self.gripper_needs_restore and GRIP_DURING_HOVER:
+                    # set it NOW, during the step-1 hover (fingers move in free air well above the part; an explicit target
+                    # needs no view of it): the restore before the descent only waits for it - it held the arm still
+                    # ~1.8 s per pick (10-23). The restore hook re-commands it if this one failed.
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    self._grip_async = subprocess.Popen(
+                        ['python3', os.path.join(script_dir, 'control_gripper.py'), str(int(pg)), '--mode', self.mode],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 self.get_logger().info(
                     f"Gripper at {w:.0f}mm, pre-grasp {pg:.0f}mm, explicit target: "
-                    + ("set before the descent" if self.gripper_needs_restore else "already there - no gripper call"))
+                    + (("set during the hover" if GRIP_DURING_HOVER else "set before the descent")
+                       if self.gripper_needs_restore else "already there - no gripper call"))
                 self.gripper_open_check_done = False      # not opened: an occlusion still gets the open-and-look path
             else:
                 if self.current_gripper_width < self.GRIPPER_FULLY_OPEN_WIDTH:
@@ -1949,6 +1961,19 @@ class DirectObjectMove(Node):
 
     def _restore_gripper_if_needed(self):
         """Restore gripper to initial width if it was opened for visibility check."""
+        pr = getattr(self, '_grip_async', None)
+        if pr is not None:
+            self._grip_async = None
+            try:
+                pr.wait(timeout=15)
+                if pr.returncode == 0 and self.gripper_needs_restore:
+                    self.get_logger().info(f"Pre-grasp width set during the hover ({self.initial_gripper_width:.0f}mm)")
+                    self.gripper_needs_restore = False
+                    return
+                self.get_logger().warn(f"pre-grasp gripper call during the hover failed (rc={pr.returncode}) - again now")
+            except subprocess.TimeoutExpired:
+                pr.kill()
+                self.get_logger().warn("pre-grasp gripper call during the hover timed out - again now")
         if self.gripper_needs_restore and self.initial_gripper_width is not None:
             self.get_logger().info(f"Restoring gripper to initial width ({self.initial_gripper_width:.0f}mm)...")
             self._run_control_gripper(int(self.initial_gripper_width))
