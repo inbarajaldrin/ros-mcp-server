@@ -310,3 +310,128 @@ def _timed(fn, kind, label_of):
                     row['result'] = o.get('result')
                 fh.write(json.dumps(row, default=str) + '\n')
     return w
+
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from seams.seated_parts import SeatedParts   # noqa: E402  (AR4: the one writer of the ledger + seat offsets)
+
+
+# ---------------------------------------------------------------------------
+# --derive-sequence: plan 1 or 2 passes from the observed start pose
+# (ported 2026-10-07 from the 2026-08-17 session; planning/sequence_planner.py)
+# ---------------------------------------------------------------------------
+_OBSERVE_ORIENTATION_HELPER = r"""
+import json, sys, time, rclpy
+from tf2_msgs.msg import TFMessage
+from geometry_msgs.msg import PoseStamped
+
+want = sys.argv[1]
+deadline_s = float(sys.argv[2])
+want_samples = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+STILL_WINDOW_S = 0.8     # a pose counts only if the TCP did not move (> 0.5 mm) in this window before it was
+                         # published: the localizer stamps at publish, frames arrive 150-650 ms late (depth_timing
+                         # 2026-10-20) and poses from frames taken while moving are ~10 mm off
+
+rclpy.init()
+n = rclpy.create_node('replay_observe_orientation')
+samples = []; pending = []; tcp = []
+
+def cb(msg):
+    for t in msg.transforms:
+        if t.child_frame_id == want:
+            q = t.transform.rotation
+            p = t.transform.translation
+            pending.append((time.time(), {'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]}))
+
+def on_tcp(m):
+    tcp.append((time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z))
+    del tcp[:-3000]
+
+def settle():
+    keep = []
+    for t_pub, smp in pending:
+        if not tcp or tcp[-1][0] < t_pub:                 # TCP history must cover the publish time
+            keep.append((t_pub, smp)); continue
+        win = [c for c in tcp if t_pub - STILL_WINDOW_S <= c[0] <= t_pub]
+        if len(win) >= 10 and max(((c[1]-win[-1][1])**2 + (c[2]-win[-1][2])**2 + (c[3]-win[-1][3])**2) ** 0.5 for c in win) <= 0.0005:
+            samples.append(smp)
+    pending[:] = keep
+
+n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
+n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 100)
+deadline = time.time() + deadline_s
+while time.time() < deadline and len(samples) < want_samples:
+    rclpy.spin_once(n, timeout_sec=0.02)
+    settle()
+print(json.dumps({'object': want, 'samples': samples,
+                  'waited_s': round(deadline_s - (deadline - time.time()), 2)}))
+n.destroy_node()
+rclpy.shutdown()
+"""
+
+
+def observe_object_orientation(object_name: str, timeout_s: float = 30.0, n_samples: int = 3) -> dict:
+    """Observe a part's resting pose on /objects_poses_real. Waits rather than sampling
+    once: the localizer goes quiet while the arm moves, so absence of a detection means
+    "not seen yet", not "not there". The camera only sees what is under the arm — put the
+    arm over the part first (home view or move_to_clear_area --fix-orientation)."""
+    try:
+        proc = subprocess.run(
+            ['python3', '-c', _OBSERVE_ORIENTATION_HELPER, object_name, str(timeout_s), str(n_samples)],
+            capture_output=True, text=True, timeout=timeout_s + 10, env=make_env(),
+        )
+        if proc.returncode != 0:
+            return {'error': f'observe rc={proc.returncode}'}
+        line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else '{}'
+        return json.loads(line)
+    except Exception as e:
+        return {'error': f'observe failed: {e}'}
+
+
+LAST_BASE_POSE = REPO_ROOT / 'ablations/logs/last_base_pose.json'
+
+
+def _last_base_pose(base_name):
+    try:
+        p, q, _ = json.load(open(LAST_BASE_POSE))[base_name]
+        return tuple(p), tuple(q)
+    except Exception:
+        return None
+
+
+def observe_base_pose(base_name: str, timeout_s: float = 15.0):
+    """The base's pose as the camera sees it, for the inserts (2026-10-14).
+
+    Grasps aim at what the camera sees; inserts used to aim at a hand-tuned
+    DEFAULT_BASE_POSITION (~5 mm off the measured base) plus per-part xy fudges. Aiming
+    the inserts at the camera-observed base makes the chain self-consistent: a bias the
+    camera/arm puts on a part's grasp also sits on its insert target, so it cancels.
+    Returns ((x, y, z), (qx, qy, qz, qw)) or None."""
+    obs = observe_object_orientation(base_name, timeout_s, n_samples=15)
+    S = obs.get('samples') or []
+    if obs.get('error') or len(S) < 5:
+        # markers not readable (low light, 2026-10-20: brightness 4.6/255 and no marker anywhere, while the depth
+        # CAD fit still read the base at 1.27 mm rms): fall back to the depth fit seeded from the last base pose
+        if os.environ.get('BASE_FROM') == 'icp' and str(base_name).startswith('base'):
+            seed = _last_base_pose(base_name)
+            if seed is not None:
+                try:
+                    from base_icp import read_icp
+                    oi, info = read_icp(base_name, seed)
+                    print(f"  [base] {base_name}: markers not read -> depth CAD fit from the last pose: {json.dumps(info)}", flush=True)
+                    return oi
+                except Exception:
+                    return None
+        return None
+    import numpy as _np
+    P = _np.median(_np.array([s_['xyz'] for s_ in S]), axis=0)
+    Q = _np.array([s_['quat_xyzw'] for s_ in S]); Q *= _np.sign(Q @ Q[0])[:, None]
+    q = Q.mean(axis=0); q /= _np.linalg.norm(q)
+    return tuple(float(v) for v in P), tuple(float(v) for v in q)
+
+
+SEATED = SeatedParts()
+
+
+RUN_BASE = {'name': 'base1'}      # the base this run assembles on (set in main from the recorded sequence)

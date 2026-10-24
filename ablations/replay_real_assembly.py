@@ -69,6 +69,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cell_io  # noqa: E402  (AR3 10-23: run I/O + run-state flags live there; read them as cell_io.<name>)
 from cell_io import (robot_safety_status, _RESULT_RE, extract_result_json, _SNAPSHOT_HELPER, STATE_TAP_JSON, STATE_TAP_FRESH_S, snapshot_robot_state, make_env, PROGRAM_DROPPED, run_subprocess, _run_subprocess_once, _TIMING, _timed)  # noqa: E402,F401
 from align_servo import (_emitter, _emitter_hold, _emitter_release, _footprints_overlap, _move_unless_there, _record_servo, _set_emitter_inproc, align_for_insert, close_base_read, depth_servo, held_axial_correction, hover_align, hover_servo, seated_under, servo_prior, track_base_in_hand, DSERVO_ITERS, DSERVO_ROBUST, DSERVO_SPREAD_YAW_PX, EMITTER_INPROC, GRASP_DEPTH_FIX, GRASP_DEPTH_MEAS_MAX_M, GRASP_DEPTH_MEAS_MIN_M, HELD_AXIAL, HELD_AXIAL_MAD_PX, HELD_AXIAL_MAX_M, HOVER_ALIGN_ABOVE_M, HOVER_ALIGN_ITERS, HOVER_ALIGN_MAX_M, LAST_TRACK_READ, SERVO_CLEAR_OVER_RIM_M, SERVO_INPROC, SERVO_MEASURED, SERVO_MEAS_OVER_RIM_M, SERVO_PRIOR, SERVO_PRIOR_LOG, SERVO_PRIOR_MAD_DEG, SERVO_PRIOR_MAD_M, SERVO_SHORT_M, SERVO_SHORT_MIN_S, SERVO_SHORT_SPEED_M_S, TRACK_VIEW_Z, _EMITTER)  # noqa: E402,F401
+from cell_io import (_OBSERVE_ORIENTATION_HELPER, observe_object_orientation, LAST_BASE_POSE, _last_base_pose, observe_base_pose, SEATED, RUN_BASE)  # noqa: E402,F401  (AR3 step 2)
+from recovery import (BASE_FIXED_CFG, CROSS_END_DIFF_MM, CROSS_EDGE_DIFF_MM, CROSS_NUDGE_AT_MM, CROSS_LOW_EDGE_MAX_MM, cross_nudge_plan, RESEAT_MAX, NUDGE_MAX_FORCE_N, NUDGE_PUSH_PAST_MM, NUDGE_FIRST_END_MM, NUDGE_SEAT_OVER_MM, NUDGE_TRIES, NUDGE_SHIFT_MM, NUDGE_END_DIFF_MM, NUDGE_START_GAPS_MM, NUDGE_PAD_Z_BASE_M, NUDGE_AXIAL_BIAS_MM, LAST_SEAT_RES, _seat_check_accepted, nudge_into_slot, EDGE_OFFSET_MM, EDGE_TAP_N, EDGE_PRESS_N, EDGE_DIFF_MIN_MM, ROLL_PRESS_DEG, _level_but_high, press_high_edge, _record_seat_check_error, _seat_by_taps, _taps_mark, seat_check_and_reseat, _seat_check_and_reseat, _seat_quat)  # noqa: E402,F401  (AR3 step 2: the recovery supervisor)
 LOG_ROOT = REPO_ROOT / "ablations" / "logs"
 
 # Make `primitives.*` importable from this script's own Python process.
@@ -225,58 +227,6 @@ def staging_single_pass_ok(obj: str, base_name: str, observed_quat):
         return None
 
 
-# ---------------------------------------------------------------------------
-# --derive-sequence: plan 1 or 2 passes from the observed start pose
-# (ported 2026-10-07 from the 2026-08-17 session; planning/sequence_planner.py)
-# ---------------------------------------------------------------------------
-_OBSERVE_ORIENTATION_HELPER = r"""
-import json, sys, time, rclpy
-from tf2_msgs.msg import TFMessage
-from geometry_msgs.msg import PoseStamped
-
-want = sys.argv[1]
-deadline_s = float(sys.argv[2])
-want_samples = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-STILL_WINDOW_S = 0.8     # a pose counts only if the TCP did not move (> 0.5 mm) in this window before it was
-                         # published: the localizer stamps at publish, frames arrive 150-650 ms late (depth_timing
-                         # 2026-10-20) and poses from frames taken while moving are ~10 mm off
-
-rclpy.init()
-n = rclpy.create_node('replay_observe_orientation')
-samples = []; pending = []; tcp = []
-
-def cb(msg):
-    for t in msg.transforms:
-        if t.child_frame_id == want:
-            q = t.transform.rotation
-            p = t.transform.translation
-            pending.append((time.time(), {'quat_xyzw': [q.x, q.y, q.z, q.w], 'xyz': [p.x, p.y, p.z]}))
-
-def on_tcp(m):
-    tcp.append((time.time(), m.pose.position.x, m.pose.position.y, m.pose.position.z))
-    del tcp[:-3000]
-
-def settle():
-    keep = []
-    for t_pub, smp in pending:
-        if not tcp or tcp[-1][0] < t_pub:                 # TCP history must cover the publish time
-            keep.append((t_pub, smp)); continue
-        win = [c for c in tcp if t_pub - STILL_WINDOW_S <= c[0] <= t_pub]
-        if len(win) >= 10 and max(((c[1]-win[-1][1])**2 + (c[2]-win[-1][2])**2 + (c[3]-win[-1][3])**2) ** 0.5 for c in win) <= 0.0005:
-            samples.append(smp)
-    pending[:] = keep
-
-n.create_subscription(TFMessage, '/objects_poses_real', cb, 10)
-n.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 100)
-deadline = time.time() + deadline_s
-while time.time() < deadline and len(samples) < want_samples:
-    rclpy.spin_once(n, timeout_sec=0.02)
-    settle()
-print(json.dumps({'object': want, 'samples': samples,
-                  'waited_s': round(deadline_s - (deadline - time.time()), 2)}))
-n.destroy_node()
-rclpy.shutdown()
-"""
 
 
 _OBSERVE_MANY_HELPER = r"""
@@ -331,25 +281,8 @@ def observe_many(names, timeout_s=8.0, n_samples=12, settle_s=2.0) -> dict:
         return {}
 
 
-def observe_object_orientation(object_name: str, timeout_s: float = 30.0, n_samples: int = 3) -> dict:
-    """Observe a part's resting pose on /objects_poses_real. Waits rather than sampling
-    once: the localizer goes quiet while the arm moves, so absence of a detection means
-    "not seen yet", not "not there". The camera only sees what is under the arm — put the
-    arm over the part first (home view or move_to_clear_area --fix-orientation)."""
-    try:
-        proc = subprocess.run(
-            ['python3', '-c', _OBSERVE_ORIENTATION_HELPER, object_name, str(timeout_s), str(n_samples)],
-            capture_output=True, text=True, timeout=timeout_s + 10, env=make_env(),
-        )
-        if proc.returncode != 0:
-            return {'error': f'observe rc={proc.returncode}'}
-        line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else '{}'
-        return json.loads(line)
-    except Exception as e:
-        return {'error': f'observe failed: {e}'}
 
 
-LAST_BASE_POSE = REPO_ROOT / 'ablations/logs/last_base_pose.json'
 
 
 def _save_base_pose(base_name, ob):
@@ -397,12 +330,6 @@ def _last_base_pose_fresh(base_name, max_age_s):
         return None
 
 
-def _last_base_pose(base_name):
-    try:
-        p, q, _ = json.load(open(LAST_BASE_POSE))[base_name]
-        return tuple(p), tuple(q)
-    except Exception:
-        return None
 
 
 def camera_brightness(timeout=3.0):
@@ -460,35 +387,6 @@ def ensure_exposure(say=print):
     return b
 
 
-def observe_base_pose(base_name: str, timeout_s: float = 15.0):
-    """The base's pose as the camera sees it, for the inserts (2026-10-14).
-
-    Grasps aim at what the camera sees; inserts used to aim at a hand-tuned
-    DEFAULT_BASE_POSITION (~5 mm off the measured base) plus per-part xy fudges. Aiming
-    the inserts at the camera-observed base makes the chain self-consistent: a bias the
-    camera/arm puts on a part's grasp also sits on its insert target, so it cancels.
-    Returns ((x, y, z), (qx, qy, qz, qw)) or None."""
-    obs = observe_object_orientation(base_name, timeout_s, n_samples=15)
-    S = obs.get('samples') or []
-    if obs.get('error') or len(S) < 5:
-        # markers not readable (low light, 2026-10-20: brightness 4.6/255 and no marker anywhere, while the depth
-        # CAD fit still read the base at 1.27 mm rms): fall back to the depth fit seeded from the last base pose
-        if os.environ.get('BASE_FROM') == 'icp' and str(base_name).startswith('base'):
-            seed = _last_base_pose(base_name)
-            if seed is not None:
-                try:
-                    from base_icp import read_icp
-                    oi, info = read_icp(base_name, seed)
-                    print(f"  [base] {base_name}: markers not read -> depth CAD fit from the last pose: {json.dumps(info)}", flush=True)
-                    return oi
-                except Exception:
-                    return None
-        return None
-    import numpy as _np
-    P = _np.median(_np.array([s_['xyz'] for s_ in S]), axis=0)
-    Q = _np.array([s_['quat_xyzw'] for s_ in S]); Q *= _np.sign(Q @ Q[0])[:, None]
-    q = Q.mean(axis=0); q /= _np.linalg.norm(q)
-    return tuple(float(v) for v in P), tuple(float(v) for v in q)
 
 
 
@@ -500,7 +398,6 @@ VERIFY_MAX_READS = 8             # "not detected" reads extend the window up to 
 
 
 from seams.seated_parts import SeatedParts   # noqa: E402  (AR4: the one writer of the ledger + seat offsets)
-SEATED = SeatedParts()
 
 
 def _ledger():
@@ -525,7 +422,6 @@ def _not_detected(r) -> bool:
     return max(abs(float(o.get('roll') or 0)), abs(float(o.get('pitch') or 0))) > VERIFY_TILT_MAX_DEG
 
 
-RUN_BASE = {'name': 'base1'}      # the base this run assembles on (set in main from the recorded sequence)
 
 
 def _read_part(o):
@@ -1500,9 +1396,6 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
                 error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
 
 
-def BASE_FIXED_CFG() -> bool:
-    from primitives.shared.config import BASE_FIXED
-    return bool(BASE_FIXED)
 
 
 def one_node() -> bool:
@@ -1887,10 +1780,6 @@ os.environ.setdefault('PRISMATIC_MAX_RETRIES', '1')
 os.environ.setdefault('PRISMATIC_HOLD_IF_WEDGED', '1')     # a wedged bar stays put: released and nudged (see below)
 SEAT_CHECK_OBJECTS = ('line_green',)      # FMB1's; any bar of any assembly is checked too (_seat_checked, 2026-10-20)
 BAR_RATIO = 4.0                           # top face this much longer than wide = a bar (line_green 5.4, U parts 3.3)
-CROSS_END_DIFF_MM = 1.5                   # one end this much higher than the other ...
-CROSS_EDGE_DIFF_MM = 0.8                  # ... and at that end one long edge this much higher: riding a channel lip
-CROSS_NUDGE_AT_MM = 12.0                  # push this far in from the high end (line_brown 2026-10-20: -58 of 70)
-CROSS_LOW_EDGE_MAX_MM = 3.0               # ... and its other edge still near the seat (a lip carries one edge only)
 
 
 def _seat_checked(obj) -> bool:
@@ -1928,497 +1817,35 @@ def _wedged_near_seat(obj, since, result=None):
     return {'dz_mm': 1000 * float(d[2]), 'dxy_mm': 1000 * float(np.hypot(d[0], d[1]))}
 
 
-def cross_nudge_plan(res):
-    """(toward, at_long_mm) for a bar whose high end rides a channel lip, from the depth check: that end high
-    and, at it, the edge on the lip side high - push from that side toward the other, at the high end
-    (line_brown 2026-10-20: -y end +1.2, -x edge +2 mm -> toward +x at -58 mm; seated after). None if not."""
-    ends = res.get('end_heights_mm'); per = (res.get('cross') or {}).get('end_edge_heights_mm'); f = res.get('face') or {}
-    if not ends or not per or not f:
-        return None
-    hi = 1 if ends[1] > ends[0] else 0
-    if ends[hi] - ends[1 - hi] < CROSS_END_DIFF_MM or per[hi] is None or None in per[hi]:
-        return None
-    lo_edge, hi_edge = per[hi]
-    if abs(hi_edge - lo_edge) < CROSS_EDGE_DIFF_MM:
-        return None
-    if min(lo_edge, hi_edge) > CROSS_LOW_EDGE_MAX_MM:
-        # both edges up: the whole end rests on the base top past its pocket - the axial push (10-14 line_green fix),
-        # not a lip. 10-22 09:35: edges +7.1/+8.9 called a lip, the sideways nudge lowered onto the seated U part
-        # beside line_green twice (7.9 / 7.7 N, stopped)
-        return None
-    cross_ax = 'x' if f['long_axis'] == 'y' else 'y'
-    toward = ('+' if lo_edge > hi_edge else '-') + cross_ax      # away from the high edge
-    at = (1 if hi else -1) * (1000 * f['half_long_m'] - CROSS_NUDGE_AT_MM)
-    return toward, at
-RESEAT_MAX = 1
-# Tilted line_green = one end resting on base1's top past the end of its pocket (the 140 mm bar
-# has almost no axial play). Operator's fix, verified 2026-10-14: gripper closed, from safe height,
-# lower beside the high end, push ALONG the bar toward the slot in small steps at <= 5 N (base1 is
-# glued to the table), re-check depth after each step. Regrasps and pressing did not work.
-NUDGE_MAX_FORCE_N = 4.0              # push until the bar is blocked (seated or stuck): operator's rule,
                                      # replaces fixed step distances that had to guess the end (2026-10-15)
-NUDGE_PUSH_PAST_MM = 15.0            # travel cap (operator): finger face at most this far past the estimated end
-NUDGE_FIRST_END_MM = 4.0             # depth end this high after an insert: a wedge - the nudge before any tap
-NUDGE_SEAT_OVER_MM = 2.0             # ...and never past the seated CAD end by more than this: line_green has no axial
                                      # stop - run 31's push met no force, ran the 15 mm cap and left the bar 18 mm past its
                                      # seat, against the U at its far end (u_orange then read outside its seat)
-NUDGE_TRIES = 3
-NUDGE_SHIFT_MM = 3.0                 # axial shift that means an end rides past its pocket
-NUDGE_END_DIFF_MM = 2.5              # one end this much higher than the other: nudge, not reseat
-NUDGE_START_GAPS_MM = (10.0, 20.0, 30.0)   # finger block this far past the depth end; next on contact
-NUDGE_PAD_Z_BASE_M = 0.037           # pad centre height (base frame): tips 22 mm, base top 17.5 mm
-NUDGE_AXIAL_BIAS_MM = 7.0          # depth puts a raised end ~7 mm past the real one (edge smear on
                                    # the D415). Not a base-read error: with the depth base and 0 here,
                                    # step 1 missed the bar entirely (operator, 2026-10-15)
 
 
-LAST_SEAT_RES = {}             # obj -> the last depth seat check (the ladder's final word when it runs out)
 
 
-def _seat_check_accepted(obj, ob, **kw):
-    """seat_check.check, passing only what ExecuteMate would certify, one read-sigma inside its band (seams.acceptance:
-    one rule for both - attempt 24 stopped its recovery at an end +2.0 mm the certifier then refused)."""
-    from seat_check import check as _check
-    res = _check(obj, ob, **kw)
-    LAST_SEAT_RES[obj] = res
-    if res.get('ok') and res.get('height_err_mm') is not None:
-        from seams.acceptance import margin_m, seat_inside
-        inside, why = seat_inside(kw.get('base') or RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0,
-                                  res.get('end_heights_mm') or [], margin=margin_m())
-        if not inside:
-            res = dict(res, ok=False, acceptance=why)
-            print(f"  [seat-check] {obj}: seat check passes it, the certifier would not ({why}) -> recovery goes on",
-                  flush=True)
-    return res
 
 
-def nudge_into_slot(obj, ob, res, say, out_dir) -> bool:
-    """Push a tilted bar's raised end along its axis into its slot (operator's method): closed
-    fingers lowered beside the high end from safe height, then ONE guarded push toward the slot
-    that stops at NUDGE_MAX_FORCE_N — the bar slides while it is free and the force rises once it
-    is blocked (seated against the pocket end, or stuck). Depth re-check after every try; the next
-    try starts from the new measurement. The base is re-fitted by every check (7th-axis creep)."""
-    if not BASE_FIXED_CFG() and os.environ.get('NUDGE_FREE_BASE', '0') != '1':
-        # on a free base the push never blocks - the base slides first: attempt 27's three pushes ran their travel cap
-        # and moved base1 ~50 mm while the bar was seated (tap map). Vertical presses (seams.tap_probe) only.
-        say(f"  [nudge] {obj}: free base - no lateral push (NUDGE_FREE_BASE=1 to allow)")
-        return False
-    check = _seat_check_accepted
-    from primitives.shared.config import RG2_TIP_CLOSED_M, RG2_PAD_HALF_M, SAFE_HEIGHT
-    base = [ob]
-    f = res.get('face') or {'cx': 0.0, 'cy': 0.0, 'z': NUDGE_PAD_Z_BASE_M, 'long_axis': 'y'}
-    def world(yb):          # yb: along the part's long axis from its CAD top-face centre (line_green: base y)
-        (bx, by, bz), bq = base[0]
-        p = np.array([f['cx'], f['cy'] + yb, f['z']]) if f['long_axis'] == 'y' else np.array([f['cx'] + yb, f['cy'], f['z']])
-        return np.array([bx, by, bz]) + R_.from_quat(bq).as_matrix() @ p
-    fz = lambda p: p[2] + RG2_TIP_CLOSED_M - RG2_PAD_HALF_M          # flange z, closed, top-down
-    half = 10.1                                                      # closed finger block half-width (mm)
-    q = ['0.0', '1.0', '0.0', '0.0']
-    X = lambda p, z: [f"{p[0]:.4f}", f"{p[1]:.4f}", f"{z:.4f}"]
-    go = lambda argv, label, t=60: run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
-    for k in range(1, NUDGE_TRIES + 1):
-        ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
-        if not ends or not ext:
-            say(f"  [nudge] {obj}: no end heights / axial extent -> cannot nudge"); return False
-        sgn = 1.0 if ends[1] > ends[0] else -1.0                     # +1: the +y (base) end is high
-        raw_mm = ext[1] if sgn > 0 else ext[0]                       # depth's end: never short of the real one
-        end_mm = raw_mm - sgn * NUDGE_AXIAL_BIAS_MM                  # corrected (depth smears a raised end out)
-        face_mm = end_mm - sgn * NUDGE_PUSH_PAST_MM
-        if f.get('half_long_m'):                                     # the seated end bounds it (no axial stop to meet)
-            face_mm = sgn * max(sgn * face_mm, 1000 * float(f['half_long_m']) - NUDGE_SEAT_OVER_MM)
-        push = world((face_mm + sgn * half) / 1000.0)
-        say(f"  [nudge] try {k}: {'+y' if sgn > 0 else '-y'} end high, depth end {raw_mm:+.0f} mm (base) "
-            f"-> push toward the slot until {NUDGE_MAX_FORCE_N:g} N (finger face to {face_mm:+.0f}: at most "
-            f"{NUDGE_PUSH_PAST_MM:g} mm past {end_mm:+.0f}, {NUDGE_SEAT_OVER_MM:g} mm past the seated end)")
-        for argv, label in [
-                (['primitives.control_gripper', 'close', '--mode', 'real'], 'nudge close'),
-                (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height')]:
-            if go(argv, label).get('result') == 'failure':
-                say(f"\n!!! {label} failed"); return False
-        # Lower in clear space past the RAW depth end (the correction above moved a -y end 7 mm onto
-        # the bar, 2026-10-15). Fingers must never land on the part: on contact, lift, step 10 mm
-        # further out, lower again.
-        for gap in NUDGE_START_GAPS_MM:
-            start = world((raw_mm + sgn * (half + gap)) / 1000.0)
-            r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, SAFE_HEIGHT + 0.08), '--quat', *q],
-                   'nudge over the start')
-            if r.get('result') == 'failure':
-                say(f"\n!!! nudge over the start failed: {r.get('error', '')}"); return False
-            r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, fz(start)), '--quat', *q,
-                    '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '5'],
-                   f'nudge lower beside the end ({gap:g} mm clear)')
-            if not r.get('contact'):
-                break
-            say(f"  [nudge] try {k}: touched something lowering {gap:g} mm past the end ({r.get('error')}) "
-                f"-> lift, further out")
-            if go(['primitives.move_to_safe_height', '--mode', 'real'], 'nudge lift').get('result') == 'failure':
-                return False
-        else:
-            say(f"\n!!! {obj}: no clear spot past the end to lower the fingers"); return False
-        if r.get('result') == 'failure':
-            say(f"\n!!! nudge lower beside the end failed: {r.get('error', '')}"); return False
-        time.sleep(1.5)                                              # settle before the force baseline
-        r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(push, fz(push)), '--quat', *q,
-                '--min-z', '0.15', '--max-force', f"{NUDGE_MAX_FORCE_N}", '--min-duration', '10'],
-               f'nudge push {k} (until {NUDGE_MAX_FORCE_N:g} N)')
-        say(f"  [nudge] push {k}: {'stopped at ' + str(r.get('error')) if r.get('contact') else 'reached the travel cap'}")
-        for argv, label in [
-                (['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(start, fz(start) + 0.02), '--quat', *q,
-                  '--min-z', '0.15'], 'nudge back off'),
-                (['primitives.move_to_safe_height', '--mode', 'real'], 'nudge safe height')]:
-            if go(argv, label).get('result') == 'failure':
-                say(f"\n!!! {label} failed"); return False
-        res = check(obj, base[0], move=True, out_dir=out_dir, base=RUN_BASE['name'])
-        base[0] = res.get('observed_base') or base[0]
-        say(f"  [seat-check] {obj} after nudge {k}: {json.dumps({k_: v for k_, v in res.items() if k_ not in ('profile_mm', 'observed_base')})}")
-        if res.get('ok'):
-            _record_seat_check_error(obj, res)     # attempt 23: only the first-pass and after-taps passes recorded it
-            return True
-        if _level_but_high(res) or abs(res.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:
-            say(f"  [nudge] {obj}: level along it now but high/rolled - stop nudging, edge press next")
-            return False
-    return False
 
 
-EDGE_OFFSET_MM = 8.0                 # tap/press point off the bar's centreline (26 mm bar, 20 mm block)
-EDGE_TAP_N = 3.0                     # measuring tap: a 3 N centre tap did not move the wedged bar
-EDGE_PRESS_N = 4.0                   # guard under the operator's 5 N limit: presses overshoot by up to 0.7 N (run 32)
-EDGE_DIFF_MIN_MM = 0.8               # edges closer than this: no roll to fix -> do not guess
-ROLL_PRESS_DEG = 5.0                 # depth roll this large: a cocked bar -> edge press (a seated bar reads ~-3 deg: bias)
 
 
-def _level_but_high(res) -> bool:
-    """Depth says: level along the bar, centred along its axis, but the whole top is high —
-    the bar is cocked across its width (roll), which depth cannot measure (16 mm strip; it reads
-    -4 deg on every seat, seated or not: 54/54 checks, 2026-10-17)."""
-    if 'pitch_deg' not in res or res.get('ok'):
-        return False
-    shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))
-    return (abs(res['pitch_deg']) <= res.get('limits', {}).get('pitch_deg', 1.5) and shift < NUDGE_SHIFT_MM
-            and res.get('height_err_mm', 0.0) > res.get('limits', {}).get('height_mm', 2.5))
 
 
-def press_high_edge(obj, ob, say, out_dir) -> bool:
-    """Rare roll wedge (operator, 2026-10-17: a bar cocked across its width sat 3.6 mm high by touch;
-    a 5 N press on its high edge, off-centre at the grasp point, seated it). Find the high edge
-    MECHANICALLY — tap both edges at 3 N — press only that edge at <= 5 N, re-check. No guessing:
-    if the edges read the same there is no roll and it stops."""
-    from tap_check import tap_once
-    check = _seat_check_accepted
-    from seat_check import TOP_FACE as _TF
-    across_x = _TF[(obj, RUN_BASE['name'])].get('long_axis', 'y') == 'y'          # edges lie across the long axis
-    off = lambda s: dict(offset_x_mm=s * EDGE_OFFSET_MM) if across_x else dict(offset_y_mm=s * EDGE_OFFSET_MM)
-    taps = {s: tap_once(obj, ob, **off(s), force=EDGE_TAP_N, say=say, base=RUN_BASE['name']) for s in (-1, 1)}
-    if not all(t['contact'] and t['err_mm'] is not None for t in taps.values()):
-        say(f"  [edge] {obj}: an edge tap found no contact {taps} -> not pressing"); return False
-    hi = max(taps, key=lambda s: taps[s]['err_mm'])
-    diff = taps[hi]['err_mm'] - taps[-hi]['err_mm']
-    if diff < EDGE_DIFF_MIN_MM:
-        say(f"  [edge] {obj}: edges level ({taps[-1]['err_mm']:+.1f} / {taps[1]['err_mm']:+.1f} mm) — "
-            f"not a roll, not pressing"); return False
-    say(f"  [edge] {obj}: {'+x' if hi > 0 else '-x'} edge high by {diff:.1f} mm -> press it at {EDGE_PRESS_N:g} N")
-    tap_once(obj, ob, **off(hi), force=EDGE_PRESS_N, press_mm=4.0, say=say, base=RUN_BASE['name'])
-    res = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-    say(f"  [seat-check] {obj} after the edge press: "
-        f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
-    if res.get('ok'):
-        _record_seat_check_error(obj, res)
-    return bool(res.get('ok'))
 
 
-def _record_seat_check_error(obj, res):
-    """A passed depth seat check measures where the part really sits ACROSS its slot (cross centre) and along it (axial
-    shift), base frame, mm: written to the verify ledger as rel_err_mm so the part threading over it next is aimed at it
-    (_follow_seated_general). 13:39/13:54 the yellow, aimed at its CAD seat, came down on line_green's top twice -
-    line_green sat 1.7 mm across from CAD (its check), the yellow straddles it with +-1 mm."""
-    try:
-        f = res.get('face') or {}
-        cross = float((res.get('cross') or {}).get('centre_mm'))
-        along = float((res.get('axial') or {}).get('shift_mm', 0.0))
-        e = [cross, along] if f.get('long_axis', 'y') == 'y' else [along, cross]
-        SEATED.set_seat_error(obj, e, 'depth seat check', touch_t=True)
-        print(f"  [seat-check] {obj}: measured seat error {e} mm (base frame) recorded for the parts over it", flush=True)
-    except Exception as ex:
-        print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
 
 
-def _seat_by_taps(obj, args, say):
-    """The seat judged by taps (operator 10-22: "use force to tap smartly - you know where it seats and the force
-    feedback"): one depth view - it re-fits the base and measures where the part sits ACROSS its slot (what the parts
-    over it follow) - then seams.tap_probe maps the top against the seated CAD and presses only what is high, <= 4.5 N,
-    vertical. Attempt 27: the depth check called line_green's end +1.5/+1.7/+1.9 mm high, three lateral nudges pushed
-    the free base ~50 mm, and the taps then read the bar seated (-1.35..+0.05 mm). True / False; None: the taps could
-    not judge it (taps off the part) - the depth ladder decides."""
-    import seat_check as _sc
-    from seams.tap_probe import tap_recover
-    out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
-    res = _sc.check(obj, args.observed_base, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-    ob = res.get('observed_base') or args.observed_base
-    args.observed_base = ob
-    # the taps go where drive-mate last MEASURED the base (its align read, top-down), not the depth re-fit from the
-    # seat check's tilted view: run 28c's taps from that re-fit all landed beside the bar (no contact at any point)
-    ob = getattr(args, 'measured_base', None) or ob
-    say(f"  [seat-check] {obj} (depth, for the base and the across error): "
-        f"{json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
-    ends_ = res.get('end_heights_mm') or []
-    if res.get('height_err_mm') is not None:
-        from seams.acceptance import seat_inside
-        inside_, why_ = seat_inside(RUN_BASE['name'], obj, float(res['height_err_mm']) / 1000.0, ends_)
-        if inside_:
-            # depth already passes it by the certifier's own rule: the taps would only confirm a seat (run 38b: line_green
-            # seated from the insert, ends +1.5 / -0.2 mm, 49 s of taps) - ExecuteMate measures it next anyway
-            say(f"  [seat-check] {obj}: depth passes it ({why_}) - no taps")
-            if (res.get('cross') or {}).get('centre_mm') is not None:
-                _record_seat_check_error(obj, res)
-            SEATED.mark(obj, True, how='depth seat check')
-            return True
-    from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
-    if wedge_possible(RUN_BASE['name'], obj) and ends_ and max(ends_) > NUDGE_FIRST_END_MM and (res.get('axial') or {}).get('extent_mm'):
-        # an end this high is a wedge depth cannot mistake (runs 31/32 after the insert: +7.7 / +8.1 mm; seated bars read
-        # +1.5..+2.5 with depth's tilt): the map and a press before the nudge only confirmed it (~60 s, every press
-        # blocked) - nudge first, the taps judge after it
-        say(f"  [taps] {obj}: depth shows an end {max(ends_):+.1f} mm high (> {NUDGE_FIRST_END_MM:g}: a wedge) -> "
-            f"one lateral nudge first, then the taps judge")
-        ok, tp, blocked = False, None, True
-    else:
-        ok, tp = tap_recover(obj, ob, RUN_BASE['name'], say)
-        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
-            return None                                      # the taps could not judge it: the depth ladder
-        blocked = not ok and any(p.blocked for p in tp.points)
-        if blocked:
-            say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
-    if blocked:
-        # the vertical presses are blocked (an end riding a lip springs back: 22:30 line_green +4.2 -> +2.7 -> +3.8 -> +3.8);
-        # ONE lateral nudge frees it (22:35: depth ends +6.1 -> +0.6, taps then -0.8..-1.1), the taps judge after it -
-        # never a second nudge on a depth reading (attempt 27: three, chasing +1.5-1.9 mm, moved the base ~50 mm)
-        prev = os.environ.get('NUDGE_FREE_BASE')
-        os.environ['NUDGE_FREE_BASE'] = '1'
-        global NUDGE_TRIES
-        tries0, NUDGE_TRIES = NUDGE_TRIES, 1
-        try:
-            nudge_into_slot(obj, args.observed_base, res, say, out_dir)
-        finally:
-            NUDGE_TRIES = tries0
-            if prev is None:
-                os.environ.pop('NUDGE_FREE_BASE', None)
-            else:
-                os.environ['NUDGE_FREE_BASE'] = prev
-        ob2 = observe_base_pose(RUN_BASE['name']) or ob       # the push moves a free base: tap where it is now
-        args.observed_base = args.measured_base = ob2
-        ok, tp = tap_recover(obj, ob2, RUN_BASE['name'], say)
-        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
-            # a point off the part right after a push: the base read lags the push (run 31: end+ on a U arm, +13.7 mm,
-            # the other three points seated) - one more base read from its own view, one more map
-            ob3 = observe_base_pose(RUN_BASE['name'])
-            if ob3 is not None:
-                args.observed_base = args.measured_base = ob3
-                ok, tp = tap_recover(obj, ob3, RUN_BASE['name'], say)
-        if tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed())):
-            return None
-    if ok and not blocked and (res.get('cross') or {}).get('centre_mm') is not None:
-        # the across error the parts over it follow - from this depth read only if nothing moved the part since (after a
-        # nudge it is the pre-nudge read: run 32 recorded [-0.2, -3.0] mm of a wedged bar the taps then found seated)
-        _record_seat_check_error(obj, res)
-    if ok:
-        # with its own time and the points' places along the bar: ExecuteMate judges the ends from it while nothing has
-        # moved since (seams.vision_ops.tap_ends)
-        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points},
-                    tap_t=time.time(), tap_along_mm={p.name: round(1000 * p.along_m, 1) for p in tp.points})
-    return ok
 
 
-def _taps_mark(obj, args, say) -> bool:
-    """Tap the part where drive-mate last measured the base; True (and the timed tap map in the ledger, which ExecuteMate
-    judges the ends from) when the taps find it seated."""
-    from seams.tap_probe import tap_recover
-    ob_ = getattr(args, 'measured_base', None) or getattr(args, 'observed_base', None)
-    if ob_ is None:
-        return False
-    say(f"  [taps] {obj}: the certifier read an end over its band - contact measures the ends")
-    ok, tp = tap_recover(obj, ob_, RUN_BASE['name'], say)
-    if not ok and (tp.off_part() or ({'mid', 'end-', 'end+'} & set(tp.missed()))):
-        # taps beside the part: the base read they were placed from is stale by mm (run 50: end- and edge+ missed on a
-        # bar depth read seated, ends +1.55 / +0.13 mm) - read the base where it is now and map once more
-        ob2 = observe_base_pose(RUN_BASE['name'])
-        if ob2 is not None:
-            say(f"  [taps] {obj}: taps off/beside the part {tp.off_part() or tp.missed()} - base re-read, mapping again")
-            args.observed_base = args.measured_base = ob2
-            ok, tp = tap_recover(obj, ob2, RUN_BASE['name'], say)
-    if ok:
-        SEATED.mark(obj, True, how='taps', tap_map_mm={p.name: ('missed' if p.err_m is None else round(1000 * p.err_m, 2)) for p in tp.points},
-                    tap_t=time.time(), tap_along_mm={p.name: round(1000 * p.along_m, 1) for p in tp.points})
-    return bool(ok)
 
 
-def seat_check_and_reseat(obj, state, args, say) -> bool:
-    """The depth seat check (+ nudges / edge press); a pass is recorded in the verify ledger as a depth
-    confirmation, which verify_seated accepts when the markers cannot see the part (2026-10-20: fork_orange,
-    depth -0.08 mm from its CAD height, failed the run on 'marker not detected'). On a free base the taps judge
-    the seat first (_seat_by_taps); the depth ladder runs only when they could not."""
-    if (os.environ.get('SEAT_BY_TAPS', '1') == '1' and not BASE_FIXED_CFG()
-            and getattr(args, 'observed_base', None) is not None):
-        ok_t = _seat_by_taps(obj, args, say)
-        if ok_t:
-            return True
-        if ok_t is None:
-            say(f"  [seat-check] {obj}: the taps could not judge it -> the depth ladder")
-        else:
-            # run 33: after the nudge line_green sat +4.8 mm level and rolled (a long edge on the channel lip), its high
-            # edge blocked at 4 N - the ladder's reseat with the insert grasp is the recovery left (run 31: it worked)
-            say(f"  [seat-check] {obj}: the taps could not seat it -> the depth ladder (edge press, reseat)")
-    ok = _seat_check_and_reseat(obj, state, args, say)
-    if not ok:
-        # the recovery ladder stops one read-sigma inside the certifier's band; when it has run out, a last reading inside
-        # the band itself goes on to ExecuteMate, which decides (run 31: an end at +1.53 mm stopped the run, 0.03 mm over
-        # the ladder's +-1.5)
-        r_ = LAST_SEAT_RES.get(obj) or {}
-        if r_.get('height_err_mm') is not None:
-            from seams.acceptance import seat_inside
-            inside, why = seat_inside(RUN_BASE['name'], obj, float(r_['height_err_mm']) / 1000.0, r_.get('end_heights_mm') or [])
-            if inside:
-                say(f"  [seat-check] {obj}: the ladder ran out inside the certifier's band ({why}) - ExecuteMate decides")
-                ok = True
-    if ok:
-        SEATED.mark(obj, True, how='depth seat check')                  # merged: keeps rel_err_mm
-    return ok
 
 
-def _seat_check_and_reseat(obj, state, args, say) -> bool:
-    """Depth-check the seated part; if it sits tilted or high, take it with the insert's own
-    grasp (the pose the insert released it from), and insert it again. Fails closed."""
-    check = _seat_check_accepted
-    from disassemble import seat_grasp, SEAT_EE_QUAT, HOVER_DZ
-    ob = getattr(args, 'observed_base', None)
-    if ob is None:
-        say(f"  [seat-check] {obj}: no observed base -> skipped"); return True
-    out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
-    for attempt in range(RESEAT_MAX + 1):
-        res = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-        ob = res.get('observed_base') or ob                    # re-fitted from the check's own view
-        args.observed_base = ob
-        say(f"  [seat-check] {obj}: {json.dumps({k: v for k, v in res.items() if k not in ('profile_mm', 'observed_base')})}")
-        if 'pitch_deg' in res and not res.get('ok') and (_level_but_high(res) or abs(res.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG
-                                                           and abs(res['pitch_deg']) <= res.get('limits', {}).get('pitch_deg', 1.5)):
-            # cocked across its width (operator 2026-10-20: "this is a roll issue ... we already faced a roll solve for
-            # fmb1"): the FMB1 edge press - tap both edges, press the high one - not axial nudges
-            say(f"  [seat-check] {obj}: level along it but {res.get('height_err_mm', 0):+.1f} mm high, roll {res.get('roll_deg', 0):+.1f} deg "
-                f"-> edge press (FMB1 roll fix)")
-            if press_high_edge(obj, ob, say, out_dir):
-                return True
-            if attempt >= RESEAT_MAX:
-                say(f"\n!!! {obj} still not seated after the edge press"); return False
-            continue
-        # a seat the check passes is not touched (operator 10-22: no nudges on a seated part; 14:02 the lip rule nudged an
-        # ok line_green sideways)
-        plan = cross_nudge_plan(res) if ('pitch_deg' in res and not res.get('ok')) else None
-        if not BASE_FIXED_CFG() and os.environ.get('NUDGE_FREE_BASE', '0') != '1':
-            plan = None                                       # no sideways push on a free base (see nudge_into_slot)
-        if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
-            plan = None        # shifted along its length: the axial nudge first (line_red 2026-10-20: -16 mm,
-                               # the sideways taps did nothing, the axial push seated it)
-        if plan is not None and attempt < RESEAT_MAX:            # nudge, then the next pass re-checks
-            # an end riding a channel lip: the depth limits call it ok (line_brown 2026-10-20, the operator
-            # saw it unseated) - push that end sideways off the lip, to the CAD face (the base is not fixed)
-            toward, at = plan
-            say(f"  [seat-check] {obj}: high end on a channel lip -> sideways nudge toward {toward} at {at:+.0f} mm")
-            r = run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
-                                f'--toward={toward}', '--at-long', f"{at:.0f}"], label=f'nudge {obj} {toward}', timeout_s=240)
-            ob = observe_base_pose(RUN_BASE['name']) or ob
-            args.observed_base = ob
-            continue
-        if res.get('ok'):
-            _record_seat_check_error(obj, res)
-            return True
-        if res.get('mode', '').startswith('median height'):
-            if res.get('ok'):
-                return True
-            say(f"\n!!! {obj}: top {res.get('height_err_mm'):+.1f} mm from its CAD height - not seated"); return False
-        if 'pitch_deg' not in res:
-            say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
-        shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))
-        ends = res.get('end_heights_mm') or [0.0, 0.0]
-        if (abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5)
-                or shift >= NUDGE_SHIFT_MM or abs(ends[1] - ends[0]) >= NUDGE_END_DIFF_MM):
-            # tilted, or shifted along its axis = an end on base1's top past the pocket end; a
-            # regrasp holds it where it is. 2026-10-15: a bar 4-7 mm high and +5 mm along its axis
-            # (pitch only 1.2 deg) went to the top-down reseat, which cannot move it, and failed.
-            ok = False
-            shift = float((res.get('axial') or {}).get('shift_mm', 0.0))
-            f_ = res.get('face') or {}
-            if abs(shift) >= NUDGE_SHIFT_MM and f_:
-                # taps along the bar to its CAD end face (operator 2026-10-20: a slow push drags the unfixed
-                # base - cycle 1's axial push moved base3 10 mm); start clear of the MEASURED end
-                lax = f_.get('long_axis', 'y')
-                # direction from the HIGH end toward the slot (as nudge_into_slot): the extent midpoint is smeared
-                # by a raised end (cycle 2: -y end 6.7 mm high, extent midpoint +7 -> taps pushed it further -y)
-                ends_ = res.get('end_heights_mm') or [0.0, 0.0]
-                toward = ('+' if ends_[0] > ends_[1] else '-') + lax
-                say(f"  [seat-check] {obj}: shifted {shift:+.0f} mm along its length -> taps toward {toward} to the CAD end face")
-                run_subprocess(['python3', '-u', 'ablations/nudge_part.py', '--object', obj, '--base', RUN_BASE['name'],
-                                f'--toward={toward}', '--face-offset-mm', f"{abs(shift) + 3:.0f}", '--taps', '3'],
-                               label=f'tap {obj} {toward}', timeout_s=300)
-                res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-                ob = res2.get('observed_base') or ob
-                say(f"  [seat-check] {obj} after the taps: {json.dumps({k: v for k, v in res2.items() if k not in ('profile_mm', 'observed_base')})}")
-                ok = bool(res2.get('ok'))
-                res = res2 if 'pitch_deg' in res2 else res
-                if ok:
-                    _record_seat_check_error(obj, res2)
-            if not ok:
-                ok = nudge_into_slot(obj, ob, res, say, out_dir)      # the slow push as the fallback
-            if not ok:
-                res2 = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
-                if _level_but_high(res2) or abs(res2.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:   # level but high: a roll
-                    say(f"  [seat-check] {obj}: level but {res2['height_err_mm']:+.1f} mm high after the nudge -> edge taps")
-                    ok = press_high_edge(obj, ob, say, out_dir)
-                if not ok:
-                    say(f"\n!!! {obj} still not seated after the nudge")
-            return ok
-        if _level_but_high(res):
-            say(f"  [seat-check] {obj}: level and centred but {res['height_err_mm']:+.1f} mm high -> edge taps")
-            ok = press_high_edge(obj, ob, say, out_dir)
-            if not ok:
-                say(f"\n!!! {obj} still not seated after the edge press")
-            return ok
-        if attempt == RESEAT_MAX:
-            say(f"\n!!! {obj} still not flat after {RESEAT_MAX} reseat(s)"); return False
-        from primitives.shared.config import get_grasp_id_for_assembly, get_gripper_width_mm
-        gid = get_grasp_id_for_assembly(obj); w = get_gripper_width_mm(obj, gid)
-        tcp = seat_grasp(obj, gid, ob, base_name=RUN_BASE['name'])
-        from disassemble import grasp_offset_for
-        os.environ['GRASP_TOOL_OFFSET_M'] = f"{grasp_offset_for(obj):.5f}"   # the insert's grasp depth
-        q = [str(v) for v in SEAT_EE_QUAT]
-        held = (R_.from_quat(ob[1]) * R_.from_quat(_seat_quat(obj, RUN_BASE['name']))).as_quat()
-        (bx, by, bz), bq = ob
-        from primitives.shared.config import get_object_base_offset_m
-        dz = float(get_object_base_offset_m(obj)[2])
-        steps = [
-            (['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
-              f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q], 'reseat hover', 60),
-            (['primitives.control_gripper', f"{w:g}", '--mode', 'real'], 'reseat open', 30),
-            (['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
-              f"{tcp[2]:.4f}", '--quat', *q, '--min-z', '0.15', '--max-force', '12', '--min-duration', '6'],
-             'reseat descend', 60),
-            (['primitives.control_gripper', 'close', '--mode', 'real'], 'reseat close', 30),
-            (['primitives.translate_object', '--mode', 'real', '--object-name', obj, '--base-name', RUN_BASE['name'],
-              '--insert', '--insertion-type', 'compliant', '--grasp-id', str(gid),
-              '--current-object-orientation', *[f"{v:.6f}" for v in held],
-              '--final-base-pos', f"{bx:.6f}", f"{by:.6f}", f"{bz + dz:.6f}",
-              '--final-base-orientation', *[f"{v:.6f}" for v in bq]], 'reseat insert', 600),
-            (['primitives.control_gripper', f"{w:g}", '--mode', 'real'], 'reseat release', 30),
-            (['primitives.move_to_safe_height', '--mode', 'real'], 'reseat lift', 60),
-        ]
-        say(f"  [seat-check] {obj} not flat -> reseat {attempt + 1}/{RESEAT_MAX} with the insert grasp")
-        for argv, label, t in steps:
-            r = run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
-            if r.get('result') == 'failure':
-                say(f"\n!!! {label} failed: {r.get('error', '')}"); return False
-    return False
 
 
-def _seat_quat(obj, base_name='base1'):
-    from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-    return load_seat_pose_in_base(base_name, obj)[1]
 
 
 CAMERA_TOPIC = os.environ.get('CAMERA_HEALTH_TOPIC', '/camera/camera/color/image_raw')
@@ -3784,7 +3211,14 @@ observe_many = _timed(observe_many, 'observe_many', lambda a, k: ','.join(a[0]) 
 held_yaw_calibration = _timed(held_yaw_calibration, 'held_yaw', lambda a, k: a[0])
 pre_insert_base_read = _timed(pre_insert_base_read, 'pre_insert_read', lambda a, k: a[0])
 verify_seated = _timed(verify_seated, 'verify', lambda a, k: ','.join(a[0]) if a else '')
-_pick_room = _timed(_pick_room, 'pick_room', lambda a, k: a[0])   # its observe_many runs in spacing_check's own copy of
+_pick_room = _timed(_pick_room, 'pick_room', lambda a, k: a[0])
+# the moved modules call the replay's TIMED versions when the planner runs them (their own imports are the bare ones)
+import align_servo as _al_mod   # noqa: E402
+import recovery as _rec_mod     # noqa: E402
+for _m in (_al_mod, _rec_mod):
+    for _n in ('run_subprocess', 'snapshot_robot_state', 'observe_base_pose', 'observe_object_orientation'):
+        if hasattr(_m, _n):
+            setattr(_m, _n, globals()[_n])   # its observe_many runs in spacing_check's own copy of
                                                                    # this module (untimed): 22 s a cycle showed as 'gap'
 # reads that ran untimed (10-25 s per part showed only as gaps, ASSEMBLY_STATE_MACHINE.md): base ICP/outline choice,
 # the part depth fit at the pick, the line_green notch read, the one-view certification, the part view
