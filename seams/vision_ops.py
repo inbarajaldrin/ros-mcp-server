@@ -319,6 +319,20 @@ def certify_many(mates):
                     ev['why'] = f"depth read {ev['why']}; the insert seated it at {ins:+.2f} mm and CAD rules out a wedge"
 
             ev['verdict'] = ('inside' if inside else 'outside') + f" (xy implied by seat depth): {ev['why']}"
+        if not inside and cap is not None:
+            # keep what the refusal was read from (10-24: u_brown read +2.7..3.0 mm high three times and nothing was
+            # saved to test why): the world cloud, the colour frame, the base pose and the verdict
+            try:
+                d_ = REPO / 'ablations' / 'logs' / 'seat_checks'; d_.mkdir(parents=True, exist_ok=True)
+                stem = d_ / f"certify_{obj}_{time.strftime('%Y%m%d_%H%M%S')}"
+                np.save(f'{stem}_world.npy', np.asarray(cap[0], np.float32))
+                if len(cap) > 2 and cap[2] is not None:
+                    import cv2
+                    cv2.imwrite(f'{stem}_color.png', np.asarray(cap[2]))
+                json.dump({'base': [list(ob[0]), list(ob[1])] if ob else None, 'evidence': ev}, open(f'{stem}.json', 'w'),
+                          default=str, indent=1)
+            except Exception as e_:
+                ev['saved'] = f'not saved: {e_}'
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
                     'tilt_deg': tilt, 'method': method, 'evidence': ev})
         lap(f'mate {addr}')
