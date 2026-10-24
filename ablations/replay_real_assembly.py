@@ -3057,7 +3057,12 @@ def main() -> int:
             # above its last sighting (run 31: line_green paid clear-area 6 s + home 4 s + 10 s wait, then this view)
             from primitives.shared.config import CLEAR_AREA_XY as _CA
             _ls = LAST_SEEN_XY.get(obj)
-            if (not args.dry_run and args.part_at_staging and not cell_io._SAFETY_STOP and _ls is not None
+            # the part is in the hand (--initial-held-quat): no table search, room check or blind re-plan for it (run 83c:
+            # u_brown held at home was looked for on the table four times and was being sent to a pick, which opens)
+            held_now = args.initial_held_quat is not None and obj in (args.only or '').split(',')
+            if held_now:
+                print(f"  [view] {obj}: in the hand - no table search", flush=True)
+            if (not args.dry_run and not held_now and args.part_at_staging and not cell_io._SAFETY_STOP and _ls is not None
                     and np.hypot(_ls[0] - _CA[0], _ls[1] - _CA[1]) > PART_AWAY_FROM_CLEAR_M):
                 msg = (f"  [view] {obj}: last seen at ({1000 * _ls[0]:.0f}, {1000 * _ls[1]:.0f}) mm, away from the clear "
                        f"area -> look above it")
@@ -3069,7 +3074,7 @@ def main() -> int:
                     if log_fh: log_fh.write(msg + "\n")
                     failed = obj
                     break
-            elif (not args.dry_run and args.part_at_staging and not cell_io._SAFETY_STOP and not _seen_here(obj)):
+            elif (not args.dry_run and not held_now and args.part_at_staging and not cell_io._SAFETY_STOP and not _seen_here(obj)):
                 msg = f"  [view] {obj}: not at the clear area -> look from home, then the staging view"
                 print(msg, flush=True)
                 if log_fh: log_fh.write(msg + "\n")
@@ -3084,7 +3089,7 @@ def main() -> int:
                     break
             # Not where we usually keep it (home view)? Look over the staging region and pick from
             # there (operator 2026-10-19: move over the staging region as part of the assembly).
-            if (not args.dry_run and not args.part_at_staging and not cell_io._SAFETY_STOP
+            if (not args.dry_run and not held_now and not args.part_at_staging and not cell_io._SAFETY_STOP
                     and (obj in NOT_FROM_HOME or not _seen_here(obj))):
                 msg = f"  [view] {obj}: not seen from home -> look above it"
                 print(msg, flush=True)
@@ -3096,7 +3101,7 @@ def main() -> int:
                     failed = obj
                     break
             # Room for the recorded grasp's open fingers where the part lies (relocates it if not)
-            if not args.dry_run and not args.part_at_staging and not cell_io._SAFETY_STOP:
+            if not args.dry_run and not held_now and not args.part_at_staging and not cell_io._SAFETY_STOP:
                 gid_ = next((parse_tool_call(s_)[1].get('grasp_id') for s_ in entry.get('tool_sequence', []) or []
                              if 'move_to_grasp' in s_), None)
                 # the fingers come down at the recorded PRE-GRASP opening (fmb1_assembly.json), not the grip width
@@ -3111,7 +3116,7 @@ def main() -> int:
                     break
             # planned blind (no planning view saw it): plan it now, with the camera above it - 10-22 attempt 20 ran the
             # recorded 2 passes on an UPRIGHT yellow (1 pass), its extra set-down left it where the regrasp lost it
-            if entry.get('_planned_blind') and not args.dry_run and not cell_io._SAFETY_STOP:
+            if entry.get('_planned_blind') and not args.dry_run and not held_now and not cell_io._SAFETY_STOP:
                 seq0, bn0 = entry.pop('_planned_blind')
                 # look straight down at it first (14:33 the check ran from over the base, before the view above the part)
                 if not _seen_here(obj, 4.0):
