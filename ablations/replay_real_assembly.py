@@ -1579,6 +1579,8 @@ DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today 
                                      # picks); u_brown lying on its side slid 8.5 mm along its uniform top face, was held
                                      # 8.5 mm off and the 8 mm spiral missed its pocket twice (rim, +34 mm).
                                      # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
+DEPTH_PICK_AGREE_XY_M = 0.002       # the two captures' xy (was 1 mm; run 84: u_brown lying at ~5 deg yaw, fits 1.9 mm / 0.4 deg
+                                    # apart, rms 1.55-1.69 mm; the pick has 7 mm of finger room)
 DEPTH_PICK_AGREE_MAX_TURN_DEG = 5.0  # two agreeing captures (0.5 deg, 1 mm) may sit this far from the marker
 DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
 DEPTH_PICK_MIN_MATCHED = 0.20        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21). 10-23: 0.30 -> 0.20 -
@@ -1685,7 +1687,7 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                         and abs(info.get('turned_deg', 99)) <= DEPTH_PICK_AGREE_MAX_TURN_DEG
                         and np.hypot(*info.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_MAX_MOVE_M
                         and info.get('n', 0) >= DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)
-                        and np.hypot(*(np.asarray(pose[0][:2]) - np.asarray(first_pose[0][:2]))) <= 0.001
+                        and np.hypot(*(np.asarray(pose[0][:2]) - np.asarray(first_pose[0][:2]))) <= DEPTH_PICK_AGREE_XY_M
                         and abs(info.get('yaw_deg', 0.0) - first_info.get('yaw_deg', 0.0)) <= 0.5):
                     say(f"  [depth-pick] {obj}: two captures agree (yaw {first_info.get('yaw_deg')} / {info.get('yaw_deg')} deg) "
                         f"- the {info.get('turned_deg')} deg to the marker is the marker's; fit trusted")
