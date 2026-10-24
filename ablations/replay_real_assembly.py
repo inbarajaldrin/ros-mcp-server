@@ -2126,7 +2126,19 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             except Exception:
                 pass
             argv += ['--pre-grasp-width', f"{w_:g}"]
-        if tool_name == 'move_to_grasp' and os.environ.get('PICK_FROM', 'depth') == 'depth' and not args.dry_run:
+        at_clear = False
+        if tool_name == 'move_to_grasp':
+            # a part the arm set down at the clear area is regrasped from its grasp point, as it was before the depth pick
+            # (operator 10-24: the drop moves it a little; run 82c refused u_orange there on a depth fit 6 deg from its
+            # marker). Nothing else is within CLEAR_OCCUPIED_M, so a few mm off is not a finger on a neighbour - the
+            # -105 N of run 46 that the depth gate is for was a pick next to other parts.
+            from primitives.shared.config import CLEAR_AREA_XY as _CA
+            pl_ = placed(obj)
+            at_clear = pl_ is not None and np.hypot(pl_[0] - _CA[0], pl_[1] - _CA[1]) < CLEAR_OCCUPIED_M
+            if at_clear:
+                say(f"  [{step_idx}] {obj}: set down at the clear area -> grasp point (no depth pick)")
+        if (tool_name == 'move_to_grasp' and os.environ.get('PICK_FROM', 'depth') == 'depth' and not args.dry_run
+                and not at_clear):
             tgt = depth_pick_target(obj, int(kw.get('grasp_id', state.last_grasp_id or 1)), say, log_fh)
             if tgt is None:
                 # no marker fallback (operator 10-23: "better to stop rather than do something harmful"): run 46's pick
