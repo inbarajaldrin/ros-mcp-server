@@ -14,6 +14,8 @@ from scipy.spatial.transform import Rotation as R_
 
 import cell_io
 from cell_io import REPO_ROOT, run_subprocess, snapshot_robot_state, make_env, _TIMING  # noqa: F401
+if str(REPO_ROOT) not in sys.path:      # run as `python3 ablations/replay_real_assembly.py`: only ablations/ is on the path yet
+    sys.path.insert(0, str(REPO_ROOT))  # (gate run 71: ModuleNotFoundError 'seams' at import)
 from seams.servo_law import (SERVO_ITERS, SERVO_YAW_TOL_DEG, SERVO_YAW_MIN_TURN_DEG, SERVO_MAX_SPREAD_PX,  # noqa: E402,F401
                              SERVO_MAX_YAW_DEG, SERVO_GAIN_CLEAR, SERVO_YAW_GAIN, SERVO_BIAS_M, SERVO_BIAS_CLEAR_M,
                              SERVO_TOL_M, SERVO_MAX_M)
