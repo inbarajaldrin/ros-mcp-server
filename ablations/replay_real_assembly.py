@@ -2968,6 +2968,10 @@ def main() -> int:
                 _PARTS = RUN_BASE.get('parts') or _PARTS           # this assembly's parts, around its base
                 seen = _obs_parts(_PARTS, timeout_s=4.0, n_samples=PICK_ROOM_SAMPLES)   # was 12 samples / 8 s (~4.7 s
                 # still at home in run 67, where the parts waiting in the staging region are not even in view)
+                if args.initial_held_quat is not None and args.only:
+                    # the part in the hand is not a table part (run 82e: held line_green read 0 mm from base1 -> relocate
+                    # -> the relocate opened the gripper at home and dropped it)
+                    seen = {k_: v_ for k_, v_ in seen.items() if k_ not in args.only.split(',')}
                 ok_sp, rep = _spacing(seen, args.observed_base or ob, base=RUN_BASE['name'])
                 rep['unseen'] = [n for n in _PARTS if n not in seen]
                 msg = f"  [spacing] {json.dumps(rep)}"

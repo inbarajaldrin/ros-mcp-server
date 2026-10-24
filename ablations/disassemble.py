@@ -865,6 +865,10 @@ def main():
     from primitives.shared.config import DEFAULT_BASE_POSITION
     if a.resume_held and not verify_held(a.resume_held):
         print(f"verify_grasp: {a.resume_held} not held — not resuming"); return 1
+    if not a.dry_run and not a.resume_held and a.relocate and verify_held(a.relocate):
+        # never open at home over a part in the hand (run 82e: the replay's spacing check took the held line_green for a
+        # table part 0 mm from base1, called this relocate, and the open at home dropped it onto the table)
+        print(f"{a.relocate} is in the gripper - opening at home would drop it; not relocating"); return 1
     if not a.dry_run and not a.resume_held:                # (opening would drop the held part)
         ok, _ = run(py('primitives.move_home', '--mode', 'real'), 'home', 60)
         if not ok: return 1
