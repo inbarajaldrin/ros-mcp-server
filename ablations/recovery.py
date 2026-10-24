@@ -424,6 +424,7 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
         say(f"  [seat-check] {obj}: no observed base -> skipped"); return True
     out_dir = REPO_ROOT / 'ablations' / 'logs' / 'seat_checks'
     for attempt in range(RESEAT_MAX + 1):
+        lift = False          # a press / nudge left it high: lift it with the insert grasp and insert it again
         res = check(obj, ob, move=True, out_dir=out_dir, base=RUN_BASE['name'])
         ob = res.get('observed_base') or ob                    # re-fitted from the check's own view
         args.observed_base = ob
@@ -438,10 +439,10 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
                 return True
             if attempt >= RESEAT_MAX:
                 say(f"\n!!! {obj} still not seated after the edge press"); return False
-            continue
+            lift = True
         # a seat the check passes is not touched (operator 10-22: no nudges on a seated part; 14:02 the lip rule nudged an
         # ok line_green sideways)
-        plan = cross_nudge_plan(res) if ('pitch_deg' in res and not res.get('ok')) else None
+        plan = cross_nudge_plan(res) if (not lift and 'pitch_deg' in res and not res.get('ok')) else None
         if not BASE_FIXED_CFG() and os.environ.get('NUDGE_FREE_BASE', '0') != '1':
             plan = None                                       # no sideways push on a free base (see nudge_into_slot)
         if abs(float((res.get('axial') or {}).get('shift_mm', 0.0))) >= NUDGE_SHIFT_MM:
@@ -457,10 +458,10 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             ob = observe_base_pose(RUN_BASE['name']) or ob
             args.observed_base = ob
             continue
-        if res.get('ok'):
+        if res.get('ok') and not lift:
             _record_seat_check_error(obj, res)
             return True
-        if res.get('mode', '').startswith('median height'):
+        if not lift and res.get('mode', '').startswith('median height'):
             if res.get('ok'):
                 return True
             say(f"\n!!! {obj}: top {res.get('height_err_mm'):+.1f} mm from its CAD height - not seated"); return False
@@ -468,7 +469,9 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             say(f"  [seat-check] {obj}: could not measure -> continuing"); return True
         shift = abs(float((res.get('axial') or {}).get('shift_mm', 0.0)))
         ends = res.get('end_heights_mm') or [0.0, 0.0]
-        if (abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5)
+        if lift:
+            pass
+        elif (abs(res['pitch_deg']) > res.get('limits', {}).get('pitch_deg', 1.5)
                 or shift >= NUDGE_SHIFT_MM or abs(ends[1] - ends[0]) >= NUDGE_END_DIFF_MM):
             # tilted, or shifted along its axis = an end on base1's top past the pocket end; a
             # regrasp holds it where it is. 2026-10-15: a bar 4-7 mm high and +5 mm along its axis
@@ -502,27 +505,43 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
                 if _level_but_high(res2) or abs(res2.get('roll_deg', 0.0)) >= ROLL_PRESS_DEG:   # level but high: a roll
                     say(f"  [seat-check] {obj}: level but {res2['height_err_mm']:+.1f} mm high after the nudge -> edge taps")
                     ok = press_high_edge(obj, ob, say, out_dir)
-                if not ok:
-                    say(f"\n!!! {obj} still not seated after the nudge")
-            return ok
-        if _level_but_high(res):
+                if 'pitch_deg' in res2:
+                    res = res2
+            if ok:
+                return ok
+            if attempt >= RESEAT_MAX:
+                say(f"\n!!! {obj} still not seated after the nudge"); return False
+            # run 73: line_green lay level ~5 mm high (taps: mid +4.8, both edges +4.2/+5.3, the high one blocked at
+            # 4 N) after the axial taps, the slow push and the edge check - nothing a push fixes; lift and insert again
+            lift = True
+        elif _level_but_high(res):
             say(f"  [seat-check] {obj}: level and centred but {res['height_err_mm']:+.1f} mm high -> edge taps")
             ok = press_high_edge(obj, ob, say, out_dir)
-            if not ok:
-                say(f"\n!!! {obj} still not seated after the edge press")
-            return ok
+            if ok:
+                return ok
+            if attempt >= RESEAT_MAX:
+                say(f"\n!!! {obj} still not seated after the edge press"); return False
+            lift = True
         if attempt == RESEAT_MAX:
             say(f"\n!!! {obj} still not flat after {RESEAT_MAX} reseat(s)"); return False
         from primitives.shared.config import get_grasp_id_for_assembly, get_gripper_width_mm
         gid = get_grasp_id_for_assembly(obj); w = get_gripper_width_mm(obj, gid)
         tcp = seat_grasp(obj, gid, ob, base_name=RUN_BASE['name'])
+        # the part sits high: grip it where the insert held it, not that much deeper (run 73: +5..7 mm on the rim - at
+        # the seat height the fingertips would reach past its underside); depth reads over the taps, so this errs high
+        lift_h = min(max(float(res.get('height_err_mm') or 0.0), 0.0), 8.0) / 1000.0
+        tcp = [tcp[0], tcp[1], tcp[2] + lift_h]
         from disassemble import grasp_offset_for
         os.environ['GRASP_TOOL_OFFSET_M'] = f"{grasp_offset_for(obj):.5f}"   # the insert's grasp depth
         q = [str(v) for v in SEAT_EE_QUAT]
         held = (R_.from_quat(ob[1]) * R_.from_quat(_seat_quat(obj, RUN_BASE['name']))).as_quat()
         (bx, by, bz), bq = ob
-        from primitives.shared.config import get_object_base_offset_m
-        dz = float(get_object_base_offset_m(obj)[2])
+        # the seat height drive-mate inserts at (UNI): learned from the part's certified inserts, else the table
+        from seams import seat_learn as _sl
+        dz, _n = _sl.learned_dz(obj)
+        if dz is None:
+            from primitives.shared.config import get_object_base_offset_m
+            dz = float(get_object_base_offset_m(obj)[2])
         steps = [
             (['primitives.move_cartesian', '--mode', 'real', '--xyz', f"{tcp[0]:.4f}", f"{tcp[1]:.4f}",
               f"{tcp[2] + HOVER_DZ:.4f}", '--quat', *q], 'reseat hover', 60),
@@ -539,7 +558,8 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             (['primitives.control_gripper', f"{w:g}", '--mode', 'real'], 'reseat release', 30),
             (['primitives.move_to_safe_height', '--mode', 'real'], 'reseat lift', 60),
         ]
-        say(f"  [seat-check] {obj} not flat -> reseat {attempt + 1}/{RESEAT_MAX} with the insert grasp")
+        say(f"  [seat-check] {obj} {'still high' if lift else 'not flat'} -> reseat {attempt + 1}/{RESEAT_MAX} with the insert "
+            f"grasp (grip {1000 * lift_h:+.1f} mm, seat dz {1000 * dz:+.2f} mm)")
         for argv, label, t in steps:
             r = run_subprocess(['python3', '-u', '-m', *argv], label=label, timeout_s=t)
             if r.get('result') == 'failure':
