@@ -646,6 +646,18 @@ def placed(obj):
         return None
 
 
+_HELD_HELPER = '''
+import rclpy, time
+from std_msgs.msg import Bool, Float32
+rclpy.init(); n = rclpy.create_node('held_check'); v = {}
+n.create_subscription(Bool, '/gripper_grasp_detected', lambda m: v.__setitem__('g', bool(m.data)), 10)
+n.create_subscription(Float32, '/gripper_width_offset', lambda m: v.__setitem__('w', float(m.data)), 10)
+t = time.time()
+while (len(v) < 2) and time.time() - t < 5: rclpy.spin_once(n, timeout_sec=0.1)
+print(('HELD' if v.get('g') and v.get('w', 0.0) > 2.0 else 'FREE') + f" grip={v.get('g')} gap_mm={v.get('w')}")
+'''
+
+
 def record_placed(obj, xy):
     try:
         d = json.load(open(PLACED_JSON)) if PLACED_JSON.exists() else {}
@@ -2712,6 +2724,16 @@ def main() -> int:
     if args.initial_held_quat is not None:
         state.held_quat = tuple(args.initial_held_quat)
         print(f"Initial held_quat seeded: {state.held_quat}")
+    elif not args.dry_run and not args.seat_check_only:
+        # a run that picks must not start with a part in the hand: the startup opens the gripper and every pick opens it
+        # (10-24 16:06: run 90b started holding line_green after a failed set-down - stopped at the base view by hand)
+        # held = the RG2's grip flag AND a finger gap (execute_mate's rule: the flag alone is also set closed on nothing,
+        # and verify_grasp's width test called the 43.9 mm release opening 'line_green held')
+        p_ = subprocess.run(['python3', '-c', _HELD_HELPER], capture_output=True, text=True, timeout=15, env=make_env())
+        if p_.stdout.strip().startswith('HELD'):
+            print(f"\n!!! the gripper holds a part ({p_.stdout.strip()}) - not starting a run that would open it "
+                  f"(set it down first: disassemble.py --place-held <part>)")
+            return 1
 
     # Open per-run log file. Captures every primitive's stdout+stderr alongside
     # the orchestrator's headers. One persistent record per replay attempt so

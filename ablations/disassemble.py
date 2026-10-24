@@ -111,6 +111,15 @@ def py(*a):
     return [sys.executable, '-u', '-m', *a]
 
 
+def _gripper_holds():
+    """The RG2's grip flag AND a finger gap (execute_mate's rule) - not verify_grasp's width test, which read the 43.9 mm
+    release opening as 'line_green held' (10-24)."""
+    sys.path.insert(0, str(REPO / 'ablations'))
+    from replay_real_assembly import _HELD_HELPER
+    p = subprocess.run(['python3', '-c', _HELD_HELPER], capture_output=True, text=True, timeout=15)
+    return p.stdout.strip().startswith('HELD')
+
+
 def verify_held(name):
     """The project's grasp check — queries/verify_grasp.py --width-only, the same one rotate_object
     runs after every pick (a part held = closed width near the part's grip width, not ~0.6 mm)."""
@@ -875,6 +884,10 @@ def main():
         print(f"[spot] {a.place_held}: free spot -> flange ({1000*fx:.0f}, {1000*fy:.0f}) mm, {gap:.0f} mm from the nearest "
               f"part; seen there: {sorted(n for n in seen if n != a.place_held)}", flush=True)
         SPOT_XY = (fx, fy)
+        # carry at the safe height, as the reset does: from the staging view (0.62 m) the spot can be out of reach
+        # (10-24 16:07: (550, -460) at 0.62 m - no Cartesian IK path, line_green stayed in the hand)
+        ok, _ = run(py('primitives.move_to_safe_height', '--mode', 'real', '--object-name', a.place_held), 'down to the safe height', 60)
+        if not ok: return 1
         rc = place_at(SPOT_XY[0], SPOT_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
         if rc == 0:
             # look where it landed (2026-10-20: a part assumed at the clear area was 38 cm away) and record it
@@ -898,7 +911,7 @@ def main():
     from primitives.shared.config import DEFAULT_BASE_POSITION
     if a.resume_held and not verify_held(a.resume_held):
         print(f"verify_grasp: {a.resume_held} not held — not resuming"); return 1
-    if not a.dry_run and not a.resume_held and a.relocate and verify_held(a.relocate):
+    if not a.dry_run and not a.resume_held and a.relocate and _gripper_holds():
         # never open at home over a part in the hand (run 82e: the replay's spacing check took the held line_green for a
         # table part 0 mm from base1, called this relocate, and the open at home dropped it onto the table)
         print(f"{a.relocate} is in the gripper - opening at home would drop it; not relocating"); return 1
