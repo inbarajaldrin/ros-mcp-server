@@ -842,18 +842,39 @@ def main():
         gid_ = get_grasp_id_for_assembly(a.place_held)          # any assembly (2026-10-20: FMB3 line_red)
         cz = contact_flange_z(a.place_held, gid_, load_seat_pose_in_base(get_base_for_part(a.place_held) or 'base1',
                                                                           a.place_held)[1], grasp_offset_for(a.place_held))
-        rc = place_at(STAGING_XY[0], STAGING_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
+        # a free spot in the staging region from a fresh staging-view look, as --to-free-spot chooses it (QUEUED #14:
+        # this went to the fixed clear area; 10-24 run 83d: line_green lay there, u_brown had nowhere to go)
+        from staging_layout import STAGING_VIEW, TOP_DOWN_Q
+        from spacing_check import observe_parts
+        ob_ = observe_base()
+        if ob_ is None:
+            print("base1 not observed - not placing"); return 1
+        ok, _ = run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
+                       '--quat', *map(str, TOP_DOWN_Q)), 'staging view (choose a free spot)', 90)
+        if not ok: return 1
+        time.sleep(1.5)
+        seen = observe_parts([n for n in RUN['parts'] if n != a.place_held])
+        sp_, sq_ = load_seat_pose_in_base(RUN['base'], a.place_held)
+        Rb_ = R.from_quat(ob_[1])
+        seen[a.place_held] = (tuple(np.array(ob_[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
+        fx, fy, gap = staging_spot(a.place_held, seen, ob_, gid_, GRIP_WIDTH_MM[a.place_held])
+        if fx is None:
+            print(f"no free spot in the staging region for {a.place_held} - not placing"); return 1
+        print(f"[spot] {a.place_held}: free spot -> flange ({1000*fx:.0f}, {1000*fy:.0f}) mm, {gap:.0f} mm from the nearest "
+              f"part; seen there: {sorted(n for n in seen if n != a.place_held)}", flush=True)
+        SPOT_XY = (fx, fy)
+        rc = place_at(SPOT_XY[0], SPOT_XY[1], GRIP_WIDTH_MM[a.place_held], home=False, contact_z=cz)
         if rc == 0:
             # look where it landed (2026-10-20: a part assumed at the clear area was 38 cm away) and record it
             sys.path.insert(0, str(REPO / 'ablations'))
             from replay_real_assembly import observe_base_pose
-            run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{STAGING_XY[0]:.4f}", f"{STAGING_XY[1]:.4f}",
+            run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', f"{SPOT_XY[0]:.4f}", f"{SPOT_XY[1]:.4f}",
                    '0.52', '--quat', '0', '1', '0', '0'), 'look at the landing', 90)
             seen = observe_base_pose(a.place_held, timeout_s=8.0)
             if seen is None:
-                print(f"!!! {a.place_held} not seen at the clear area after the set-down"); return 1
-            d = 1000 * float(np.hypot(seen[0][0] - STAGING_XY[0], seen[0][1] - STAGING_XY[1]))
-            print(f"[place-held] {a.place_held} seen at ({1000*seen[0][0]:.0f}, {1000*seen[0][1]:.0f}) mm, {d:.0f} mm from the clear area", flush=True)
+                print(f"!!! {a.place_held} not seen at its spot after the set-down"); return 1
+            d = 1000 * float(np.hypot(seen[0][0] - SPOT_XY[0], seen[0][1] - SPOT_XY[1]))
+            print(f"[place-held] {a.place_held} seen at ({1000*seen[0][0]:.0f}, {1000*seen[0][1]:.0f}) mm, {d:.0f} mm from its spot", flush=True)
             record_staged(a.place_held, seen[0][0], seen[0][1])
         return rc
     order = json.load(open(REPO / f"ablations/eval_resources/fmb{RUN['base'][4:]}_assembly.json"))['assembly_order']
