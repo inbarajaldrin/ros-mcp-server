@@ -236,6 +236,15 @@ To do: automate this nudge in `replay_real_assembly.py:seat_check_and_reseat` (d
 measured high end; re-check depth after each step), replacing the top-down reseat. Root cause to
 chase separately: why the bar lands axially off (insert pose error along base y, see #12).
 
+### 14. `disassemble.py --place-held` sets the part down at the clear area (queued 2026-10-23)
+
+Its help says "in the staging region", but it lands at `STAGING_XY` - the fixed **clear area** (-0.320, -0.500).
+Run 74 (stopped mid-insert holding u_brown) put it there on its side; the next run's depth fit of it read 3.3 deg,
+then 18 deg from 0.45 m, and refused to pick (fail-closed, correct). The operator does not want parts parked at the
+clear area. Recovered by `--relocate u_brown --from-staging --grasp-id 1` (spot planned from the staging view).
+Fix: choose the spot as `--to-free-spot` does (staging view, `observe_parts`, `staging_spot`) - needs the held part's
+footprint pose from the TCP + the insert's seat stance, which `staging_spot` takes as `seen[name]`.
+
 ---
 
 ## Investigated and closed
