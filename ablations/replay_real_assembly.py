@@ -2699,7 +2699,10 @@ DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today 
                                      # 8.5 mm off and the 8 mm spiral missed its pocket twice (rim, +34 mm).
                                      # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
 DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
-DEPTH_PICK_MIN_MATCHED = 0.30        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21)
+DEPTH_PICK_MIN_MATCHED = 0.20        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21). 10-23: 0.30 -> 0.20 -
+                                     # a part picked from the staging region has neighbours in its crop: u_brown's good fit
+                                     # (2.3 mm, 1.6 deg) matched 28% and stopped run 66; of 261 fits today only 3 were under
+                                     # 0.30 and the other two failed the move / turn limits anyway (6.6 mm; 12.3 deg)
 
 
 def depth_pick_target(obj, gid, say=print, log_fh=None):
