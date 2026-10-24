@@ -854,6 +854,18 @@ def main():
         if not ok: return 1
         time.sleep(1.5)
         seen = observe_parts([n for n in RUN['parts'] if n != a.place_held])
+        # parts set down earlier and not seen from this view are obstacles too, as for --to-free-spot (10-24 15:03: the
+        # staging look saw only u_brown / u_orange; yellow, set down there by the reset, was 100 mm off the chosen spot)
+        try:
+            st_ = json.load(open(STAGED)) if STAGED.exists() else {}
+        except Exception:
+            st_ = {}
+        for n_, v_ in st_.items():
+            if (n_ != a.place_held and n_ in RUN['parts'] and n_ not in seen and len(v_) >= 4
+                    and v_[2] >= time.time() - STAGED_OBSTACLE_S):
+                seen[n_] = (tuple(v_[3][0]), tuple(v_[3][1]))
+                print(f"[spot] {n_}: not seen from the staging view - set down at ({1000*v_[0]:.0f}, {1000*v_[1]:.0f}) mm, "
+                      f"kept as an obstacle", flush=True)
         sp_, sq_ = load_seat_pose_in_base(RUN['base'], a.place_held)
         Rb_ = R.from_quat(ob_[1])
         seen[a.place_held] = (tuple(np.array(ob_[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
