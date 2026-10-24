@@ -1638,13 +1638,21 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
             or info_.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info_.get('n_data', 1), 1))
     if not trusted(pose, info):
         # re-measure once from the other view height (a different depth sample of the same part) before refusing
+        # fresh frames from the 0.52 m view, not the 0.45 m one: every 0.45 m re-measure in the logs was worse than the read
+        # it re-checked (3/3 - runs 66, 74b, 75: 1.6/3.3/3.1 deg -> 12.3/18.3/7.6 deg on 15-39% of the points; the D415's
+        # depth thins out there), while the refused first reads were marginal (3.13, 3.28 deg against 3.0)
         cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
-        alt = next((z_ for z_ in DEPTH_VIEW_ZS if cur is None or abs(z_ - cur[2]) > 0.02), None)
-        if cur is not None and alt is not None:
-            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{alt:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
-                                '--min-z', '0.15'], label=f'depth-pick re-measure above {obj} at {alt:.2f} m', timeout_s=60,
-                               log_fh=log_fh)
+        alt = DEPTH_VIEW_ZS[0]
+        if cur is not None:
+            r = {'result': 'success'}
+            if abs(alt - cur[2]) > 0.02:
+                r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                    f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{alt:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                    '--min-z', '0.15'], label=f'depth-pick re-measure above {obj} at {alt:.2f} m',
+                                   timeout_s=60, log_fh=log_fh)
+            else:
+                alt = cur[2]
+                time.sleep(0.5)                     # new frames, not the ones the first fit used
             if r.get('result') != 'failure':
                 try:
                     from part_depth import read as _read
