@@ -2132,11 +2132,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             # (operator 10-24: the drop moves it a little; run 82c refused u_orange there on a depth fit 6 deg from its
             # marker). Nothing else is within CLEAR_OCCUPIED_M, so a few mm off is not a finger on a neighbour - the
             # -105 N of run 46 that the depth gate is for was a pick next to other parts.
-            from primitives.shared.config import CLEAR_AREA_XY as _CA
+            # also a recovery set-down anywhere (disassemble --place-held writes placed_parts.json too; the cycle reset
+            # clears it, so the reset's own set-downs keep the depth pick). Run 84: u_brown set down by --place-held,
+            # fits 0.4 deg / 1.9 mm apart and 3.8-4.8 deg from the marker -> refused
             pl_ = placed(obj)
-            at_clear = pl_ is not None and np.hypot(pl_[0] - _CA[0], pl_[1] - _CA[1]) < CLEAR_OCCUPIED_M
+            at_clear = pl_ is not None
             if at_clear:
-                say(f"  [{step_idx}] {obj}: set down at the clear area -> grasp point (no depth pick)")
+                say(f"  [{step_idx}] {obj}: set down by the arm in this cycle -> grasp point (no depth pick)")
         if (tool_name == 'move_to_grasp' and os.environ.get('PICK_FROM', 'depth') == 'depth' and not args.dry_run
                 and not at_clear):
             tgt = depth_pick_target(obj, int(kw.get('grasp_id', state.last_grasp_id or 1)), say, log_fh)

@@ -129,6 +129,7 @@ def _in_staging(cx, cy, ex, ey):
 
 
 STAGED = REPO / 'ablations/logs/staged_parts.json'
+PLACED = REPO / 'ablations/logs/placed_parts.json'   # recovery set-downs this cycle (replay_real_assembly.placed)
 
 
 def record_staged(name, x, y, pose=None):
@@ -876,6 +877,13 @@ def main():
             d = 1000 * float(np.hypot(seen[0][0] - SPOT_XY[0], seen[0][1] - SPOT_XY[1]))
             print(f"[place-held] {a.place_held} seen at ({1000*seen[0][0]:.0f}, {1000*seen[0][1]:.0f}) mm, {d:.0f} mm from its spot", flush=True)
             record_staged(a.place_held, seen[0][0], seen[0][1])
+            # a recovery set-down: the replay regrasps it from the grasp point (placed_parts.json, cleared per cycle)
+            try:
+                d_ = json.load(open(PLACED)) if PLACED.exists() else {}
+            except Exception:
+                d_ = {}
+            d_[a.place_held] = {'xy': [round(float(seen[0][0]), 4), round(float(seen[0][1]), 4)], 't': time.time()}
+            json.dump(d_, open(PLACED, 'w'), indent=1)
         return rc
     order = json.load(open(REPO / f"ablations/eval_resources/fmb{RUN['base'][4:]}_assembly.json"))['assembly_order']
     sel = a.relocate or a.only
