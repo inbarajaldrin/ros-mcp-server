@@ -148,6 +148,13 @@ _NODE = {}
 SHORT_MOVE_M = 0.005          # probe steps and retracts up to this: timed by distance, not the 2.5 s floor
 SHORT_SPEED_M_S = 0.005
 SHORT_MIN_S = 0.6
+# the guarded descent to the probe start goes no faster than this within NEAR_RIM_M of it: the guard's 51-sample median
+# (~100 ms, against the F/T glitch) lags a hard contact, and seated parts stand up to ~40 mm over line_green's rim. Run 82d:
+# the in-hand base re-read failed, the arm stayed at 0.56 m and came down 330 mm at 70 mm/s onto a part top 29 mm over the
+# rim - -7 to -75 N in 57 ms, robot protective stop before the guard fired; 10-23 21:51 touched the same height at 35 mm/s
+# and the guard stopped it at 6.4 N
+NEAR_RIM_M = 0.06
+NEAR_RIM_SPEED_M_S = 0.015   # mean; the s-curve peaks ~1.9x -> under the 35 mm/s the guard caught
 
 
 def _node():
@@ -305,8 +312,18 @@ def main():
         x, y = seat[0] + dx, seat[1] + dy
         cur, _ = tcp_now() if IN_PROCESS else (None, None)
         d_ = float(np.linalg.norm(np.array([x, y, start_z]) - cur)) if cur is not None else 1.0
-        r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N,          # guarded: 13:39 an unguarded descent here put the
-                  duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S) if d_ <= SHORT_MOVE_M else None)   # yellow on line_green
+        if cur is not None and cur[2] > start_z + NEAR_RIM_M + 0.005:
+            r0 = move([x, y, start_z + NEAR_RIM_M], q, max_force=MAX_FORCE_N)
+            if r0.get('result') == 'failure':
+                return None
+            cur, _ = tcp_now()
+            d_ = float(np.linalg.norm(np.array([x, y, start_z]) - cur))
+        if d_ > SHORT_MOVE_M:
+            r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N, min_duration=d_ / NEAR_RIM_SPEED_M_S,
+                      duration=d_ / NEAR_RIM_SPEED_M_S)
+        else:
+            r1 = move([x, y, start_z], q, max_force=MAX_FORCE_N,          # guarded: 13:39 an unguarded descent here put the
+                  duration=max(SHORT_MIN_S, d_ / SHORT_SPEED_M_S))   # yellow on line_green
         if r1.get('result') == 'failure' and not r1.get('contact'):
             return None
         # down only as far as the rim can tell: ENTER_DZ (+1 mm) below the lowest rim known (measured, else CAD) - past it
