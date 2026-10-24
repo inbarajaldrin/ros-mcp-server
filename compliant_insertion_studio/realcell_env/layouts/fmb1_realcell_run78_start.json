@@ -1,0 +1,193 @@
+{
+ "record": {
+  "schema": "layout/2.0",
+  "layout": "fmb1_realcell_run78_start",
+  "semantics_revision": "r1-realcell-draft",
+  "created": "2026-10-24",
+  "status": "DRAFT - cell part frames, NOT the graph occurrence frames"
+ },
+ "assembly": "fmb1",
+ "embodiment": "ur5e_rg2",
+ "root": "placed",
+ "poses_absolute": true,
+ "frame": "world (twin_world: table-top plane under base_link; p = (-x_base, -y_base, z_base + 0.080), q = Rz(pi) q_base)",
+ "frame_convention_WARNING": "pos_m / quat_wxyz are each part's CELL frame (bbox centre, cell axes: aruco-grasp-annotator meshes), not the graph occurrence frame (volume centroid; base1 axes Rz(-90) from ours, MEASURED_CELL parts.frame_map_cell_to_graph). Converting to occurrence frames is OWED; do not feed these to a referee as occurrence poses.",
+ "measured_run": {
+  "log": "/tmp/fmb1_78.log",
+  "result": "RUN EXIT 0, 4/4 certified placed by /ur5e/execute_mate (lines 487, 678, 873, 1068)",
+  "rounding": "parts 1 mm / 1 deg as logged; base1 0.1 mm / 0.01 deg"
+ },
+ "parts": {
+  "Body1": {
+   "occurrence": "occurrence:00",
+   "cell_name": "base1",
+   "spawn": "measured",
+   "pos_m": [
+    -0.1066,
+    0.4892,
+    0.0175
+   ],
+   "quat_wxyz": [
+    0.18601,
+    0.0,
+    0.0,
+    -0.98255
+   ],
+   "ur_base": {
+    "pos_mm": [
+     106.6,
+     -489.2,
+     -62.5
+    ],
+    "rpy_deg_xyz_extrinsic": [
+     0,
+     0,
+     21.44
+    ]
+   },
+   "source": "/tmp/fmb1_78.log line 308: [base] base1 observed at (replay start, after move_base)",
+   "z_status": "derived: localizer z snap (table rest height) for parts; table + 17.5 mm (config.py:121) for base1",
+   "footprint_xy_m": [
+    0.161,
+    0.161
+   ]
+  },
+  "Body2": {
+   "occurrence": "occurrence:01",
+   "cell_name": "u_brown",
+   "spawn": "measured",
+   "pos_m": [
+    -0.33,
+    0.399,
+    0.035
+   ],
+   "quat_wxyz": [
+    0.12279,
+    -0.12279,
+    0.69636,
+    -0.69636
+   ],
+   "ur_base": {
+    "pos_mm": [
+     330,
+     -399,
+     -45
+    ],
+    "rpy_deg_xyz_extrinsic": [
+     -90,
+     0,
+     20
+    ]
+   },
+   "source": "/tmp/fmb1_78.log line 310: [pick] pose used",
+   "z_status": "derived: localizer z snap (table rest height) for parts; table + 17.5 mm (config.py:121) for base1",
+   "footprint_xy_m": [
+    0.07,
+    0.021
+   ]
+  },
+  "Body5": {
+   "occurrence": "occurrence:04",
+   "cell_name": "u_orange",
+   "spawn": "measured",
+   "pos_m": [
+    -0.451,
+    0.535,
+    0.035
+   ],
+   "quat_wxyz": [
+    0.68303,
+    -0.70729,
+    -0.13109,
+    0.12659
+   ],
+   "ur_base": {
+    "pos_mm": [
+     451,
+     -535,
+     -45
+    ],
+    "rpy_deg_xyz_extrinsic": [
+     -92,
+     0,
+     -159
+    ]
+   },
+   "source": "/tmp/fmb1_78.log line 503: [pick] pose used",
+   "z_status": "derived: localizer z snap (table rest height) for parts; table + 17.5 mm (config.py:121) for base1",
+   "footprint_xy_m": [
+    0.07,
+    0.021
+   ]
+  },
+  "Body3": {
+   "occurrence": "occurrence:02",
+   "cell_name": "line_green",
+   "spawn": "measured",
+   "pos_m": [
+    -0.553,
+    0.458,
+    0.013
+   ],
+   "quat_wxyz": [
+    0.69527,
+    -0.12886,
+    0.69527,
+    0.12886
+   ],
+   "ur_base": {
+    "pos_mm": [
+     553,
+     -458,
+     -67
+    ],
+    "rpy_deg_xyz_extrinsic": [
+     159,
+     90,
+     0
+    ]
+   },
+   "source": "/tmp/fmb1_78.log line 695: [pick] pose used",
+   "z_status": "derived: localizer z snap (table rest height) for parts; table + 17.5 mm (config.py:121) for base1",
+   "footprint_xy_m": [
+    0.0259,
+    0.14
+   ]
+  },
+  "Body4": {
+   "occurrence": "occurrence:03",
+   "cell_name": "inverted_u_yellow",
+   "spawn": "measured",
+   "pos_m": [
+    -0.411,
+    0.467,
+    0.035
+   ],
+   "quat_wxyz": [
+    0.69412,
+    -0.69412,
+    -0.13492,
+    0.13492
+   ],
+   "ur_base": {
+    "pos_mm": [
+     411,
+     -467,
+     -45
+    ],
+    "rpy_deg_xyz_extrinsic": [
+     -90,
+     0,
+     -158
+    ]
+   },
+   "source": "/tmp/fmb1_78.log line 890: [pick] pose used (tracked pose; re-observed rpy (-90,0,-157.2) line 891)",
+   "z_status": "derived: localizer z snap (table rest height) for parts; table + 17.5 mm (config.py:121) for base1",
+   "footprint_xy_m": [
+    0.1127,
+    0.021
+   ]
+  }
+ },
+ "fixtures": {}
+}

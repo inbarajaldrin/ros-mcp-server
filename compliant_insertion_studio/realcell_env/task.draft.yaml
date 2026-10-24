@@ -1,0 +1,182 @@
+# fmb1_assemble_realcell - DRAFT task bundle: assemble FMB1 on the REAL cell (environment fmb1_realcell).
+#
+# Modelled on plan-anything data/tasks/fmb1_assemble/task.yaml (dimelab, structure only). Written 2026-10-24 on the cell
+# PC from MEASURED_CELL.yaml (cited [M:key]). NOT published, NOT gated, no receipt: /author-task's publication, the
+# referee's real-cell inputs and the environment receipt are OWED (OWED.md).
+#
+# What differs from the twin task, and why (each from a measurement):
+#   1. base1 (occurrence:00) is FREE, not static. It is untaped (cell_layout.yaml:28 base_fixed false), the arm slides and
+#      turns it between cycles (ablations/move_base.py), it creeps 1-4 mm per part with the Vention e-stop engaged, and a
+#      9 N spiral drags it with the part. The cell re-measures it before every insert [M:base1.*].
+#   2. The assembly region is where base1 has ACTUALLY sat: the union of the 161 mm footprint over 114 replay-start
+#      reads (2026-10-22..23) plus 5 mm [M:base1.footprint_union]. The twin's region (x <= 0.16 world) and the cell's own
+#      configured assembly region (cell_layout.yaml:25) both miss the base's real placements.
+#   3. The parts start in the cell's staging region in their MEASURED stance: U parts and yellow at rpy (-90, 0, yaw)
+#      (the seated orientation up to yaw, resting z 35 mm), line_green long axis horizontal on a long face (z 13 mm) -
+#      every planning that saw them chose 1 pass [M:parts.resting_stance].
+#   4. Perception is a wrist camera, in-view only, ~2.6 Hz, silent while the arm moves, z snapped, held parts occluded
+#      [M:perception.*]. There is no scene-truth pose stream and no 30 Hz.
+#   5. Time is wall time; there is no /clock.
+#
+# Frames: twin_world (table-top plane under base_link). Regions are written support-local on the work_table's top
+# surface as the schema requires; the work_table's placement is a dimelab STAND-IN (centre world (0, 0.4985), extent
+# UNMEASURED), so each region also states its WORLD rectangle, which is the measured truth. If the table is re-placed,
+# recompute the table-local numbers from the world ones.
+
+schema: pa.task/1
+task_id: fmb1_assemble_realcell
+declared_on: '2026-10-24'
+declared_by: realcell env pack draft (claude, cell PC) - /author-task publication OWED
+status: DRAFT
+
+# ---------------------------------------------------------------------------- references
+assembly:
+  name: fmb1
+  assembly_digest: 0438cd536fb5b6fc6c8a4aa8bfdccd77109984b092a15ce84a5775ba4274f64e   # same graph as the twin task (seams/bindings.yaml:5-6 binds this digest)
+  receipt_sha256: 944a376ed0b9f2f951feda64153f08efef0f88ab02bba1f502836ea2c1dbb590    # copied from fmb1_assemble; re-pin at publish
+environment:
+  name: fmb1_realcell
+  receipt_sha256: OWED   # fmb1_realcell is not published (declaration.draft.yaml)
+roles:
+  - role: manipulator
+    token: ur5e_0            # assigned by fmb1_realcell's declaration (the twin surface the adapter exposes)
+    grasp_mode: friction     # RG2 at a fixed 40 N (grip_adapter.py:46); Grip.force is recorded, not applied
+
+starting_scene:
+  occurrences: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]
+  realized_mates: []
+  extra_objects: []
+
+# ---------------------------------------------------------------------------------- goal
+goal:
+  target:
+    kind: assembled_state
+    occurrences: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]
+    placement: {mode: in_region, region: assembly}   # anywhere / any yaw inside the measured base area; base1 is free
+  verify: verify_assembly
+  equivalence:
+    not_interchangeable: []      # class:03 = {Body2, Body5}: the two U parts may swap slots (bindings.yaml:7)
+    orientation_fixed: []
+
+mate_realization:
+  default: attach_on_verified_mate   # twin vocabulary, kept for structure. On the real cell NOTHING attaches: all four
+  physical_only: [mate:00, mate:01, mate:02, mate:03]   # mates are `free`, judged at rest after release by
+  trigger: measured_relative_pose_inside_accepted_seated_set   # /ur5e/execute_mate from a depth seat measurement
+  attachment_scope: internal_part_to_part
+
+requirement_profile:
+  name: b1_default
+
+# ------------------------------------------------------------------------------ tolerances
+tolerances:
+  - target: every mate of the assembled_state target
+    band: assembly_graph/mate:*/seated.acceptance       # 1 mm per mate-frame axis, 1 deg (bindings.yaml:8-13)
+    provenance: "registry: declared flat band (assembly-ingest), unchanged from the twin task"
+    derivation: DECLARED
+  - target: what the REAL cell's certifier can resolve (informative - the graph band above is the goal)
+    band: {z_m: 0.002, xy: not_judged, tilt: reported_only}
+    provenance: >-
+      seams/vision_ops.py:267 lim_z = graph half-width 1 mm + 2 x seat_depth sigma 0.5 mm (bindings.yaml:28); marker xy has
+      no stated sigma and is reported, not judged (vision_ops.py:247-251); seated bars read a -3 deg roll bias
+      (ARCHITECTURE_SEAMS.md:93). Good seats land within +-1.7 mm of the predicted seat (CLAUDE.md:181).
+    derivation: MEASURED_ON_CELL
+    note: the twin admission evidence's 0.086-0.453 mm position error does not carry over to this cell
+
+# ----------------------------------------------------------------------------- referee gates
+# Kept for structure. On the real cell the referee's inputs are NOT available as declared: require_support reads
+# /objects/support_events (simulator-only), require_weld_absent reads attach_events (simulator-only), and the at-rest
+# bounds read a pose series that, here, is in-view-only, z-snapped and silent while the arm moves. A real-cell referee
+# definition is OWED (OWED.md). Values below are the twin's, NOT measured here.
+referee:
+  at_rest: {linear_speed_m_s: 0.002, angular_speed_rad_s: 0.020, window_s: 1.0, min_samples: 5,
+            sampling_rate_hz: 2.6}     # 2.6 = the cell's measured localizer rate (twin: 12.0); bounds UNMEASURED at this rate
+  require_dynamic: true
+  require_weld_absent: true            # no real counterpart (no attach); the cell's equivalent is ExecuteMate's not_at_rest gate (RG2 holding)
+  require_support: true                # no real counterpart (support_events is sim_only)
+  support_probe_max_m: 0.030
+  fastening: {default: free}
+
+# --------------------------------------------------------------------------------- layouts
+layouts:
+  regime: fixed                        # one MEASURED start (below); the cell's own generator (disassemble.py free spots +
+                                       # move_base targets) is not declared as a pa generator - OWED
+  world_from_assembly:
+    witness_only: true
+    frame: world
+    # derived from run 78's base1 read (0.1066 m, 0.4892 m world, yaw 201.44 deg) through the cell->graph frame map
+    # p_graph = Rz(-90) p_cell + (0,0,0.0175) [M:parts.frame_map_cell_to_graph] (translation-checked only):
+    # graph-assembly yaw = 201.44 + 90 = 291.44 deg, origin on the table (z 0).
+    xyz_m: [-0.1066, 0.4892, 0.0]
+    quat_wxyz: [0.82629, 0.0, 0.0, -0.56324]   # yaw 291.44 deg (= -68.56 deg); DERIVED, unverified orientation map
+    support: work_table
+  regions:
+    assembly:
+      # WORLD (measured truth): x [-0.268, 0.020], y [0.327, 0.629] = base1 footprint union + 5 mm [M:base1.footprint_union]
+      anchor: {environment_node: work_table, feature: top_surface}
+      geometry: {kind: rectangle_2d, x_m: [-0.268, 0.020], y_m: [-0.1715, 0.1305]}   # table-local via the stand-in centre (0, 0.4985)
+      subject_predicate: complete_assembly_inside
+    staging:
+      # WORLD: x [-0.62, -0.19], y [0.25, 0.62] = cell_layout.yaml:27 staging_region (UR x [0.19, 0.62], y [-0.62, -0.25])
+      # OVERLAPS the assembly region in world x [-0.268, -0.19]: base1's footprint reached into staging (x up to 0.263 UR);
+      # the cell keeps parts >= 25 mm from base1 by measurement (spacing_check.py:27), not by disjoint regions.
+      anchor: {environment_node: work_table, feature: top_surface}
+      geometry: {kind: rectangle_2d, x_m: [-0.62, -0.19], y_m: [-0.2485, 0.1215]}
+      subject_predicate: complete_body_inside
+    reorient:
+      # WORLD: x [0.2636, 0.3764], y [0.4436, 0.5564] = the cell's clear area point (0.320, 0.500) world [M:regions.clear_area]
+      # +- 56.4 mm (half of the longest FMB1 part, yellow 112.7 mm). The taped square's real size is UNMEASURED.
+      anchor: {environment_node: work_table, feature: top_surface}
+      geometry: {kind: rectangle_2d, x_m: [0.2636, 0.3764], y_m: [-0.0549, 0.0579]}
+      subject_predicate: complete_body_inside
+  free: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]   # base1 FREE (twin: static)
+  static: []
+  domains:
+    occurrence:00: {region: assembly, yaw: free, rest: settled}    # measured yaw 3.6-24.3 deg UR (183.6-204.3 world), mean 19.3 UR
+    occurrence:01: {region: staging, yaw: free, rest: settled}     # stance rpy (-90, 0, yaw) - seated orientation up to yaw
+    occurrence:04: {region: staging, yaw: free, rest: settled}     # stance rpy (-90, 0, yaw); once seen at pitch -12 deg
+    occurrence:02: {region: staging, yaw: free, rest: settled}     # stance: long axis horizontal on a long face, z 13 mm
+    occurrence:03: {region: staging, yaw: free, rest: settled}     # stance rpy (-90, 0, yaw)
+    # The schema's domain has no stance key; the measured stances are in layouts/fmb1_realcell_run78_start.json and
+    # MEASURED_CELL parts.resting_stance. A generator over this cell must keep them (all observed starts are 1-pass).
+  constraints: {no_overlap: true, clearance_m: 0.025}   # the cell's spacing rule, ablations/spacing_check.py:27 MIN_GAP_MM 25
+  decorrelation: [target_yaw]
+  generator: NOT_APPLICABLE_FIXED
+  fixed:
+    - name: fmb1_realcell_run78_start
+      path: layouts/fmb1_realcell_run78_start.json
+      sha256: 661043051a12092ae1199fb1caf7b18cc8f8b1f275e0c9e2828a5e8efc991acb
+      frame: world
+      provenance: >-
+        MEASURED start of run 78 (2026-10-23 21:57-22:20 MST, /tmp/fmb1_78.log, 4/4 certified): base1 from the replay-start
+        read after the reset push, parts from the pick-time observations. CELL part frames (bbox centre, cell axes), not graph
+        occurrence frames - the conversion is OWED (the file says so).
+  # Measured variability the fixed layout does not capture (for a generator / robustness claim):
+  #   base1 after the reset push, 46 resets: UR x 98-148 mm, y -512..-434 mm, yaw 14.7-23.9 deg [M:base1.after_reset_push]
+  #   staging spots per part (flange), all logs [M:parts.staging_spots_flange_ur_base_mm]
+
+# --------------------------------------------------------------------------------- streams
+streams:
+  object_frames: [fmb1/occurrence:00, fmb1/occurrence:01, fmb1/occurrence:02, fmb1/occurrence:03, fmb1/occurrence:04]
+  # real_today the stream carries cell names (base1, u_brown, u_orange, line_green, inverted_u_yellow) in bbox-centre
+  # frames, values in UR base - the adapter that renames and re-frames them is OWED. A planner on this cell additionally
+  # needs /vision/get_pose (sigma, stillness) and /ur5e/drive_mate, which no stream represents (INTERFACE.md).
+  recording_opt_ins: []
+
+# ---------------------------------------------------------------------------------- prompt
+prompt:
+  platform: {name: platform, sha256: de728a1dbf10ac3e89b6d1f82c3cef05ea71fc16b88031daaa650d6f141bd56c}   # copied from fmb1_assemble; re-pin
+  domain: {name: assembly, sha256: d6be4fa5ba7cca3164d3d549b3c92f7c891e724870dfc31e7c941227a30d25b4}     # copied from fmb1_assemble; re-pin
+  task_layer: ""   # a real-cell task layer (perception, free base, drive-mate) is OWED - see INTERFACE.md for its content
+
+# -------------------------------------------------------------------------------- admission
+admission:
+  class: asserted                      # never cleared on fmb1_realcell by a platform spike
+  evidence:
+    kind: real_cell_reference_planner_runs   # NOT a platform admission kind; recorded so the claim is checkable
+    what: >-
+      The cell's reference planner (ablations/replay_real_assembly.py through /ur5e/drive_mate and /ur5e/execute_mate)
+      assembled FMB1 4/4 hands-off from disassembled starts: e.g. run 74c 534 s (checkpoint tag ckpt/fmb1-2026-10-23-run74c,
+      commit 3dfa3d0), run 78 (/tmp/fmb1_78.log, RUN EXIT 0, every mate placed=True); loop of 2026-10-23 runs 68-79:
+      7 RUN EXIT 0, 2 RUN EXIT 1 (/tmp/fmb1_loop.log).
+    says_nothing_about: any planner other than the reference replay; any start outside the measured ranges
+# physics: DERIVED BY THE PUBLISHER (scripts/publish_task.py) - not authored here.

@@ -1,0 +1,410 @@
+# fmb1_realcell - STATIC-ONLY DRAFT of a pa.environment-declaration/1 for the REAL UR5e + RG2 FMB1 cell.
+#
+# Authored FRESH (onboard-environment SKILL.md §1 DECLARE, "Author the cell FRESH"), on the cell PC, 2026-10-24.
+# dimelab's declaration (dimelab_env_elevated/elevated/plan-anything/data/environments/dimelab/declaration.yaml) was
+# used for STRUCTURE only. Every value below cites MEASURED_CELL.yaml (this directory) by key, e.g. [M:frames.cell_tf_world].
+#
+# WHAT THIS DRAFT IS NOT (OWED.md has the full list):
+#   - not gated, not published, no receipt. The LIVE half of /onboard-environment is OWED to a session with the
+#     simulator and the publisher: Part 2 GATE (static gate run), Part 3 LAUNCH/bringup, Part 4 VERIFY wire readback,
+#     the sim-binding map (prim paths, controller_exec_edge), and Part 5 PUBLISH. Nothing here was composed or read back.
+#   - the robot pins (sidecar / composite / rig manifest) are COPIED from dimelab and are PROVISIONAL: they re-pin at
+#     publish (the real cell needs at least a camera mount and the measured 230.86 mm fingertip the twin composite was
+#     never compared with).
+#   - the twin SURFACE declared here (token ur5e_0, /ur5e_0/... names, /objects/poses in world with occurrence frames)
+#     is the surface the operator ruled OUR adapter exposes (2026-10-23). The adapter is NOT BUILT: today's real names
+#     are written beside each entry as `real_today` comments. Declaring them is the target, not a claim they exist.
+#
+# Frames used throughout: twin_world = table-top plane, origin under base_link, base_link axes [M:frames.twin_world_definition].
+# UR `base` -> twin_world: p = (-x, -y, z + 0.080); yaw + 180 deg [M:frames.ur_base_to_twin_world].
+
+schema: pa.environment-declaration/1
+name: fmb1_realcell
+declared_on: '2026-10-24'
+declared_by: /onboard-environment §1 DECLARE (static-only draft), cell PC OptiPlex; live half OWED
+robots:
+- token: ur5e_0
+  # The twin token is kept on purpose: the operator ruled the real cell exposes the twin's surface through our adapter
+  # (2026-10-23), so the planner sees /ur5e_0/... on both. real_today: the cell's own servers live under /ur5e/...
+  # (Grip, ExecuteMate, DriveMate) and at the root (/joint_states, /scaled_joint_trajectory_controller/...).
+  sidecar:
+    path: ${workspace}/plan-anything/data/robots/ur5e_rg2/deploy/ur5e_0.sidecar.yaml
+    sha256: 5a2d9d590f67f0364aa62e048899ce631d8a192143be64b621709fddc2d51389   # PROVISIONAL: copied from dimelab; re-pins at publish
+  composite:
+    name: ur5e_rg2
+    sha256: d91b5a68f9285a9b8d6dd0a9c7d97dd43b386f85e74e05937e29dae7d4b4d567   # PROVISIONAL: copied from dimelab; re-pins at publish
+  subpaths:
+    gripper: rg2
+  # base_link 0.080 m ABOVE the table-top plane [M:frames.base_link_above_table] (config.py:3; Vention design 80.48 mm;
+  # operator decision 0.080). x, y, yaw are 0 BY DEFINITION of twin_world (its origin is the point under base_link and
+  # its axes are base_link's) - not a measurement. A fixed articulation root rests on nothing (SKILL.md 2026-09-18), so
+  # neither the Vention plate nor the slider is declared under it.
+  # CAUTION [M:frames.cell_tf_world]: the real cell's live /tf_static carries world -> base_link = IDENTITY, i.e. its
+  # `world` is base_link, 0.080 m above this declaration's world. The adapter must publish this world (OWED).
+  base_pose:
+    frame: world
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.08
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+  home_configuration:
+    joints:
+      ur5e_0_shoulder_pan_joint: 1.5708
+      ur5e_0_shoulder_lift_joint: -1.5708
+      ur5e_0_elbow_joint: 1.5708
+      ur5e_0_wrist_1_joint: -1.5708
+      ur5e_0_wrist_2_joint: -1.5708
+      ur5e_0_wrist_3_joint: 0.0
+    gripper_open_width_m: 0.1006
+    provenance:
+      joints: "[M:robot.home_joints] repo primitives/shared/config.py:341 HOME_JOINTS (operator-confirmed 2026-05-03); measured home flange (0.0650, -0.3850, 0.4810) UR base on /tcp_pose_broadcaster/pose 2026-10-24. real_today: names are unprefixed on /joint_states and arrive in the order pan, wrist_2, wrist_3, wrist_1, elbow, lift"
+      gripper_open_width_m: "[M:gripper.open_width] /gripper_width_offset read 100.60 mm after 107 'open' commands in /tmp/fmb1_*.log (tip-to-tip gap). Twin: 0.1008"
+  actions:
+    # The twin surface (namespace-relative). real_today, per line:
+    arm_trajectory: arm_controller/follow_joint_trajectory   # real_today: /scaled_joint_trajectory_controller/follow_joint_trajectory (control_msgs/action/FollowJointTrajectory) - alias OWED
+    gripper: rg2/grip                                        # real_today: /ur5e/rg2/grip (pa_gripper_msgs/action/Grip, seams/grip_adapter.py:41) - alias OWED
+    execute_mate: execute_mate                               # real_today: /ur5e/execute_mate (pa_assembly_msgs/action/ExecuteMate, seams/execute_mate_server.py:43) - alias OWED
+    # NO SCHEMA SLOT for the cell's insertion driver and its perception services, which a real-cell planner must call:
+    #   /ur5e/drive_mate        fmb_seam_msgs/action/DriveMate      (seams/drive_mate_server.py:58)
+    #   /vision/get_pose        fmb_seam_msgs/srv/GetVisionPose     (seams/vision_server.py:50)
+    #   /vision/certify_seat    fmb_seam_msgs/srv/CertifySeat       (seams/vision_server.py:51)
+    # environment-declaration-1.md defines actions as {arm_trajectory, gripper, execute_mate}; whether the validator
+    # refuses an extra key is unknown, so they are NOT added here (OWED.md: schema question). INTERFACE.md documents them.
+  # WRIST CAMERA (D415, tool -Y side): the schema has no robot-mounted sensor field and the pinned composite has no
+  # camera link. Mount [M:wrist_camera.hand_eye] position [-0.01573, -0.04201, 0.07153], quat xyzw [-0.01298, -0.00391,
+  # -0.0098, 0.99986] in the flange frame (aruco_camera_localizer/config/robot_config.yaml:10,12). Its streams are
+  # declared under `streams` below; the mount belongs in the robot record (OWED.md).
+contents:
+- name: work_table
+  kind: the cell's work table - the horizontal panel the parts and base1 rest on, 0.080 m below the robot base plate
+  operator_description:
+    what_it_is: A rigid horizontal work table panel fixed in the cell, the robot's base plate standing 80 mm above it.
+    how_it_can_be_used: It provides a flat horizontal support surface on which parts and the free assembly base may rest, slide and be manipulated.
+  # PLACEHOLDER REPRESENTATION. The real table's EXTENT and xy PLACEMENT are UNMEASURED [M:table.extent]. No admitted
+  # rigid asset of this table exists, and an entry without one is not declarable (SKILL.md §1), so dimelab's
+  # work_table_1890x720 asset is pinned here as a STAND-IN to make the regions' anchor resolvable. Its 1.89 x 0.72 m
+  # extent and its centre (0, 0.4985) are dimelab's (robo-manipulate fixture-type.json), NOT measured on this cell.
+  # What IS measured: the top face is world z 0 (0.04 m slab centred at z -0.02 puts its top there) [M:table.top_plane].
+  # Everything the cell has used lies inside this stand-in's top: twin_world x [-0.62, 0.32], y [0.25, 0.65].
+  # Replace with an asset onboarded from the measured table (OWED.md: tape/depth survey or the Vention design USD).
+  pose:
+    frame: world
+    subject_frame: frame:work_table_1890x720/source
+    xyz:
+    - 0.0      # UNMEASURED - dimelab stand-in
+    - 0.4985   # UNMEASURED - dimelab stand-in
+    - -0.02    # measured: top at world z 0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+  representation:
+    asset: work_table_1890x720
+    receipt_sha256: a7ad46338c27c158cbf68d24f7819b963cb56ee6ec4fdb32ddb755c34146d8ec   # PROVISIONAL stand-in (dimelab's asset receipt)
+    key: isaac
+    root_frame: frame:work_table_1890x720/source
+  collider:
+    kind: box
+  provenance:
+    status: STAND_IN_UNMEASURED_EXTENT
+    measured: top plane z 0 (MEASURED_CELL table.top_plane); nothing else
+    extent_source: dimelab's (robo-manipulate assets/fixtures/table/fixture-type.json) - not this table
+# NOT DECLARED, each for a stated reason:
+#  - the Vention 7th-axis slider rail and carriage [M:robot.vention_slider]: no admitted rigid asset; the robot root
+#    needs no support; its e-stop state moves the base (OWED.md).
+#  - base1: a TASK occurrence (fmb1/occurrence:00), FREE on this cell - it enters through the task, never the
+#    environment (SKILL.md §1 "frozen environment binding contains persistent nodes only").
+#  - the taped clear-area square: a task region, not a node; its size is UNMEASURED.
+frames:
+  world_origin: world
+  named: {}
+streams:
+  object_poses:
+    # ONE measurement, two channels per the schema. REAL CELL (measured [M:perception.localizer_stream]):
+    #   topic /objects/poses = verbatim relay of /objects_poses_real (seams/vision_server.py:52-54), tf2_msgs/TFMessage,
+    #   header.frame_id "World" but values in UR `base`; children = cell names (base1, u_brown, ...); only objects IN THE
+    #   WRIST CAMERA'S VIEW; one message per processed frame carrying every object in view; z SNAPPED to the table-rest
+    #   height (filter_config.yaml:22-29) - seated parts too [M:perception.z_snap]; no detections while the TCP moves
+    #   > 15 mm/s (filter_config.yaml:45-47). Object frames are NOT on /tf (live /tf probe 2026-10-24).
+    # Declared below is the twin-surface TARGET the adapter must produce: parent `world` (twin), frames
+    # fmb1/occurrence:0N (graph centroid frames), on both channels. NOT BUILT (OWED.md).
+    aggregate:
+      topic: /objects/poses
+      type: tf2_msgs/msg/TFMessage
+      parent_frame: world
+      class: transferable
+      snapshot_grouping: one_message_per_snapshot    # real: all in-view objects in one message; dimelab: header_stamp_equality
+      messages_per_snapshot: one_for_all_in_view_objects
+    tf:
+      topic: /tf
+      type: tf2_msgs/msg/TFMessage
+      parent_frame: world
+      class: transferable
+      namespaced: false
+      # real_today: the localizer publishes NO object frames on /tf - OWED
+    declared_frames: []          # the environment tracks no persistent node (the table is not seen by the camera)
+    task_frames: union_at_run_assembly
+    source: wrist_camera_aruco_localizer      # markers + fold/z snap; NOT physics_step. The depth CAD fit / seat check are on /vision/* only
+    coverage: in_view_only                    # not every object every snapshot (CLAUDE.md:156-157)
+    stamp: wall_clock                         # localizer `now` at publish; there is no /clock
+    declared_rate_hz: 2.6                     # measured 2.56-2.6 Hz, arm still at home, 3 objects in view (evidence/topic_rates_20261024_090532.json)
+    emitted_on: rate
+    minimum_rate_hz: null                     # UNMEASURED. While the arm moves the stream is silent by design (motion pause), so a floor must be judged on still segments; measure over a recorded full run
+    qos:
+      history: keepLast
+      depth: 10                               # real publisher: create_publisher(TFMessage, '/objects_poses_real', 10), reliable/volatile default
+      reliability: reliable
+      durability: volatile
+    publisher_rules:
+      lazy: forbidden                         # the localizer publishes whether or not anything subscribes
+  wrist_camera_color:
+    topic: /camera/camera/color/image_raw
+    type: sensor_msgs/msg/Image
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 15.0                    # driver profile 1280x720@15 (live cmdline); a Python probe received 7.4-9.1 Hz
+    minimum_rate_hz: null                     # UNMEASURED (a bag on the cell, not a Python subscriber)
+    frame: camera_color_optical_frame         # NOT attached to the robot tree on /tf_static; the hand-eye lives in the localizer config
+  wrist_camera_color_compressed:
+    topic: /camera/camera/color/image_raw/compressed
+    type: sensor_msgs/msg/CompressedImage
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 15.0
+    minimum_rate_hz: null                     # UNMEASURED
+  wrist_camera_color_info:
+    topic: /camera/camera/color/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 15.0
+    minimum_rate_hz: null                     # UNMEASURED
+    # K fx 923.80 fy 923.63 cx 622.89 cy 351.84, zero distortion (driver); the marker localizer uses its own 910.13/911.16/619.57/349.15 + distortion (robot_config.yaml:15-21)
+  wrist_camera_aligned_depth:
+    topic: /camera/camera/aligned_depth_to_color/image_raw
+    type: sensor_msgs/msg/Image
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 15.0                    # profile; Python probe received 5.2-5.9 Hz
+    minimum_rate_hz: null                     # UNMEASURED
+    # use only frames stamped >= 0.25 s after the TCP stopped (frames in motion ~10 mm off; no depth closer than ~0.45 m) [M:wrist_camera.depth_timing]
+  wrist_camera_aligned_depth_info:
+    topic: /camera/camera/aligned_depth_to_color/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 15.0
+    minimum_rate_hz: null                     # UNMEASURED
+  camera_pose:
+    topic: /camera_pose
+    type: geometry_msgs/msg/PoseStamped
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 2.6                     # measured with the localizer stream
+    minimum_rate_hz: null                     # UNMEASURED
+    # the localizer's camera pose in UR `base` (TCP at frame time composed with the hand-eye)
+  grip_events:
+    robot: ur5e_0
+    topic: /rg2/grip_events                   # real_today: /ur5e/rg2/grip_events (grip_adapter.py:56) - alias OWED
+    emitted_on: change
+    type: std_msgs/msg/String
+    encoding: json
+    emitted_by: the cell's RG2 Grip adapter, one message per Grip RESULT (seams/grip_adapter.py:90-95); widths read back from /gripper_width_offset
+    class: transferable
+    evidential_status: measured
+    qos:
+      history: keepLast
+      depth: 10
+      reliability: reliable
+      durability: volatile                     # real publisher default QoS; dimelab declares transientLocal
+  gripper_width:
+    topic: /gripper_width_offset              # tip-to-tip gap, mm (plate spacing - 2 x 4.6 mm); /gripper_width reads +9.2 mm
+    type: std_msgs/msg/Float32
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 10.0                    # measured 9.99-10.0
+    minimum_rate_hz: null                     # UNMEASURED
+    # the RG2 has NO joint state on this cell (/rg2/joint_states: 0 publishers); this is its measured-state surface
+  gripper_grasp_detected:
+    topic: /gripper_grasp_detected
+    type: std_msgs/msg/Bool
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 10.0
+    minimum_rate_hz: null                     # UNMEASURED
+  fastening_events:
+    topic: /objects/fastening_events
+    type: std_msgs/msg/String
+    encoding: json
+    class: transferable                       # on this cell the attestation is the ExecuteMate server's, from a vision measurement
+    emitted_on: change
+    kinds: [stream_open, placed]             # FMB1 mates are all `free`; nothing welds on a real cell
+    evidential_status: measured
+    emitter_status: OWED                      # real_today: ExecuteMate journals to a FILE, repo ablations/logs/mate_journal.jsonl (execute_mate_server.py:45,160-172); no topic
+    fields_status: prior_from_dimelab_pending_first_bag_measurement
+    publisher_rules:
+      lazy: forbidden
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  tf_static:
+    topic: /tf_static
+    type: tf2_msgs/msg/TFMessage
+    class: transferable
+    emitted_on: latch
+    # real_today carries world->base_link IDENTITY (must become z 0.080), base_link->base pi about z, tool0->rg2_base_link pi about z
+  transform_tree:
+    topic: /tf
+    type: tf2_msgs/msg/TFMessage
+    class: transferable
+    emitted_on: rate
+    minimum_rate_hz: null                     # UNMEASURED (robot tree from the UR driver; no object frames today)
+  arm_state:
+    robot: ur5e_0
+    topic: /joint_states                      # real_today: /joint_states, unprefixed names, non-UR order - alias OWED
+    type: sensor_msgs/msg/JointState
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 474.5                   # measured, Python probe 15 s
+    minimum_rate_hz: null                     # UNMEASURED - derive from a recorded bag per SKILL.md (#126 method)
+  tcp_pose:
+    topic: /tcp_pose_broadcaster/pose         # flange pose in UR `base` (the hand-eye's EE); not in the twin
+    type: geometry_msgs/msg/PoseStamped
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 470.9                   # measured
+    minimum_rate_hz: null                     # UNMEASURED
+  wrench:
+    topic: /force_torque_sensor_broadcaster/wrench   # UR5e built-in F/T, frame tool0_controller; ~60-102 ms glitches (CLAUDE.md:222-227)
+    type: geometry_msgs/msg/WrenchStamped
+    class: transferable
+    emitted_on: rate
+    declared_rate_hz: 475.2                   # measured
+    minimum_rate_hz: null                     # UNMEASURED
+  controller_state:
+    robot: ur5e_0
+    topic: /arm_controller/controller_state   # real_today: /scaled_joint_trajectory_controller/controller_state - alias OWED
+    type: control_msgs/msg/JointTrajectoryControllerState
+    class: transferable
+    emitted_on: rate
+    minimum_rate_hz: null                     # UNMEASURED
+  arm_action_status:
+    robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/status   # real_today under /scaled_joint_trajectory_controller/
+    type: action_msgs/msg/GoalStatusArray
+    class: transferable
+    emitted_on: change
+  grip_action_status:
+    robot: ur5e_0
+    topic: /rg2/grip/_action/status           # real_today: /ur5e/rg2/grip/_action/status
+    type: action_msgs/msg/GoalStatusArray
+    class: transferable
+    emitted_on: change
+# NOT DECLARED (no real counterpart, each said): /clock (wall time only), object_state_events / support_events /
+# contact_events / attach_events / robot_health / isaac_joint_states (simulator-only), goal_echo (no emitter on the cell -
+# OWED if a scored real run needs the FJT goal record).
+recording:
+  default_topics:
+  - topic: /objects/poses
+    why: the planner's object-pose input as the cell published it - the aggregate
+  - topic: /tf
+    why: the robot's tree as consumers saw it
+  - topic: /tf_static
+    why: fixed frames, including the world->base_link the adapter must correct
+  - robot: ur5e_0
+    topic: /joint_states
+    why: the measured arm state
+  - topic: /tcp_pose_broadcaster/pose
+    why: the flange pose every cell reading and the hand-eye compose with; judges stillness for every vision read
+  - topic: /force_torque_sensor_broadcaster/wrench
+    why: contact evidence of every insert and press (force limits are stated against it)
+  - topic: /camera/camera/color/image_raw/compressed
+    why: what the wrist camera saw; overlays are rendered offline from it (record_demo_bag.sh pattern, ~2.4 MB/s)
+  - topic: /camera/camera/color/camera_info
+    why: the intrinsics the depth path used
+  - topic: /camera/camera/aligned_depth_to_color/camera_info
+    why: the aligned depth's intrinsics
+  - topic: /camera_pose
+    why: the localizer's camera pose per frame, to re-project the recorded poses
+  - topic: /gripper_width_offset
+    why: the RG2's measured gap - its only state surface on this cell
+  - topic: /gripper_grasp_detected
+    why: the RG2's own grip flag
+  - robot: ur5e_0
+    topic: /rg2/grip_events
+    why: each Grip result - holding, width, verdict
+  - topic: /objects/fastening_events
+    why: the mate journal (ticket 082); its emitter is OWED on this cell
+  - robot: ur5e_0
+    topic: /arm_controller/controller_state
+    why: commanded against measured
+  - robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/status
+    why: the goal lifecycle
+  - robot: ur5e_0
+    topic: /rg2/grip/_action/status
+    why: the goal lifecycle
+  not_recorded:
+  - topic: /camera/camera/color/image_raw
+    why: 'raw 1280x720 RGB at 15 Hz is ~40 MB/s; the OptiPlex localizer is CPU-bound and a second encoder pushed load 5 -> 12 on 6 cores and made runs stop (mem video-recorder.md). The compressed topic carries the same frames. DISCHARGE: recorded again when a recorder runs off-box or the cell PC has the headroom, measured by an unchanged localizer rate during recording.'
+  - topic: /camera/camera/aligned_depth_to_color/image_raw
+    why: 'aligned depth at 1280x720 is the same bandwidth problem; the seat checks keep their own still captures and CSVs. DISCHARGE: as above.'
+  format:
+    storage_id: mcap
+    storage_preset_profile: zstd_fast
+    compression_mode: none
+  gate:
+    required:
+    - topic: /objects/poses
+    - robot: ur5e_0
+      topic: /joint_states
+    timeout_s: 30.0
+    # no /clock: the twin's close_margin_s is in sim seconds and has no meaning here; a wall-time margin is OWED
+  retention:
+    policy: keep_indefinitely
+    overwrite_existing: false
+physics:
+  # A REAL CELL. The world's gravity is a statement about the world and is true here; the solver blocks below are what a
+  # TWIN of this cell would be composed with and checked against - nothing has been composed (SKILL.md static-only posture).
+  physics_scene:
+    status: UNMEASURED_owed_first_compose
+  scene:
+    status: UNMEASURED_owed_first_compose
+    solver_type: TGS                          # fleet-standard TARGET (dimelab), not a measurement
+    enable_ccd: false
+    enable_stabilization: false
+    gravity:
+      enabled: true
+      magnitude_m_s2: 9.81
+      direction: [0.0, 0.0, -1.0]
+      # provenance: operator ruling 27, 2026-09-06 (ticket 039); it is also simply the real world
+  bodies:
+    status: UNMEASURED_owed_first_compose
+    solver_position_iterations: 64            # fleet-standard TARGET
+    solver_velocity_iterations: 1
+    sleep_threshold:
+      source: asset
+      minimum: 1.0e-06
+      units: distance^2/second^2 (mass-normalised kinetic energy, per the PhysX schema)
+  work_surface:
+    material: UNMEASURED                      # the panel's material is not identified [M:table.material]
+    measured: false
+    static_friction: UNMEASURED               # measure_by: tilt / pull test of an FMB1 part and of base1 on the panel
+    dynamic_friction: UNMEASURED
+    restitution: UNMEASURED
+    note: >-
+      Measured fact that bears on it: base1 is free and slides - a 9 N press / 8 N lateral spiral carried the base with
+      the part (part-on-base friction exceeded base-on-table), and an empty-base push guard is 12 N (move_base.py:41).
+      Coefficients were never measured.
+lighting:
+- name: room
+  type: dome
+  intensity: 1000.0
+  temperature_k: 6500
+  why: a render of a lightless stage is black (SKILL.md §1). Presentation only; the real cell's lighting matters to the camera (mem dim-light-camera.md), not to this light

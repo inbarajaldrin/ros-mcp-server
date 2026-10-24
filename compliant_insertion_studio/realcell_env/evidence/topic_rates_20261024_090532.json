@@ -1,0 +1,200 @@
+{
+ "window_s": 15.0,
+ "measured_at_unix": 1792857947.5718052,
+ "topics": {
+  "/objects_poses_real": {
+   "type": "tf2_msgs/msg/TFMessage",
+   "n": 39,
+   "rate_hz": 2.56,
+   "gap_s": {
+    "median": 0.3865,
+    "max": 0.5273
+   },
+   "frames": [
+    "World"
+   ],
+   "children": [
+    "base1",
+    "u_brown",
+    "u_orange"
+   ],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/objects/poses": {
+   "type": "tf2_msgs/msg/TFMessage",
+   "n": 39,
+   "rate_hz": 2.56,
+   "gap_s": {
+    "median": 0.3825,
+    "max": 0.5262
+   },
+   "frames": [
+    "World"
+   ],
+   "children": [
+    "base1",
+    "u_brown",
+    "u_orange"
+   ],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/objects_poses_real_raw": {
+   "type": "tf2_msgs/msg/TFMessage",
+   "n": 39,
+   "rate_hz": 2.56,
+   "gap_s": {
+    "median": 0.3806,
+    "max": 0.5285
+   },
+   "frames": [
+    "World"
+   ],
+   "children": [
+    "base1",
+    "u_brown",
+    "u_orange"
+   ],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/joint_states": {
+   "type": "sensor_msgs/msg/JointState",
+   "n": 7118,
+   "rate_hz": 474.47,
+   "gap_s": {
+    "median": 0.0019,
+    "max": 0.0228
+   },
+   "frames": [
+    "base_link"
+   ],
+   "children": [],
+   "joint_names": [
+    "shoulder_pan_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+    "wrist_1_joint",
+    "elbow_joint",
+    "shoulder_lift_joint"
+   ],
+   "last_value": null
+  },
+  "/tcp_pose_broadcaster/pose": {
+   "type": "geometry_msgs/msg/PoseStamped",
+   "n": 7063,
+   "rate_hz": 470.87,
+   "gap_s": {
+    "median": 0.0019,
+    "max": 0.0261
+   },
+   "frames": [
+    "base"
+   ],
+   "children": [],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/camera/camera/color/image_raw": {
+   "type": "sensor_msgs/msg/Image",
+   "n": 110,
+   "rate_hz": 7.38,
+   "gap_s": {
+    "median": 0.0729,
+    "max": 0.8315
+   },
+   "frames": [
+    "camera_color_optical_frame"
+   ],
+   "children": [],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/camera/camera/aligned_depth_to_color/image_raw": {
+   "type": "sensor_msgs/msg/Image",
+   "n": 89,
+   "rate_hz": 5.92,
+   "gap_s": {
+    "median": 0.0692,
+    "max": 1.3429
+   },
+   "frames": [
+    "camera_color_optical_frame"
+   ],
+   "children": [],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/grasp_points_real": {
+   "type": "visualization_msgs/msg/MarkerArray",
+   "n": 75,
+   "rate_hz": 5.0,
+   "gap_s": {
+    "median": 0.2001,
+    "max": 0.2208
+   },
+   "frames": [],
+   "children": [],
+   "joint_names": null,
+   "last_value": null
+  },
+  "/gripper_width_offset": {
+   "type": "std_msgs/msg/Float32",
+   "n": 150,
+   "rate_hz": 9.99,
+   "gap_s": {
+    "median": 0.0997,
+    "max": 0.1281
+   },
+   "frames": [],
+   "children": [],
+   "joint_names": null,
+   "last_value": 88.19999694824219
+  },
+  "/gripper_width": {
+   "type": "std_msgs/msg/Float32",
+   "n": 150,
+   "rate_hz": 9.99,
+   "gap_s": {
+    "median": 0.1002,
+    "max": 0.1203
+   },
+   "frames": [],
+   "children": [],
+   "joint_names": null,
+   "last_value": 97.4000015258789
+  },
+  "/gripper_grasp_detected": {
+   "type": "std_msgs/msg/Bool",
+   "n": 150,
+   "rate_hz": 10.0,
+   "gap_s": {
+    "median": 0.1004,
+    "max": 0.209
+   },
+   "frames": [],
+   "children": [],
+   "joint_names": null,
+   "last_value": false
+  },
+  "/force_torque_sensor_broadcaster/wrench": {
+   "present": false
+  },
+  "/camera_pose": {
+   "type": "geometry_msgs/msg/PoseStamped",
+   "n": 39,
+   "rate_hz": 2.56,
+   "gap_s": {
+    "median": 0.3862,
+    "max": 0.5266
+   },
+   "frames": [
+    "base"
+   ],
+   "children": [],
+   "joint_names": null,
+   "last_value": null
+  }
+ }
+}

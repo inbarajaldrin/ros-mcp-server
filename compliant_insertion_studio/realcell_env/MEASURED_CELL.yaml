@@ -1,0 +1,432 @@
+# MEASURED_CELL.yaml - the real UR5e + RG2 FMB1 cell, as measured (2026-10-24, cell PC "OptiPlex").
+#
+# Every fact: value, frame, source, status.
+#   status  measured    read off the real cell: a live topic, a run log the cell printed, or a physical measurement
+#                       recorded in code/notes with its method
+#           derived     computed from measured facts by a stated formula (the formula is in `how`)
+#           definition  true by construction of a frame/convention, not a measurement
+#           UNMEASURED  nobody measured it; `measure_by` says what would
+# Paths: repo = /home/aldrin/Documents/ros-mcp-server-verified ; ws = ~/Desktop/ros2_ws/src ;
+#        mem = ~/.claude/projects/-home-aldrin-Documents-ros-mcp-server-verified/memory ;
+#        evidence/ = this pack's evidence dir (tools/ wrote it, read-only probes).
+# Units: m, rad unless a key says _mm / _deg. Quaternions xyzw unless a key says wxyz.
+# Frames:
+#   ur_base     UR `base` (DH base). Every cell log, VisionPose, cell_layout.yaml, /tcp_pose_broadcaster/pose.
+#   base_link   ur_base turned pi about z (the twin's robot root, RViz fixed frame on the cell).
+#   twin_world  the table-top plane, origin directly under base_link, axes = base_link axes (the twin/pack world).
+#   cell_tf_world  the frame named `world` on the cell's LIVE /tf_static. It is NOT twin_world (see frames.cell_tf_world).
+
+schema: realcell-measured-facts/0      # this pack's own layout, not a platform schema
+cell: fmb1_realcell
+written_on: '2026-10-24'
+written_by: claude (read-only session on the cell PC; no motion, no service calls that move anything)
+
+frames:
+  ur_base_to_base_link:
+    value: {xyz: [0, 0, 0], quat_xyzw: [0, 0, 1, 0]}         # pi about z
+    frame: base_link -> ur_base
+    source: live /tf_static (base_link -> base) read 2026-10-24 09:0x; repo CLAUDE.md:100 ("UR base rotated 180 deg about z")
+    status: measured
+  base_link_above_table:
+    value: 0.080
+    frame: twin_world z of base_link origin
+    source: >-
+      repo primitives/shared/config.py:3 ROBOT_BASE_Z = 0.08 (and :5 TABLE_HEIGHT = -0.08 in ur_base);
+      Vention Fusion design VentionAssembly_393251_v81.1: robot plate top 880.25 mm vs table panel 799.77 mm = 80.48 mm
+      (mem camera-calibration-2026-10-13.md); operator decision 2026-10-23: 0.080 m
+    status: measured   # design-CAD gap 80.48 mm, code value 80.0 mm; the 0.48 mm is not used anywhere
+    note: >-
+      mem staging-layout-tipping.md says "the cell's base is 82 mm above the table" - contradicts both; not used by code.
+      ChArUco boards solved ~4 mm above the table in the 10-13 hand-eye (a perception residual, not a mount measurement).
+  ur_base_to_twin_world:
+    value:
+      position: "p_world = (-x_base, -y_base, z_base + 0.080)"
+      orientation: "q_world = Rz(pi) * q_base ; xyzw: (qx,qy,qz,qw)_world = (-qy, qx, qw, -qz) ; yaw_world = yaw_base + 180 deg"
+    frame: ur_base -> twin_world
+    source: derived from frames.ur_base_to_base_link + frames.base_link_above_table
+    status: derived
+  twin_world_definition:
+    value: "origin = the point on the table-top plane directly below base_link's origin; axes = base_link's"
+    source: elevated dimelab declaration comment (dimelab_env_elevated/elevated/.../declaration.yaml:15-24); operator 2026-10-23
+    status: definition
+  cell_tf_world:
+    value: {parent: world, child: base_link, xyz: [0, 0, 0], quat_xyzw: [0, 0, 0, 1]}
+    source: live /tf_static (world -> base_link) 2026-10-24
+    status: measured
+    note: >-
+      The cell's own TF `world` IS base_link (identity), i.e. 0.080 m ABOVE twin_world. Any consumer that reads `world`
+      off the real cell's /tf gets base_link. The adapter must publish twin_world (or rename) - OWED.md.
+  objects_stream_parent_label:
+    value: "World"     # header.frame_id on /objects_poses_real and its relay /objects/poses
+    frame_values_are_in: ur_base
+    source: ws aruco_camera_localizer/aruco_camera_localizer/localizer_bridge.py:183; live echo 2026-10-24 (base1 at x 0.135, y -0.466, z -0.0625)
+    status: measured
+  quaternion_order:
+    value: "cell: xyzw everywhere (VisionPose geometry_msgs/Pose, logs, last_base_pose.json, assembly JSONs). twin: layouts/task quat_wxyz, declaration rpy, TF xyzw"
+    source: repo seams/vision_server.py:66; twin task.yaml:109; briefing 1.1
+    status: definition
+
+robot:
+  model:
+    value: UR5e, headless ur_robot_driver (no pendant program), controller at 192.168.1.111
+    source: repo CLAUDE.md:1-60; live /controller_manager/list_controllers
+    status: measured
+  mount:
+    value: "on a Vention 7th-axis slider carriage; the robot plate sits 0.080 m above the table top (frames.base_link_above_table)"
+    source: mem vention-7th-axis.md; mem camera-calibration-2026-10-13.md
+    status: measured
+  vention_slider:
+    value: {controller: MachineMotion, port: 9999, address: 192.168.7.2 (also 192.168.5.2), axis_1_pos_2026_10_15: 0, estop_2026_10_15: true}
+    source: mem vention-7th-axis.md; mem optiplex-cell-quirks.md (static wired net)
+    status: measured   # 2026-10-15 only
+    effect: >-
+      e-stop engaged = drive disabled = carriage not held: inserts/nudges creep the arm; base1 read +1..4 mm per part and
+      ~+8 mm/hour in ur_base while the base never moved on the table (2026-10-15). The code re-reads the base before every part.
+    current_estop_state: UNMEASURED
+    measure_by: "read-only MachineMotion query `estop/status;` on port 9999 (never armctl connect(): it auto-releases the e-stop)"
+    twin_model: none (the twin has no slider or carriage)
+  home_joints:
+    value: {shoulder_pan_joint: 1.5708, shoulder_lift_joint: -1.5708, elbow_joint: 1.5708, wrist_1_joint: -1.5708, wrist_2_joint: -1.5708, wrist_3_joint: 0.0}
+    source: repo primitives/shared/config.py:341 HOME_JOINTS (operator-confirmed 2026-05-03); equals twin dimelab home (declaration.yaml:35-42)
+    status: measured
+  home_flange_pose:
+    value_ur_base: {xyz: [0.0650, -0.3850, 0.4810], quat_xyzw: [-0.00054, -1.0, 0.00002, 0.0]}
+    value_twin_world: {xyz: [-0.0650, 0.3850, 0.5610]}
+    source: live /tcp_pose_broadcaster/pose 2026-10-24 (arm at home); matches config.py:324 HOME_POSE [0.065, -0.385, 0.481, 0, 180, 0]
+    status: measured
+  joint_state_topic:
+    value: {topic: /joint_states, names_unprefixed: true, order_on_wire: [shoulder_pan_joint, wrist_2_joint, wrist_3_joint, wrist_1_joint, elbow_joint, shoulder_lift_joint], header_frame: base_link, rate_hz: 474.5}
+    source: live probe evidence/topic_rates_20261024_090532.json; mem fmb3-cycles-2026-10-20.md ("not the UR order - read by name")
+    status: measured
+  trajectory_action:
+    value: {name: /scaled_joint_trajectory_controller/follow_joint_trajectory, type: control_msgs/action/FollowJointTrajectory, controller: ur_controllers/ScaledJointTrajectoryController (active)}
+    source: live `ros2 action list -t`, `ros2 control list_controllers` 2026-10-24; repo primitives/core/move_joints.py:75
+    status: measured
+    also_present_inactive: [joint_trajectory_controller, passthrough_trajectory_controller, force_mode_controller, freedrive_mode_controller, tool_contact_controller]
+  speed_scaling:
+    value: 100.0
+    source: live /speed_scaling_state_broadcaster/speed_scaling 2026-10-24
+    status: measured
+  cell_motion_limits:
+    value: {joint_vel_rad_s: 0.80, joint_accel_rad_s2: 0.80, cart_vel_m_s: 0.0798, cart_accel_m_s2: 0.0798, min_duration_s: 2.5, max_duration_s: 10.0}
+    source: repo primitives/shared/config.py:317-322 (compute_duration takes the max of joint and Cartesian)
+    status: definition   # the cell's own caps (hardware max pi rad/s, 1.0 m/s); policy, not a measurement
+  wrist_3_limit:
+    value: {abs_max_rad: 4.0, why: "camera + gripper cables wind up; wrist_3 reached 6.30 rad on 2026-10-20 (two protective stops)"}
+    source: repo primitives/shared/ik.py:47; primitives/move_cartesian.py:38,110-114; mem fmb3-cycles-2026-10-20.md
+    status: definition
+  safe_height:
+    value: {above_table: 0.40, ur_base_z: 0.320, twin_world_z: 0.400}
+    source: repo primitives/shared/config.py:112-113
+    status: definition
+  payload:
+    value: {mass_kg: 2.1109, cog_m: [-0.0032, 0.0031, -0.0318]}
+    frame: tool flange
+    source: repo compliant_insertion_studio/configs/ft_calibration_onrobot_rg2_with_camera_20260503.yaml:66-70 (8-pose fit, residuals Fx/Fy/Fz 0.86/0.66/0.69 N)
+    status: measured
+  kinematic_calibration:
+    value: "DH deltas fitted 2026-10-14 over 486 poses: gripper-centre FK error 1.78 mm median (nominal) -> 0.08 mm"
+    source: repo primitives/shared/config.py:352-369
+    status: measured
+  clock:
+    value: "no /clock; wall time everywhere"
+    source: live `ros2 topic list` 2026-10-24 (no /clock)
+    status: measured
+
+force_torque:
+  sensor: {value: "UR5e built-in F/T at the flange; /force_torque_sensor_broadcaster/wrench, frame tool0_controller", rate_hz: 475.2,
+           source: "live probe evidence/topic_rates_20261024_wrench_probe.json 2026-10-24 (6 s window)", status: measured}
+  glitch:
+    value: "robot-side ~102 ms wrench glitches; ~60 ms impulses up to +57 N with nothing touched; settle >= 1.5 s before any zero"
+    source: repo CLAUDE.md:210,222-227; mem ft-sensor-glitch.md
+    status: measured
+  limits:
+    on_parts_default_N: {value: 5.0, source: "repo CLAUDE.md:207", status: definition}
+    on_parts_override_N: {value: 9.0, source: "repo CLAUDE.md:207 (--override-fz-cap); translate_object passes the tuned F_press 9 / Fmax 8 (CLAUDE.md:192-193)", status: definition}
+    lateral_N: {value: 6.0, source: "repo CLAUDE.md:207", status: definition}
+    free_base_search_N: {value: 1.5, source: "mem free-base-search-drags-base.md (commit 95a2892: press 1.5 N, lateral <= 1.5 N, then 8 N INSERT_DESCENT)", status: measured,
+                         why: "a 9 N spiral carried the untaped base with the part (wrist-camera frames: base edges fixed within 1 px)"}
+    search_rotation: {value: "LOCKED in SEARCH, selection_vector (T,T,T,F,F,F)", source: "repo CLAUDE.md:208", status: definition}
+    empty_base_push_guard_N: {value: 12.0, source: "repo ablations/move_base.py:41 (pushing the EMPTY base, not a seated part)", status: definition}
+    guard_overshoot_N: {value: 0.7, source: "mem fmb1-runs-2026-10-23.md (guarded presses overshoot up to 0.7 N; guards set to 4.0 N)", status: measured}
+
+table:
+  top_plane:
+    value: {ur_base_z: -0.080, twin_world_z: 0.0}
+    source: repo primitives/shared/config.py:3-5; ws aruco_camera_localizer/config/robot_config.yaml:44 (table_z -0.08)
+    status: measured   # via frames.base_link_above_table
+  extent:
+    value: UNMEASURED
+    measure_by: >-
+      tape-measure the table edges from the robot base (or a depth survey of the edges from the wrist camera at >= 0.5 m),
+      or read the design extent from the Vention design USD on dual-a4500
+      (~/a4500-backup-20260828/Desktop/omniverse_Library_10thoc2025/Digital workspace/VentionAssembly_393251_v88.usd, read-only)
+    note: >-
+      The twin's 1.89 x 0.72 x 0.04 m table centred at world (0, 0.4985) comes from robo-manipulate
+      assets/fixtures/table/fixture-type.json; whether it is this table was never checked. The robot is "mounted at the long-side
+      centre" (config.py:326-327). Everything the cell has reached lies within twin_world x [-0.62, 0.32], y [0.25, 0.65]
+      (staging, clear area, base footprints) - that is a lower bound on the usable top, not its extent.
+  material: {value: UNMEASURED, measure_by: "identify the panel (Vention aluminium? laminate?) and measure friction with a tilt test; the clear area is marked with black tape (cell_layout.yaml:45-47)"}
+  friction: {value: UNMEASURED, measure_by: "tilt / pull test of an FMB1 part on the panel"}
+
+gripper:
+  model: {value: "OnRobot RG2 via onrobot_ros over the UR tool serial bridge (socat ttyUR)", source: "repo CLAUDE.md:41-46,237-238; grip_adapter.py:7-9", status: measured}
+  open_width:
+    value_mm: 100.6
+    topic: /gripper_width_offset
+    source: "/tmp/fmb1_*.log: 'stabilized at 100.60mm' 107 times, 101.70 once (primitives.control_gripper reads /gripper_width_offset in real mode, control_gripper.py:80-88)"
+    status: measured
+    twin: "dimelab home gripper_open_width_m 0.1008; composite width_domain max 0.10109"
+  closed_empty_width_mm: {value: [0.5, 0.6], source: "/tmp/fmb1_*.log 'stabilized at 0.50mm' x9, '0.60mm' x18; execute_mate_server.py:44 EMPTY_CLOSED_M 0.002", status: measured}
+  closed_on_part_mm:
+    value: {u_brown: 21.0-21.5, u_orange: 21.0-21.5, line_green: 25.9-26.1, inverted_u_yellow: 41.7-42.9}
+    source: "repo primitives/shared/config.py:18-21 (readback 10-07..10-14); /tmp/fmb1_7*.log final_width_mm 21.5 x20, 26.1 x8, 41.9/42.0/42.9"
+    status: measured
+  width_topics:
+    value: {"/gripper_width_offset": "tip-to-tip gap = plate spacing - 2 x 4.6 mm (10 Hz)", "/gripper_width": "plate reading, +9.2 mm (10 Hz)",
+            "/gripper_grasp_detected": "RG2 stall/grip flag (10 Hz); also true when closed on nothing", "/gripper_status": "Motion/Grasp/Width/Safety/Circuit string",
+            "/gripper_motion_ongoing": bool}
+    source: "live probe 2026-10-24 (97.4 vs 88.2 = 9.2 mm); grip_adapter.py:13-14; execute_mate_server.py:118-120; repo CLAUDE.md:276-277"
+    status: measured
+  joint_state: {value: "none - /rg2/joint_states has 0 publishers (rg2_state_publisher subscribes only); onrobot_ros reports no joint angle or effort",
+                source: "live `ros2 topic info -v /rg2/joint_states` 2026-10-24; grip_adapter.py:75-76", status: measured}
+  force:
+    value_N: 40.0
+    source: "seams/grip_adapter.py:16-20,46 - onrobot_ros rg_gripper passes no force; every command runs at the driver default 400 x 0.1 N"
+    status: measured   # what the driver sends; Grip.force is recorded, not applied
+  flange_to_closed_fingertip:
+    value: 0.23086
+    frame: tool z
+    source: "repo primitives/shared/config.py:12-15 (closed tips touched base1's 35 mm top at flange - 230.86 mm, 2026-10-14); mem grasp-depth-and-y-offset-2026-10-14.md"
+    status: measured
+  fingertip_to_pad_centre: {value: 0.0149, source: "config.py:14,16 (pads 29.8 mm long, CAD)", status: derived}
+  tip_length_vs_gap: {value: "L(gap_mm) = 0.23086 - 0.055 * (cos(asin(3.96/110)) - cos(asin((gap+3.96)/110)))", source: "config.py:52-55 (RG2 4-bar, R = 55 mm, CAD)", status: derived}
+  legacy_nominal_offset: {value: 0.2286, source: "config.py:8-11 - the fingertip END, ~1 mm above the tips; NOT the pad centre", status: definition}
+  grasp_depth_executed:
+    value: "per part, written by move_to_grasp --pad-center to repo ablations/logs/grasp_tool_offsets.json (e.g. u_brown 216.25 mm on 2026-10-21)"
+    source: config.py:63-76
+    status: measured
+  pre_grasp_opening_mm:
+    recorded: {u_brown: 35.0, u_orange: 35.0, line_green: 39.8, inverted_u_yellow: 56.7}
+    used_in_runs: {u_brown: 39, u_orange: 39, line_green: "55.8-87.8", inverted_u_yellow: 96.7}
+    source: "recorded: repo ablations/eval_resources/fmb1_assembly.json; used: /tmp/fmb1_*.log '[pick] ... opening X mm (recorded Y)' (replay_real_assembly.py _pick_room chooses per stance)"
+    status: measured
+  mount_in_cell_tf: {value: "tool0 -> rg2_base_link: xyz 0, pi about z (no quick-changer offset in the cell's URDF)", source: "live /tf_static 2026-10-24", status: measured,
+                     note: "twin composite: tool0 -> quick_changer_link yaw -90 deg, -> rg2_base_link +0.0181 m pitch -90 deg (composite.yaml:42-69); robo-manipulate says a 15.92 mm weld. Neither compared with 230.86 mm."}
+  firmware_quirks: {value: "no precise positioning mode (2.1 mm overshoot seen); safety-circuit latch cleared only by an arm power cycle", source: "repo CLAUDE.md:276-300; grip_adapter.py:43", status: measured}
+
+wrist_camera:
+  model: {value: "Intel RealSense D415, wrist-mounted on the tool's -Y side", source: "repo CLAUDE.md:139", status: measured}
+  hand_eye:
+    value: {position: [-0.01573, -0.04201, 0.07153], quat_xyzw: [-0.01298, -0.00391, -0.0098, 0.99986]}
+    frame: "EE = the pose on /tcp_pose_broadcaster/pose (robot_config.yaml:41), which is the flange: at home it reads HOME_POSE (0.065,-0.385,0.481)"
+    source: "ws aruco_camera_localizer/config/robot_config.yaml:10,12 (2026-10-20 base1 24-view survey, ablations/handeye_from_survey.py: spread 2.8->1.2 mm median, 7.3->3.5 max)"
+    status: measured
+    superseded: "2026-10-13 ChArUco values [-0.01446, -0.04424, 0.07317] / [-0.0238, -0.00386, -0.01645, 0.99957] (robot_config.yaml:9,11; mem camera-calibration-2026-10-13.md still quotes these)"
+    open_items: "roll about the optical axis weakly determined (~+-2 mm at the gripper); a ~2 mm -y seat bias (repo docs/QUEUED_FIXES.md:209 #12); a 2 deg error is ~9 mm of target at a 0.27 m height difference (mem same-frame-aim.md)"
+    in_cell_tf: "camera_link is NOT attached to the robot tree on /tf_static (live); the localizer applies the hand-eye itself"
+  driver_profile:
+    value: {color: "1280x720 @ 15 fps", depth: "1280x720 @ 15 fps", align_depth: true, infra: off, rgb_auto_exposure_priority: false}
+    source: "live process cmdline (ros2 launch realsense2_camera rs_launch.py ...), running since 2026-10-15"
+    status: measured
+  intrinsics_driver:
+    color: {width: 1280, height: 720, fx: 923.8002, fy: 923.6292, cx: 622.8865, cy: 351.8378, distortion: "plumb_bob, all 0"}
+    aligned_depth: "same K as color (frame camera_color_optical_frame)"
+    raw_depth: {width: 1280, height: 720, fx: 943.2414, fy: 943.2414, cx: 636.8291, cy: 357.3701}
+    source: "live /camera/camera/{color,aligned_depth_to_color,depth}/camera_info 2026-10-24; depth reads use this (repo ablations/seat_check.py:84)"
+    status: measured
+  intrinsics_localizer:
+    value: {width: 1280, height: 720, fx: 910.13, fy: 911.16, cx: 619.57, cy: 349.15, distortion: [0.130074, -0.439479, -0.001453, -0.000549, 0.369498]}
+    source: "ws aruco_camera_localizer/config/robot_config.yaml:15-21; marker poses use this (localizer runs on /camera/camera/color/image_raw)"
+    status: measured   # mem camera-calibration-2026-10-13: 0.23-0.25 px per-view RMS, "never refit"
+    note: "two intrinsic sets coexist: markers 910.13, depth 923.80 (1.5 % focal difference) - OWED.md"
+  rates_received:
+    value: {color_image_raw_hz: [7.4, 9.1], aligned_depth_hz: [5.2, 5.9]}
+    source: "evidence/topic_rates_20261024_090532.json and an earlier 15 s window (Python subscriber on the cell PC; may be subscriber-limited below the 15 fps profile)"
+    status: measured
+  min_depth_range: {value: 0.45, source: "mem pose-findings-2026-10-14.md (D415 at 1280x720 gives no depth closer than ~0.45 m)", status: measured}
+  depth_timing:
+    value: "frames taken while the arm moves (>30 mm/s) put a static base ~10 mm off; after the stop the first frame is final; frames arrive 148 ms median / 651 ms p90 after their stamp; rule: frames stamped >= 0.25 s after the TCP last moved > 0.5 mm"
+    source: "mem depth-timing.md (repo ablations/depth_timing.py, 617 frames)"
+    status: measured
+  lighting: {value: "lights off -> colour image black; runtime fix gain 128, auto exposure off, exposure 8000; D415 IR projector off for colour reads even when lit", source: "mem dim-light-camera.md", status: measured}
+  hardware_quirk: {value: "worn USB-C plug: drops to 480 Mbps on big wrist rotations; must run on USB 3 (5000 Mbps)", source: "mem optiplex-cell-quirks.md; repo CLAUDE.md:20-22", status: measured}
+
+perception:
+  localizer_stream:
+    value: {topic: /objects_poses_real, relay: /objects/poses, raw_pre_snap: /objects_poses_real_raw, type: tf2_msgs/msg/TFMessage,
+            rate_hz: 2.6, gap_s_max: 0.48, message_shape: "one TFMessage per processed frame, carrying every object in view",
+            children_names: "cell names (base1, u_brown, u_orange, line_green, inverted_u_yellow)", parent_label: World, values_in: ur_base}
+    source: "live probe evidence/topic_rates_20261024_090532.json (arm still at home, 3 objects in view); seams/vision_server.py:52-54 (relay)"
+    status: measured
+    other_reports: "mem optiplex-cell-quirks.md ~3.6 Hz; replay comment 'the localizer's ~2.3 Hz' (ablations/replay_real_assembly.py:561); repo CLAUDE.md:25 ~3 Hz"
+  coverage:
+    value: >-
+      only what is in the wrist camera's view: from home it cannot see the clear area; over the clear area it cannot see the
+      table parts; a part directly under half-closed fingers is hidden; a horizontal gripper sees no table. In 342 of 419
+      sequence-planner observations the part was seen; inverted_u_yellow was 'not seen from any view' or 'observe failed' 56
+      times, line_green 8, u_orange 8, u_brown 5 (the arm then looks straight at it, or the recorded sequence is used).
+    source: "repo CLAUDE.md:156-157,239-243; /tmp/fmb1_*.log '[derive-sequence]' lines (115 logs)"
+    status: measured
+  motion_pause: {value: "no detections while the TCP moves > 15 mm/s (holdover 0 frames)", source: "ws aruco_camera_localizer/config/filter_config.yaml:45-47", status: definition}
+  z_snap:
+    value: >-
+      published z is SNAPPED, not measured: objects to table_z + face_height/2 when within 10 mm (object_snap_z), boards to
+      table_z + height/2 and yaw-only (board_snap_z, board_yaw_only); parts slide along the camera ray to rest height (within 50 mm).
+      Seen live 2026-10-24: u_brown and u_orange SEATED in base1 published at z -0.045 (the table-resting value) although the
+      seated centre is ~-0.0415.
+    source: "ws aruco_camera_localizer/config/filter_config.yaml:19-29; live /objects_poses_real echo 2026-10-24"
+    status: measured
+  fold_snap: {value: "orientation snapped to one canonical branch of the part's symmetry group per frame (subtypes block, peg; skipped over 10 deg tilt)", source: "filter_config.yaml:39-42; mem fold-symmetry-logic.md", status: definition}
+  ema: {value: off, source: "filter_config.yaml:12", status: definition}
+  still_rule: {value: "a pose counts only if the TCP was still 0.8 s before it was published; >= 3 still samples, median", source: "seams/vision_ops.py:34,112-119; repo CLAUDE.md:252-257", status: definition}
+  base_view_detection_sets: {value: "from the 0.56 m base view the localizer sits in one of two marker sets for minutes; base1 read steps ~8 mm in y", source: "mem base-view-detection-sets.md", status: measured}
+  sigmas:
+    base_icp_xy: {value: 0.0018, source: "seams/bindings.yaml:27 (11-view CAD-fit survey 2026-10-20)", status: measured}
+    base_icp_z_yaw: {value: UNMEASURED, source: "seams/vision_ops.py:107 (sigma [s_xy, s_xy, NaN, NaN])", measure_by: "repeat the depth CAD fit of a still base over N views (handeye_icp_survey pattern) and take the z / yaw spread"}
+    seat_depth_z: {value: 0.0005, source: "seams/bindings.yaml:28 (seat_check on seated parts 2026-10-20)", status: measured}
+    part_markers: {value: "the read's own spread of >= 3 still samples (repeatability, not bias)", source: "seams/vision_ops.py:111-124", status: definition}
+    marker_xy_in_certify: {value: UNMEASURED, source: "vision_ops.py:247-251 (reported, not judged)", measure_by: "marker xy of a seated part vs a contact (tap) map over N views"}
+  held_part:
+    value: "occluded by the gripper; not re-read. The held pose is chained from the previous primitive's result (grasp id + executed grasp depth + world orientation). /vision/get_pose kind=held is NOT served."
+    source: "repo CLAUDE.md:212-213; seams/vision_ops.py:74-76; replay_real_assembly.py:1355-1386"
+    status: measured
+  base_cad_fit_z_and_tilt:
+    value: {z_mm_ur_base: {n: 520, median: -63.1, mean: -63.07, stdev: 0.25, min: -64.3, max: -62.6}, twin_world_z_mm_median: 16.9,
+            pitch_deg: {median: 0.92, stdev: 0.26}, roll_deg: {median: -0.25, stdev: 0.25}, fit_rms_mm: 1.2,
+            fit_minus_marker_xy_mm: {dx_median: 2.0, dy_median: -0.7}}
+    source: "/tmp/fmb1_*.log '[base] CAD fit' and '[move_base] base1 at' json (evidence/run_log_poses.json base_cad_fit)"
+    status: measured
+    note: "depth CAD fit carries the 1-4 mm per-view bias of mem depth-timing.md; touch-measured base tilt was 0.47 deg (mem same-frame-aim.md). The code does not use this z (frames base1 z below)."
+
+regions:
+  active_layout: {value: fmb1_home_2026_10_21, source: "repo primitives/shared/cell_layout.yaml:18 (and FMB_LAYOUT in every 10-23 run)", status: measured}
+  assembly_region:
+    ur_base: {center: [0.032, -0.450], half: [0.120, 0.120], x: [-0.088, 0.152], y: [-0.570, -0.330]}
+    twin_world: {center: [-0.032, 0.450], x: [-0.152, 0.088], y: [0.330, 0.570]}
+    source: "cell_layout.yaml:25"
+    status: definition
+    note: "where the startup base read flies; it does NOT contain where base1 actually sat (centre x up to 0.1595, footprint to x 0.263 ur_base) - see base1.footprint_union"
+  clear_area:
+    ur_base: [-0.320, -0.500]
+    twin_world: [0.320, 0.500]
+    source: "cell_layout.yaml:26; move_to_clear_area.py"
+    status: definition
+    note: "a taped spot (black tape); its square size UNMEASURED. Sideways-held parts are released ~17-31 mm above the table there and U parts sometimes topple (mem staging-layout-tipping.md)"
+  staging_region:
+    ur_base: {x: [0.19, 0.62], y: [-0.62, -0.25]}
+    twin_world: {x: [-0.62, -0.19], y: [0.25, 0.62]}
+    view_flange_ur_base: [0.400, -0.450, 0.62]
+    view_flange_twin_world: [-0.400, 0.450, 0.70]
+    source: "cell_layout.yaml:27"
+    status: definition
+  base_fixed: {value: false, source: "cell_layout.yaml:28; config.py:468 BASE_FIXED", status: definition}
+  spacing_rule: {value: "every table part >= 25 mm from base1 and from each other (open-finger reach)", source: "repo ablations/spacing_check.py:27", status: definition}
+
+base1:
+  free: {value: true, source: "cell_layout.yaml:28 base_fixed false; operator 2026-10-21 (tape does not hold it); the arm slides/turns it (ablations/move_base.py)", status: measured}
+  cad: {extent_mm: [161.0, 161.0, 35.0], origin: "bbox centre", source: "aruco-grasp-annotator/data/models/base1.obj via ablations/grasp_depth.py load_mesh", status: measured}
+  z:
+    value: {ur_base: -0.0625, twin_world: 0.0175}
+    source: "config.py:121 DEFAULT_BASE_POSITION z = TABLE_HEIGHT + 0.0175; ablations/logs/last_base_pose.json; every '[base] base1 observed at (..., -62.5) mm'"
+    status: derived   # table + half the CAD height; never measured directly by the code path; the depth fit reads -63.1 (perception.base_cad_fit_z_and_tilt)
+  observed_at_replay_start:
+    n: 114
+    ur_base: {x_mm: {min: 87.4, max: 159.5, mean: 133.3, median: 142.4}, y_mm: {min: -526.5, max: -437.1, mean: -486.1, median: -485.1}, yaw_deg: {min: 3.63, max: 24.30, mean: 19.34, median: 19.54}}
+    twin_world: {x_mm: {min: -159.5, max: -87.4, mean: -133.3}, y_mm: {min: 437.1, max: 526.5, mean: 486.1}, yaw_deg: {min: 183.6, max: 204.3, mean: 199.3}}
+    source: "/tmp/fmb1_*.log '[base] base1 observed at' (replay_real_assembly.py:2909), 2026-10-22..23; one bench-test read at yaw -53.3 deg (fmb1_28d.log:70) excluded"
+    status: measured
+  after_reset_push:
+    n: 46
+    ur_base: {x_mm: {min: 98.1, max: 148.2, mean: 135.2}, y_mm: {min: -512.1, max: -434.0, mean: -478.0}, yaw_deg: {min: 14.65, max: 23.92, mean: 19.75}}
+    twin_world: {x_mm: {min: -148.2, max: -98.1, mean: -135.2}, y_mm: {min: 434.0, max: 512.1, mean: 478.0}, yaw_deg: {min: 194.7, max: 203.9, mean: 199.8}}
+    source: "/tmp/fmb1_*.log '[move_base] DONE in N pushes' (ablations/move_base.py)"
+    status: measured
+  loop_2026_10_23_runs_68_79:
+    commanded_targets_ur_base_mm_deg: [[116, -510, 15], [131, -445, 21], [101, -485, 19], [121, -470, 22], [141, -482, 19], [126, -465, 14]]
+    observed: {n: 14, x_mm: [104.5, 148.6], y_mm: [-509.8, -438.1], yaw_deg: [15.14, 23.51], mean: [131.6, -477.3, 19.97]}
+    source: "/tmp/fmb1_loop.log ('=== LOOP run N pose X Y YAW'); /tmp/fmb1_68..79.log"
+    status: measured
+    note: "the loop driver script is not in the repo (only its log); the reset pushes base1 to a different target each run"
+  last_saved_read:
+    value: {ur_base: [0.13445, -0.46945, -0.0625], quat_xyzw: [0, 0, 0.13176, 0.99128], yaw_deg: 15.14, unix_t: 1792819759.26, local: "2026-10-23 22:29:19 MST"}
+    twin_world: {xyz: [-0.13445, 0.46945, 0.0175], yaw_deg: 195.14}
+    source: "repo ablations/logs/last_base_pose.json (= run 79's read, /tmp/fmb1_79.log:309)"
+    status: measured
+  live_2026_10_24:
+    value: {ur_base: [0.13508, -0.46609, -0.0625], yaw_deg: 15.38, with: "u_brown and u_orange seated (u_brown read 1.7/2.5 mm off its CAD seat, u_orange 0.1/1.1 mm)"}
+    source: "live /objects_poses_real echo 2026-10-24 ~09:06 (arm at home)"
+    status: measured
+  footprint_union:
+    value: {ur_base_mm: {x: [-15.4, 263.3], y: [-624.0, -332.2]}, twin_world_mm: {x: [-263.3, 15.4], y: [332.2, 624.0]}}
+    how: "corners of the 161 mm square at each of the 114 observed poses"
+    loop_runs_68_79_only: {ur_base_mm: {x: [1.9, 251.6], y: [-609.1, -332.9]}}
+    source: evidence/run_log_poses.json
+    status: derived
+    note: "overlaps the staging region (ur_base x >= 0.19); the spacing check keeps parts >= 25 mm from it"
+  moves_between_parts: {value: "+1..4 mm per part (Vention carriage creep, 10-15); recent runs '[base] moved (+0.3..+2.3, -0.7..+3.7) mm since the last read' between disassembly picks", source: "mem vention-7th-axis.md; /tmp/fmb1_77..79.log", status: measured}
+
+parts:
+  name_map:
+    value:
+      base1: {occurrence: "fmb1/occurrence:00", label: Body1}
+      u_brown: {occurrence: "fmb1/occurrence:01", label: Body2, mate: "fmb1/mate:00", graph_seat_z_mm: 17.50}
+      u_orange: {occurrence: "fmb1/occurrence:04", label: Body5, mate: "fmb1/mate:01", graph_seat_z_mm: 17.50}
+      line_green: {occurrence: "fmb1/occurrence:02", label: Body3, mate: "fmb1/mate:02", graph_seat_z_mm: 24.25}
+      inverted_u_yellow: {occurrence: "fmb1/occurrence:03", label: Body4, mate: "fmb1/mate:03", graph_seat_z_mm: 14.26}
+    order: [mate:00, mate:01, mate:02, mate:03]
+    interchangeable: "class:03 = {Body2, Body5} (the two U parts)"
+    source: "repo seams/bindings.yaml:10-21; fmb1.assembly-graph.json"
+    status: definition
+  cad_extent_mm:
+    value: {u_brown: [70, 70, 21], u_orange: [70, 70, 21], line_green: [25.9, 140, 25.9], inverted_u_yellow: [112.7, 70, 21]}
+    origin: bbox centre (cell meshes); the twin's occurrence frames are VOLUME CENTROIDS
+    source: "aruco-grasp-annotator/data/models/<part>.obj (x0.01) via ablations/grasp_depth.py:34-42"
+    status: measured
+  frame_map_cell_to_graph:
+    value: "base1 frame -> graph assembly frame: p_graph = Rz(-90 deg) p_cell + (0, 0, 0.0175)  (origin moves from base1's bbox centre to its bottom)"
+    source: "derived 2026-10-24 from translations: cell u_brown y -0.0475 / u_orange y +0.0485 (fmb_assembly1.json) vs graph Body2 x -0.0476 / Body5 x +0.0476 (fmb1.assembly-graph.json occurrence:01/04); Rz(-90) is the only z-up rotation that maps both; graph Body1 centroid z 0.0167"
+    status: derived
+    not_checked: "part orientations (cell U/yellow seated rpy (-90,0,0), graph identity), the U-part centroid-vs-bbox offsets, the 1 mm cell slot asymmetry"
+  resting_stance:
+    value:
+      u_brown: {rpy_deg: "(-90, 0, yaw)", z_ur_base_mm: -45, z_twin_world_mm: 35.0, is: "the seated orientation up to yaw; 1 pass"}
+      u_orange: {rpy_deg: "(-90..-95, 0..1, yaw); once (-91, -12)", z_ur_base_mm: "-45 (once -55)", z_twin_world_mm: 35.0, is: "seated orientation up to yaw; 1 pass"}
+      line_green: {rpy_deg: "(150..164, 88..90, 0)", z_ur_base_mm: -67, z_twin_world_mm: 13.0, is: "long axis horizontal on a long face - the seated stance modulo the square section; 1 pass"}
+      inverted_u_yellow: {rpy_deg: "(-90, 0, yaw)", z_ur_base_mm: -45, z_twin_world_mm: 35.0, is: "seated orientation up to yaw; 1 pass"}
+    source: "/tmp/fmb1_*.log '[pick] ... pose used' (n 30/25/22/26) and '[derive-sequence] ... -> 1 pass' (84/84/90/84 of the plannings that saw the part, no 2-pass decision)"
+    status: measured   # orientation measured by markers; z is the localizer's SNAPPED rest height (perception.z_snap)
+    note: "briefing §2.4 says all parts 'lie on a side'; the logged rpy are the assembled orientation up to yaw (except line_green, modulo its square section)"
+  staging_spots_flange_ur_base_mm:
+    value:
+      u_brown: {n: 15, x: [324, 493], y: [-543, -400], median: [344, -410]}
+      u_orange: {n: 63, x: [333, 604], y: [-593, -271], median: [364, -412]}
+      line_green: {n: 116, x: [330, 580], y: [-550, -330], median: [550, -470]}
+      inverted_u_yellow: {n: 118, x: [410, 560], y: [-480, -280], median: [420, -480]}
+    source: "/tmp/fmb1_*.log '[spot] <part>: free spot ... flange (x, y)' and '... set down at (x, y)' (ablations/disassemble.py); evidence/run_log_poses.json"
+    status: measured   # where the disassembly put each part's flange; the part pose is within a few cm of it
+  staged_record_latest:
+    value:
+      inverted_u_yellow: {spot_ur_base: [0.4103, -0.4699], set_down_pose_ur_base: {xyz: [0.410, -0.470, -0.0415], quat_xyzw: [-0.69361, -0.13750, 0.13750, 0.69361]}, local: "2026-10-23 22:21:45"}
+      line_green: {spot_ur_base: [0.5501, -0.4501], set_down_pose_ur_base: {xyz: [0.550, -0.450, -0.03905], quat_xyzw: [0, 0, 0.20052, 0.97969]}, local: "2026-10-23 22:23:17"}
+      u_orange: {spot_ur_base: [0.3334, -0.4098], set_down_pose_ur_base: {xyz: [0.310, -0.420, -0.0415], quat_xyzw: [-0.69225, -0.14418, 0.14418, 0.69225]}, local: "2026-10-23 22:24:44"}
+      u_brown: {spot_ur_base: [0.4934, -0.5198], set_down_pose_ur_base: {xyz: [0.470, -0.530, -0.0415], quat_xyzw: [-0.69230, -0.14397, 0.14397, 0.69230]}, local: "2026-10-23 22:26:15"}
+    source: "repo ablations/logs/staged_parts.json (written by ablations/disassemble.py:131-145 record_staged; run 79's disassembly)"
+    status: measured   # the commanded set-down pose: z is the release height, not the resting z
+    twin_world_xy: {inverted_u_yellow: [-0.410, 0.470], line_green: [-0.550, 0.450], u_orange: [-0.310, 0.420], u_brown: [-0.470, 0.530]}
+  current_table_state:
+    value: "unknown after run 79 (EXIT 1 at 22:34:21, /tmp/fmb1_loop.log); live 2026-10-24: u_brown + u_orange seated in base1, line_green and yellow not in the home view"
+    status: measured
+
+insertion_and_certification:
+  insert_routes: {value: "u_brown, u_orange: compliant_insert FSM (spiral/touch); line_green, inverted_u_yellow: prismatic_peg_insertion - routed by part name inside translate_object (recorded debt)", source: "repo CLAUDE.md:173-178; drive_mate_server.py:29-32", status: measured}
+  good_seat_band_mm: {value: 1.7, source: "repo CLAUDE.md:180-181", status: measured}
+  drive_mate_seated_dz_m: {value: 0.005, rest: "TCP still < 0.5 mm over 0.5 s", source: "seams/insert_outcome.py:32; drive_mate_server.py:62", status: definition}
+  certify_z_band_m: {value: 0.002, how: "graph half-width 1 mm + 2 x seat_depth sigma 0.5 mm", source: "seams/vision_ops.py:267", status: derived}
+  certify_judges: {value: "seat height (centre + end heights) by depth; tilt angle and marker xy reported only", source: "seams/vision_ops.py:247-251; ARCHITECTURE_SEAMS.md:90-93", status: definition}
+  graph_acceptance: {value: "half-widths 1 mm each mate-frame axis, 1 deg, class insertion, fastening free (judged at rest)", source: "seams/bindings.yaml:8-13", status: definition}
+  known_biases: {value: "seated bars read a -3 deg roll; line_green lands 2-4 mm toward base -y along its axis in 16 of 19 inserts and pivots in the jaws (recovered by nudge + taps, ~120 s)", source: "ARCHITECTURE_SEAMS.md:93; mem fmb1-runs-2026-10-23.md", status: measured}
+
+cycle:
+  hands_off_4of4_wall_s: {value: [968, 944, 880, 919, 829, 705, 793, 687, 534], source: "mem fmb1-runs-2026-10-23.md (runs 34-38b, 42-44); LADDER/ckpt fmb1-2026-10-23-run74c (534 s, git 64e6df7)", status: measured}
+  target_s: {value: 544, source: "mem cycle-time-target.md / fmb1-runs-2026-10-23.md (TGOAL)", status: definition}
