@@ -30,6 +30,9 @@ ap.add_argument('--fps', type=float, default=5.0)
 ap.add_argument('--port', type=int, default=8080)
 ap.add_argument('--bind', default='0.0.0.0')
 ap.add_argument('--transcript', default=None, help='a Claude Code session .jsonl to show live beside the views')
+ap.add_argument('--timeline', default=None,
+                help="a background job's timeline.jsonl (~/.claude/jobs/<id>/): what the session is doing right now, as a live "
+                     "status line under the chat (default: the job whose id starts the transcript's session id)")
 a = ap.parse_args()
 TOPICS = a.topic or ['/annotated_stream', '/depth_view', '/camera/camera/color/image_raw/compressed']
 
@@ -111,7 +114,7 @@ def _img_src(src):
 
 def log_entries(since):
     """Transcript records from byte offset `since` (the last ~12 MB when negative: tool output and images fill it) as compact entries, and the new
-    offset. Only complete lines; thinking, tool results and bookkeeping records are left out."""
+    offset. Only complete lines; replies, thinking, tool calls with a line of each result, images; bookkeeping left out."""
     import json
     import os
     out = []
@@ -151,8 +154,15 @@ def log_entries(since):
                     u = _img_src(b.get('source'))
                     if u:
                         out.append({'k': 'img', 'who': 'user', 't': ts, 'x': u})
-                elif b.get('type') == 'tool_result' and isinstance(b.get('content'), list):
-                    for x in b['content']:                          # an image Claude read (Read on a PNG / JPG)
+                elif b.get('type') == 'tool_result':
+                    # the result under its call, one short line (prompt2assembly's watch_agent shows it the same way)
+                    bc = b.get('content')
+                    txt = bc if isinstance(bc, str) else ' '.join(x.get('text', '') for x in (bc or [])
+                                                                  if isinstance(x, dict) and x.get('type') == 'text')
+                    txt = ' '.join(txt.split())
+                    if txt:
+                        out.append({'k': 'result', 't': ts, 'x': ('error: ' if b.get('is_error') else '') + txt[:220]})
+                    for x in (bc if isinstance(bc, list) else []):  # an image Claude read (Read on a PNG / JPG)
                         if isinstance(x, dict) and x.get('type') == 'image':
                             u = _img_src(x.get('source'))
                             if u:
@@ -161,12 +171,47 @@ def log_entries(since):
             for b in c:
                 if b.get('type') == 'text' and b.get('text', '').strip():
                     out.append({'k': 'claude', 't': ts, 'x': b['text']})
+                elif b.get('type') == 'thinking' and b.get('thinking', '').strip():
+                    # the terminal shows these; the page left them out, so what the operator read there never came here
+                    # (10-24: 'Run 81 halted before assembly ...' was a thinking block)
+                    out.append({'k': 'thinking', 't': ts, 'x': b['thinking']})
                 elif b.get('type') == 'tool_use':
                     i = b.get('input') or {}
                     what = i.get('description') or i.get('file_path') or i.get('pattern') or i.get('prompt', '')[:120] \
                         or (i.get('command') or '').split('\n')[0][:160]
                     out.append({'k': 'tool', 't': ts, 'x': f"{b.get('name')}: {what}"})
     return out, start + end
+
+
+def _timeline_path():
+    import glob
+    import os
+    if a.timeline:
+        return a.timeline
+    sid = os.path.basename(a.transcript or '').split('.')[0]
+    hits = [d for d in glob.glob(os.path.expanduser('~/.claude/jobs/*/timeline.jsonl')) if sid.startswith(os.path.basename(os.path.dirname(d)))]
+    return hits[0] if hits else None
+
+
+def status():
+    """What the session is doing now: the job timeline's last record (state, detail, since when). Claude Code writes the
+    transcript one finished block at a time and no partial tokens anywhere, so this line is what moves between blocks."""
+    import json
+    import os
+    path = _timeline_path()
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, 'rb') as f:
+        f.seek(max(0, os.path.getsize(path) - 20000))
+        lines = f.read().split(b'\n')
+    for ln in reversed(lines):
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        return {'state': d.get('state', ''), 'detail': (d.get('detail') or '')[:200], 'at': d.get('at', ''),
+                't': _local(d.get('at'))}
+    return {}
 
 
 PAGE_SPLIT = """<html><head><title>FMB1 cell</title><meta name='viewport' content='width=device-width'>
@@ -201,6 +246,15 @@ details.tools div{padding:1px 0 1px 16px;white-space:pre-wrap;overflow-wrap:anyw
 .event{align-self:flex-start;color:var(--event);background:var(--eventbg);border-radius:8px;padding:3px 10px;
   font:12px/1.45 ui-monospace,Menlo,monospace;max-width:92%;overflow-wrap:anywhere;white-space:pre-wrap}
 .event .ts{margin-left:6px}
+.row.thinking{align-self:flex-start;max-width:92%}
+.thinking .bubble{color:var(--muted);font-style:italic;font-size:14px;line-height:1.55;border-left:2px solid var(--line);padding:0 0 0 10px}
+details.tools div.res{color:var(--muted);opacity:.85}
+#status{padding:7px 20px;border-top:1px solid var(--line);color:var(--muted);font:12px/1.4 ui-monospace,Menlo,monospace;
+  display:flex;gap:8px;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#status .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+#status.working .dot{background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+#status span.d{overflow:hidden;text-overflow:ellipsis}
 .md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
 .md p{margin:.45em 0}.md ul,.md ol{margin:.45em 0;padding-left:1.5em}.md li{margin:.2em 0}
 .md h1,.md h2,.md h3{font-size:16px;margin:.7em 0 .3em}
@@ -219,7 +273,7 @@ details.tools div{padding:1px 0 1px 16px;white-space:pre-wrap;overflow-wrap:anyw
 figcaption{color:var(--muted);font-size:12px;padding:3px 4px}
 @media (max-width:900px){body{flex-direction:column;height:auto;overflow:auto}#chat{height:60vh}#views{width:auto}}
 </style></head><body>
-<div id='chat'><header><svg class='mark' viewBox='0 0 24 24' fill='currentColor'><path d='M12 2l1.6 6.9L20 6l-4.6 5.1L22 12l-6.6.9L20 18l-6.4-2.9L12 22l-1.6-6.9L4 18l4.6-5.1L2 12l6.6-.9L4 6l6.4 2.9z'/></svg>Claude <small>FMB1 cell session</small></header><div id='log'></div></div>
+<div id='chat'><header><svg class='mark' viewBox='0 0 24 24' fill='currentColor'><path d='M12 2l1.6 6.9L20 6l-4.6 5.1L22 12l-6.6.9L20 18l-6.4-2.9L12 22l-1.6-6.9L4 18l4.6-5.1L2 12l6.6-.9L4 6l6.4 2.9z'/></svg>Claude <small>FMB1 cell session</small></header><div id='log'></div><div id='status'><span class='dot'></span><span class='d'></span></div></div>
 <div id='views'>__FIGS__</div>
 <script src='https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js'></script>
 <script src='https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js'></script>
@@ -236,6 +290,8 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden)imgs.forEa
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function md(s){try{return DOMPurify.sanitize(marked.parse(s,{gfm:true,breaks:false}))}catch(e){return '<div style=white-space:pre-wrap>'+esc(s)+'</div>'}}
 function add(e){
+  if(e.k==='result'){const g=log.lastElementChild;if(!g||g.tagName!=='DETAILS')return;
+    const d=document.createElement('div');d.className='res';d.textContent='  ← '+e.x;g.appendChild(d);return}
   if(e.k==='tool'){
     let g=log.lastElementChild;
     if(!g||g.tagName!=='DETAILS'){g=document.createElement('details');g.className='tools';g.innerHTML='<summary></summary>';g.n=0;log.appendChild(g)}
@@ -260,8 +316,17 @@ async function poll(){
     while(log.children.length>500)log.removeChild(log.firstChild);
     since=j.next;if(atBottom||j.first)log.scrollTop=log.scrollHeight;
   }catch(err){}
-  setTimeout(poll,2000)}
+  setTimeout(poll,document.hidden?3000:500)}
 poll();
+// what the session is doing right now (the job timeline), with how long it has been at it
+const st=document.getElementById('status');let stAt=null,stDetail='';
+async function pollStatus(){
+  try{const j=await (await fetch('status')).json();
+    if(j.at){stAt=Date.parse(j.at);stDetail=j.detail||j.state;st.className=j.state==='working'?'working':''}}catch(err){}
+  setTimeout(pollStatus,document.hidden?5000:1000)}
+setInterval(()=>{if(stAt===null)return;const s=Math.max(0,Math.round((Date.now()-stAt)/1000));
+  st.querySelector('.d').textContent=(st.className==='working'?'working · ':'')+stDetail+' · '+(s<120?s+'s':Math.round(s/60)+' min')+' ago'},500);
+pollStatus();
 </script></body></html>"""
 
 
@@ -270,6 +335,12 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith('/status'):
+            import json
+            body = json.dumps(status()).encode()
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith('/log') and a.transcript:
             import json
             from urllib.parse import parse_qs, urlparse

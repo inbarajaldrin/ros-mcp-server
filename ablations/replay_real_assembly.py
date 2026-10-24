@@ -1576,6 +1576,7 @@ DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today 
                                      # picks); u_brown lying on its side slid 8.5 mm along its uniform top face, was held
                                      # 8.5 mm off and the 8 mm spiral missed its pocket twice (rim, +34 mm).
                                      # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
+DEPTH_PICK_AGREE_MAX_TURN_DEG = 5.0  # two agreeing captures (0.5 deg, 1 mm) may sit this far from the marker
 DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
 DEPTH_PICK_MIN_MATCHED = 0.20        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21). 10-23: 0.30 -> 0.20 -
                                      # a part picked from the staging region has neighbours in its crop: u_brown's good fit
@@ -1636,6 +1637,7 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
             np.hypot(*info_.get('moved_mm', [0, 0])) > 1000 * DEPTH_PICK_MAX_MOVE_M
             or abs(info_.get('turned_deg', 0.0)) > DEPTH_PICK_MAX_TURN_DEG
             or info_.get('n', 0) < DEPTH_PICK_MIN_MATCHED * max(info_.get('n_data', 1), 1))
+    first_pose, first_info = pose, info
     if not trusted(pose, info):
         # re-measure once from the other view height (a different depth sample of the same part) before refusing
         # fresh frames from the 0.52 m view, not the 0.45 m one: every 0.45 m re-measure in the logs was worse than the read
@@ -1660,6 +1662,18 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                 except Exception as e:
                     pose, info = None, {'error': str(e)}
                 say(f"  [depth-pick] {obj} (re-measured at {alt:.2f} m): {json.dumps(info)}")
+                # two captures that agree are a stable fit; a steady few-degree gap to the marker is then the marker's (a
+                # sticker turned on the part), not a slide (10-24 run 81: u_orange 3.13 / 3.17 deg against 3.0, fits 0.3 deg
+                # and 0.4 mm apart; the slides this limit is for moved 8.5 mm and turned 7.6-18 deg)
+                if (pose is not None and first_pose is not None
+                        and abs(info.get('turned_deg', 99)) <= DEPTH_PICK_AGREE_MAX_TURN_DEG
+                        and np.hypot(*info.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_MAX_MOVE_M
+                        and info.get('n', 0) >= DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)
+                        and np.hypot(*(np.asarray(pose[0][:2]) - np.asarray(first_pose[0][:2]))) <= 0.001
+                        and abs(info.get('yaw_deg', 0.0) - first_info.get('yaw_deg', 0.0)) <= 0.5):
+                    say(f"  [depth-pick] {obj}: two captures agree (yaw {first_info.get('yaw_deg')} / {info.get('yaw_deg')} deg) "
+                        f"- the {info.get('turned_deg')} deg to the marker is the marker's; fit trusted")
+                    trusted = lambda *_: True  # noqa: E731
     if not trusted(pose, info):
         say(f"  [depth-pick] {obj}: fit {'failed' if pose is None else 'moved ' + str(info.get('moved_mm')) + ' mm, turned ' + str(info.get('turned_deg')) + ' deg'}"
             f" - not trusted (no marker fallback)"); return None
