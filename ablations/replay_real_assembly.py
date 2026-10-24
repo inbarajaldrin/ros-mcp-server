@@ -2644,25 +2644,44 @@ def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     # both times, ~25 s each) - learned from results, not a per-part table
     vfile = REPO_ROOT / 'ablations' / 'logs' / 'certify_views.json'
     try:
-        last_side = json.load(open(vfile)).get(mate)
+        vd_ = json.load(open(vfile))
     except Exception:
-        last_side = None
-    sides = ([last_side] if last_side in _sc.VIEW_SIDES else []) + [v for v in _sc.VIEW_SIDES if v != last_side]
+        vd_ = {}
+    # ranked by each view's record for this mate (measured / not), the last one that measured breaking ties: the last view
+    # alone alternated u_orange between 'inner' and 'along+' (each reads an end 2 mm under the floor at some base poses)
+    # and tried 'outer', which it never reaches, every time one of them failed (runs 63, 65: ~13 s a wasted view)
+    ent = vd_.get(mate)
+    last_side = ent if isinstance(ent, str) else (ent or {}).get('last')
+    stats = (vd_.get('_stats') or {}).get(mate) or {}
+
+    def _rank(v):
+        st = stats.get(v) or {}
+        return (-(st.get('ok', 0) + 1) / (st.get('ok', 0) + st.get('fail', 0) + 2), 0 if v == last_side else 1)
+    sides = sorted(_sc.VIEW_SIDES, key=_rank)
+
+    def _note(side, ok):
+        try:
+            d_ = json.load(open(vfile)) if vfile.exists() else {}
+            st_ = d_.setdefault('_stats', {}).setdefault(mate, {}).setdefault(side, {'ok': 0, 'fail': 0})
+            st_['ok' if ok else 'fail'] += 1
+            if ok:
+                d_[mate] = side
+            json.dump(d_, open(vfile, 'w'), indent=1)
+        except Exception:
+            pass
     for side in sides:                              # vision does no motion: the planner tries views until it measures
         r = run_subprocess(_sc.view_pose(obj, observed_base, base, side), label=f'execute_mate: seat view ({obj}, {side})',
                            timeout_s=90, log_fh=log_fh)
         if r.get('result') == 'failure':
+            _note(side, False)
+            say(f"  [execute_mate] {mate}: the {side} view was not reached - next view")
             continue
         out = _seam_call(['execute', '--mate', mate], 450)
         if out.get('refusal') != 'engagement_invalid':
             if out.get('engagement_depth_m') is not None:
-                try:
-                    d_ = json.load(open(vfile)) if vfile.exists() else {}
-                    d_[mate] = side
-                    json.dump(d_, open(vfile, 'w'), indent=1)
-                except Exception:
-                    pass
+                _note(side, True)
             break
+        _note(side, False)
         say(f"  [execute_mate] {mate}: not measurable from the {side} view ({out.get('refusal_detail', '')}) - next view")
     if out is None:
         say(f"  [execute_mate] {mate}: no seat view reached - not asked"); return None
