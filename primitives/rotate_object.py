@@ -41,6 +41,9 @@ import time
 
 from primitives.shared.ik import ik_objective_quaternion, forward_kinematics, dh_params, nearest_joint_equivalent
 from primitives.shared.velocity_profiles import single_point, compute_duration
+
+ROTATE_SHORT = os.environ.get('ROTATE_SHORT', '1') == '1'
+ROTATE_SHORT_RAD, ROTATE_SHORT_RAD_S, ROTATE_SHORT_MIN_S = 0.10, 0.07, 1.0
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
@@ -1659,6 +1662,10 @@ class ReorientForAssembly(Node):
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
         duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+        if ROTATE_SHORT and joint_dist <= ROTATE_SHORT_RAD:
+            # a reorient that is a few degrees (the face is already down: U parts, yellow 0.02-0.06 rad) timed by its joint
+            # distance at ~4 deg/s, >= 1 s, not held to the 2.5 s floor - the speed the wrist turns run at (benched 10-23)
+            duration = max(ROTATE_SHORT_MIN_S, joint_dist / ROTATE_SHORT_RAD_S)
         self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
         positions, velocities, t = single_point(joint_angles, duration)[0]
         trajectory = {"traj1": [{
