@@ -1581,7 +1581,11 @@ DEPTH_PICK_MAX_MOVE_M = 0.005        # 10-21 17:19: 10 -> 5 mm. Good fits today 
                                      # Earlier: 10 mm - a fit this far from its marker seed is not trusted (in clutter - a bar in the base -
 DEPTH_PICK_AGREE_XY_M = 0.002       # the two captures' xy (was 1 mm; run 84: u_brown lying at ~5 deg yaw, fits 1.9 mm / 0.4 deg
                                     # apart, rms 1.55-1.69 mm; the pick has 7 mm of finger room)
-DEPTH_PICK_AGREE_MAX_TURN_DEG = 5.0  # two agreeing captures (0.5 deg, 1 mm) may sit this far from the marker
+DEPTH_PICK_AGREE_MAX_TURN_DEG = 7.0  # was 5: a U lying on its side near 0/180 deg yaw reads its marker 3.8-6.6 deg off two
+                                    # depth captures that agree (u_orange run 82c 6.6, u_brown 84 4.8, u_orange 87 5.5); the
+                                    # slides this guards against turned 7.6-18 deg and moved 8.5+ mm
+DEPTH_PICK_AGREE_MAX_MOVE_M = 0.007 # same: their marker xy sat 5.3 mm off (u_orange run 87)
+DEPTH_PICK_AGREE_YAW_DEG = 1.0      # the two captures' yaw (was 0.5: run 87 u_orange 0.87 deg, rms 1.5-1.7 mm)  # two agreeing captures (0.5 deg, 1 mm) may sit this far from the marker
 DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
 DEPTH_PICK_MIN_MATCHED = 0.20        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21). 10-23: 0.30 -> 0.20 -
                                      # a part picked from the staging region has neighbours in its crop: u_brown's good fit
@@ -1685,10 +1689,10 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                 # and 0.4 mm apart; the slides this limit is for moved 8.5 mm and turned 7.6-18 deg)
                 if (pose is not None and first_pose is not None
                         and abs(info.get('turned_deg', 99)) <= DEPTH_PICK_AGREE_MAX_TURN_DEG
-                        and np.hypot(*info.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_MAX_MOVE_M
+                        and np.hypot(*info.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_AGREE_MAX_MOVE_M
                         and info.get('n', 0) >= DEPTH_PICK_MIN_MATCHED * max(info.get('n_data', 1), 1)
                         and np.hypot(*(np.asarray(pose[0][:2]) - np.asarray(first_pose[0][:2]))) <= DEPTH_PICK_AGREE_XY_M
-                        and abs(info.get('yaw_deg', 0.0) - first_info.get('yaw_deg', 0.0)) <= 0.5):
+                        and abs(info.get('yaw_deg', 0.0) - first_info.get('yaw_deg', 0.0)) <= DEPTH_PICK_AGREE_YAW_DEG):
                     say(f"  [depth-pick] {obj}: two captures agree (yaw {first_info.get('yaw_deg')} / {info.get('yaw_deg')} deg) "
                         f"- the {info.get('turned_deg')} deg to the marker is the marker's; fit trusted")
                     trusted = lambda *_: True  # noqa: E731
