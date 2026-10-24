@@ -198,6 +198,7 @@ def main():
         print("  !!! target outside the staging/assembly area - not moving"); return 1
     first_dir = None
     prev, boost = None, 0.0
+    lever_scale = 1.0
     blocked = 0
     for k in range(1, a.max_pushes + 1):
         (x, y, _), q = ob
@@ -210,9 +211,13 @@ def main():
             # -6.7 mm / -1.1..-1.6 deg; an 8 mm one then moved it 3.8 mm) - the next push goes further, not the same
             if np.hypot(ex - prev[0], ey - prev[1]) < NO_PROGRESS_MM and abs(eyaw - prev[2]) < NO_PROGRESS_DEG:
                 boost = min(boost + BOOST_MM, STEP_MAX_MM)
-                print(f"[move_base] the last push did not move it -> {boost:g} mm further this time", flush=True)
+                # an off-centre push that did not move it: nearer the face middle next (FMB1 logs to run 74: the turn push
+                # at lever 55 left the base where it was 26/45 times on face [-1,0] and 5/11 on [0,-1] - run 74 six in a
+                # row; the centred pushes moved it 72/72)
+                lever_scale *= 0.5
+                print(f"[move_base] the last push did not move it -> {boost:g} mm further, lever x{lever_scale:g} this time", flush=True)
             else:
-                boost = 0.0
+                boost, lever_scale = 0.0, 1.0
         prev = (ex, ey, eyaw)
         if np.hypot(ex, ey) <= a.tol_mm and abs(eyaw) <= a.tol_deg:
             print(f"[move_base] DONE in {k-1} pushes: ({1000*x:.1f}, {1000*y:.1f}) mm {yaw:.2f} deg"); _saved(a.base, ob); return 0
@@ -223,7 +228,7 @@ def main():
             ax = int(np.argmax(np.abs(e_b))) if np.hypot(*e_b) > a.tol_mm else 1
             d = np.zeros(2); d[ax] = 1.0 if (e_b[ax] >= 0 or np.hypot(*e_b) <= a.tol_mm) else -1.0
             # a push along +d at a point offset +t from the face middle (t = d rotated +90) turns the base -z
-            lever = -np.sign(eyaw) * LEVER_MM
+            lever = -np.sign(eyaw) * LEVER_MM * lever_scale
             if np.hypot(*e_b) <= a.tol_mm:
                 # pure turn = a couple (two pushes): 10-21 couples turned base1 0.65-1.3 deg per mm of step (7 mm ->
                 # 8.9 deg for a 2.4 deg error; 10 mm -> 6.5 deg for 4.5), so 1.5 mm/deg + 3 overshot every time
