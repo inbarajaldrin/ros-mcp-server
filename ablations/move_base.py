@@ -69,9 +69,22 @@ def read_base(base):
     return oi, info
 
 
-def go(argv, label, timeout=90):
+PROGRAM_DROPPED = ('goal rejected', 'robot_program_running=False', 'External control program stopped', 'Controller is not running')
+
+
+def go(argv, label, timeout=90, _retried=False):
     r = subprocess.run(['python3', '-u', '-m', *argv], cwd=str(REPO), capture_output=True, text=True, timeout=timeout)
     out = r.stdout
+    if r.returncode != 0 and not _retried and any(k in out + r.stderr for k in PROGRAM_DROPPED):
+        # the program dropped after a good move (run 76: "Connection to reverse interface dropped" after a push, no safety
+        # event; every later move 'goal rejected') - re-send it and retry once, as the replay and disassemble do.
+        # ensure_program refuses unless the safety status is NORMAL.
+        e = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], cwd=str(REPO), capture_output=True,
+                           text=True, timeout=180)
+        print(f"    [program] dropped during '{label}' -> re-sent ({'ok' if e.returncode == 0 else 'FAILED'}), retrying once",
+              flush=True)
+        if e.returncode == 0:
+            return go(argv, label + ' (retry)', timeout, _retried=True)
     res = {}
     if '__RESULT_JSON__' in out:
         try:
