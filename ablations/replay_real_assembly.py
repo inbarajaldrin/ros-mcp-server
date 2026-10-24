@@ -2680,6 +2680,16 @@ def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
     return out
 
 
+def _seat_learned(obj, out):
+    """The insert's seat record counts (seams.seat_learn) only when the part certified on this FIRST check - a part that
+    needed a nudge / taps was not seated where the insert ended."""
+    try:
+        from seams import seat_learn
+        seat_learn.mark_certified(obj, bool(out.get('placed')))
+    except Exception:
+        pass
+
+
 def certify_via_execute_mate(obj, base, observed_base, say, log_fh=None):
     """SEAMS_CERTIFY=1 (M3a): after a part is done, fly the seat view and ask /ur5e/execute_mate. Log-only until FMB1
     proves it: the replay's own verification still decides."""
@@ -4127,6 +4137,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if certify_:
             out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                            say, log_fh) or {}
+            _seat_learned(obj, out)
             if wedgy and not SEAT_CHECK_FIRST and not out.get('placed') and out.get('refusal') == 'not_at_seat':
                 say(f"  [execute_mate] {obj}: not_at_seat -> the seat check and its recovery (nudge / taps), then again")
                 if not seat_check_and_reseat(obj, state, args, say):
@@ -4148,6 +4159,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # view could measure the seat.
         bn_ = base_name or RUN_BASE['name']
         out = certify_via_execute_mate(obj, bn_, getattr(args, 'observed_base', None), say, log_fh) or {}
+        _seat_learned(obj, out)
         if not out.get('placed') and _seat_checked(obj) and getattr(args, 'seat_check', True):
             say(f"  [execute_mate] {obj}: {out.get('refusal') or 'no answer'} -> the replay's seat check / reseat")
             if not seat_check_and_reseat(obj, state, args, say):

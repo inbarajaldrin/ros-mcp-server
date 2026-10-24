@@ -225,7 +225,15 @@ class DriveMateServer(Node):
         import importlib
         import primitives.shared.config as _cfg
         importlib.reload(_cfg)
-        dz = float(_cfg.get_object_base_offset_m(obj)[2])     # known debt: per-part seat-z offset (docstring)
+        # the seat height (UNI, 10-23): learned from this part's own certified inserts (seams.seat_learn); none yet -> the
+        # CAD seat (dz 0). SEAT_DZ_SOURCE=table: the old hand table (PER_OBJECT_BASE_OFFSET_M + settle)
+        from seams import seat_learn as _sl
+        if os.environ.get('SEAT_DZ_SOURCE', 'learned') == 'table':
+            dz, dz_src = float(_cfg.get_object_base_offset_m(obj)[2]), 'table'
+        else:
+            dz_l, n_l = _sl.learned_dz(obj)
+            dz, dz_src = (dz_l, f'learned from {n_l} certified inserts') if dz_l is not None else (0.0, 'CAD (nothing learned yet)')
+        self.get_logger().info(f'{g.mate_id}: seat dz {1000 * dz:+.2f} mm ({dz_src})')
         env = os.environ.copy()
         env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'; env['ROS_MCP_MODE'] = 'real'
         env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
@@ -308,6 +316,10 @@ class DriveMateServer(Node):
         res.trace_path = out.get('trace_path', '')
         if out.get('slide') is not None:
             res.slide = out['slide']; res.measured_correction = out['measured_correction']
+            try:
+                _sl.record_insert(obj, dz, float(out['measured_correction'][2]), res.seated)   # ok set by the certifier
+            except Exception as e_:
+                self.get_logger().warn(f'{g.mate_id}: seat record not written ({e_})')
         res.refusal = ''
         self.get_logger().info(f'{g.mate_id}: rc={rc} stage={res.stage_reached} seated={res.seated} '
                                f'fsm={out.get("fsm_outcome")} correction={out.get("measured_correction")}')
