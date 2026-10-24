@@ -732,7 +732,7 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         others = [b for b in ('base1', 'base2', 'base3', 'base4') if b != RUN_BASE['name']]
         # 5 samples a name, not 12: a still part's pose repeats to ~1 mm and the median of 5 serves a clearance check;
         # 12 at the localizer's ~2.3 Hz kept the arm still ~5 s before every pick (runs 62-66b: ~22 s a cycle, untimed)
-        seen, seen_bases = observe_parts(list(PARTS) + others, with_raw=True, n_samples=PICK_ROOM_SAMPLES)
+        seen, seen_bases = observe_parts(list(PARTS) + others, timeout_s=4.0, with_raw=True, n_samples=PICK_ROOM_SAMPLES)
         if obj not in seen:
             # not in this view: its latest still sighting from any view (the check was skipped for line_green, picked
             # with 5 mm per side -> finger on the bar, 87 N, 2026-10-21)
@@ -4504,7 +4504,8 @@ def main() -> int:
             if ob is not None and not args.part_at_staging:
                 from spacing_check import check as _spacing, observe_parts as _obs_parts, PARTS as _PARTS
                 _PARTS = RUN_BASE.get('parts') or _PARTS           # this assembly's parts, around its base
-                seen = _obs_parts(_PARTS)
+                seen = _obs_parts(_PARTS, timeout_s=4.0, n_samples=PICK_ROOM_SAMPLES)   # was 12 samples / 8 s (~4.7 s
+                # still at home in run 67, where the parts waiting in the staging region are not even in view)
                 ok_sp, rep = _spacing(seen, args.observed_base or ob, base=RUN_BASE['name'])
                 rep['unseen'] = [n for n in _PARTS if n not in seen]
                 msg = f"  [spacing] {json.dumps(rep)}"
