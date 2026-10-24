@@ -213,7 +213,7 @@ def main():
                 boost = min(boost + BOOST_MM, STEP_MAX_MM)
                 # an off-centre push that did not move it: nearer the face middle next (FMB1 logs to run 74: the turn push
                 # at lever 55 left the base where it was 26/45 times on face [-1,0] and 5/11 on [0,-1] - run 74 six in a
-                # row; the centred pushes moved it 72/72)
+                # row; the centred pushes moved it 47 of 50 times)
                 lever_scale *= 0.5
                 print(f"[move_base] the last push did not move it -> {boost:g} mm further, lever x{lever_scale:g} this time", flush=True)
             else:
