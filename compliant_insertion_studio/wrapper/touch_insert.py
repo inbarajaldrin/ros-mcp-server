@@ -68,7 +68,7 @@ PUSH_SPRING_N = 3.0          # a push that reaches the floor WITHOUT its 6 N gua
 
 
 
-ENTRY_PRIOR_N, ENTRY_PRIOR_MIN, ENTRY_PRIOR_MAD_M = 6, 3, 0.001
+ENTRY_PRIOR_N, ENTRY_PRIOR_MIN, ENTRY_PRIOR_MAD_M = 3, 3, 0.001   # last 3 (was 6): 10-23 22:11 on, line_green entered ~2 mm off the 6-median (-2.6, -1.0) and took 72-93 probes; the last 3 put it at (-0.75, -0.67)
 
 
 def _entry_prior(obj):
@@ -84,6 +84,9 @@ def _entry_prior(obj):
         if m.get('outcome') != 'success':
             continue
         ent = [p_ for p_ in m.get('probes', []) if p_.get('push')]
+        # an insert that entered without a flagged push (10-23 21:51 / 22:11: seated, no 'push' probe) entered at its first
+        # probe below the rim contact - those two were the line_green entries that had moved ~2 mm off the old prior
+        ent = ent or [p_ for p_ in m.get('probes', []) if p_.get('z_above_seat_mm', 99) < 10.0][:1]
         if ent:
             offs.append((ent[-1]['dx_mm'] / 1000.0, ent[-1]['dy_mm'] / 1000.0))
         if len(offs) >= ENTRY_PRIOR_N:
