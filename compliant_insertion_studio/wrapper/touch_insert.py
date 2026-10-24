@@ -40,6 +40,8 @@ PUSH_SPEED_M_S = 0.008       # the entering push to the seat, guarded at 6 N (wa
 PUSH_MIN_S = 2.0
 ABOVE_RIM_M = 0.003          # first probe; later ones start 1.5 mm over the MEASURED rim (CAD rim read 1.3 mm low)
 SEATED_DZ_M = 0.003          # within this of the predicted seat = in
+SEATED_DZ_WEDGE_M = 0.001    # ... for a part CAD says can wedge (line_green: an end on the base top holds its grasp point
+                             # +2.3..3.5 mm up; its clean seats push to -0.5..-2.0 mm)
 ENTER_DZ_M = 0.004           # stopped this far below the rim contact height = partly in the pocket
 # Probe grid (2026-10-21 23:10): a hexagonal lattice around the aim, nearest first. u_brown's pocket admits the part
 # within about +-1 x +-0.5 mm, so the lattice pitch (covering radius pitch/sqrt(3)) must stay ~1 mm; the old 2/4/6 mm
@@ -358,7 +360,7 @@ def main():
     def outcome(z):
         if z is None:
             return 'error'
-        if z - seat_z() <= SEATED_DZ_M:
+        if z - seat_z() <= (SEATED_DZ_WEDGE_M if wedge_check else SEATED_DZ_M):
             return 'in'
         if z < rim_z - ENTER_DZ_M:
             return 'entering'
@@ -384,9 +386,14 @@ def main():
         pts = hex_grid(GRID_PITCH_M, rmax)
     try:
         from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
-        wedge_search = not over and wedge_possible(a.base_name, a.object_name)
+        wedge_check = bool(wedge_possible(a.base_name, a.object_name))
     except Exception:
-        wedge_search = False
+        wedge_check = False
+    # CAD says it can rest off its seat looking seated (an end on the base top): it is 'in' only within
+    # SEATED_DZ_WEDGE_M, and a push held up short steps on along the lattice - also when it threads over seated parts
+    # (10-24: line_green, astride the U parts, was accepted at +2.33 mm by the 3 mm test and certify read the end wedge
+    # +7.5 mm, pitch -3.3 deg, in runs 87 / 89 / 89b / 90). The lattice change stays for a part not threading over others.
+    wedge_search = not over and wedge_check
     if wedge_search:
         ax = _corridor_axis_world(a.base_name, [a.object_name], a.final_base_orientation)
         pts = corridor_grid(ax, WEDGE_ALONG_PITCH_M, WEDGE_ALONG_M, 0.0)
@@ -437,7 +444,7 @@ def main():
                 pushes.append((z2, dx, dy))                    # the fallback if no point along the bar seats clean
                 move([seat[0] + dx, seat[1] + dy, start_z], q_seat, max_force=None)
                 continue
-            if outcome(z2) == 'in' or not wedge_search:
+            if outcome(z2) == 'in' or not wedge_check:
                 return finish(stem, meta, 'success' if outcome(z2) == 'in' else 'entering')
             # held up short of the seat: an end on the base top - the next point along the bar (straight up first)
             pushes.append((z2, dx, dy))
