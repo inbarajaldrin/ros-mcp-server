@@ -76,6 +76,39 @@ def _local(iso):
         return ''
 
 
+_IMG_CACHE = {}
+
+
+def _img_src(src):
+    """A transcript image (base64) as a small JPEG data URL (<= 900 px wide) for the page; cached."""
+    import base64
+    data = (src or {}).get('data') or ''
+    if not data:
+        return None
+    key = (len(data), data[:64])
+    if key in _IMG_CACHE:
+        return _IMG_CACHE[key]
+    url = None
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            if img.shape[1] > 900:
+                img = cv2.resize(img, (900, int(img.shape[0] * 900 / img.shape[1])), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                url = 'data:image/jpeg;base64,' + base64.b64encode(buf.tobytes()).decode()
+    except Exception:
+        url = None
+    if url is None and len(data) < 1_500_000:
+        url = f"data:{(src or {}).get('media_type', 'image/png')};base64,{data}"
+    if len(_IMG_CACHE) > 200:
+        _IMG_CACHE.clear()
+    _IMG_CACHE[key] = url
+    return url
+
+
 def log_entries(since):
     """Transcript records from byte offset `since` (the last ~12 MB when negative: tool output and images fill it) as compact entries, and the new
     offset. Only complete lines; thinking, tool results and bookkeeping records are left out."""
@@ -114,6 +147,16 @@ def log_entries(since):
             for b in c:
                 if b.get('type') == 'text' and not b.get('text', '').lstrip().startswith('<'):
                     out.append({'k': 'user', 't': ts, 'x': b['text']})
+                elif b.get('type') == 'image':                       # an image the operator attached
+                    u = _img_src(b.get('source'))
+                    if u:
+                        out.append({'k': 'img', 'who': 'user', 't': ts, 'x': u})
+                elif b.get('type') == 'tool_result' and isinstance(b.get('content'), list):
+                    for x in b['content']:                          # an image Claude read (Read on a PNG / JPG)
+                        if isinstance(x, dict) and x.get('type') == 'image':
+                            u = _img_src(x.get('source'))
+                            if u:
+                                out.append({'k': 'img', 'who': 'claude', 't': ts, 'x': u})
         elif d.get('type') == 'assistant' and isinstance(c, list):
             for b in c:
                 if b.get('type') == 'text' and b.get('text', '').strip():
@@ -148,6 +191,9 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 ui-sans-serif
 .claude .bubble{padding:0 2px;font-family:ui-serif,Georgia,'Times New Roman',serif;font-size:16px;line-height:1.65}
 .bubble{word-wrap:break-word;overflow-wrap:anywhere}
 .ts{color:var(--muted);font-size:11px;margin:3px 4px 0;font-variant-numeric:tabular-nums}
+img.shot{max-width:100%;max-height:420px;border-radius:10px;border:1px solid var(--line);display:block;cursor:zoom-in}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:10;cursor:zoom-out}
+.lightbox img{max-width:96vw;max-height:94vh;border-radius:6px}
 details.tools{align-self:flex-start;color:var(--tool);font:12px/1.45 ui-monospace,Menlo,monospace;max-width:92%}
 details.tools summary{cursor:pointer;list-style:none}
 details.tools summary::before{content:'▸ ';color:var(--accent)}details.tools[open] summary::before{content:'▾ '}
@@ -195,6 +241,12 @@ function add(e){
     if(!g||g.tagName!=='DETAILS'){g=document.createElement('details');g.className='tools';g.innerHTML='<summary></summary>';g.n=0;log.appendChild(g)}
     const d=document.createElement('div');d.textContent=e.x;g.appendChild(d);g.n++;
     g.querySelector('summary').textContent=e.x.slice(0,90)+(g.n>1?'  (+'+(g.n-1)+' more)':'');return}
+  if(e.k==='img'){const r=document.createElement('div');r.className='row '+(e.who==='user'?'user':'claude');
+    const im=document.createElement('img');im.className='shot';im.src=e.x;
+    im.onclick=()=>{const o=document.createElement('div');o.className='lightbox';const b=document.createElement('img');b.src=e.x;
+      o.appendChild(b);o.onclick=()=>o.remove();document.body.appendChild(o)};
+    r.appendChild(im);const t=document.createElement('div');t.className='ts';t.textContent=e.t;r.appendChild(t);
+    log.appendChild(r);return}
   if(e.k==='event'){const d=document.createElement('div');d.className='event';
     d.innerHTML=esc(e.x)+"<span class='ts'>"+e.t+"</span>";log.appendChild(d);return}
   if(e.k==='user'){if(recentUser.includes(e.x))return;recentUser.push(e.x);if(recentUser.length>4)recentUser.shift()}
