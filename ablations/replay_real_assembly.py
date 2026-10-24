@@ -565,7 +565,10 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
             # with 5 mm per side -> finger on the bar, 87 N, 2026-10-21)
             try:
                 e_ = json.load(open(TRACKER_JSON)).get(obj)
-                if e_ and time.time() - float(e_['t']) < TRACKER_TRUST_S:
+                pl_ = placed(obj)
+                # a set-down newer than the sighting: the sighting is where the part WAS (run 82b judged u_orange at
+                # its old staging spot (466, -562) while it lay at the clear area)
+                if e_ and (pl_ is None or pl_[2] < float(e_['t'])) and time.time() - float(e_['t']) < TRACKER_TRUST_S:
                     seen[obj] = (tuple(e_['xyz']), tuple(e_['quat_xyzw']))
                     print(f"  [pick] {obj}: not in this view - judged at its tracked pose "
                           f"({1000*e_['xyz'][0]:.0f}, {1000*e_['xyz'][1]:.0f}) mm", flush=True)
@@ -2062,6 +2065,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 snap_after = snapshot_robot_state()
                 _record_snapshot(snap_fh, "after", f"{obj}#{step_idx}{tag} place_down", snap_after)
                 xyz_ = (snap_after.get('tcp') or {}).get('xyz')
+                q_ = (snap_after.get('tcp') or {}).get('quat_xyzw')
+                if xyz_ and q_:
+                    # the part is at the gripper centre, not the flange: set down sideways the flange is 229 mm off
+                    # (run 82: recorded (-321, -271), the part lay at the clear area (-321, -500); the regrasp looked
+                    # at the empty table)
+                    from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
+                    xyz_ = list(np.asarray(xyz_, float) + R_.from_quat(q_).apply(GRIPPER_CENTER_TOOL_OFFSET))
                 if r.get('result') != 'failure' and xyz_:
                     # the part is where it was set down (2026-10-22: the regrasp's depth-pick view flew to u_orange's
                     # pick spot 0.8 m away - the stale tracker sighting - saw nothing, and the run stopped)
