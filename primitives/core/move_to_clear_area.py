@@ -713,6 +713,24 @@ class MoveToClearArea(Node):
                         travel_distance = np.sum(np.abs(target_joints - start_joints))
                         collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw))
 
+                via = None
+                if not collision_free_trajectories:
+                    # the direct joint path from the staging side swings the arm across itself (10-24 run 80: u_orange's
+                    # only candidate self-collided at alpha 0.30; the same set-down passed 10-23 from other starts) -
+                    # through the home joints, when both legs are clear
+                    from primitives.shared.config import HOME_JOINTS
+                    home = np.array(HOME_JOINTS, dtype=float)
+                    margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+                    for cost, candidate_joints, yaw in candidate_solutions:
+                        tj = np.array(candidate_joints).copy()
+                        if check_collision_with_table(tj) or check_self_collision(tj):
+                            continue
+                        if (not check_trajectory_collision(start_joints, home, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())
+                                and not check_trajectory_collision(home, tj, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())):
+                            collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)), tj, cost, yaw))
+                    if collision_free_trajectories:
+                        via = home
+                        self.get_logger().info("Direct path collides - going through the home joints")
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
                     self.get_logger().error(self.error_message)
@@ -728,18 +746,23 @@ class MoveToClearArea(Node):
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
-                joint_dist = float(np.max(np.abs(target_joints - start_joints)))
-                total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-                self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
-
-                # Single endpoint trajectory — let the UR controller handle smooth acceleration/deceleration
-                positions, velocities, t = single_point(target_joints, total_duration)[0]
-                trajectory_points = [JointTrajectoryPoint(
-                    positions=positions,
-                    velocities=velocities,
-                    time_from_start=Duration(sec=int(t),
-                                            nanosec=int((t % 1) * 1e9))
-                )]
+                legs = [target_joints] if via is None else [via, target_joints]
+                trajectory_points = []
+                t, prev = 0.0, start_joints
+                for leg in legs:
+                    joint_dist = float(np.max(np.abs(leg - prev)))
+                    leg_s = compute_duration(joint_distance=joint_dist, profile='s_curve')
+                    self.get_logger().info(f"Duration: {leg_s:.2f}s (joint={joint_dist:.2f}rad)")
+                    t += leg_s
+                    # each waypoint at rest (velocity 0): the UR controller interpolates each leg smoothly
+                    positions, velocities, _ = single_point(leg, t)[0]
+                    trajectory_points.append(JointTrajectoryPoint(
+                        positions=positions,
+                        velocities=velocities,
+                        time_from_start=Duration(sec=int(t),
+                                                nanosec=int((t % 1) * 1e9))
+                    ))
+                    prev = leg
 
                 # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
