@@ -2263,6 +2263,7 @@ def _move_unless_there(xyz, q, label, log_fh=None, extra=()):
                            *extra], label=label, timeout_s=60, log_fh=log_fh)
 
 
+SEAT_CHECK_FIRST = os.environ.get('SEAT_CHECK_FIRST', '0') == '1'
 SERVO_PRIOR = os.environ.get('SERVO_PRIOR', '1') == '1'
 SERVO_PRIOR_LOG = REPO_ROOT / 'ablations' / 'logs' / 'servo_priors.jsonl'
 SERVO_PRIOR_MAD_M, SERVO_PRIOR_MAD_DEG = 0.001, 1.0
@@ -4044,12 +4045,23 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # its pocket sits on the rim, far outside drive-mate's band. 11:47 a first-try seated u_orange (flat by touch:
         # ends +0.1 / -0.2 mm) read +2.4 mm at one end by depth, was tapped (base dragged 2.5 mm) and refused.
         from compliant_insertion_studio.wrapper.cad_geometry import wedge_possible
-        if _seat_checked(obj) and getattr(args, 'seat_check', True) and wedge_possible(RUN_BASE['name'], obj):
+        wedgy = _seat_checked(obj) and getattr(args, 'seat_check', True) and wedge_possible(RUN_BASE['name'], obj)
+        certify_ = os.environ.get('SEAMS_CERTIFY') == '1'
+        # the certifier IS the per-seat check (its depth view judges the ends where a wedge is possible): the replay's own
+        # depth seat check before it read the same seat a second time (~10 s a cycle, run 62) - it runs as the recovery
+        # for a refusal, with its nudge. SEAT_CHECK_FIRST=1: the old order (seat check, then certify)
+        if wedgy and (not certify_ or SEAT_CHECK_FIRST):
             if not seat_check_and_reseat(obj, state, args, say):
                 return False
-        if os.environ.get('SEAMS_CERTIFY') == '1':
+        if certify_:
             out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
                                            say, log_fh) or {}
+            if wedgy and not SEAT_CHECK_FIRST and not out.get('placed') and out.get('refusal') == 'not_at_seat':
+                say(f"  [execute_mate] {obj}: not_at_seat -> the seat check and its recovery (nudge / taps), then again")
+                if not seat_check_and_reseat(obj, state, args, say):
+                    return False
+                out = certify_via_execute_mate(obj, base_name or RUN_BASE['name'], getattr(args, 'observed_base', None),
+                                               say, log_fh) or {}
             if (not out.get('placed') and out.get('refusal') == 'not_at_seat' and wedge_possible(RUN_BASE['name'], obj)
                     and _taps_mark(obj, args, say)):
                 # the seat check passed it by depth and skipped the taps; the certifier's own view read an end over the
