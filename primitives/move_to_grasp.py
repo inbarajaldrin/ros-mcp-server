@@ -856,8 +856,16 @@ class DirectObjectMove(Node):
         import time as _time
         # Brief wait to ensure we have current force readings, then capture baseline
         _time.sleep(0.1)
-        self.baseline_force = self.current_force.copy()
-        self.baseline_torque = self.current_torque.copy()
+        # the median of the last ~0.3 s, like the re-take: one sample caught a robot-side glitch (10-23 run 79: baseline
+        # F=(-25.0, -39.1, +43.0) N, the settled re-take (-0.1, 0.2, 0.5) N was then refused as 'the glitch' and the
+        # descent stopped on a -42.5 N 'contact' with nothing touched)
+        buf = [b for b in getattr(self, '_wrench_buf', []) if b[0] >= _time.time() - 0.3]
+        if len(buf) >= 5:
+            self.baseline_force = np.median([b[1] for b in buf], axis=0)
+            self.baseline_torque = np.median([b[2] for b in buf], axis=0)
+        else:
+            self.baseline_force = self.current_force.copy()
+            self.baseline_torque = self.current_torque.copy()
         # Record when movement actually starts (for grace period)
         self.force_movement_start_time = _time.time()
         self.force_threshold_reached = False
@@ -931,10 +939,14 @@ class DirectObjectMove(Node):
                 f_med = np.median([b[1] for b in buf], axis=0); t_med = np.median([b[2] for b in buf], axis=0)
             else:
                 f_med, t_med = self.current_force.copy(), self.current_torque.copy()
-            if np.linalg.norm(f_med - self.baseline_force) > 8.0:
+            if (np.linalg.norm(f_med - self.baseline_force) > 8.0
+                    and np.linalg.norm(f_med) >= np.linalg.norm(self.baseline_force)):
+                # the payload-compensated wrench rests near 0: the one farther from it is the glitch (or a contact - keeping
+                # the smaller reference then still reports it). Logs 10-22..23: in all 7 disagreements the pre-motion
+                # sample was the glitch (-y/+z, 10-63 N) and the re-take read ~0 - the old rule kept the glitch every time
                 self.get_logger().warn(
                     f"Force re-take {np.round(f_med, 2)} is {np.linalg.norm(f_med - self.baseline_force):.1f} N off the "
-                    f"pre-motion baseline {np.round(self.baseline_force, 2)} - a glitch, keeping the pre-motion baseline")
+                    f"pre-motion baseline {np.round(self.baseline_force, 2)} and farther from 0 - keeping the pre-motion baseline")
             else:
                 self.baseline_force, self.baseline_torque = f_med, t_med
                 self.get_logger().info(
