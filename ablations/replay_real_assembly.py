@@ -702,6 +702,9 @@ def _finger_clearance_mm(obj, pose, gid, open_mm, obstacles):
     return own, other
 
 
+PICK_ROOM_SAMPLES = int(os.environ.get('PICK_ROOM_SAMPLES', '5'))
+
+
 def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
     """True when `obj` can be picked with grasp `gid` where it lies — choosing the pre-grasp opening for
     the stance it lies in (PICK_OPENING_MM): the recorded one or wider, whichever keeps the open fingers
@@ -714,7 +717,9 @@ def _pick_room(obj, gid, width_mm, log_fh=None, base_pose=None) -> bool:
         # applied read (it was re-observed by markers per pick: 11 reads, 64 s in one FMB1 run) and the layout's
         # parked region as an obstacle (base2/3/4 were probed one by one, 25 s)
         others = [b for b in ('base1', 'base2', 'base3', 'base4') if b != RUN_BASE['name']]
-        seen, seen_bases = observe_parts(list(PARTS) + others, with_raw=True)
+        # 5 samples a name, not 12: a still part's pose repeats to ~1 mm and the median of 5 serves a clearance check;
+        # 12 at the localizer's ~2.3 Hz kept the arm still ~5 s before every pick (runs 62-66b: ~22 s a cycle, untimed)
+        seen, seen_bases = observe_parts(list(PARTS) + others, with_raw=True, n_samples=PICK_ROOM_SAMPLES)
         if obj not in seen:
             # not in this view: its latest still sighting from any view (the check was skipped for line_green, picked
             # with 5 mm per side -> finger on the bar, 87 N, 2026-10-21)
@@ -4788,6 +4793,8 @@ observe_many = _timed(observe_many, 'observe_many', lambda a, k: ','.join(a[0]) 
 held_yaw_calibration = _timed(held_yaw_calibration, 'held_yaw', lambda a, k: a[0])
 pre_insert_base_read = _timed(pre_insert_base_read, 'pre_insert_read', lambda a, k: a[0])
 verify_seated = _timed(verify_seated, 'verify', lambda a, k: ','.join(a[0]) if a else '')
+_pick_room = _timed(_pick_room, 'pick_room', lambda a, k: a[0])   # its observe_many runs in spacing_check's own copy of
+                                                                   # this module (untimed): 22 s a cycle showed as 'gap'
 # reads that ran untimed (10-25 s per part showed only as gaps, ASSEMBLY_STATE_MACHINE.md): base ICP/outline choice,
 # the part depth fit at the pick, the line_green notch read, the one-view certification, the part view
 choose_base_read = _timed(choose_base_read, 'base_read', lambda a, k: a[0])

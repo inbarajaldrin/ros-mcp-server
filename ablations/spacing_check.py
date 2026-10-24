@@ -132,12 +132,12 @@ def mean_quat_fold_aware(name, quats):
     m = Q.mean(axis=0); return m / np.linalg.norm(m)
 
 
-def observe_parts(names, timeout_s=8.0, with_raw=False):
+def observe_parts(names, timeout_s=8.0, with_raw=False, n_samples=12):
     """{name: ((x, y, z), quat)} for the parts the camera sees now (median of samples). One still-camera window for
     all names (Speed T1, 2026-10-21; was one window per name, each absent name waiting out its timeout). with_raw:
     also return {name: median pose} for names that are not parts (bases), without the part clustering."""
     from replay_real_assembly import observe_many
-    allS = observe_many(list(names), timeout_s, n_samples=12)
+    allS = observe_many(list(names), timeout_s, n_samples=n_samples)
     out, raw = {}, {}
     for n in names:
         S = allS.get(n) or []
