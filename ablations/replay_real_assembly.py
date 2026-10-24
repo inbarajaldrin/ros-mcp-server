@@ -1604,6 +1604,19 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                            log_fh=log_fh)
         if r.get('result') != 'failure':
             ok = True; break
+    if not ok and 'joint step' in str(r.get('error', '')):
+        # the gripper still sideways after a place-down (run 82: u_orange's regrasp view wanted a 2.77 rad jump, over the
+        # 1.5 rad cap) - nothing is held here, so turn top-down through the home joints at safe height, then look again
+        say(f"  [depth-pick] {obj}: the view is a {r.get('error')} jump from here -> through home, then the view")
+        if run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
+                          label='safe height before home', timeout_s=60, log_fh=log_fh).get('result') != 'failure' and \
+           run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
+                          label='home (turn top-down for the view)', timeout_s=60, log_fh=log_fh).get('result') != 'failure':
+            r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
+                                f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{DEPTH_VIEW_ZS[0]:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                '--min-z', '0.15'], label=f'depth-pick view above {obj} at {DEPTH_VIEW_ZS[0]:.2f} m (from home)',
+                               timeout_s=90, log_fh=log_fh)
+            ok = r.get('result') != 'failure'
     if not ok:
         say(f"  [depth-pick] {obj}: no reachable view above it - markers as before"); return None
     try:
