@@ -85,7 +85,8 @@ def go(argv, label, timeout=90):
 
 def push(base, ob, face_dir_b, along_mm, step_mm, dry):
     """One guarded push on the face whose outward normal is -face_dir_b (base frame unit x/y), moving the base
-    along +face_dir_b. along_mm: push point offset along the face from its middle (lever for a turn)."""
+    along +face_dir_b. along_mm: push point offset along the face from its middle (lever for a turn).
+    True = pushed; False = a motion failed; None = every lower beside the face met something (no push made)."""
     from spacing_check import BASE_SIDE_M
     from primitives.shared.config import RG2_TIP_CLOSED_M, SAFE_HEIGHT, TABLE_HEIGHT
     (bx, by, bz), bq = ob
@@ -132,7 +133,7 @@ def push(base, ob, face_dir_b, along_mm, step_mm, dry):
             break
         go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s2, SAFE_HEIGHT + 0.05), '--quat', *Q], 'lift')
     else:
-        return False
+        return None
     if r.get('result') == 'failure':
         return False
     time.sleep(1.5)                                                     # settle before the force baseline
@@ -197,6 +198,7 @@ def main():
         print("  !!! target outside the staging/assembly area - not moving"); return 1
     first_dir = None
     prev, boost = None, 0.0
+    blocked = 0
     for k in range(1, a.max_pushes + 1):
         (x, y, _), q = ob
         yaw = float(R.from_quat(q).as_euler('xyz', degrees=True)[2])
@@ -241,7 +243,8 @@ def main():
             elif np.dot(d, first_dir) < 0:
                 print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); _saved(a.base, ob); return 0
         step = float(min(step + boost, STEP_MAX_MM))
-        if not push(a.base, ob, d, lever, step, a.dry_run):
+        ok_ = push(a.base, ob, d, lever, step, a.dry_run)
+        if ok_ is False:
             print("  !!! push failed - stopping"); return 1
         if lever != 0.0 and np.hypot(*e_b) <= a.tol_mm:          # pure turn: couple; with a slide still owed, the
                                                                    # single push from the side that also reduces it
@@ -249,10 +252,22 @@ def main():
             # the base the same way while the two slides cancel - one off-centre push alone slid base1 17 mm and
             # turned it 0.3 deg. push() measures the lever along the face's own tangent (d turned +90), which flips
             # with d: the SAME lever on -d is the opposite end, and (-L t) x (-d) = L t x d, the same turn.
-            if not push(a.base, ob, -d, lever, step, a.dry_run):
-                print("  !!! push failed - stopping"); return 1
+            # this corner is placed from the read before the first push, which may have slid the base under it (run 74:
+            # a 4 mm turn push, then all three lowers beside the far face met the base top at 5 N) - blocked: re-read
+            if ok_:
+                ok_ = push(a.base, ob, -d, lever, step, a.dry_run)
+                if ok_ is False:
+                    print("  !!! push failed - stopping"); return 1
         if a.dry_run:
             return 0
+        if ok_ is None:
+            blocked += 1
+            if blocked > 1:
+                print("  !!! the lower beside the face was blocked twice running - stopping"); return 1
+            print("  [move_base] the lower beside the face met something (no push) -> re-read the base and re-plan", flush=True)
+            prev = None                                   # no push: not a 'push that did not move it'
+        else:
+            blocked = 0
         if not view(ob):
             return 1
         time.sleep(1.5)
