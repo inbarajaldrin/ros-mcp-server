@@ -159,6 +159,28 @@ class DriveMateServer(Node):
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGTERM)                  # never SIGKILL in force mode
 
+    def _sigma_gate(self, g, obj, base):
+        """(servo?, note) - decision 2026-10-22: drive-mate moves on a vision read of the held part over its seat only when
+        the target's xy sigma exceeds the part's CAD clearance (seams.clearance). The target's sigma is the VisionPose's;
+        NaN (not stated) -> the base fit's stated repeatability (bindings.yaml sigma.base_icp.xy). SIGMA_GATE=0: always."""
+        if os.environ.get('SIGMA_GATE', '1') != '1':
+            return True, 'off (SIGMA_GATE=0) - servo'
+        try:
+            sg = [float(v) for v in (g.target.sigma or [])[:2]]
+            s_xy = max(sg) if sg and all(np.isfinite(sg)) else float('nan')
+            src = 'the target read'
+            if not np.isfinite(s_xy):
+                B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
+                s_xy, src = float(B['sigma']['base_icp']['xy']), 'the base fit (bindings)'
+            from seams.clearance import xy_clearance_m
+            from compliant_insertion_studio.wrapper.cad_geometry import get_seated_so_far
+            clr = xy_clearance_m(base, obj, list(get_seated_so_far(base, obj)))
+        except Exception as e:
+            return True, f'not judged ({e}) - servo'
+        servo = s_xy > clr
+        return servo, (f'xy sigma {1000 * s_xy:.2f} mm ({src}) vs CAD clearance {1000 * clr:.2f} mm -> '
+                       + ('servo' if servo else 'no servo, the read is inside the clearance'))
+
     def _align(self, gh, g, obj, base, gid, measured, held_world, env):
         """seams.drive_align as a child in its own process group (a cancel reaches it like the insert); its result."""
         argv = ['python3', '-u', '-m', 'seams.drive_align', '--obj', obj, '--base', base, '--grasp-id', str(gid),
@@ -241,7 +263,11 @@ class DriveMateServer(Node):
         # first - today's servo, run here instead of by the planner. Then the planner's corrections (follow / bias)
         # on the base the alignment arrived at, in the order the planner applied them before.
         aim, align = measured, {}
-        if not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1':
+        servo, gate_note = self._sigma_gate(g, obj, base)
+        self.get_logger().info(f'{g.mate_id}: sigma gate: {gate_note}')
+        if not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1' and not servo:
+            align = {'route': 'none (sigma gate: ' + gate_note + ')'}
+        elif not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1':
             align = self._align(gh, g, obj, base, gid, measured, held_world, env)
             if gh.is_cancel_requested:
                 gh.canceled(); return res
