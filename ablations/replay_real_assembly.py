@@ -454,6 +454,27 @@ def _save_base_pose(base_name, ob):
 
 
 STARTUP_SEEDED_ICP = os.environ.get('STARTUP_SEEDED_ICP', '1') == '1'
+STARTUP_GRIP_PARALLEL = os.environ.get('STARTUP_GRIP_PARALLEL', '1') == '1'
+
+
+def _gripper_width_mm(timeout_s=2.0):
+    """/gripper_width (mm) now, on a private context; None when no message came."""
+    try:
+        import rclpy
+        from std_msgs.msg import Float32
+        from rclpy.executors import SingleThreadedExecutor
+        ctx = rclpy.context.Context(); rclpy.init(context=ctx)
+        try:
+            n = rclpy.create_node('replay_gripper_width', context=ctx); got = {}
+            n.create_subscription(Float32, '/gripper_width', lambda m: got.setdefault('w', float(m.data)), 2)
+            ex = SingleThreadedExecutor(context=ctx); ex.add_node(n); t = time.time()
+            while 'w' not in got and time.time() - t < timeout_s:
+                ex.spin_once(timeout_sec=0.05)
+            return got.get('w')
+        finally:
+            rclpy.shutdown(context=ctx)
+    except Exception:
+        return None
 STARTUP_SEED_MAX_AGE_S = 900.0
 
 
@@ -4310,6 +4331,15 @@ def main() -> int:
                 (['python3', '-u', '-m', 'primitives.control_gripper', '100', '--mode', 'real'],
                  'startup gripper-open', 30),
             ]
+            w0 = _gripper_width_mm()
+            grip_async = None
+            if STARTUP_GRIP_PARALLEL and w0 is not None and (w0 >= 95.0 or w0 <= 3.0):
+                # nothing held (open, or closed on nothing): open it while the arm goes home - 3 s of still arm (run 68).
+                # A width in between may be a part still in the jaws: then the old order, home first
+                grip_async = subprocess.Popen(startup_steps[1][0], cwd=str(REPO_ROOT), env=make_env(),
+                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                startup_steps = startup_steps[:1]
+                print(f"  [startup] gripper at {w0:.1f} mm (empty) - opening it while the arm goes home", flush=True)
             for argv, label, timeout_s in startup_steps:
                 r = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
                 if r.get('result') == 'failure':
@@ -4317,6 +4347,16 @@ def main() -> int:
                     print(fail_msg)
                     if log_fh: log_fh.write(fail_msg)
                     return 1
+            if grip_async is not None:
+                try:
+                    grip_async.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    grip_async.kill()
+                if grip_async.returncode != 0:
+                    r = run_subprocess(['python3', '-u', '-m', 'primitives.control_gripper', '100', '--mode', 'real'],
+                                       label='startup gripper-open (again)', timeout_s=30, log_fh=log_fh)
+                    if r.get('result') == 'failure':
+                        print("\n!!! STARTUP FAILED at startup gripper-open"); return 1
 
         # --derive-sequence: plan EVERY part up front, from wherever the startup left the
         # arm (home, gripper open — all table parts in view) or the operator put it. Start
