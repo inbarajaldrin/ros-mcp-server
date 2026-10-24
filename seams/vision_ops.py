@@ -198,6 +198,22 @@ def tap_ends(obj, base):
     return [round(float(c0 - c1 * hl), 2), round(float(c0 + c1 * hl), 2)], f"taps {time.time() - t:.0f} s ago {m}"
 
 
+INSERT_DEPTH_MAX_AGE_S = 900.0    # the insert's seat - prediction, recorded this recently, stands for a no-wedge mover
+
+
+def _insert_depth(obj, lim_z):
+    """z (mm) of the insert's recorded seat - prediction for `obj` when recent and inside +-lim_z, else None."""
+    from datetime import datetime
+    from seams.seated_parts import SeatedParts
+    v = SeatedParts().seated_offsets().get(obj) or {}
+    try:
+        t = datetime.strptime(v['t'], '%Y-%m-%d %H:%M:%S').timestamp()
+        z = float(v['seat_minus_pred_mm'][2])
+    except Exception:
+        return None
+    return z if time.time() - t <= INSERT_DEPTH_MAX_AGE_S and abs(z) <= 1000 * lim_z else None
+
+
 def certify_many(mates):
     """Each mover's pose relative to its declared seat, from where the camera is: one base read and one still depth
     capture shared by all (execute_mate re-reads every predecessor NOW). z and the long-axis tilt from the depth seat
@@ -292,6 +308,16 @@ def certify_many(mates):
             ev['ends_judged'] = wedge_possible(base, obj)
             inside, ev['why'] = seat_inside(base, obj, z_err, ends, ends_by_contact=te is not None)
             method = 'both' if xy_seen else 'depth_seat_check'
+            if not inside and not ev['ends_judged']:
+                # a mover CAD says cannot rest off its seat inside the at-rest band (no wedge: out of the pocket it sits on
+                # the rim, ~30 mm up) that the insert drove to seat depth IS seated - the depth read is the one off (operator
+                # 10-24: "there is literally no way it can roll on any wedge"; u_brown read +2.92 / +3.01 / +2.74 mm after
+                # inserts at +0.28 / +0.50 mm, then -0.91 / -0.75 mm untouched an hour later; nothing under it, not deformed)
+                ins = _insert_depth(obj, lim_z)
+                if ins is not None:
+                    inside, method = True, 'insert_depth'
+                    ev['why'] = f"depth read {ev['why']}; the insert seated it at {ins:+.2f} mm and CAD rules out a wedge"
+
             ev['verdict'] = ('inside' if inside else 'outside') + f" (xy implied by seat depth): {ev['why']}"
         out.append({'mate_id': f'{asm}/{addr}', 'inside': inside, 'error_mate_frame_m': [ex, ey, z_err],
                     'tilt_deg': tilt, 'method': method, 'evidence': ev})
