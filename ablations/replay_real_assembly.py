@@ -1750,7 +1750,7 @@ def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
                 seated_ = tuple(get_seated_so_far(base, held_obj))
             except Exception:
                 seated_ = ()
-        pose, icp = read_icp(base, seed, seated=seated_)
+        pose, icp = read_icp(base, seed, seated=seated_, still_already=True)   # base_pose_world just read here (>= 1.4 s still)
         if seated_:
             icp = dict(icp, seated=list(seated_))
     except Exception as e:

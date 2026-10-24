@@ -55,7 +55,9 @@ def views(ob):
     return out
 
 
-def capture(n=12, timeout=6.0):
+def capture(n=12, timeout=6.0, still_already=False):
+    """still_already: the caller knows the arm has been still for over 1.2 s (a read just ran at this pose): only motion
+    seen DURING the capture restarts the wait - the first pose sample counted as 'moved now' and cost 1.2 s every time."""
     import rclpy
     from cv_bridge import CvBridge
     from geometry_msgs.msg import PoseStamped
@@ -66,7 +68,11 @@ def capture(n=12, timeout=6.0):
     mv_ = {'ref': None, 't': None}               # last time the TCP moved > 0.5 mm (from the first sample on)
     def on_tcp(m):
         now = time.time(); p = np.array([m.pose.position.x, m.pose.position.y, m.pose.position.z])
-        if mv_['ref'] is None or np.linalg.norm(p - mv_['ref']) > 0.0005:
+        if mv_['ref'] is None:
+            mv_['ref'] = p
+            if not still_already:
+                mv_['t'] = now
+        elif np.linalg.norm(p - mv_['ref']) > 0.0005:
             mv_['ref'] = p; mv_['t'] = now
         st['t'].append((now, m)); del st['t'][:-200]
     node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', on_tcp, 50)

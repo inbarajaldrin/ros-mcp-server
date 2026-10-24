@@ -153,12 +153,12 @@ Z_OFF_MAX_M = 0.003           # from the base's height on the table (DEFAULT_BAS
 N_MIN = 4000                  # clean fits match ~7800 of 8000 sampled points
 
 
-def read_icp(base, ob, seated=(), n_points=8000):
+def read_icp(base, ob, seated=(), n_points=8000, still_already=False):
     """((x, y, z_marker), quat_yaw), info from one still capture where the arm is; z is the marker read's
     (table-snapped, like every base read). None + info on failure."""
     from seat_check import X_CAM as X0
     from handeye_icp_survey import capture, fit6, T
-    c = capture()
+    c = capture(still_already=still_already)
     if c is None:
         return None, {'error': 'no still depth capture'}
     d, K, tcp = c
