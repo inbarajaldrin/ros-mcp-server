@@ -2049,6 +2049,16 @@ def depth_servo(obj, base, observed_base, held_q, grasp_id, say, log_fh=None):
     if not ok and misread and HELD_AXIAL:
         # the held part's place in the hand, from its outline over bare table (taken above), against this frame's base read
         c = held_axial_correction(obj, grasp_id, hq_outline, outline, tp_outline, say)
+        if c is not None and abs(yaw_total) > 0.05:
+            # the rounds turned the wrist on image-yaw readings of a fit that then proved unreliable; the aim from the held
+            # part assumes it square to the base as the base-yaw turn left it - turn those back (run 67: -0.79 and -3.26 deg
+            # kept after a misread round, line_green went in 4 deg off its slot, rode the U tops at +38 mm, wedged +10 mm)
+            if turn_wrist(-yaw_total):
+                say(f"  [dservo] {obj}: the rounds' wrist turns ({yaw_total:+.2f} deg) turned back - the held-part aim is square")
+                held_q = list((R_.from_euler('z', -yaw_total, degrees=True) * R_.from_quat(held_q)).as_quat())
+                yaw_total = 0.0
+            else:
+                say(f"  [dservo] {obj}: could not turn the rounds' {yaw_total:+.2f} deg back - no aim from this servo"); return None
         if c is not None:
             say(f"  [dservo] {obj}: aim shifted ({1000*c[0]:+.1f}, {1000*c[1]:+.1f}) mm by the held part's place in the hand")
             return ((bx + c[0], by + c[1], bz), bq), held_q
