@@ -80,6 +80,39 @@ def fit(part, Pw, seed, table_z):
     return pose, info
 
 
+FACE_DOWN = [R.identity(), R.from_euler('x', 90, degrees=True), R.from_euler('x', 180, degrees=True),
+             R.from_euler('x', -90, degrees=True), R.from_euler('y', 90, degrees=True), R.from_euler('y', -90, degrees=True)]
+
+
+def fit_any_stance(part, Pw, seed, table_z):
+    """The fit without the marker's tilt: every resting face of the CAD (6 face-down rotations) x 4 starting yaws about
+    the marker's, solved by fit(); the lowest-rms one wins (operator 10-24: depth + CAD tell you exactly what you are
+    looking at - a marker read from another face gave line_green a tilt 8.9 deg off its depth fit). Returns (pose, info)
+    with 'stance': the winner's face index and how far the marker's orientation is from it (deg)."""
+    (sx, sy, sz), sq = seed
+    yaw_m = float(R.from_quat(sq).as_euler('xyz')[2])
+    # choose on a quarter of the points near the seed (24 full fits took 35 s), then refit the winner on all of them
+    near = (np.hypot(Pw[:, 0] - sx, Pw[:, 1] - sy) < CROP_R_M) & (Pw[:, 2] > table_z + ABOVE_TABLE_M)
+    Pn = Pw[near]
+    Ps = Pn[np.random.default_rng(0).choice(len(Pn), min(len(Pn), max(N_MIN * 4, len(Pn) // 4)), replace=False)] \
+        if len(Pn) > N_MIN * 4 else Pn
+    best = (None, {'error': 'no stance fitted'})
+    for fi, F in enumerate(FACE_DOWN):
+        for k in range(4):
+            q0 = (R.from_euler('z', yaw_m + k * np.pi / 2) * F).as_quat()
+            pose, info = fit(part, Ps, ((sx, sy, sz), tuple(q0)), table_z)
+            if pose is not None and (best[0] is None or info['rms_mm'] < best[1]['rms_mm']):
+                best = (pose, dict(info, stance={'face': fi, 'yaw_start_deg': round(np.degrees(yaw_m) + 90 * k, 1)}))
+    if best[0] is not None:
+        st_ = best[1]['stance']
+        pose, info = fit(part, Pw, best[0], table_z)
+        best = (pose, dict(info, stance=st_)) if pose is not None else best
+    if best[0] is not None:
+        d = (R.from_quat(best[0][1]) * R.from_quat(sq).inv()).magnitude()
+        best[1]['stance']['marker_off_deg'] = round(float(np.degrees(d)), 2)
+    return best
+
+
 def read(part, seed=None, timeout=8.0):
     """From where the arm is: still capture, marker seed (unless given), fit. (pose | None, info)."""
     from handeye_icp_survey import capture, T
@@ -103,6 +136,43 @@ def read(part, seed=None, timeout=8.0):
     table_z = float(np.percentile(Pw[:, 2], 30))
     pose, info = fit(part, Pw, seed, table_z)
     info['table_z_mm'] = round(1000 * table_z, 1)
+    return pose, info
+
+
+CAL_LOG = REPO / 'ablations' / 'logs' / 'marker_vs_depth.jsonl'   # marker pose next to the depth+CAD pose (per-face calibration)
+
+
+def read_any(part, seed=None, timeout=8.0):
+    """As read(), with the stance chosen by depth + CAD (fit_any_stance), not taken from the marker; logs the marker
+    pose next to the depth one to CAL_LOG for a per-face marker calibration."""
+    from handeye_icp_survey import capture, T
+    from seat_check import X_CAM
+    if seed is None:
+        from replay_real_assembly import observe_many
+        S = observe_many([part], timeout, n_samples=8).get(part) or []
+        if not S:
+            return None, {'error': f'{part}: no marker read here'}
+        P = np.median(np.array([s['xyz'] for s in S]), axis=0)
+        seed = (tuple(P), tuple(S[-1]['quat_xyzw']))
+    c = capture()
+    if c is None:
+        return None, {'error': 'no still depth capture'}
+    d, K, tcp = c
+    d = d.astype(np.float32) / 1000.0
+    vv, uu = np.nonzero(d > 0.1); z = d[vv, uu]
+    Pc = np.c_[(uu - K[0, 2]) / K[0, 0] * z, (vv - K[1, 2]) / K[1, 1] * z, z]
+    Tw = T(tcp[:3], tcp[3:]) @ X_CAM
+    Pw = Pc @ Tw[:3, :3].T + Tw[:3, 3]
+    table_z = float(np.percentile(Pw[:, 2], 30))
+    pose, info = fit_any_stance(part, Pw, seed, table_z)
+    info['table_z_mm'] = round(1000 * table_z, 1)
+    try:
+        with open(CAL_LOG, 'a') as fh:
+            fh.write(json.dumps({'t': time.time(), 'part': part, 'marker': [list(seed[0]), list(seed[1])],
+                                 'depth': [list(pose[0]), list(pose[1])] if pose else None,
+                                 'rms_mm': info.get('rms_mm'), 'stance': info.get('stance')}) + '\n')
+    except Exception:
+        pass
     return pose, info
 
 

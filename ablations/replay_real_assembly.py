@@ -1597,6 +1597,8 @@ DEPTH_PICK_AGREE_MAX_TURN_DEG = 7.0  # was 5: a U lying on its side near 0/180 d
                                     # depth captures that agree (u_orange run 82c 6.6, u_brown 84 4.8, u_orange 87 5.5); the
                                     # slides this guards against turned 7.6-18 deg and moved 8.5+ mm
 DEPTH_PICK_AGREE_MAX_MOVE_M = 0.007 # same: their marker xy sat 5.3 mm off (u_orange run 87)
+DEPTH_ANY_RMS_MAX_MM = 1.3          # the resting-face fit is trusted at or under this rms (line_green flat: 1.06-1.09 mm;
+DEPTH_ANY_MIN_MATCHED = 0.5         # the marker-tilt fit that was refused 1.69-1.78) and this matched fraction (0.71)
 DEPTH_PICK_AGREE_YAW_DEG = 1.0      # the two captures' yaw (was 0.5: run 87 u_orange 0.87 deg, rms 1.5-1.7 mm)  # two agreeing captures (0.5 deg, 1 mm) may sit this far from the marker
 DEPTH_PICK_MAX_TURN_DEG = 3.0       # 10-21 17:25: good fits turned <= 2.3 deg; a side-lying u_brown's turned 10.0 (seed 179.9)
 DEPTH_PICK_MIN_MATCHED = 0.20        # one slid 28 mm on 5% of the points; table fits: 2.4 mm, 53%, 2026-10-21). 10-23: 0.30 -> 0.20 -
@@ -1708,6 +1710,23 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                     say(f"  [depth-pick] {obj}: two captures agree (yaw {first_info.get('yaw_deg')} / {info.get('yaw_deg')} deg) "
                         f"- the {info.get('turned_deg')} deg to the marker is the marker's; fit trusted")
                     trusted = lambda *_: True  # noqa: E731
+    if not trusted(pose, info):
+        # the marker's tilt may be the wrong one (a marker read on a side face: line_green 10-24 16:11 read 80-90 deg off
+        # the depth fit's flat stance and the fit seeded with it was loose, rms 1.7): let depth + CAD choose the resting
+        # face (operator 10-24: "depth and cad both tell you exactly what you are looking at"). Trusted only when it fits
+        # tightly and sits where the marker saw the part (position, not orientation, is compared).
+        try:
+            from part_depth import read_any
+            pose_a, info_a = read_any(obj)
+        except Exception as e:
+            pose_a, info_a = None, {'error': str(e)}
+        say(f"  [depth-pick] {obj} (resting face from depth + CAD): {json.dumps(info_a)}")
+        if (pose_a is not None and (info_a.get('rms_mm') or 99) <= DEPTH_ANY_RMS_MAX_MM
+                and info_a.get('n', 0) >= DEPTH_ANY_MIN_MATCHED * max(info_a.get('n_data', 1), 1)
+                and np.hypot(*info_a.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_AGREE_MAX_MOVE_M):
+            pose, info = pose_a, info_a
+            trusted = lambda *_: True  # noqa: E731
+            say(f"  [depth-pick] {obj}: resting face {info_a.get('stance')} fits at rms {info_a.get('rms_mm')} mm - trusted")
     if not trusted(pose, info):
         say(f"  [depth-pick] {obj}: fit {'failed' if pose is None else 'moved ' + str(info.get('moved_mm')) + ' mm, turned ' + str(info.get('turned_deg')) + ' deg'}"
             f" - not trusted (no marker fallback)"); return None
