@@ -44,6 +44,16 @@ BLOCK_HALF_PUSH_M = 0.0101      # closed finger block: half of the side that fac
 VIEW_Z = 0.56
 
 
+def _saved(base, ob):
+    """The final read is where the base now is: the replay's startup seeds its CAD fit from it (last_base_pose.json) -
+    without this the newest saved read was from BEFORE the move (up to ~90 mm off)."""
+    try:
+        from replay_real_assembly import _save_base_pose
+        _save_base_pose(base, ob)
+    except Exception as e:
+        print(f"[move_base] final read not saved ({e})", flush=True)
+
+
 def read_base(base):
     from replay_real_assembly import observe_base_pose
     from base_icp import read_icp
@@ -203,7 +213,7 @@ def main():
                 boost = 0.0
         prev = (ex, ey, eyaw)
         if np.hypot(ex, ey) <= a.tol_mm and abs(eyaw) <= a.tol_deg:
-            print(f"[move_base] DONE in {k-1} pushes: ({1000*x:.1f}, {1000*y:.1f}) mm {yaw:.2f} deg"); return 0
+            print(f"[move_base] DONE in {k-1} pushes: ({1000*x:.1f}, {1000*y:.1f}) mm {yaw:.2f} deg"); _saved(a.base, ob); return 0
         Rb = R.from_euler('z', yaw, degrees=True)
         e_b = Rb.inv().apply([ex, ey, 0.0])[:2]                            # error in the base frame
         if abs(eyaw) > a.tol_deg:
@@ -229,7 +239,7 @@ def main():
             if first_dir is None:
                 first_dir = d.copy()
             elif np.dot(d, first_dir) < 0:
-                print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); return 0
+                print(f"[move_base] overshot by {np.hypot(*e_b):.1f} mm - accepted (no push back)"); _saved(a.base, ob); return 0
         step = float(min(step + boost, STEP_MAX_MM))
         if not push(a.base, ob, d, lever, step, a.dry_run):
             print("  !!! push failed - stopping"); return 1

@@ -453,6 +453,19 @@ def _save_base_pose(base_name, ob):
         pass
 
 
+STARTUP_SEEDED_ICP = os.environ.get('STARTUP_SEEDED_ICP', '1') == '1'
+STARTUP_SEED_MAX_AGE_S = 900.0
+
+
+def _last_base_pose_fresh(base_name, max_age_s):
+    """The last applied read of the base if it is younger than max_age_s, else None."""
+    try:
+        p, q, t = json.load(open(LAST_BASE_POSE))[base_name]
+        return (tuple(p), tuple(q)) if time.time() - float(t) < max_age_s else None
+    except Exception:
+        return None
+
+
 def _last_base_pose(base_name):
     try:
         p, q, _ = json.load(open(LAST_BASE_POSE))[base_name]
@@ -4432,8 +4445,27 @@ def main() -> int:
                                  f"{_bx:.4f}", f"{_by:.4f}", f"{_VZ:.2f}"],
                                 label='base-view move', timeout_s=60, log_fh=log_fh)
             above = r_.get('result') == 'success'
-            ob = observe_base_pose(bname)
-            if above and ob is not None:
+            ob = None
+            choose_base_read.source = None
+            if above and os.environ.get('BASE_FROM') == 'icp' and STARTUP_SEEDED_ICP:
+                # the CAD fit seeded by the last read (move_base read the base a minute ago): the marker read (~5.5 s) was
+                # only this fit's seed and the depth outline (~6 s + a 1 s settle) only its fallback - both run only if it
+                # fails (run 67: 71 s before the first part)
+                seed_ = _last_base_pose_fresh(bname, STARTUP_SEED_MAX_AGE_S)
+                if seed_ is not None:
+                    try:
+                        from base_icp import read_icp
+                        ob, info_ = read_icp(bname, seed_)
+                    except Exception as e_:
+                        ob, info_ = None, {'error': str(e_)}
+                    msg = f"  [base] CAD fit (seeded by the last read): {json.dumps(info_)}"
+                    print(msg, flush=True)
+                    if log_fh: log_fh.write(msg + "\n")
+                    if ob is not None:
+                        choose_base_read.source = 'icp'
+            if ob is None:
+                ob = observe_base_pose(bname)
+            if above and ob is not None and getattr(choose_base_read, 'source', None) != 'icp':
                 time.sleep(1.0)                                # settle before the depth frames
                 ob_d, info_d = _base_from_depth(ob, bname)
                 msg = f"  [base] depth outline: {json.dumps(info_d)}"
