@@ -46,7 +46,7 @@ def _model_points(base, seated, step=0.0015):
     return M[M[:, 2] > M[:, 2].min() + 0.003]          # drop the base's bottom face (never seen)
 
 
-def fit(base, seated, Pw, init_ob, table_z=None):
+def fit(base, seated, Pw, init_ob, table_z=None, n_min=None):
     """Returns (((x, y, z), quat), info)."""
     M = model_points(base, seated); tree = cKDTree(M)
     (bx, by, bz), bq = init_ob
@@ -153,7 +153,7 @@ Z_OFF_MAX_M = 0.003           # from the base's height on the table (DEFAULT_BAS
 N_MIN = 4000                  # clean fits match ~7800 of 8000 sampled points
 
 
-def read_icp(base, ob, seated=(), n_points=8000, still_already=False):
+def read_icp(base, ob, seated=(), n_points=8000, still_already=False, n_min=None):
     """((x, y, z_marker), quat_yaw), info from one still capture where the arm is; z is the marker read's
     (table-snapped, like every base read). None + info on failure."""
     from seat_check import X_CAM as X0
@@ -209,6 +209,6 @@ def read_icp(base, ob, seated=(), n_points=8000, still_already=False):
     z_tab = float(DEFAULT_BASE_POSITION[2])
     if abs(Bw[2, 3] - z_tab) > Z_OFF_MAX_M:
         return None, dict(info, error=f'fit {1000 * (Bw[2, 3] - z_tab):+.1f} mm off the table height')
-    if n < N_MIN:
+    if n < (N_MIN if n_min is None else n_min):
         return None, dict(info, error=f'only {n} matched points')
     return ((float(Bw[0, 3]), float(Bw[1, 3]), float(bz)), R.from_euler('z', yaw, degrees=True).as_quat()), info

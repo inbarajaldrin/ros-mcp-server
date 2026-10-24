@@ -23,6 +23,9 @@ from seams.servo_law import (SERVO_ITERS, SERVO_YAW_TOL_DEG, SERVO_YAW_MIN_TURN_
 TRACK_VIEW_Z = 0.56            # flange height over the base for the in-hand read: the startup base view's height, so the
 
 
+IN_HAND_N_MIN = 2500     # matched points for the base fit with a part in the hand (the tilt / coverage / height checks stay)
+
+
 def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
     """Free base (2026-10-21 19:31-19:35): two u_brown rim searches turned base1 from 0.19 to ~8.4 deg (8 N lateral
     search force on an untaped base) and the next attempt aimed at the startup read. With the part in hand, fly the
@@ -61,7 +64,10 @@ def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
                 seated_ = tuple(get_seated_so_far(base, held_obj))
             except Exception:
                 seated_ = ()
-        pose, icp = read_icp(base, seed, seated=seated_, still_already=True)   # base_pose_world just read here (>= 1.4 s still)
+        # the held part hides some of the base: a flat, covered fit at the table height with fewer matches is the base
+        # (10-22..24: 9 in-hand fits refused only for 2861-3977 < 4000 matches, all flat, coverage >= 0.85, z -62.2..-63.2;
+        # run 90c then aimed line_green at the marker read 9 mm off in y and 3 x 143 probes rode the U tops)
+        pose, icp = read_icp(base, seed, seated=seated_, still_already=True, n_min=IN_HAND_N_MIN)   # base_pose_world just read here (>= 1.4 s still)
         if seated_:
             icp = dict(icp, seated=list(seated_))
     except Exception as e:
