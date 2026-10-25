@@ -294,14 +294,15 @@ def _side_tap_log(obj, rnd, push_mm, off_mm, seated, res=None):
 
 
 def _side_tap_start(obj):
-    """First round's stroke past the CAD face: the median stroke that seated `obj` in its last 5 seated recoveries,
-    minus one step (so the round that seated before is the first or second now), else 0 (operator 10-24: find what is
-    required to minimise the nudge - check - nudge rounds)."""
+    """First round's stroke past the CAD face: the median stroke that seated `obj` in its last 5 seated recoveries
+    (+2 mm for line_green, runs 93 / 94), else 0 (operator 10-24: find what is required to minimise the nudge - check -
+    nudge rounds; the base moving is fine). The taps' dF_peak reads ~0.5 N: the guard's 100 ms median hides a 0.4 s
+    tap's impact - the force a tap delivers needs the raw wrench, not this."""
     try:
         rows = [json.loads(l) for l in open(SIDE_TAP_LOG)]
         st = [r['stroke_past_cad_mm'] for r in rows if r.get('part') == obj and r.get('seated')][-5:]
         if st:
-            return float(max(0.0, min(4.0, np.median(st) - SIDE_TAP_STEP_MM)))
+            return float(max(0.0, min(4.0, np.median(st))))   # at it, not a step under: run 94 with -1 step took 2 rounds
     except Exception:
         pass
     return 0.0
