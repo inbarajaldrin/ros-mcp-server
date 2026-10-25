@@ -189,6 +189,8 @@ def main():
     ap.add_argument('--min-radius', type=float, default=0.25)
     ap.add_argument('--max-force', type=float, default=None, help='stop on a sustained |dF| above this (N)')
     ap.add_argument('--min-duration', type=float, default=0.0, help='slow the move to at least this (s)')
+    ap.add_argument('--duration', type=float, default=None,
+                    help='exact seconds, for a short move of a few mm only (a tap: nudge_part.py); refused over 10 mm')
     a = ap.parse_args()
     rclpy.init(); n = Mover()
     try:
@@ -198,8 +200,19 @@ def main():
             orient = ('keep', None)
         else:
             orient = ('yaw', a.yaw_deg)
+        if a.duration is not None:
+            # an exact short duration only for a short move: a few mm in 0.3 s is a tap, a long one would be a lunge
+            t0 = time.time()
+            while n.q is None and time.time() - t0 < 3.0:
+                rclpy.spin_once(n, timeout_sec=0.05)
+            if n.q is None:
+                result({'result': 'failure', 'error': 'no joint state'}); return 1
+            cur = forward_kinematics(dh_params, n.q)[:3, 3]
+            if float(np.linalg.norm(np.asarray(a.xyz) - cur)) > 0.010:
+                result({'result': 'failure', 'error': '--duration is for moves of <= 10 mm'}); return 1
         out = plan_move(n, a.xyz, orient, max_force=a.max_force, min_duration=a.min_duration, min_z=a.min_z,
-                        max_joint_step=a.max_joint_step, max_wrist3_step=a.max_wrist3_step, min_radius=a.min_radius)
+                        max_joint_step=a.max_joint_step, max_wrist3_step=a.max_wrist3_step, min_radius=a.min_radius,
+                        duration=a.duration)
         result(out); return 0 if out.get('result') == 'success' else 1
     finally:
         n.destroy_node(); rclpy.shutdown()

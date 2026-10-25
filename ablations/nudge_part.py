@@ -53,6 +53,9 @@ def main():
                     help='measured shift of the face toward the block (+ = the part sits that much closer)')
     ap.add_argument('--max-force', type=float, default=MAX_FORCE_N)
     ap.add_argument('--taps', type=int, default=2, help='quick taps (out and straight back) - the default')
+    ap.add_argument('--tap-s', type=float, default=0.4,
+                    help='seconds for the tap stroke out (the 2.5 s floor of a short move was a slow push: 10-24 18:27 '
+                         'two 2.5 s "taps" on line_green moved base1 6.1 mm / 2.3 deg and not the bar)')
     ap.add_argument('--slow-push', action='store_true',
                     help='one slow push instead of taps (dragged base3 4 mm / 1.7 deg, 2026-10-20 - avoid)')
     ap.add_argument('--dry-run', action='store_true')
@@ -133,7 +136,7 @@ def main():
         # second, so the part is knocked off its lip before friction carries the base along.
         for k in range(1, a.taps + 1):
             r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(p, fz(p)), '--quat', *Q,
-                    '--min-z', '0.15', '--max-force', f"{a.max_force}"], f'tap {k}')
+                    '--min-z', '0.15', '--max-force', f"{a.max_force}", '--duration', f"{a.tap_s:.2f}"], f'tap {k}')
             print(f"[nudge] tap {k}: {'stopped: ' + str(r.get('error')) if r.get('contact') else 'reached the face'}"
                   f" ({r.get('duration_s', r.get('t_after_start_s'))} s)", flush=True)
             b = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s, fz(s)), '--quat', *Q,

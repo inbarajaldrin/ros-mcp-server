@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 import time
 
 import numpy as np
@@ -278,6 +279,30 @@ def _record_seat_check_error(obj, res):
         print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
 
 
+def side_tap(obj, res, say) -> bool:
+    """Quick taps along the part from its high end toward the slot (ablations/nudge_part.py), the end's measured
+    offset from depth when the depth span is the part's own length. True when the seat check after them passes."""
+    f = res.get('face') or {}
+    ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
+    if not ends or not f.get('half_long_m'):
+        return False
+    hi = 1 if ends[1] > ends[0] else 0                              # index of the high end (0: -long, 1: +long)
+    ax = f.get('long_axis', 'y')
+    toward = ('-' if hi == 1 else '+') + ax                         # push from the high end toward the other
+    off = 0.0
+    if ext and abs((ext[1] - ext[0]) - 2000 * f['half_long_m']) <= RESEAT_SPAN_TOL_MM:
+        cad_end = (1 if hi == 1 else -1) * 1000 * f['half_long_m']
+        off = float(np.clip(abs(ext[hi] - cad_end), 0.0, 4.0))     # mm the high end sits past its CAD face
+    say(f"  [side-tap] {obj}: {'+' if hi == 1 else '-'}{ax} end high -> taps toward {toward}, end face {off:.1f} mm "
+        f"past CAD (depth span {ext})")
+    r = run_subprocess([sys.executable, '-u', str(Path(__file__).resolve().parent / 'nudge_part.py'), '--object', obj,
+                        '--base', RUN_BASE['name'], '--toward', toward, '--face-offset-mm', f"{off:.1f}", '--push-mm', '0',
+                        '--taps', '2'], label=f'side taps {obj}', timeout_s=300)
+    ok = r.get('result') != 'failure' and r.get('returncode', 0) == 0
+    say(f"  [side-tap] {obj}: {'seated' if ok else 'not seated'} after the taps")
+    return ok
+
+
 def _seat_by_taps(obj, args, say):
     """The seat judged by taps (operator 10-22: "use force to tap smartly - you know where it seats and the force
     feedback"): one depth view - it re-fits the base and measures where the part sits ACROSS its slot (what the parts
@@ -324,11 +349,14 @@ def _seat_by_taps(obj, args, say):
         if blocked:
             say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
     if blocked and not BASE_FIXED_CFG():
-        # free base: the closed fingers lower past the raised end - for line_green that is past base1's edge - and the
-        # push meets the base's side wall, not the bar: it runs the travel cap and drags the base (10-24 runs 89/89b/90/
-        # 91/92: 'reached the travel cap', the frames show the fingers outside the edge and the base moving; base1 turned
-        # ~20 deg over these recoveries). Go to the depth ladder, whose reseat grips the bar where it lies (5beac4f).
-        say(f"  [taps] {obj}: free base - no lateral nudge (it pushes the base); the depth ladder and its reseat")
+        # free base: a slow push drags the base with the part (runs 89/89b/90/91/92: the 10 s push 'reached the travel
+        # cap', frames 18:19 show base1 moving, base1 turned ~20 deg over these recoveries). Operator 10-24: "tap it into
+        # place from the side ... when it's not fixed a small tap will seat it and then you can check if it seated" - the
+        # taps of nudge_part.py: from the high end along the part toward its slot, out to the CAD end face (corrected by
+        # where depth sees that end) at the arm's short-move speed and straight back, then a depth seat check.
+        if side_tap(obj, res, say):
+            return True
+        say(f"  [taps] {obj}: the side taps did not seat it -> the depth ladder and its reseat")
         return None
     if blocked:
         # the vertical presses are blocked (an end riding a lip springs back: 22:30 line_green +4.2 -> +2.7 -> +3.8 -> +3.8);
