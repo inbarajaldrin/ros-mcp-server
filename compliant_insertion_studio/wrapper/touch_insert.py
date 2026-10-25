@@ -73,6 +73,24 @@ PUSH_SPRING_N = 3.0          # a push that reaches the floor WITHOUT its 6 N gua
 ENTRY_PRIOR_N, ENTRY_PRIOR_MIN, ENTRY_PRIOR_MAD_M = 3, 3, 0.001   # last 3 (was 6): 10-23 22:11 on, line_green entered ~2 mm off the 6-median (-2.6, -1.0) and took 72-93 probes; the last 3 put it at (-0.75, -0.67)
 
 
+def _certify_refused_after(obj, t_insert, window_s=900.0):
+    """True when the first certify of `obj`'s mate after this insert (within window_s) refused it. 10-24: line_green's
+    entries were learned from inserts that ended wedged on base1 (end +7.5 mm, -3 deg pitch; certify refused every one),
+    so the prior kept steering the next insert to the same wedge spot."""
+    try:
+        import yaml
+        B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
+        mates = {f'{asm}/{addr}' for asm, A in B.items() if isinstance(A, dict) and isinstance(A.get('mates'), dict)
+                 for addr, m in A['mates'].items() if isinstance(m, dict) and m.get('mover') == obj}
+        for line in open(REPO / 'ablations' / 'logs' / 'mate_journal.jsonl'):
+            e = json.loads(line)
+            if e.get('mate_id') in mates and t_insert <= float(e.get('t', 0)) <= t_insert + window_s:
+                return e.get('event') == 'refused'
+    except Exception:
+        pass
+    return False
+
+
 def _entry_prior(obj):
     """(dx, dy) m: the median entry offset of this part's last successful inserts (their 'push' probe), when there are
     at least ENTRY_PRIOR_MIN and they agree (MAD <= 1 mm on each axis); else None."""
@@ -85,6 +103,8 @@ def _entry_prior(obj):
             continue
         if m.get('outcome') != 'success':
             continue
+        if _certify_refused_after(obj, os.path.getmtime(f)):
+            continue                                    # the insert said seated, the camera then refused it: a wedge spot
         ent = [p_ for p_ in m.get('probes', []) if p_.get('push')]
         # an insert that entered without a flagged push (10-23 21:51 / 22:11: seated, no 'push' probe) entered at its first
         # probe below the rim contact - those two were the line_green entries that had moved ~2 mm off the old prior
