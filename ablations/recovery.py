@@ -266,6 +266,11 @@ def _record_seat_check_error(obj, res):
         f = res.get('face') or {}
         cross = float((res.get('cross') or {}).get('centre_mm'))
         along = float((res.get('axial') or {}).get('shift_mm', 0.0))
+        ext_ = (res.get('axial') or {}).get('extent_mm')
+        if not (ext_ and f.get('half_long_m') and abs((ext_[1] - ext_[0]) - 2000 * f['half_long_m']) <= RESEAT_SPAN_TOL_MM):
+            # a depth span that is not the part's own length is smeared, not a place (10-24 17:45: line_green seated flat,
+            # span -70..+90 = 160 mm for its 140 -> 'shift +10 mm' was recorded for the yellow's aim)
+            along = 0.0
         e = [cross, along] if f.get('long_axis', 'y') == 'y' else [along, cross]
         SEATED.set_seat_error(obj, e, 'depth seat check', touch_t=True)
         print(f"  [seat-check] {obj}: measured seat error {e} mm (base frame) recorded for the parts over it", flush=True)
