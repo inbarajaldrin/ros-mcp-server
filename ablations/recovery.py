@@ -323,6 +323,13 @@ def _seat_by_taps(obj, args, say):
         blocked = not ok and any(p.blocked for p in tp.points)
         if blocked:
             say(f"  [taps] {obj}: vertical presses blocked -> one lateral nudge, then the taps judge")
+    if blocked and not BASE_FIXED_CFG():
+        # free base: the closed fingers lower past the raised end - for line_green that is past base1's edge - and the
+        # push meets the base's side wall, not the bar: it runs the travel cap and drags the base (10-24 runs 89/89b/90/
+        # 91/92: 'reached the travel cap', the frames show the fingers outside the edge and the base moving; base1 turned
+        # ~20 deg over these recoveries). Go to the depth ladder, whose reseat grips the bar where it lies (5beac4f).
+        say(f"  [taps] {obj}: free base - no lateral nudge (it pushes the base); the depth ladder and its reseat")
+        return None
     if blocked:
         # the vertical presses are blocked (an end riding a lip springs back: 22:30 line_green +4.2 -> +2.7 -> +3.8 -> +3.8);
         # ONE lateral nudge frees it (22:35: depth ends +6.1 -> +0.6, taps then -0.8..-1.1), the taps judge after it -
