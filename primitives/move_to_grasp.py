@@ -204,7 +204,11 @@ def fix_orientation_inprocess(node, target_xy, logger):
         lift_pose[:3, 3] = lift_pos
         lift_pose[:3, :3] = target_rot
 
-        solver = IKSolver(IKSolverConfig(joint_bounds=ik_bounds))
+        # the lift is seeded from the current joints, and those may sit outside (-pi, pi) on a wrist: the clear-area
+        # place-down takes a wrist twin a full turn nearer (e285897; run 109d left wrist_2 at -6.159 and this lift's IK
+        # failed). The UR5e wrists span +-2 pi.
+        lift_bounds = ik_bounds[:3] + [(-2*np.pi, 2*np.pi)] * 3
+        solver = IKSolver(IKSolverConfig(joint_bounds=lift_bounds))
         lift_joints = solver.solve(
             seeds=[current_joints.copy()],
             target_pose=lift_pose,
@@ -252,6 +256,14 @@ def fix_orientation_inprocess(node, target_xy, logger):
         return False
 
     logger.info(f"fix-orient: hover IK cost={hover_solver._best_result.cost:.6f}")
+    # from a wound wrist the turn to face-down is a long joint swing (run 109d: wrist_2 -6.16 -> ~-1.6): check it for
+    # table and self collision before sending, as move_to_clear_area does for its own move
+    from primitives.shared.collision import check_trajectory_collision
+    swing_from = np.array(trajectory_points[-1].positions) if trajectory_points else np.array(current_joints)
+    if check_trajectory_collision(swing_from, np.array(hover_joints), logger=logger):
+        logger.error(f"fix-orient: the turn to face-down collides (joint step "
+                     f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad) - not sending")
+        return False
     lift_duration = 3 if trajectory_points else 0
     trajectory_points.append(JointTrajectoryPoint(
         positions=[float(x) for x in hover_joints],
