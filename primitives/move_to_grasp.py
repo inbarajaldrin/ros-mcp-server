@@ -2376,6 +2376,14 @@ class DirectObjectMove(Node):
 
     def output_result_json(self, movement_type="move_to_object"):
         """Output movement result as JSON"""
+        if (self.movement_completed and not self.error_message and self.final_position is None
+                and self.target_xyz is not None and self.target_xyzw is not None):
+            # the explicit target (the replay's depth CAD fit) is the pose this grasp was driven by - no marker sighting
+            # is needed for it (run 109c, 10-25: u_brown reached its depth target, no marker was seen during the call,
+            # and the pick was reported failed)
+            self.get_logger().info("No marker sighting during the call - reporting the explicit (depth-fit) target pose")
+            self.final_position = [float(v) for v in self.target_xyz[:3]]
+            self.final_orientation_quat = [float(v) for v in self.target_xyzw]
         if self.movement_completed and not self.error_message and self.final_position is not None and self.final_orientation_quat is not None:
             # Success
             result = {
