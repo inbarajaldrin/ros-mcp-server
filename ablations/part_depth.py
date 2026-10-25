@@ -176,6 +176,79 @@ def read_any(part, seed=None, timeout=8.0):
     return pose, info
 
 
+SIX_AGREE_MM, SIX_AGREE_DEG, SIX_MIN_AGREE = 2.0, 2.0, 3   # 6-dof starts that must converge on one pose
+
+
+def read_6dof(part, timeout=8.0, others=('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')):
+    """A part lying ON or AGAINST another one (tilted, not on the table): each neighbour the markers see is fitted from
+    its marker + CAD and its points removed, then `part` is fitted in 6 dof from its own marker and the marker's IPPE
+    flips. Trusted when >= SIX_MIN_AGREE starts converge (operator 10-25: "is markers cad and depth not enough" -
+    u_brown on the tipped yellow: flat fits flipped 15 deg, unseeded 6-dof starts spread 32 mm; with yellow's points
+    removed and the marker seed, 7 starts agreed to 0.4 mm / 0.8 deg at rms 1.08 mm). (pose | None, info)."""
+    from handeye_icp_survey import capture, T, fit6
+    from seat_check import X_CAM
+    from replay_real_assembly import observe_many
+    names = [part] + [o for o in others if o != part]
+    S = observe_many(names, timeout, n_samples=8)
+    if not S.get(part):
+        return None, {'error': f'{part}: no marker read here'}
+    seeds = {n: (tuple(np.median(np.array([s['xyz'] for s in S[n]]), axis=0)), tuple(S[n][-1]['quat_xyzw']))
+             for n in names if S.get(n)}
+    c = capture()
+    if c is None:
+        return None, {'error': 'no still depth capture'}
+    d, K, tcp = c
+    d = d.astype(np.float32) / 1000.0
+    vv, uu = np.nonzero(d > 0.1); z = d[vv, uu]
+    Pc = np.c_[(uu - K[0, 2]) / K[0, 0] * z, (vv - K[1, 2]) / K[1, 1] * z, z]
+    Tw = T(tcp[:3], tcp[3:]) @ X_CAM
+    Pw = Pc @ Tw[:3, :3].T + Tw[:3, 3]
+    table_z = float(np.percentile(Pw[:, 2], 30))
+    (sx, sy, sz), sq = seeds[part]
+    D = Pw[(np.hypot(Pw[:, 0] - sx, Pw[:, 1] - sy) < CROP_R_M) & (Pw[:, 2] > table_z + ABOVE_TABLE_M)
+           & (Pw[:, 2] < table_z + 0.10)]
+    info = {'n_data': int(len(D)), 'table_z_mm': round(1000 * table_z, 1), 'removed': {}}
+    for n, sd in seeds.items():
+        if n == part or np.hypot(sd[0][0] - sx, sd[0][1] - sy) > CROP_R_M + 0.06:
+            continue
+        pn, inf_n = fit(n, Pw, sd, table_z)
+        if pn is None:
+            continue
+        Mn = R.from_quat(pn[1]).apply(model_points(n)) + np.array(pn[0])
+        dn, _ = cKDTree(Mn).query(D, distance_upper_bound=0.004)
+        info['removed'][n] = int(np.isfinite(dn).sum()); D = D[~np.isfinite(dn)]
+    if len(D) < N_MIN:
+        return None, dict(info, error='too few depth points left for the part')
+    if len(D) > 40000:
+        D = D[np.random.default_rng(0).choice(len(D), 40000, replace=False)]
+    M = model_points(part); tree = cKDTree(M)
+    q = R.from_quat(sq); e = q.as_euler('xyz', degrees=True)
+    starts = [q, R.from_euler('xyz', [e[0], -e[1], e[2]], degrees=True),
+              R.from_euler('xyz', [-e[0], e[1], e[2]], degrees=True), R.from_euler('z', 180, degrees=True) * q]
+    res = []
+    for qs in starts:
+        for dp in ((0, 0, 0), (0.003, 0, 0), (0, 0.003, 0), (0, 0, 0.003)):
+            T0 = np.eye(4); T0[:3, :3] = qs.as_matrix(); T0[:3, 3] = np.array([sx, sy, sz]) + dp
+            Tf, rms, n = fit6(D, M, tree, T0)
+            if Tf is not None:
+                res.append((rms, n, Tf))
+    if not res:
+        return None, dict(info, error='6-dof fit lost the part from every start')
+    best = min(res, key=lambda r: r[0])
+    agree = [r for r in res if 1000 * np.linalg.norm(r[2][:3, 3] - best[2][:3, 3]) <= SIX_AGREE_MM
+             and np.degrees((R.from_matrix(r[2][:3, :3]) * R.from_matrix(best[2][:3, :3]).inv()).magnitude()) <= SIX_AGREE_DEG]
+    Tb = best[2]; qb = R.from_matrix(Tb[:3, :3])
+    tilt = float(np.degrees(np.arccos(np.clip(abs((qb * R.from_quat(sq).inv()).apply([0, 0, 1])[2]), -1, 1))))
+    info.update(rms_mm=round(best[0], 2), n=int(best[1]), starts=len(res), agree=len(agree),
+                xy_mm=[round(1000 * Tb[0, 3], 1), round(1000 * Tb[1, 3], 1)], z_mm=round(1000 * Tb[2, 3], 1),
+                moved_mm=[round(1000 * (Tb[0, 3] - sx), 1), round(1000 * (Tb[1, 3] - sy), 1)],
+                rpy_deg=[round(float(v), 1) for v in qb.as_euler('xyz', degrees=True)], to_marker_tilt_deg=round(tilt, 1))
+    pose = ((float(Tb[0, 3]), float(Tb[1, 3]), float(Tb[2, 3])), tuple(float(v) for v in qb.as_quat()))
+    if best[0] > RMS_MAX_MM or len(agree) < SIX_MIN_AGREE:
+        return None, dict(info, error=f'6-dof starts did not converge ({len(agree)} agree) or loose fit')
+    return pose, info
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--part', required=True)

@@ -1728,6 +1728,20 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
             trusted = lambda *_: True  # noqa: E731
             say(f"  [depth-pick] {obj}: resting face {info_a.get('stance')} fits at rms {info_a.get('rms_mm')} mm - trusted")
     if not trusted(pose, info):
+        # no flat resting face fits: the part may lie on or against another one (10-25: u_brown tilted on the tipped
+        # yellow) - remove the neighbours' points (their marker + CAD fits) and fit 6 dof from the part's own marker
+        try:
+            from part_depth import read_6dof
+            pose_6, info_6 = read_6dof(obj)
+        except Exception as e:
+            pose_6, info_6 = None, {'error': str(e)}
+        say(f"  [depth-pick] {obj} (6-dof, neighbours removed): {json.dumps(info_6)}")
+        if pose_6 is not None and np.hypot(*info_6.get('moved_mm', [99, 99])) <= 1000 * DEPTH_PICK_AGREE_MAX_MOVE_M:
+            pose, info = pose_6, info_6
+            trusted = lambda *_: True  # noqa: E731
+            say(f"  [depth-pick] {obj}: {info_6.get('agree')}/{info_6.get('starts')} 6-dof starts agree at rms "
+                f"{info_6.get('rms_mm')} mm - trusted")
+    if not trusted(pose, info):
         say(f"  [depth-pick] {obj}: fit {'failed' if pose is None else 'moved ' + str(info.get('moved_mm')) + ' mm, turned ' + str(info.get('turned_deg')) + ' deg'}"
             f" - not trusted (no marker fallback)"); return None
     import json as _j
