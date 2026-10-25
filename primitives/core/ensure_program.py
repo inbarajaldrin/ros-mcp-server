@@ -31,6 +31,15 @@ def program_running(timeout=4.0):
     return st.get('r')
 
 
+def _dashboard(cmd, host='192.168.1.111'):
+    import socket
+    try:
+        with socket.create_connection((host, 29999), timeout=3) as k:
+            k.recv(1024); k.sendall((cmd + '\n').encode()); k.settimeout(3); return k.recv(1024).decode().strip()
+    except Exception as e:
+        return f'dashboard: {e}'
+
+
 def safety_normal():
     r = subprocess.run(['python3', 'scripts/ur_dashboard.py', '--host', '192.168.1.111', '--real', 'safety'],
                        cwd='/home/aldrin/Documents/prismatic-manipulation', capture_output=True, text=True, timeout=20)
@@ -43,26 +52,27 @@ def main():
     if not safety_normal():
         result({'result': 'failure', 'was_running': False, 'error': 'safety status not NORMAL - not re-sending'}); return 1
     ok = False
-    # 10-23 02:21: one re-send + 13 s of polling gave up; the driver reported the program back 28 s after the drop -
-    # re-send up to three times, polling ~10 s after each
-    for _attempt in range(3):
+    # stop_run.sh's order, which recovers where a bare re-send loops (10-24 11:13, 18:28, 22:22: drop -> re-send -> drop
+    # ~30 s later, 'not inactive ... Empty activate and deactivate list'): dashboard stop, re-send and wait for the
+    # program, cycle force mode (its deactivation sends end_force_mode), then deactivate conflicting controllers and
+    # activate the trajectory controller in ONE switch
+    def ctl(*argv):
+        subprocess.run(['ros2', 'control', 'switch_controllers', *argv], capture_output=True, text=True, timeout=20)
+    for _attempt in range(2):
+        _dashboard('stop')
         subprocess.run(['ros2', 'service', 'call', '/io_and_status_controller/resend_robot_program', 'std_srvs/srv/Trigger',
                         '{}'], capture_output=True, text=True, timeout=20)
-        time.sleep(3.0)
-        # a real restart, as stop_run.sh does: an 'activate' on a controller the manager still lists active is a no-op
-        # ('not inactive ... Empty activate and deactivate list'), the controller writes nothing, and the program drops
-        # again ~30 s later - 10-24 11:13 and 18:28 looped drop -> resend -> drop until stop_run.sh cycled it
-        subprocess.run(['ros2', 'control', 'switch_controllers', '--deactivate', 'scaled_joint_trajectory_controller',
-                        'force_mode_controller', 'passthrough_trajectory_controller'],
-                       capture_output=True, text=True, timeout=20)
-        subprocess.run(['ros2', 'control', 'switch_controllers', '--activate', 'scaled_joint_trajectory_controller'],
-                       capture_output=True, text=True, timeout=20)
-        for _ in range(4):                      # the program reports running a few seconds after the re-send
-            time.sleep(2.0)
+        for _ in range(10):                     # the program reports running a few seconds after the re-send
+            time.sleep(1.0)
             if program_running():
-                ok = True; break
-        if ok:
-            break
+                break
+        ctl('--deactivate', 'scaled_joint_trajectory_controller', '--activate', 'force_mode_controller')
+        ctl('--deactivate', 'force_mode_controller')
+        ctl('--deactivate', 'passthrough_trajectory_controller', 'freedrive_mode_controller', 'joint_trajectory_controller',
+            '--activate', 'scaled_joint_trajectory_controller')
+        time.sleep(2.0)
+        if program_running():
+            ok = True; break
     result({'result': 'success' if ok else 'failure', 'was_running': False, 'recovered': ok})
     return 0 if ok else 1
 
