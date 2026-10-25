@@ -727,14 +727,22 @@ def finish_staging_layout(layout, ob):
         if True:                                             # set down again inside the staging region
             print(f"  [layout] {sorted(names)} too close: relocating {mover} (strayed "
                   f"{1000*strayed(mover):.0f} mm from its plan)", flush=True)
-            ok_r, _ = run([sys.executable, '-u', str(REPO / 'ablations/disassemble.py'), '--assembly-json', 'x',
+            ok_r, _ = run([sys.executable, '-u', str(REPO / 'ablations/disassemble.py'), '--assembly-json',
+                           RUN.get('json') or str(REPO / 'ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json'),
                            '--relocate', mover, '--grasp-id', 'auto', '--spot-staging'], f'relocate {mover}', 900)
             ok_r = True          # whatever the relocate reported, the re-check below is the truth
             if ok_r:
                 run(py('primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
                        '--quat', *map(str, TOP_DOWN_Q)), 'staging view', 90)
                 time.sleep(1.5)
+                prev_seen = dict(seen)
                 seen = observe_parts(RUN['parts'])
+                # a part the relocation did not touch is where it was seen (10-25 00:31: u_brown, tipped to (581, -318)
+                # outside the staging view's field and found from above its spot, was 'not seen' after line_green's
+                # relocation and failed the layout)
+                for n_, v_ in prev_seen.items():
+                    if n_ != mover and n_ not in seen:
+                        seen[n_] = v_
                 miss = [n for n in RUN['parts'] if n not in seen]
                 if miss:
                     run(py('primitives.move_home', '--mode', 'real'), 'home (second look)', 60)
@@ -820,6 +828,7 @@ def main():
     try:                                   # the run's base and parts (2026-10-20: FMB3 on base3)
         _d = json.load(open(a.assembly_json))
         RUN['base'] = _d.get('base_name') or RUN['base']
+        RUN['json'] = str(Path(a.assembly_json).resolve())       # the relocate child reads the same assembly
         RUN['parts'] = tuple(e['object_name'] for e in _d.get('assembly_order', [])) or RUN['parts']
     except Exception as e:
         ap.error(f'--assembly-json: {e}')
