@@ -280,27 +280,45 @@ def _record_seat_check_error(obj, res):
 
 
 def side_tap(obj, res, say) -> bool:
-    """Quick taps along the part from its high end toward the slot (ablations/nudge_part.py), the end's measured
-    offset from depth when the depth span is the part's own length. True when the seat check after them passes."""
+    """Measure -> tap -> re-check, in one constant direction (operator 10-24: "moving the base is fine ... measure the
+    wedge and do manoeuvres to nudge it with constant direction and recheck"): each round taps the part along its
+    length from the high end toward its slot (ablations/nudge_part.py, quick taps), the end face taken from the latest
+    depth check when its span is the part's own length, the stroke going SIDE_TAP_STEP_MM further past the CAD face
+    each round (to nudge_part's 4 mm cap); nudge_part re-reads the base and runs the depth seat check after every
+    round. True when a check passes."""
     f = res.get('face') or {}
-    ends, ext = res.get('end_heights_mm'), (res.get('axial') or {}).get('extent_mm')
+    ends = res.get('end_heights_mm')
     if not ends or not f.get('half_long_m'):
         return False
-    hi = 1 if ends[1] > ends[0] else 0                              # index of the high end (0: -long, 1: +long)
+    hi = 1 if ends[1] > ends[0] else 0                              # the high end (0: -long, 1: +long) - kept all rounds
     ax = f.get('long_axis', 'y')
-    toward = ('-' if hi == 1 else '+') + ax                         # push from the high end toward the other
-    off = 0.0
-    if ext and abs((ext[1] - ext[0]) - 2000 * f['half_long_m']) <= RESEAT_SPAN_TOL_MM:
-        cad_end = (1 if hi == 1 else -1) * 1000 * f['half_long_m']
-        off = float(np.clip(abs(ext[hi] - cad_end), 0.0, 4.0))     # mm the high end sits past its CAD face
-    say(f"  [side-tap] {obj}: {'+' if hi == 1 else '-'}{ax} end high -> taps toward {toward}, end face {off:.1f} mm "
-        f"past CAD (depth span {ext})")
-    r = run_subprocess([sys.executable, '-u', str(Path(__file__).resolve().parent / 'nudge_part.py'), '--object', obj,
-                        '--base', RUN_BASE['name'], '--toward', toward, '--face-offset-mm', f"{off:.1f}", '--push-mm', '0',
-                        '--taps', '2'], label=f'side taps {obj}', timeout_s=300)
-    ok = r.get('result') != 'failure' and r.get('returncode', 0) == 0
-    say(f"  [side-tap] {obj}: {'seated' if ok else 'not seated'} after the taps")
-    return ok
+    toward = ('-' if hi == 1 else '+') + ax                         # constant: from the high end toward the other
+    import seat_check as _sc
+    for k in range(SIDE_TAP_ROUNDS):
+        ext = (res.get('axial') or {}).get('extent_mm')
+        off = 0.0
+        if ext and abs((ext[1] - ext[0]) - 2000 * f['half_long_m']) <= RESEAT_SPAN_TOL_MM:
+            cad_end = (1 if hi == 1 else -1) * 1000 * f['half_long_m']
+            off = float(np.clip(abs(ext[hi] - cad_end), 0.0, 4.0))
+        push = min(4.0, SIDE_TAP_STEP_MM * k)
+        say(f"  [side-tap] {obj} round {k + 1}/{SIDE_TAP_ROUNDS}: taps toward {toward}, end {off:.1f} mm past CAD "
+            f"(depth span {ext}), stroke {push:.1f} mm past the CAD face")
+        r = run_subprocess([sys.executable, '-u', str(Path(__file__).resolve().parent / 'nudge_part.py'), '--object', obj,
+                            '--base', RUN_BASE['name'], '--toward', toward, '--face-offset-mm', f"{off:.1f}",
+                            '--push-mm', f"{push:.1f}", '--taps', '2'], label=f'side taps {obj} round {k + 1}', timeout_s=300)
+        if r.get('result') != 'failure' and r.get('returncode', 0) == 0:
+            say(f"  [side-tap] {obj}: seated after round {k + 1}"); return True
+        # the depth check nudge_part ran is in its output only - measure again for the next round's end face
+        ob_ = observe_base_pose(RUN_BASE['name'])
+        if ob_ is None:
+            break
+        res = _sc.check(obj, ob_, move=True, out_dir=None, base=RUN_BASE['name'])
+        if res.get('ok'):
+            say(f"  [side-tap] {obj}: seated after round {k + 1}"); return True
+        e_ = res.get('end_heights_mm') or ends
+        say(f"  [side-tap] {obj} after round {k + 1}: ends {e_} mm, span {(res.get('axial') or {}).get('extent_mm')}")
+    say(f"  [side-tap] {obj}: not seated after {SIDE_TAP_ROUNDS} rounds")
+    return False
 
 
 def _seat_by_taps(obj, args, say):
@@ -618,6 +636,8 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
     return False
 
 
+SIDE_TAP_ROUNDS = 4          # measure -> tap -> re-check rounds on a free base
+SIDE_TAP_STEP_MM = 1.0       # each round's stroke goes this much further past the CAD face (nudge_part caps at 4)
 RESEAT_SPAN_TOL_MM = 4.0     # the depth span must match the part's CAD length this well to be read as its place
 RESEAT_SHIFT_MAX_MM = 5.0    # ... and the grip moves at most this far along the part
 
