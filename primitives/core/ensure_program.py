@@ -49,6 +49,12 @@ def main():
         subprocess.run(['ros2', 'service', 'call', '/io_and_status_controller/resend_robot_program', 'std_srvs/srv/Trigger',
                         '{}'], capture_output=True, text=True, timeout=20)
         time.sleep(3.0)
+        # a real restart, as stop_run.sh does: an 'activate' on a controller the manager still lists active is a no-op
+        # ('not inactive ... Empty activate and deactivate list'), the controller writes nothing, and the program drops
+        # again ~30 s later - 10-24 11:13 and 18:28 looped drop -> resend -> drop until stop_run.sh cycled it
+        subprocess.run(['ros2', 'control', 'switch_controllers', '--deactivate', 'scaled_joint_trajectory_controller',
+                        'force_mode_controller', 'passthrough_trajectory_controller'],
+                       capture_output=True, text=True, timeout=20)
         subprocess.run(['ros2', 'control', 'switch_controllers', '--activate', 'scaled_joint_trajectory_controller'],
                        capture_output=True, text=True, timeout=20)
         for _ in range(4):                      # the program reports running a few seconds after the re-send
