@@ -159,6 +159,28 @@ def push(base, ob, face_dir_b, along_mm, step_mm, dry):
     return True
 
 
+PUSH_LOG = Path(__file__).resolve().parent / 'logs' / 'base_pushes.jsonl'
+
+
+def _log_push(base, before, after, d_b, lever_mm, step_mm, couple):
+    """One push and what it did (operator 10-24: learn the push response so a pose change takes the fewest pushes - a
+    16 deg turn push dragged the base 10-20 mm and 1-3 more pushes only cleaned that up). Base-frame push: face
+    direction d_b, lever along the face (mm), stroke (mm), couple = the two-corner pure turn."""
+    try:
+        (x0, y0, _), q0 = before; (x1, y1, _), q1 = after
+        y0d = float(R.from_quat(q0).as_euler('xyz', degrees=True)[2]); y1d = float(R.from_quat(q1).as_euler('xyz', degrees=True)[2])
+        dw = np.array([1000 * (x1 - x0), 1000 * (y1 - y0)])
+        db = R.from_euler('z', y0d, degrees=True).inv().apply([dw[0], dw[1], 0.0])[:2]
+        rec = {'t': time.time(), 'base': base, 'd_b': [float(v) for v in d_b], 'lever_mm': float(lever_mm),
+               'step_mm': float(step_mm), 'couple': bool(couple), 'before': [1000 * x0, 1000 * y0, y0d],
+               'after': [1000 * x1, 1000 * y1, y1d], 'dxy_world_mm': [round(float(v), 2) for v in dw],
+               'dxy_base_mm': [round(float(v), 2) for v in db], 'dyaw_deg': round(((y1d - y0d + 180) % 360) - 180, 2)}
+        with open(PUSH_LOG, 'a') as fh:
+            fh.write(json.dumps(rec) + '\n')
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--base', required=True)
@@ -293,6 +315,8 @@ def main():
         if nb is None:
             print(f"  !!! base not read after the push: {info}"); return 1
         print(f"    read: {json.dumps(info)}", flush=True)
+        if ok_ is not None:
+            _log_push(a.base, ob, nb, d, lever, step, couple=(lever != 0.0 and np.hypot(*e_b) <= a.tol_mm))
         ob = nb
     print("[move_base] not at the target after the pushes allowed"); return 2
 
