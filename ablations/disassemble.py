@@ -884,6 +884,20 @@ def main():
                 seen[n_] = (tuple(v_[3][0]), tuple(v_[3][1]))
                 print(f"[spot] {n_}: not seen from the staging view - set down at ({1000*v_[0]:.0f}, {1000*v_[1]:.0f}) mm, "
                       f"kept as an obstacle", flush=True)
+        # ...and the parts the staging layout set down and saw (its record, not staged_parts.json): 10-25 00:38 the
+        # tipped yellow, unseen from this view, was not an obstacle and u_brown was set down against it
+        try:
+            from staging_layout import OUT as _LAYOUT_OUT
+            lay_ = json.load(open(_LAYOUT_OUT))
+            if time.time() - float(lay_.get('t', time.time())) < STAGED_OBSTACLE_S or 't' not in lay_:
+                for p_ in lay_.get('parts', []):
+                    o_ = p_.get('observed') or {}
+                    if p_.get('name') != a.place_held and p_.get('name') not in seen and o_.get('xyz') and o_.get('quat'):
+                        seen[p_['name']] = (tuple(o_['xyz']), tuple(o_['quat']))
+                        print(f"[spot] {p_['name']}: from the staging layout record at ({1000*o_['xyz'][0]:.0f}, "
+                              f"{1000*o_['xyz'][1]:.0f}) mm, kept as an obstacle", flush=True)
+        except Exception:
+            pass
         sp_, sq_ = load_seat_pose_in_base(RUN['base'], a.place_held)
         Rb_ = R.from_quat(ob_[1])
         seen[a.place_held] = (tuple(np.array(ob_[0]) + Rb_.apply(sp_)), tuple((Rb_ * R.from_quat(sq_)).as_quat()))
