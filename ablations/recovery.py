@@ -527,6 +527,17 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
         from primitives.shared.config import get_grasp_id_for_assembly, get_gripper_width_mm
         gid = get_grasp_id_for_assembly(obj); w = get_gripper_width_mm(obj, gid)
         tcp = seat_grasp(obj, gid, ob, base_name=RUN_BASE['name'])
+        # grip it where it LIES along its length, not at the CAD seat point: re-inserted from a grip at the seat point,
+        # a bar lying off along its axis goes back to the same spot (10-24: line_green spanned -72..+68 mm in 13 wedged
+        # checks - 140 mm, CAD's length, 2 mm toward -y: its -y end on base1's wedge; the reseat gripped at 0 and put it
+        # there again in run 91). Only when the depth span is the part's own length (the smeared reads are not).
+        ax_ = (res.get('axial') or {}).get('extent_mm'); f_ = res.get('face') or {}
+        if ax_ and f_.get('half_long_m') and abs((ax_[1] - ax_[0]) - 2000 * f_['half_long_m']) <= RESEAT_SPAN_TOL_MM:
+            sh = float(np.clip((ax_[0] + ax_[1]) / 2.0, -RESEAT_SHIFT_MAX_MM, RESEAT_SHIFT_MAX_MM)) / 1000.0
+            v_ = [0.0, sh, 0.0] if f_.get('long_axis', 'y') == 'y' else [sh, 0.0, 0.0]
+            dw = R_.from_quat(ob[1]).apply(v_)
+            tcp = [tcp[0] + dw[0], tcp[1] + dw[1], tcp[2]]
+            say(f"  [seat-check] {obj}: lies {1000 * sh:+.1f} mm along its length (depth span {ax_} mm) -> reseat grip there")
         # the part sits high: grip it where the insert held it, not that much deeper (run 73: +5..7 mm on the rim - at
         # the seat height the fingertips would reach past its underside); depth reads over the taps, so this errs high
         lift_h = min(max(float(res.get('height_err_mm') or 0.0), 0.0), 8.0) / 1000.0
@@ -565,6 +576,10 @@ def _seat_check_and_reseat(obj, state, args, say) -> bool:
             if r.get('result') == 'failure':
                 say(f"\n!!! {label} failed: {r.get('error', '')}"); return False
     return False
+
+
+RESEAT_SPAN_TOL_MM = 4.0     # the depth span must match the part's CAD length this well to be read as its place
+RESEAT_SHIFT_MAX_MM = 5.0    # ... and the grip moves at most this far along the part
 
 
 def _seat_quat(obj, base_name='base1'):
