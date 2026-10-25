@@ -138,7 +138,7 @@ def main():
             r = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(p, fz(p)), '--quat', *Q,
                     '--min-z', '0.15', '--max-force', f"{a.max_force}", '--duration', f"{a.tap_s:.2f}"], f'tap {k}')
             print(f"[nudge] tap {k}: {'stopped: ' + str(r.get('error')) if r.get('contact') else 'reached the face'}"
-                  f" ({r.get('duration_s', r.get('t_after_start_s'))} s)", flush=True)
+                  f" ({r.get('duration_s', r.get('t_after_start_s'))} s, peak {r.get('dF_peak_N')} N)", flush=True)
             b = go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *X(s, fz(s)), '--quat', *Q,
                     '--min-z', '0.15'], f'tap {k} back')
             if b.get('result') == 'failure':

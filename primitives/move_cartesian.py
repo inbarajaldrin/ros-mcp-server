@@ -156,6 +156,7 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
             rclpy.spin_once(n, timeout_sec=0.005)
             Fm_ = np.median(np.array(n.F), axis=0)
             dF = float(np.linalg.norm(Fm_ - F0))
+            out['dF_peak_N'] = round(max(out.get('dF_peak_N', 0.0), dF), 2)   # the push's peak load (side taps log it)
             if on_sample is not None:
                 on_sample(time.time() - t_go, dF, Fm_, n.q)
             if dF > max_force:
