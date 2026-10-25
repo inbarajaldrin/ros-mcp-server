@@ -2719,6 +2719,11 @@ def main() -> int:
         def say(m):
             print(m, flush=True)
         ok = seat_check_and_reseat(args.seat_check_only, AssemblyState(), args, say)
+        if ok and os.environ.get('SEAMS_CERTIFY') == '1':
+            # the parts after it are certified in order (order_violated otherwise: 10-24 17:46, the yellow refused after
+            # line_green was fixed here); ExecuteMate journals the verdict like an insert's own certify
+            out = certify_via_execute_mate(args.seat_check_only, RUN_BASE['name'], ob, say) or {}
+            ok = bool(out.get('placed', ok)) if isinstance(out, dict) else ok
         run_subprocess(['python3', '-u', '-m', 'primitives.move_to_safe_height', '--mode', 'real'],
                        label='seat-check-only safe height', timeout_s=60)
         run_subprocess(['python3', '-u', '-m', 'primitives.move_home', '--mode', 'real'],
