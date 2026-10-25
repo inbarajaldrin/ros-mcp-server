@@ -693,6 +693,21 @@ class MoveToClearArea(Node):
 
                 # Sort by cost (best first)
                 candidate_solutions.sort(key=lambda x: x[0])
+                # the same pose with wrist_1 / wrist_2 a full turn nearer where they are now (within +-2 pi): 10-25 run
+                # 109b the rotate left wrist_2 at -4.195 rad, the only candidate had +0.126, and the 4.3 rad swing
+                # self-collided (direct and via home) - the -2 pi twin (-6.158) is 1.96 rad away. wrist_3 untouched
+                # (cable: +-4 rad). Tried first; the original candidates stay as they were.
+                twins = []
+                for cost_, cj_, yaw_ in candidate_solutions:
+                    tj_ = np.array(cj_, dtype=float).copy()
+                    for j_ in (3, 4):
+                        opts = [tj_[j_] + k_ * 2 * np.pi for k_ in (-1, 0, 1) if abs(tj_[j_] + k_ * 2 * np.pi) <= 2 * np.pi]
+                        tj_[j_] = min(opts, key=lambda v_: abs(v_ - start_joints[j_]))
+                    if np.max(np.abs(tj_ - np.array(cj_, dtype=float))) > 1e-6:
+                        twins.append((cost_, tj_, yaw_))
+                if twins:
+                    self.get_logger().info(f"{len(twins)} wrist twin(s) nearer the current wrist angles")
+                candidate_solutions = twins + candidate_solutions
                 self.get_logger().info(f"Found {len(candidate_solutions)} candidate IK solutions")
 
                 # Check each candidate for collision-free trajectory (no joint wrapping)
