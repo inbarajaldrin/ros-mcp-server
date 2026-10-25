@@ -279,6 +279,34 @@ def _record_seat_check_error(obj, res):
         print(f"  [seat-check] {obj}: seat error not recorded ({ex})", flush=True)
 
 
+SIDE_TAP_LOG = REPO_ROOT / 'ablations' / 'logs' / 'side_tap.jsonl'
+
+
+def _side_tap_log(obj, rnd, push_mm, off_mm, seated, res=None):
+    try:
+        with open(SIDE_TAP_LOG, 'a') as fh:
+            fh.write(json.dumps({'t': time.time(), 'part': obj, 'round': rnd, 'stroke_past_cad_mm': push_mm,
+                                 'end_off_mm': off_mm, 'seated': seated,
+                                 'ends_mm': (res or {}).get('end_heights_mm'),
+                                 'span_mm': ((res or {}).get('axial') or {}).get('extent_mm')}) + '\n')
+    except Exception:
+        pass
+
+
+def _side_tap_start(obj):
+    """First round's stroke past the CAD face: the median stroke that seated `obj` in its last 5 seated recoveries,
+    minus one step (so the round that seated before is the first or second now), else 0 (operator 10-24: find what is
+    required to minimise the nudge - check - nudge rounds)."""
+    try:
+        rows = [json.loads(l) for l in open(SIDE_TAP_LOG)]
+        st = [r['stroke_past_cad_mm'] for r in rows if r.get('part') == obj and r.get('seated')][-5:]
+        if st:
+            return float(max(0.0, min(4.0, np.median(st) - SIDE_TAP_STEP_MM)))
+    except Exception:
+        pass
+    return 0.0
+
+
 def side_tap(obj, res, say) -> bool:
     """Measure -> tap -> re-check, in one constant direction (operator 10-24: "moving the base is fine ... measure the
     wedge and do manoeuvres to nudge it with constant direction and recheck"): each round taps the part along its
@@ -294,25 +322,28 @@ def side_tap(obj, res, say) -> bool:
     ax = f.get('long_axis', 'y')
     toward = ('-' if hi == 1 else '+') + ax                         # constant: from the high end toward the other
     import seat_check as _sc
+    start = _side_tap_start(obj)                                    # the stroke that seated this part before
     for k in range(SIDE_TAP_ROUNDS):
         ext = (res.get('axial') or {}).get('extent_mm')
         off = 0.0
         if ext and abs((ext[1] - ext[0]) - 2000 * f['half_long_m']) <= RESEAT_SPAN_TOL_MM:
             cad_end = (1 if hi == 1 else -1) * 1000 * f['half_long_m']
             off = float(np.clip(abs(ext[hi] - cad_end), 0.0, 4.0))
-        push = min(4.0, SIDE_TAP_STEP_MM * k)
+        push = min(4.0, start + SIDE_TAP_STEP_MM * k)
         say(f"  [side-tap] {obj} round {k + 1}/{SIDE_TAP_ROUNDS}: taps toward {toward}, end {off:.1f} mm past CAD "
             f"(depth span {ext}), stroke {push:.1f} mm past the CAD face")
         r = run_subprocess([sys.executable, '-u', str(Path(__file__).resolve().parent / 'nudge_part.py'), '--object', obj,
                             '--base', RUN_BASE['name'], '--toward', toward, '--face-offset-mm', f"{off:.1f}",
                             '--push-mm', f"{push:.1f}", '--taps', '2'], label=f'side taps {obj} round {k + 1}', timeout_s=300)
         if r.get('result') != 'failure' and r.get('returncode', 0) == 0:
+            _side_tap_log(obj, k + 1, push, off, True)
             say(f"  [side-tap] {obj}: seated after round {k + 1}"); return True
         # the depth check nudge_part ran is in its output only - measure again for the next round's end face
         ob_ = observe_base_pose(RUN_BASE['name'])
         if ob_ is None:
             break
         res = _sc.check(obj, ob_, move=True, out_dir=None, base=RUN_BASE['name'])
+        _side_tap_log(obj, k + 1, push, off, bool(res.get('ok')), res)
         if res.get('ok'):
             say(f"  [side-tap] {obj}: seated after round {k + 1}"); return True
         e_ = res.get('end_heights_mm') or ends
