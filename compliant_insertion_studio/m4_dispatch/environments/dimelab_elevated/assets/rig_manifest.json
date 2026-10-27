@@ -1,0 +1,28 @@
+{
+ "schema": "pa.rig-asset-manifest/1",
+ "prefix": "ur5e_0_",
+ "derived_by": "sim_instrumentation/prefix_rg2_usd.py",
+ "components": {
+  "ur5e": {
+   "profile": "${composite}/assets/components/ur5e/profile.yaml",
+   "source": "${composite}/assets/components/ur5e/arm/ur5e.usd",
+   "source_sha256": "4de699a43bfa583446e8d330e841d6a513f97909fe3d4f60b386d98ed32b06d0",
+   "output": "${rig_work}/assets_ns/ur5e_0_ur5e.usd",
+   "output_sha256": "10ba36f109ecfdeb578c731ea95aca10975696cc5965bebbcf43e54edacebe88"
+  },
+  "quickchanger": {
+   "profile": "${composite}/assets/components/quickchanger/profile.yaml",
+   "source": "${composite}/assets/components/quickchanger/coupler.usd",
+   "source_sha256": "29c4b37d3926e6367717e0f15ec81fb69214b0a40df8cd3e2ef3fc326de6f98b",
+   "output": "${rig_work}/assets_ns/ur5e_0_coupler.usd",
+   "output_sha256": "980d2ad36d35f5e24704f01c1225af395e2e84f7d00a083ecc97db5f73ed5e9f"
+  },
+  "rg2": {
+   "profile": "${composite}/assets/components/rg2/profile.yaml",
+   "source": "${composite}/assets/components/rg2/rg2_gripper.usd",
+   "source_sha256": "cebb1d6c86222ce09cfbbae0cb110da340177ce268bb539b23d6fc3bbd5c4920",
+   "output": "${rig_work}/assets_ns/ur5e_0_rg2_gripper.usd",
+   "output_sha256": "803e1f219be9033728fbf2b6e333f1b266abf279b8ed309b7ab5e285fef4d30e"
+  }
+ }
+}

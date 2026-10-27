@@ -1,0 +1,774 @@
+schema: pa.environment-declaration/1
+name: dimelab_elevated
+declared_on: '2026-10-26'
+declared_by: /onboard-environment §1 DECLARE on the cell PC (OptiPlex), 2026-10-26 - dimelab (receipt 4d49a106, declaration a10d8eba) with robots[0].base_pose.xyz z 0.0 -> 0.08 and this name; live gate OWED to dual-a4500 (see m4_dispatch/README.md)
+robots:
+- token: ur5e_0
+  sidecar:
+    path: ${workspace}/plan-anything/data/robots/ur5e_rg2/deploy/ur5e_0.sidecar.yaml
+    sha256: 5a2d9d590f67f0364aa62e048899ce631d8a192143be64b621709fddc2d51389
+  composite:
+    name: ur5e_rg2
+    sha256: d91b5a68f9285a9b8d6dd0a9c7d97dd43b386f85e74e05937e29dae7d4b4d567
+  subpaths:
+    gripper: rg2
+  # ELEVATED BASE (real cell, 2026-10-23). world = the work-table TOP plane (work_table below is
+  # unchanged: centre z -0.02, 0.04 thick -> top at z 0), so every layout, region and resting part
+  # keeps its z. The UR5e base_link origin sits 0.080 m ABOVE that plane on the real cell:
+  #   ros-mcp-server-verified primitives/shared/config.py:3   ROBOT_BASE_Z = 0.08
+  #   ros-mcp-server-verified primitives/shared/config.py:5   TABLE_HEIGHT = -0.08 (table in the robot frame)
+  #   Vention Fusion assembly (VentionAssembly_393251_v81.1): robot plate top 880.25 mm vs table
+  #   panel 799.77 mm = 80.48 mm (the 0.48 mm is not used by the cell's code; 0.080 kept).
+  # x, y and yaw unchanged: the cell's assembly and staging regions already sit where this
+  # bench puts them (UR `base` frame = this base_link turned pi about z). A fixed articulation
+  # root needs no support under it (onboard-environment SKILL.md, 2026-09-18 addendum).
+  base_pose:
+    frame: world
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.08
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+  home_configuration:
+    joints:
+      ur5e_0_shoulder_pan_joint: 1.5708
+      ur5e_0_shoulder_lift_joint: -1.5708
+      ur5e_0_elbow_joint: 1.5708
+      ur5e_0_wrist_1_joint: -1.5708
+      ur5e_0_wrist_2_joint: -1.5708
+      ur5e_0_wrist_3_joint: 0.0
+    gripper_open_width_m: 0.1008
+    provenance:
+      joints: robo-manipulate/hardware/ur5e.yaml:32 home_joints (operator-confirmed);
+        UR joint order, mapped to the declared names by suffix
+      gripper_open_width_m: gripper.width_domain_m.max, the rendered conformance descriptor
+  actions:
+    arm_trajectory: arm_controller/follow_joint_trajectory
+    gripper: rg2/grip
+    execute_mate: execute_mate
+contents:
+- name: work_table
+  kind: the operator's work table, the bounded work SURFACE every layout is written
+    in and rests on
+  operator_description:
+    what_it_is: A rigid rectangular work table fixed in the cell.
+    how_it_can_be_used: It provides a flat horizontal support surface on which parts may rest and be manipulated.
+  pose:
+    frame: world
+    subject_frame: frame:work_table_1890x720/source
+    xyz:
+    - 0.0
+    - 0.4985
+    - -0.02
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+  representation:
+    asset: work_table_1890x720
+    receipt_sha256: a7ad46338c27c158cbf68d24f7819b963cb56ee6ec4fdb32ddb755c34146d8ec
+    key: isaac
+    root_frame: frame:work_table_1890x720/source
+  render_material:
+    kind: matte
+    color_rgb: [0.01033, 0.01033, 0.01033]
+    why: presentation-only, render seam only (take_assets); the tint's glossy table (roughness 0.55) mirrors the robot. Operator 2026-10-02 ("I want to change the table so it's not reflective"), applied to the table as a class (furniturebench_cell's work_table carries the same block); declared here 2026-10-13 on plan47's S7 draw000 finding (the arm mirrored in the dimelab table), plan29/render-hd-matte.
+  # A BOX COLLIDER, DECLARED (079 build-order step 1). The provenance below records that this
+  # fixture was authored with a static box collider, and the static gate hashes the representation
+  # without ever interpreting it — so the collider kind is knowable only from here. The per-task
+  # physics-device resolver reaches CPU only across a closure it can PROVE free of SDF colliders,
+  # and until this line existed the work_table was the one member of this bench that could not say:
+  # every SDF-free task here refused `member_collider_undeclared`.
+  collider:
+    kind: box
+  provenance:
+    authored_by: a static box collider (extent below) + the audited work-surface physics
+      material bound to it, mirroring author_support.py --collision static plus the
+      material author_support does not yet author (an author_support --material option
+      is owed). Material values from robo-manipulate isaac/rm_scene/load_scene.py
+      (2026-08-24)
+    extent_source: "Desktop/robo-manipulate/assets/fixtures/table/fixture-type.json\
+      \ (fixture-type/1.0.0-draft, revision r1, content_digest sha256:8eb27a4162e4c95cc42fd392300727111a07b286cd332cd7ec34d7340d89f261)\
+      \ \u2014 `geometry.extent` verbatim; surface height from robo-manipulate/workspace.yaml\
+      \ `table_height`, which that record cites as its own source"
+    note: admitted from the accepted local NVIDIA rubber-matte-v4 native USD closure;
+      source hierarchy, materials, collider and source frame are preserved byte-for-byte
+frames:
+  world_origin: world
+  named: {}
+streams:
+  object_poses:
+    aggregate:
+      topic: /objects/poses
+      type: tf2_msgs/msg/TFMessage
+      parent_frame: world
+      class: transferable
+      snapshot_grouping: header_stamp_equality
+      messages_per_snapshot: one_per_object
+    tf:
+      topic: /tf
+      type: tf2_msgs/msg/TFMessage
+      parent_frame: world
+      class: transferable
+      namespaced: false
+    declared_frames:
+    - work_table
+    task_frames: union_at_run_assembly
+    source: physics_step
+    stamp: sim_clock
+    declared_rate_hz: 30.0
+    emitted_on: rate
+    minimum_rate_hz: 10.0
+    rate_tolerance_frac: 0.1
+    pacing:
+      node: IsaacSimulationGate
+      step: 2
+      physics_hz: 60.0
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: volatile
+      deadline: 0.1
+    publisher_rules:
+      lazy: forbidden
+      built_for: the whole declared set at compose, firing from the physics step whether
+        or not anything subscribes
+  object_state_events:
+    topic: /objects/state_events
+    type: std_msgs/msg/String
+    encoding: json
+    class: sim_only
+    emitted_on: change
+    kinds:
+    - stream_open
+    - tracked
+    - untracked
+    - kinematic_enabled
+    - added
+    - removed
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  support_events:
+    topic: /objects/support_events
+    type: std_msgs/msg/String
+    encoding: json
+    class: sim_only
+    emitted_on: change
+    fields:
+    - frame_id
+    - supported
+    - beneath_prim
+    - gap_mm
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  contact_events:
+    topic: /objects/contact_events
+    type: std_msgs/msg/String
+    encoding: json
+    class: sim_only
+    emitted_on: change
+    emitted_by: the armed contact observer, from the PhysX contact-report callback
+    schema: pa.contact_pair/2
+    kinds:
+    - stream_open
+    - contact_pair
+    events:
+    - found
+    - persist
+    - lost
+    fields:
+    - kind
+    - event
+    - sim_time_s
+    - physics_step
+    - physics_step_s
+    - bodies
+    - colliders
+    - point_count
+    - min_separation_m
+    - peak_impulse_n_s
+    - total_force_n
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  fastening_events:
+    topic: /objects/fastening_events
+    type: std_msgs/msg/String
+    encoding: json
+    class: sim_only
+    emitted_on: change
+    emitted_by: the platform, inside execute_mate(mate_id), for EVERY mate class it
+      closes or releases - the weld it authors or removes for a rigid or threaded
+      mate, and the `placed` attestation for a free one, which fastens nothing
+      (where the part's bore captures its pin, the platform keeps it on that line with a joint
+      that stands in for the capturing lip - collider fidelity, not a fastening - and reports
+      it under `engagement.retention`); and by the constraint watcher it starts, on change and on
+      the declared cadence
+    kinds:
+    - stream_open
+    - welded
+    # `placed`: a FREE mate attested at rest by execute_mate. No joint is authored, so nothing
+    # holds the part afterwards and the end-state settle still rules; the seat reading the event
+    # carries is from the instant of placement and is recorded beside the verdict rather than
+    # compared with it, because the two read different instants on purpose.
+    - placed
+    - released
+    # `constraint_state`: the joint's LIVE state, on change and on the cadence below. Ticket 024's
+    # ruling — a one-time `welded` event does not prove the constraint was still holding when the
+    # episode was scored, and a joint that is disabled, removed, or letting its bodies separate
+    # leaves the creation event looking identical. MIRRORED FROM franka_cell rather than measured
+    # here: the watcher is platform code that execute_mate starts and its period is a module
+    # constant, so the same statement is true on both benches.
+    - constraint_state
+    # `weld_witness_span`: the weld witness's declared span (`pa.weld-witness/3`), written when its
+    # window closes after the hand that held the part let go. A REPORT, NOT AN ATTESTATION: its
+    # payload rides `engagement` (`weld_witness`, `of_event`), it is never a mate's last word, and
+    # the referee reads nothing from it (end-state-referee `fastening.REPORT_KINDS`).
+    - weld_witness_span
+    evidential_status: measured
+    stamp: sim_clock
+    fields:
+    - kind
+    - mate_id
+    - assembly
+    - fastening_class
+    - sim_time_s
+    # `weld_prim` is NULL on a `placed` event and written rather than omitted, so a reader keying
+    # on it meets ONE shape across the stream and reads the absence.
+    - weld_prim
+    - mover_frame
+    - reference_frame
+    # `pose_at_weld` rides `welded` ONLY, and its absence from `placed` is the ruling rather than a
+    # gap: it exists because a welded mate is judged AT ITS WELD and the event is the only record
+    # of that instant, while a free mate is judged at the END STATE off the pose aggregate the
+    # verdict already rests on. There is deliberately no `pose_at_placement` counterpart.
+    - pose_at_weld
+    # `order_position` — integer, on BOTH kinds. Which step of the assembly's declared placement
+    # order this mate closed at: 0-based, indexing the graph's recorded
+    # `assembly_order_provenance.linear_extension` by the MOVER's occurrence. Two mates closed by
+    # seating one part share a step, which is what jenga does.
+    - order_position
+    # `order_strength` — string, on BOTH kinds: `required` (a fixed sequence) or
+    # `required_partial_order` (a prerequisite DAG), read off the graph's
+    # `assembly_order_provenance.order_strength`. Under a partial order `order_position` is -1.
+    - order_strength
+    # `required_predecessors` — list of occurrence addresses, on BOTH kinds: the mover's BINDING
+    # prerequisites (`required_prerequisites`) under a partial order; every earlier occurrence of
+    # the `linear_extension` under a fixed sequence.
+    - required_predecessors
+    # `seated` — sub-object, on BOTH kinds, EXACTLY four keys: `error_mate_frame_m` (three floats),
+    # `quat_dot`, `residual`, and `symmetry_elements` ({mover, reference}, each the engine's own
+    # name for the element chosen). It carries NO verdict and no reasons, deliberately: a free mate
+    # is judged at rest AFTER release and this reading is from an earlier instant, so a verdict
+    # here would invite a reader to mark the mate down for a difference the ruling created.
+    - seated
+    # `engagement` — sub-object, on BOTH kinds, the audit trail the verb judged the seat on
+    # (`contact`, `at_rest`, `execution_gate`, `execution_gate_source`, `engagement_depth`,
+    # `judged_against`, ...; `engagement_fields` below lists every key). The referee reads `judged_from`; the rest is recorded so a seat refusal can be
+    # re-read offline. It has ridden `welded` since the verb existed and went undeclared until now.
+    - engagement
+    # `engagement_fields` — every key the `engagement` sub-object can carry, by writer, TRANSCRIBED
+    # from the emitter (sim_instrumentation.lab.fastening.ENGAGEMENT_FIELDS, where each is said
+    # by writer). The referee reads `judged_from`; the rest is an audit trail and a report.
+    engagement_fields:
+    - contact
+    - seated
+    - at_rest
+    - mover_frame
+    - reference_frame
+    - fill
+    - execution_gate
+    - execution_gate_source
+    - engagement_depth
+    - judged_against
+    - retention
+    - judged_from
+    - retention_expected_not_delivered
+    - source
+    - task
+    - already_realized
+    - attach_drift
+    - weld_witness
+    - pair_rate_before_authoring
+    - of_event
+    # The list is now TRANSCRIBED FROM THE EMITTER, not the referee's spec: produced by running
+    # ExecuteMate.run over the published jenga graph into the real incell_fastening.placed, and
+    # matched field for field against the referee's reader. What is still owed is a measurement off
+    # a real recorded BAG, which no bench has written yet because the stream was excused until now.
+    # THE `constraint_state` KIND CARRIES ITS OWN FIELDS, a separate population from the lifecycle
+    # above rather than more of it. A reader must keep the two apart: filed together, the last
+    # routine cadence sample reads as the last thing that HAPPENED to the pair.
+    constraint_state_fields:
+    - kind
+    - mate_id
+    - assembly
+    - fastening_class
+    - sim_time_s
+    - joint
+    - present
+    - enabled
+    - parent
+    - child
+    - mover_frame
+    - reference_frame
+    - separation_since_weld_m
+    - separation_gate_m
+    - separated
+    - active
+    - emitted_because
+    - unrecorded_by_this_journal
+    - why
+    # How often the constraint state is RE-STATED when nothing about it has changed, in simulated
+    # seconds. It bounds how stale the last word about a constraint may be when an episode is
+    # scored; a release inside that second is caught by the on-change emission, not by the cadence.
+    constraint_state_period_sim_s: 1.0
+    fields_status: transcribed_from_emitter_20260906_pending_first_bag_measurement
+    # LIVE, and nothing about this stream is owed. The emitter has run inside execute_mate since
+    # 2026-08-27; ticket 082 slice (b) landed `placed`, `order_position`, `seated` and `engagement`
+    # on 2026-09-06, and ExecuteMate calls the journal on every free mate as it does on every weld.
+    emitter_status: live
+    publisher_rules:
+      lazy: forbidden
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  goal_echo:
+    robot: ur5e_0
+    topic: /arm_controller/goal_echo
+    emitted_on: change
+    type: std_msgs/msg/String
+    encoding: json
+    emitted_by: the episode driver, as it sends each FollowJointTrajectory goal
+    class: transferable
+    evidential_status: claim_by_sender
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  robot_health:
+    robot: ur5e_0
+    topic: /robot_health
+    type: std_msgs/msg/String
+    class: sim_only
+    emitted_on: change
+    qos:
+      reliability: reliable
+      history: keepLast
+      depth: 1
+      durability: transientLocal
+    why: "whether the rig is drivable. The wedge it reports is a digital-twin pathology\
+      \ \u2014 a real cell's protective stop is a different mechanism with different\
+      \ semantics \u2014 so the stream is sim_only and does not cross to a real deployment"
+  attach_events:
+    robot: ur5e_0
+    topic: /rg2/attach_events
+    type: std_msgs/msg/String
+    encoding: json
+    emitted_by: the RG2 adapter over pa_attach, one message per attachment lifecycle
+      transition
+    class: sim_only
+    evidential_status: measured
+    emitted_on: change
+    source: attach_engine
+    stamp: sim_clock
+    verbs:
+    - attach
+    - detach
+    fields:
+      attach:
+      - event
+      - sim_time_s
+      - wall_time_s
+      - grasp_mode
+      - expect
+      - result
+      - width_measured_m
+      - width_commanded_m
+      - force_n
+      - squeezed
+      - effort_nm
+      detach:
+      - event
+      - sim_time_s
+      - wall_time_s
+      - kind
+      - result
+      - width_measured_m
+    result: nested_object
+    kinds:
+    - grip
+    - seat
+    publisher_rules:
+      lazy: forbidden
+      built_for: every attachment transition, whether or not anything subscribes
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  grip_events:
+    robot: ur5e_0
+    topic: /rg2/grip_events
+    emitted_on: change
+    type: std_msgs/msg/String
+    encoding: json
+    emitted_by: the RG2 adapter, one message per Grip RESULT, refusals included
+    class: transferable
+    evidential_status: measured
+    qos:
+      history: keepLast
+      depth: 100
+      reliability: reliable
+      durability: transientLocal
+  clock:
+    topic: /clock
+    type: rosgraph_msgs/msg/Clock
+    class: sim_only
+    emitted_on: rate
+    minimum_rate_hz: 59.7
+  tf_static:
+    topic: /tf_static
+    type: tf2_msgs/msg/TFMessage
+    class: transferable
+    emitted_on: latch
+  transform_tree:
+    topic: /tf
+    type: tf2_msgs/msg/TFMessage
+    class: transferable
+    emitted_on: rate
+    minimum_rate_hz: 59.7
+  arm_state:
+    robot: ur5e_0
+    topic: /joint_states
+    type: sensor_msgs/msg/JointState
+    class: transferable
+    emitted_on: rate
+    minimum_rate_hz: 59.7
+  sim_joint_state:
+    robot: ur5e_0
+    topic: /isaac_joint_states
+    type: sensor_msgs/msg/JointState
+    class: sim_only
+    emitted_on: rate
+    minimum_rate_hz: 59.7
+  controller_state:
+    robot: ur5e_0
+    topic: /arm_controller/controller_state
+    type: control_msgs/msg/JointTrajectoryControllerState
+    class: transferable
+    emitted_on: rate
+    minimum_rate_hz: 57.0
+  arm_action_feedback:
+    robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/feedback
+    type: control_msgs/action/FollowJointTrajectory_FeedbackMessage
+    class: transferable
+    emitted_on: change
+  arm_action_status:
+    robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/status
+    type: action_msgs/msg/GoalStatusArray
+    class: transferable
+    emitted_on: change
+  grip_action_feedback:
+    robot: ur5e_0
+    topic: /rg2/grip/_action/feedback
+    type: pa_robot_msgs/action/Grip_FeedbackMessage
+    class: transferable
+    emitted_on: change
+  grip_action_status:
+    robot: ur5e_0
+    topic: /rg2/grip/_action/status
+    type: action_msgs/msg/GoalStatusArray
+    class: transferable
+    emitted_on: change
+recording:
+  default_topics:
+  - topic: /clock
+    why: the sim time every stamp in the bag is expressed in
+  - topic: /tf
+    why: the robot's tree and the object frames, as consumers see them
+  - topic: /tf_static
+    why: fixed frames; time-invariant under replay
+  - topic: /objects/poses
+    why: "the referee's pose record \u2014 the aggregate"
+  - robot: ur5e_0
+    topic: /joint_states
+    why: the contract's measured-state surface
+  - robot: ur5e_0
+    topic: /isaac_joint_states
+    why: the sim's own state; carries the RG2's passive and mimic joints, which joint_states does not, and
+      rendering needs them
+  - robot: ur5e_0
+    topic: /arm_controller/controller_state
+    why: commanded against measured, per control cycle
+  - robot: ur5e_0
+    topic: /rg2/attach_events
+    why: the declared grip attach lifecycle; the referee's weld_present input offline
+  - topic: /objects/fastening_events
+    why: 'the mate journal - the platform''s own account of every pair it mated, and the only record of
+      the instant a weld closed, which exists for a few milliseconds inside one execute_mate call and travels
+      otherwise only on an action result, over services, which rosbag2 cannot record at all. ticket 082
+      (2026-09-06): the journal is the platform''s attestation that it MATED a pair, required of every fastening
+      class, not the welded path''s private evidence. A mate the journal says nothing about FAILs whatever
+      its physical end state, and a bag carrying no such topic at all is unscorable (NO_FASTENING_EVIDENCE)
+      because that is a fault of the recorder rather than of the artifact.'
+  - topic: /objects/state_events
+    why: typed absence, and the dynamics flag the referee refuses a kinematic body on
+  - topic: /objects/support_events
+    why: the support fact, made scorable from a bag
+  - topic: /objects/contact_events
+    why: the armed observer's pair and impulse timeline, including pad contact and any brush between the
+      carried block and the stack during descent
+  - robot: ur5e_0
+    topic: /arm_controller/goal_echo
+    why: the FJT goal as submitted
+  - robot: ur5e_0
+    topic: /rg2/grip_events
+    why: "each Grip result \u2014 holding, width, verdict"
+  - robot: ur5e_0
+    topic: /robot_health
+    why: whether the rig was drivable, so a failed run can be told from a wedged one offline
+  - robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/status
+    why: the goal lifecycle
+  - robot: ur5e_0
+    topic: /rg2/grip/_action/status
+    why: the goal lifecycle
+  not_recorded:
+  - robot: ur5e_0
+    topic: /arm_controller/follow_joint_trajectory/_action/feedback
+    why: 'the setpoint trace. rosbag2-storage-mcap 0.15.16 parses a type name only as <pkg>/msg|srv/<Name>; an action-generated feedback type fails that parse and the topic records with an EMPTY schema, so the messages are in the file and no offline reader can decode them. No record option supplies the missing definition. Measured 2026-09-03 on the first scored bag: 13,299 arm and 3,087 grip messages, both unreadable. Excused rather than recorded because a stream a verdict cannot be re-derived from is weight in every bag and evidence in none; the goal LIFECYCLE is carried by the _action/status streams and the goal echo, and the setpoint tracking by arm_controller/controller_state, so nothing that reads a bag loses a fact. THE OBLIGATION STANDS AND IS THIS: when the shipped storage plugin can name these types, they are recorded again and this excuse is deleted.'
+  - robot: ur5e_0
+    topic: /rg2/grip/_action/feedback
+    why: 'the jaw closure trace. rosbag2-storage-mcap 0.15.16 parses a type name only as <pkg>/msg|srv/<Name>; an action-generated feedback type fails that parse and the topic records with an EMPTY schema, so the messages are in the file and no offline reader can decode them. No record option supplies the missing definition. Measured 2026-09-03 on the first scored bag: 13,299 arm and 3,087 grip messages, both unreadable. Excused rather than recorded because a stream a verdict cannot be re-derived from is weight in every bag and evidence in none; the goal LIFECYCLE is carried by the _action/status streams and the goal echo, and the setpoint tracking by arm_controller/controller_state, so nothing that reads a bag loses a fact. THE OBLIGATION STANDS AND IS THIS: when the shipped storage plugin can name these types, they are recorded again and this excuse is deleted.'
+  dropped:
+  - robot: ur5e_0
+    topic: /dynamic_joint_states
+    why: a 1.86x costlier encoding of exactly what joint_states already carries, and
+      21% of the payload of every tracer bag. A bag holding two encodings of one truth
+      invites somebody to score from the wrong one.
+  format:
+    storage_id: mcap
+    storage_preset_profile: zstd_fast
+    compression_mode: none
+  anim_layer:
+    enabled: true
+    recorder: omni.kit.stagerecorder.core
+    time_mode: LIVE
+    pre_roll: false
+    closes_before: the bag
+  gate:
+    required:
+    - topic: /clock
+    - topic: /objects/poses
+    - robot: ur5e_0
+      topic: /joint_states
+    timeout_s: 30.0
+    # How far past the closed bracket the CELL's own /clock must run before the recorder is
+    # stopped and its finalized bag verified (ruling C, ticket 095, plan44 2026-09-25). Measured:
+    # ~222k header-stamped messages over 9 live bags (3 boxes, N=1..4, rtf 0.09-0.52) were all
+    # received within the sim step they were stamped in; 0.5 s is 30 physics steps, >=0.22 s of
+    # wall at the fastest measured rtf (2.3) against millisecond loopback DDS delivery.
+    close_margin_s: 0.5
+    on_timeout: refuse
+  retention:
+    policy: keep_indefinitely
+    overwrite_existing: false
+    note: Written down because the closest precedent did not write one and overwrites
+      its verdict bags by default. A verdict shipped without its evidence is a claim;
+      the bags are the evidence, they cost about 1.7 MiB each, and pruning is a human
+      decision.
+physics:
+  physics_scene:
+    applies_on_device: cpu
+    gpu_max_num_partitions: 8
+    physx_num_threads: 8
+    measured_by: 'THE VALUES EVERY RECORDED RUN OF THE ESTATE RAN UNDER, DECLARED (plan47''s ruling, 2026-10-21,
+      plan29/physics-scene-declared): partitions unauthored = the PhysxSceneAPI schema fallback 8 (omni.usd.schema.physx
+      generatedSchema.usda), and 8 PhysX worker threads, the value every box''s realisation read-back (steps.scene_regime_*.physx_scene_settings)
+      shows from 2026-10-08 to 2026-10-18 on all three boxes. From 10-18 rtx6000 and a4500 read 0 instead:
+      their Isaac 6.1 install config (site-packages isaacsim/kit/data/Kit/Isaac-Sim Base/6.1/user.config.json)
+      was left at 0 by a run that lent Kit 0 before saving was switched off (plan29/kit-restore), while
+      dual-a4500''s reads 8. Where the receipts disagree, this is the dual-a4500 value. This bench''s own
+      read-backs, 2026-10-11..10-21: rtx6000 8 threads on 142 jobs (e.g. 00cb110efd4d, 0701a9ea52fb), dual-a4500
+      8 on 55 (e.g. 05a52f00363a, 05f7cef190f7), a4500 8 on 8 (e.g. 78b3782b654e); 0 on dual-a4500 4 jobs
+      and rtx6000 8 jobs, all from 10-19 (the leaked install value). CPU only: every read-back of this bench
+      resolved CPU; beam_assemble (GPU, last dispatched 2026-09-17) has no read-back here and refuses PHYSICS_SCENE_REGIME_OUT_OF_SCOPE
+      at its cell until a GPU measurement is declared.'
+    device_provenance:
+      cpu:
+        kind: read-back
+        jobs:
+        - 0a6f7a0a2421
+        - 0bb220d20124
+        - 0cfa924be30b
+        - 1078c4ec31f2
+        - 18f5a666477a
+        - 19fd9c7f3afe
+        - 279ba23fbcaa
+        - 29b6720efe43
+        - 36f6c0b33efa
+        - 5b1901b8cc7f
+        - 5ffe91754bda
+        - 60a53b9716dc
+        - 7136de26c5c6
+        - 8bbd6babfe61
+        - 95104f0d8fbb
+        - be02d45b4222
+        - c2a41ec96026
+        - c3d928d5b5a0
+        - d3878c6852aa
+        - db91f90ab574
+        - e3e035895c8e
+        - e72989c099b4
+        - fd3c59fcef46
+        boxes:
+        - dual-a4500
+        - rtx6000
+        simulator_release: 6.1.0-rc.26+release.49347.2d230af4.gl
+        regime_digest: sha256:283210d712c2948663094eceab15339fca091562a3f2c978fbb832db119dbdf3
+  scene:
+    measured_on: rtx6000 (live cell, Isaac Sim 5.0, composed from these declarations)
+    measured_by: sim_instrumentation.incell_physics
+    confirm_with: python3 -m sim_instrumentation.physics_config
+    # `physics_dt_s` WAS DECLARED HERE and was REMOVED by operator ruling
+    # (2026-09-19). The physics RATE is not a property of the bench: it is what the
+    # TASK's closure requires, derived at publication into `physics.rate` from whatever
+    # member of that closure states a requirement — an assembly's MEASURED tuning, a
+    # robot's `physics.rate_requirement`, or a fixture's — and compared live at compose.
+    # NOT from `physics.threading_regime`: that is the geometry-derived SDF/contact policy
+    # every thread carries, `assembly_ingest.threading_regime` calls it "deliberately
+    # separate" from the measured tuning, and reading it as a requirement is what refused
+    # M16 attempt 8 at compose over a bench that had threaded that assembly at 60 Hz.
+    # Same shape
+    # as `gpu_dynamics` and `broadphase`, removed here by ruling 079 on 2026-09-04 for
+    # the same reason. Every code reader had already moved off it before this removal
+    # — physics_config.py:120, standalone_contract.py:275, tape.py:108 each say so in
+    # their own words — so this deletes a value nothing consumed.
+    solver_type: TGS
+    # `gpu_dynamics` and `broadphase` USED TO BE DECLARED HERE and were REMOVED by operator
+    # ruling (079, 2026-09-04). The physics device is not a property of the bench: it is resolved
+    # PER TASK from the task's whole closure — the assembly parts' `sdf_bearing` riders, this
+    # bench's fixtures' collider kinds, and the collider records of the robots it binds — GPU iff
+    # anything in that closure is SDF-bearing and CPU when the closure is proven free of it, by
+    # `sim_instrumentation.physics_device`. The broadphase FOLLOWS the device (GPU / MBP) and is
+    # derived with it, so the two cannot disagree. A declaration that still carries either field is
+    # refused by name at publication (`ENVIRONMENT_DECLARES_DEVICE`).
+    enable_ccd: false
+    enable_stabilization: false
+    gravity:
+      # THE WORLD'S GRAVITY. This is a SCENE/CHAIN SPLIT, not a boolean about the cell as a whole,
+      # and reading it as the latter is what produced the value it replaces.
+      #
+      #   THE SCENE (declared here, realised by every composer, read back on every run):
+      #       9.81 m/s^2 along the negative stage up axis. ON.
+      #   THE ROBOT CHAIN (NOT declared here — an INVARIANT of the composers, never a bench knob):
+      #       every rigid body under the articulation root carries `physxRigidBody:disableGravity`,
+      #       authored before the `world.reset()` that latches it (compose_rig_ns.py section 7b).
+      #       The rig receipt names the exempted prims; the bench does not configure them.
+      #
+      # RULING 27 (operator, 2026-09-06, ticket 039): "only the robot has gravity off by default,
+      # literally nothing else". This bench declared `enabled: false` on the reading that the 040
+      # swing fix's gravity-off applied to the SCENE. It did not — its third stacked gap was
+      # "gravity ON on the chain" and its cure was the per-body exemption above.
+      #
+      # THIS IS WHAT THE BENCH WAS ALREADY DOING, MEASURED. The merged composer this bench binds
+      # through read no gravity define at all and built its World at Isaac's default, so every
+      # dimelab rig cell has run at earth gravity while this block said otherwise. On rtx6000,
+      # 2026-09-06, against the PUBLISHED declaration and the composer bytes of the day: scene
+      # `gravityMagnitude` 9.8100004196167 authored, `gravityDirection` [0,0,-1] authored, 23 of 23
+      # chain bodies carrying `disableGravity`, and a free body with no collider falling at an
+      # implied 9.809995 m/s^2 (setup/gravity-on-039-20260906.md section 2).
+      #
+      # THE SENTINEL, CITED SO NO READER REPEATS THE MISREADING. An unauthored PhysX scene is not a
+      # scene without gravity. The shipped UsdPhysics schema (usdPhysics/schema.usda:96-115) reads
+      #     physics:gravityDirection = (0,0,0)  "a request to use the negative upAxis"
+      #     physics:gravityMagnitude = -inf     "a request to use a value equivalent to earth gravity"
+      # so a readback of [0,0,0] with no finite magnitude MEANS 9.81 -z. Recording it as UNMEASURED
+      # hides a value rather than protecting one; `incell_physics` now resolves it in the reader.
+      #
+      # NO DRIVE OR TRACKING CAP IS RE-MEASURED FOR THIS FLIP, and this is the load-bearing
+      # consequence. Every number in this closure that is qualified "gravity-free" — the arm's
+      # reflected inertia, its torque-envelope margin, the `frozen_74` tracking worst of 0.026305
+      # rad — was measured with the CHAIN exempt and the WORLD pulling, which is the regime this
+      # block now declares. Only the world's statement changes; the chain's regime is untouched, so
+      # the phrase "gravity-off" in any of those notes means chain-gravity-free and their
+      # obligations are discharged rather than pending.
+      enabled: true
+      magnitude_m_s2: 9.81
+      direction: [0.0, 0.0, -1.0]
+    note: 'Read while the bringup contact probe was armed, so physxScene:reportKinematicKinematicPairs
+      and reportKinematicStaticPairs were both true. Those are the probe''s, authored
+      at arming and restored on disarm; they are not part of this declaration. Measured
+      alongside: physics_sim_device reports `cpu` while gpu_dynamics is true.'
+  bodies:
+    solver_position_iterations: 64
+    solver_velocity_iterations: 1
+    sleep_threshold:
+      source: asset
+      minimum: 1.0e-06
+      units: distance^2/second^2 (mass-normalised kinetic energy, per the PhysX schema)
+      measured_value_on_the_jenga_bundle: 5.0e-05
+      why: 'A part whose threshold is zero never sleeps, so it is never at rest as
+        far as physics is concerned, and every reading taken afterwards is taken in
+        a cell nobody described. The floor is set well below the value the shipping
+        parts carry and far above zero, because what it is guarding against is replacement
+        by zero rather than a tuning difference.
+
+        '
+      measured_failure: 'isaacsim.core.prims.RigidPrim defaults prepare_contact_sensors=True,
+        which applies the PhysX rigid-body schema to every prim in the view and sets
+        its sleep threshold to 0 (rigid_prim.py:2292, "disable sleeping, because sleeping
+        bodies don''t get contact reports"). Any lane that read a velocity did this.
+        Measured on a long-lived cell: all six jenga blocks read 0 and none had slept
+        in over a day.
+
+        '
+  work_surface:
+    material: the work table's own audited material, bound to its collider (2026-08-24)
+    measured: true
+    static_friction: 0.8
+    dynamic_friction: 0.6
+    restitution: 0.0
+    friction_combine_mode: average
+    restitution_combine_mode: min
+    provenance: "robo-manipulate isaac/rm_scene/load_scene.py TABLE_STATIC_FRICTION\
+      \ / TABLE_DYNAMIC_FRICTION / TABLE_RESTITUTION \u2014 an audited dry-lab work-surface\
+      \ pair (0.8 / 0.6 / 0) chosen so the table resists the measured 0.497-degree\
+      \ part yaw without a restOffset or solver change. Static exceeds dynamic per\
+      \ Coulomb; restitution-combine `min` keeps a bouncy default part from bouncing\
+      \ on this surface."
+    note: "The work table now carries PhysicsCollisionAPI AND this material binding\
+      \ (assets/work_table.usda), and the infinite default ground plane is removed\
+      \ \u2014 so a part resting anywhere in a declared region rests ON THE TABLE\
+      \ and takes this material combined with its own. The manipulated FMB part carries\
+      \ its own audited material (FmbPrintedPlastic, 0.8 / 0.6 / 0); jenga blocks\
+      \ carry the simulator default, which is why the table's `min` restitution combine\
+      \ matters for them. Supersedes the pre-2026-08-24 state (table collision:none,\
+      \ part-on-ground-plane, surface UNMEASURED)."
+lighting:
+- name: room
+  type: dome
+  intensity: 1000.0
+  temperature_k: 6500
+  why: 'the bench''s ambient. Without it a raytraced render of this stage is black
+    whatever the camera is pointed at, which is what every capture from dimelab was
+    until this was declared.
+
+    '

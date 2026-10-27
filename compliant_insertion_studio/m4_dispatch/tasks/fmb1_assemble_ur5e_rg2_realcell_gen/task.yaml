@@ -1,0 +1,184 @@
+# fmb1_assemble_ur5e_rg2_realcell_gen - generated sibling of fmb1_assemble (control) for the M4 planner build.
+# DRAFT for the operator: the task a harbor AUTHORING job is dispatched against on dual-a4500, in simulation, on the
+# bench dimelab_elevated (dimelab with the UR5e base_link 0.080 m above the table, as on the real cell).
+#
+# Authored 2026-10-26 on the cell PC (OptiPlex) from fmb1_assemble_ur5e_rg2_flat_gen as published in generation
+# refs/pa/published @ 538bbeee (task.yaml sha256 f6bb8aa5..., pulled read-only) and the real cell's measurements
+# (ros-mcp-server-verified compliant_insertion_studio/realcell_env/MEASURED_CELL.yaml, cited [M:key]).
+# NOT published, NOT gated, no receipt: /author-task's publication on dual-a4500 is the next step (README.md).
+#
+# What differs from fmb1_assemble_ur5e_rg2_flat_gen, and the measurement behind each:
+#   1. environment: dimelab_elevated (base_link z 0.080 above the table top) - config.py:3 ROBOT_BASE_Z, Vention
+#      design 80.48 mm, operator decision 2026-10-23 [M:frames.base_link_above_table].
+#   2. Body1 (occurrence:00) is FREE and DRAWN, not static: base1 is untaped on the cell, the reset pushes it to a
+#      different pose every cycle, it creeps 1-4 mm per part, and the cell re-measures it before every insert
+#      [M:base1.*]. A planner must read it from /objects/poses, never from the layout - that is the behaviour M4
+#      carries to the cell. Draw region `base_start` = where base1 ACTUALLY sat: the union of its 161 mm footprint
+#      over 114 replay-start reads (2026-10-22..23) + 5 mm [M:base1.footprint_union].
+#   3. staging = the cell's staging region (cell_layout.yaml fmb1_home_2026_10_21, UR x [0.19, 0.62], y [-0.62, -0.25]),
+#      trimmed 25 mm clear of base_start (the cell's spacing rule, ablations/spacing_check.py MIN_GAP_MM 25).
+#   4. reorient = the cell's one clear area (UR (-0.320, -0.500)) +- 56.4 mm (half the longest part, yellow 112.7 mm)
+#      [M:regions.clear_area]; the taped square's real size is UNMEASURED.
+#   5. domains: Body2/4/5 laid flat on a large face with flips free (flat_gen's domains, carried) - the cell's
+#      tipping cycles (phase 2, run 109 on) start this way; its untipped cycles start in the authored (standing) frame,
+#      which is the control's domain. Body3 lies along its length on a long face on the cell too [M:parts.resting_stance].
+#   6. prompt.task_layer: the M4 seam instruction (one insertion function, base read from the stream, held pose
+#      chained) - the exceptional instruction this dispatch exists for.
+# Everything else (goal, equivalence, mate realization, tolerances, referee, streams, prompt pins) is the control's.
+#
+# Frames: world = the table-top plane under base_link (twin world). UR `base` -> world: p = (-x, -y, z + 0.080),
+# yaw + 180 deg [M:frames.ur_base_to_twin_world]. Regions are support-local on work_table's top surface; work_table
+# is centred at world (0, 0.4985) (dimelab declaration), so local = world - (0, 0.4985); each region's WORLD
+# rectangle is written beside it and is the measured truth.
+#
+# Reference: plan-anything/data/tasks/fmb1_assemble_ur5e_rg2_flat_gen/task.yaml (the sibling this copies)
+# Reference: plan-anything/data/tasks/fmb1_assemble/task.yaml (the control)
+# Reference: plan-anything/.claude/skills/author-task/SKILL.md §2a path 2 (generated sibling of a fixed control)
+# Reference: ros-mcp-server-verified compliant_insertion_studio/realcell_env/{MEASURED_CELL.yaml,INTERFACE.md,OWED.md}
+
+schema: pa.task/1
+task_id: fmb1_assemble_ur5e_rg2_realcell_gen   # the convention has no variant slot: the operator names it (SKILL §2a)
+declared_on: '2026-10-26'
+declared_by: /author-task draft, claude on the cell PC (OptiPlex) for the operator's M4 planner-build dispatch - publication OWED
+
+# ---------------------------------------------------------------------------- references
+assembly:
+  name: fmb1
+  assembly_digest: 0438cd536fb5b6fc6c8a4aa8bfdccd77109984b092a15ce84a5775ba4274f64e   # unchanged from the control and flat_gen
+  receipt_sha256: 944a376ed0b9f2f951feda64153f08efef0f88ab02bba1f502836ea2c1dbb590    # flat_gen's pin @ 538bbeee; [pin_graph] re-pins at publish
+environment:
+  name: dimelab_elevated
+  receipt_sha256: PUBLISH_FIRST   # dimelab_elevated is published in the same lane BEFORE this task (README step 2); publish_task re-pins it
+roles:
+  - role: manipulator
+    token: ur5e_0            # assigned by dimelab_elevated's declaration (dimelab's token, unchanged)
+    grasp_mode: friction     # the RG2 holds by pad friction (the real RG2: 40 N fixed)
+
+starting_scene:
+  occurrences: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]
+  realized_mates: []
+  extra_objects: []   # no fixture (removed from the FMB1 tasks 2026-10-13); the real cell has none
+
+# ---------------------------------------------------------------------------------- goal
+goal:
+  target:
+    kind: assembled_state
+    occurrences: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]
+    placement: {mode: in_region, region: assembly}   # assembled anywhere / any yaw inside the measured base area (Body1 is free)
+  verify: verify_assembly
+  equivalence:
+    not_interchangeable: []      # class:03 = {Body2, Body5}: the two U parts may swap slots (control, 037 proof)
+    orientation_fixed: []
+
+mate_realization:
+  default: attach_on_verified_mate
+  physical_only: [mate:00, mate:01, mate:02, mate:03]
+  trigger: measured_relative_pose_inside_accepted_seated_set
+  attachment_scope: internal_part_to_part
+
+requirement_profile:
+  name: b1_default
+
+# ------------------------------------------------------------------------------ tolerances
+tolerances:
+  - target: every mate of the assembled_state target
+    band: assembly_graph/mate:*/seated.acceptance
+    provenance: "registry: declared flat band, 1 mm on every mate-frame axis and 1 degree of orientation
+      (assembly-ingest constants registry), unchanged from the control. Real-cell note (informative, not a band):
+      the cell's certifier judges z within 2.0 mm and reports xy/tilt only (realcell_env/INTERFACE.md §3.4);
+      good real seats land within +-1.7 mm of the predicted seat."
+    derivation: DECLARED
+  - target: the unwelded settle band the referee tolerates at verdict (basins-not-poses)
+    band: data/assemblies/fmb1/artifacts/fmb1.sim-checks.json (recorded unwelded settle)
+    provenance: "assembly-ingest Tier-B, recorded regardless of weld choice (027 §8)"
+
+# ----------------------------------------------------------------------------- referee gates
+# The control's v0 block, unchanged: this task is scored in SIMULATION (the real cell has its own certifier).
+referee:
+  at_rest: {linear_speed_m_s: 0.002, angular_speed_rad_s: 0.020, window_s: 1.0, min_samples: 5,
+            sampling_rate_hz: 12.0}
+  require_dynamic: true
+  require_weld_absent: true
+  require_support: true
+  support_probe_max_m: 0.030
+  fastening: {default: free}
+
+# --------------------------------------------------------------------------------- layouts
+layouts:
+  regime: generated
+  rest_claim: seated
+  # witness: run 78's base1 read (2026-10-23 21:57 MST, 4/4 certified), UR (0.1066, -0.4892) yaw 21.44 deg ->
+  # world (-0.1066, 0.4892), yaw 201.44 deg; graph-assembly yaw = world yaw + 90 deg through the cell->graph frame map
+  # p_graph = Rz(-90) p_cell (translation-checked on base1 only, orientation UNVERIFIED [M:parts.frame_map_cell_to_graph]).
+  # witness_only: Body1 is drawn, so nothing is placed from this.
+  world_from_assembly: {witness_only: true, frame: world, xyz_m: [-0.1066, 0.4892, 0.0], quat_wxyz: [0.82629, 0.0, 0.0, -0.56324], support: work_table}
+  regions:
+    # WORLD x [-0.268, 0.020], y [0.327, 0.629]: base1's footprint union over 114 reads + 5 mm [M:base1.footprint_union]
+    assembly:   {anchor: {environment_node: work_table, feature: top_surface}, geometry: {kind: rectangle_2d, x_m: [-0.268, 0.020], y_m: [-0.1715, 0.1305]}, subject_predicate: complete_assembly_inside}
+    base_start: {anchor: {environment_node: work_table, feature: top_surface}, geometry: {kind: rectangle_2d, x_m: [-0.268, 0.020], y_m: [-0.1715, 0.1305]}, subject_predicate: complete_body_inside}
+    # WORLD x [-0.62, -0.293], y [0.25, 0.62]: the cell's staging region, its +x edge 25 mm clear of base_start
+    staging:    {anchor: {environment_node: work_table, feature: top_surface}, geometry: {kind: rectangle_2d, x_m: [-0.62, -0.293], y_m: [-0.2485, 0.1215]}, subject_predicate: complete_body_inside}
+    # WORLD x [0.2636, 0.3764], y [0.4436, 0.5564]: the cell's clear area +- 56.4 mm
+    reorient:   {anchor: {environment_node: work_table, feature: top_surface}, geometry: {kind: rectangle_2d, x_m: [0.2636, 0.3764], y_m: [-0.0549, 0.0579]}, subject_predicate: complete_body_inside}
+  free: [occurrence:00, occurrence:01, occurrence:02, occurrence:03, occurrence:04]   # Body1 FREE (control and flat_gen: static)
+  static: []
+  domains:
+    # Body1: drawn in the measured base area; yaw free because the cell's reset turns it to a new yaw each cycle
+    # (measured 14.7-23.9 deg UR after the push; the loop also rotates it through 8 target poses) and the cell->graph
+    # orientation map is unverified, so no bounded centre can be stated honestly. If the map is verified: the engine
+    # accepts yaw: {kind: bounded, center_rad: <c>, half_range_rad: <h>}.
+    occurrence:00: {region: base_start, yaw: free, rest: settled}   # Body1
+    # Body2, Body4, Body5: flat_gen's stance - a quarter turn about -y lays each on a large face (the cell's tipped
+    # starts); flip: free turns it onto the opposite large face through a certified half-turn. Body3 keeps the
+    # authored frame (it lies along its length on the cell too).
+    occurrence:01: {region: staging, stance: {quat_wxyz: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]}, yaw: free, flip: free, rest: settled}   # Body2
+    occurrence:02: {region: staging, yaw: free, flip: free, rest: settled}   # Body3
+    occurrence:03: {region: staging, stance: {quat_wxyz: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]}, yaw: free, flip: free, rest: settled}   # Body4
+    occurrence:04: {region: staging, stance: {quat_wxyz: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]}, yaw: free, flip: free, rest: settled}   # Body5
+  constraints: {no_overlap: true, clearance_m: 0.025}   # the cell's spacing rule (spacing_check.py MIN_GAP_MM 25)
+  decorrelation: [target_yaw]
+  generator:
+    engine: sim_instrumentation.layout_generator/1
+    sha256: 778eed5aeac3d48eb9a2d5f8be7db790a0cab7a7d55b3b9e8f254164d24f24a2   # flat_gen's pin @ 538bbeee; the exercise (README step 3) prints the engine at head - re-pin if it moved
+  # no `fixed:` record: nothing is static. If the engine refuses a FREE Body1 (nothing in the generator forbids it,
+  # but no published task has drawn its reference part), fall back to README §5 fallback A: Body1 static at the
+  # measured pose from m4_dispatch/fallback/fmb1_realcell_base_static.json.
+
+# --------------------------------------------------------------------------------- streams
+streams:
+  object_frames: [fmb1/occurrence:00, fmb1/occurrence:01, fmb1/occurrence:02, fmb1/occurrence:03, fmb1/occurrence:04]
+  recording_opt_ins: []
+
+# ---------------------------------------------------------------------------------- prompt
+prompt:
+  platform: {name: platform, sha256: de728a1dbf10ac3e89b6d1f82c3cef05ea71fc16b88031daaa650d6f141bd56c}   # current @ 538bbeee (verified 2026-10-26)
+  domain: {name: assembly, sha256: d6be4fa5ba7cca3164d3d549b3c92f7c891e724870dfc31e7c941227a30d25b4}     # current @ 538bbeee (verified 2026-10-26)
+  # The exceptional instruction this dispatch exists for (M4: the delivered planner runs on the real UR5e + RG2 cell
+  # with ONE substitution). Only what the structured declaration cannot say.
+  task_layer: >-
+    M4 transfer requirement. This planner will be run on a real UR5e + RG2 cell with exactly one substitution, so
+    structure it as follows. (1) Every insertion of a mover into its seat is performed by exactly one function,
+    insert_mate(mate_id, reference_pose, held_pose), where reference_pose is the reference part's (Body1's) pose read
+    from /objects/poses immediately before the call and held_pose is the held mover's pose expressed in the tool frame;
+    no other code moves the arm within 30 mm above a seat. On the real cell this one function is replaced by a
+    force-controlled insertion action with the same inputs and a {seated, stage_reached} result, so make every
+    decision after an insertion depend only on that result and on a fresh read of the scene. (2) Body1 is free and
+    its pose differs on every episode: read it from /objects/poses before every mate, never from the layout, and
+    aim each subsequent mate from the pose read after the previous one. (3) Read a mover's pose once per grasp, right
+    before closing the gripper, and carry that held pose forward (chain it through every reorientation) instead of
+    re-reading it while it is held - on the real cell the held part is occluded. (4) When a part must be set down
+    and regrasped, use the reorient region.
+
+# -------------------------------------------------------------------------------- admission
+admission:
+  class: asserted                      # nothing has cleared THIS task in simulation; flips to proven on the first clear (spike or harbor job)
+  evidence:
+    kind: real_cell_reference_planner_runs   # NOT a platform admission kind; recorded so the assertion is checkable
+    what: >-
+      The real cell's reference planner (ablations/replay_real_assembly.py through /ur5e/drive_mate and
+      /ur5e/execute_mate) assembles FMB1 4/4 hands-off from starts drawn from these domains' real-world counterparts:
+      16 consecutive certified cycles 2026-10-24/25 (runs 93-108, untipped starts, base free and re-pushed every
+      cycle) and the tipped starts of phase 2 (run 109 on). In simulation the laid-flat domains are flat_gen's,
+      admitted 60/60 by engine 778eed5a (its author_engine_exercise); a drawn Body1 has not been exercised.
+    says_nothing_about: any planner other than the reference replay; the simulated bench; a drawn Body1 until README step 3 runs
+# physics: DERIVED BY THE PUBLISHER (scripts/publish_task.py) - not authored here.

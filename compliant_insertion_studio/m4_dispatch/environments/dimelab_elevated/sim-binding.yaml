@@ -1,0 +1,309 @@
+# THE SIM-BINDING MAP for `dimelab_elevated` (dimelab, renamed; the hop is unchanged) — the hop from declared names to prims on a stage.
+#
+# The environment declaration names a scene, an assembly graph names an assembly's occurrences,
+# and a simulator realises both as prims. Nothing owned that last hop, which is why the robot
+# sidecar still carries a `sim:` block full of prim paths its own schema says it should not
+# hold. This file is that hop, written down, and it is per-SIMULATOR and per-BENCH: rerealise
+# the same environment somewhere else and only this file changes.
+#
+# Reference: plan-anything/wayfinder/tickets/023-…md (the artefact, opened as fog)
+# Reference: plan-anything/wayfinder/tickets/028-…md (RESOLUTION — the stream this feeds)
+# Reference: plan-anything/setup/pose-wiring-20260822.md §1.3 (the first instance of this file)
+#
+# WHAT MOVED OUT OF IT. The pose-wiring build's `streams:` block lived here because the
+# environment declaration did not exist yet, and its header said ticket 032 would move it. It is
+# gone: `refcell.yaml` beside this file carries it now, and `scripts/streams.py` joins the two.
+# There is one statement of the observation infrastructure and it is in the declaration.
+#
+# The one rule: every frame_id here is a LITERAL and this is the only place the string is
+# written. Nothing composes one from parts at runtime. The occurrence and assembly fields beside
+# it are provenance a referee joins on offline; they explain the literal, they do not generate
+# it.
+
+schema: pa.sim-binding-map/1
+name: dimelab_elevated
+environment: dimelab_elevated            # the pa.environment-declaration/1 this realises
+simulator: isaac-sim-5.0
+bench: rtx6000
+declared_on: '2026-08-23'
+declared_by: /onboard-environment, ticket 032; assemblies and task parts at v3 by the
+  robot-integration pass
+
+# --------------------------------------------------------------------------- the assemblies
+# Pinned so a frame_id can be traced back to the occurrence it names, offline, without the sim.
+#
+# BOTH DIGESTS WERE WRONG until 2026-08-23, through two publications, and nothing noticed —
+# because nothing read them. The contract module never opens this file, the publisher copied it
+# verbatim, and `validate_home.py` verifies that the published BYTES match the receipt rather
+# than what those bytes say. A pinned digest that nothing verifies is not a pin; it is a comment
+# shaped like a guarantee, and this one sat two assembly republishes behind (the 037
+# interchangeability re-ingest, then the bamboo material class) while the environment was
+# reported green each time.
+#
+# `publish_environment.check_binding_assemblies` now refuses a publication whose pins disagree
+# with the assembly's own published receipt — symmetric with the check that already refuses an
+# asset whose bytes disagree with what the declaration pins. So these two numbers are now
+# maintained by the refusal rather than by whoever remembers.
+#
+# Consequence to know before editing: an assembly republish STALES this file, and re-pinning it
+# moves the environment receipt, which stales every task bundle that pins the environment. That
+# chain is the cost of the pins being real.
+assemblies:
+  - name: fmb1
+    assembly_graph: artifacts/fmb1.assembly-graph.json
+
+  # ADDED AT v3. The bench holds two published assemblies now, and a frame_id carrying an
+  # occurrence address is only unique WITHIN its assembly — `occurrence:02` names a different
+  # thing in each of these two — so a scene that streams both has to pin both or the scoping
+  # prefix on the frame ids has nothing to resolve against.
+  - name: jenga_pyramid
+    assembly_graph: artifacts/jenga_pyramid.assembly-graph.json
+
+  - name: beam
+    assembly_graph: artifacts/beam.assembly-graph.json
+
+# ------------------------------------------------------------------------------- the objects
+# One entry per object whose pose this scene publishes. The declared set is fixed at compose
+# time and the publishers are built for ALL of it: an object that leaves the stage is announced
+# on the object-state event topic, never by its pose stream falling silent.
+#
+# `contributed_by` records which floor each frame came off. The environment declares the frames
+# of the things it owns; a task unions the frames of the objects it brings, at run assembly.
+# Writing it down here is what keeps a scene's own responsibility legible after a task has
+# added to it.
+objects:
+  # pedestal + place_seat support bindings removed (dimelab is table-only; those are tracer-task supports).
+  - frame_id: work_table
+    contributed_by: environment
+    content: work_table
+    prim: /World/WorkTable
+    role: work_surface
+    dynamics: static
+
+  # ------------------------------------------------------------------- the task parts, at v3
+  # Every occurrence of both published assemblies, bound to the prim this simulator realises it
+  # as. Three things about this block are easy to misread.
+  #
+  # BEING HERE IS NOT BEING ON THE STAGE. This map says which prim a frame reads FROM; whether
+  # that prim exists right now is a fact about an episode, and a declaration that carried it
+  # would be wrong between one episode and the next. Today exactly one of these eleven is
+  # realised — `/World/Objects/Body3`, the tracer's part — and the other ten are absent. That is
+  # a supported state and not a gap: `pose_stream.compose` authors a publisher for every
+  # DECLARED object, present or not, closes the gate on the ones with no prim to read, and the
+  # object-state event topic carries the absence. Membership of the topic is a property of the
+  # declaration; silence is never the signal.
+  #
+  # THE FRAME IDS ARE THE TASKS'. `fmb1_assemble` and `jenga_pyramid_stack` each declare their
+  # own `streams.object_frames`, and these are those strings — the same literals, written once
+  # more here only because this is where a literal is bound to a prim. Nothing composes one from
+  # parts at runtime.
+  #
+  # THE PRIM NAMES ARE THIS FILE'S TO CHOOSE, and they are derived from the occurrence's own
+  # `source_native_id` rather than invented: `Body3:1` becomes `Body3`, `jenga_block:4` becomes
+  # `jenga_block_4`. The colon has to go because USD prim names admit only letters, digits and
+  # underscores, and six occurrences of ONE part type need six distinct names, which is why the
+  # jenga prims carry the index the fmb1 prims do not need.
+  - frame_id: fmb1/occurrence:00
+    contributed_by: [task:fmb1_assemble]
+    assembly: fmb1
+    occurrence: occurrence:00
+    part_label: Body1                 # the occurrence's part_type.label, for humans
+    source_native_id: Body1:1         # what the CAD chain called it
+    prim: /World/Objects/Body1
+    role: task_part
+    # STATIC in fmb1_assemble's layout, which gives it an explicit fixed pose — but the
+    # dynamics here describe what the PRIM is, and it is a rigid body like the rest. Which
+    # occurrence a task pins is the task's statement, not this file's.
+    dynamics: rigid_body
+
+  - frame_id: fmb1/occurrence:01
+    contributed_by: [task:fmb1_assemble]
+    assembly: fmb1
+    occurrence: occurrence:01
+    part_label: Body2
+    source_native_id: Body2:1
+    prim: /World/Objects/Body2
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: fmb1/occurrence:02
+    # TWO tasks bring this one: the tracer's single pick-and-place and the full assembly. The
+    # frame, the occurrence and the prim are the same in both, which is the point of binding a
+    # name rather than a task's copy of it.
+    contributed_by: [task:tracer_pickplace_fmb1_body3, task:fmb1_assemble]
+    assembly: fmb1
+    occurrence: occurrence:02
+    part_label: Body3
+    source_native_id: Body3:1
+    prim: /World/Objects/Body3
+    role: task_part
+    dynamics: rigid_body
+    # the assembly scope is here because an occurrence address is unique only WITHIN its
+    # assembly and a scene may hold more than one. An interior '/' is legal in tf2 and
+    # meaningless to it — only a LEADING '/' is rejected — which is the same mechanism MoveIt
+    # uses for subframe names. At v3 the scene holds two assemblies, so the scope is load-bearing
+    # rather than anticipatory: `jenga_pyramid/occurrence:02` is below and is a different thing.
+
+  - frame_id: fmb1/occurrence:03
+    contributed_by: [task:fmb1_assemble]
+    assembly: fmb1
+    occurrence: occurrence:03
+    part_label: Body4
+    source_native_id: Body4:1
+    prim: /World/Objects/Body4
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: fmb1/occurrence:04
+    contributed_by: [task:fmb1_assemble]
+    assembly: fmb1
+    occurrence: occurrence:04
+    part_label: Body5
+    source_native_id: Body5:1
+    prim: /World/Objects/Body5
+    role: task_part
+    dynamics: rigid_body
+
+  # SIX OCCURRENCES OF ONE PART TYPE. jenga_pyramid's graph carries a single equivalence class
+  # and six members of it, so every entry below names the same `part_label` and the same
+  # published bundle; what distinguishes them is the occurrence address, and the prim name
+  # carries the index for exactly that reason.
+  - frame_id: jenga_pyramid/occurrence:00
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:00
+    part_label: jenga_block
+    source_native_id: jenga_block:1
+    prim: /World/Objects/jenga_block_1
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: jenga_pyramid/occurrence:01
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:01
+    part_label: jenga_block
+    source_native_id: jenga_block:2
+    prim: /World/Objects/jenga_block_2
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: jenga_pyramid/occurrence:02
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:02
+    part_label: jenga_block
+    source_native_id: jenga_block:3
+    prim: /World/Objects/jenga_block_3
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: jenga_pyramid/occurrence:03
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:03
+    part_label: jenga_block
+    source_native_id: jenga_block:4
+    prim: /World/Objects/jenga_block_4
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: jenga_pyramid/occurrence:04
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:04
+    part_label: jenga_block
+    source_native_id: jenga_block:5
+    prim: /World/Objects/jenga_block_5
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: jenga_pyramid/occurrence:05
+    contributed_by: [task:jenga_pyramid_stack]
+    assembly: jenga_pyramid
+    occurrence: occurrence:05
+    part_label: jenga_block
+    source_native_id: jenga_block:6
+    prim: /World/Objects/jenga_block_6
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: beam/occurrence:00
+    contributed_by: [task:beam_assemble]
+    assembly: beam
+    occurrence: occurrence:00
+    part_label: part6
+    source_native_id: part6:1
+    prim: /World/Objects/beam__occurrence_00
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: beam/occurrence:01
+    contributed_by: [task:beam_assemble]
+    assembly: beam
+    occurrence: occurrence:01
+    part_label: part2
+    source_native_id: part2:1
+    prim: /World/Objects/beam__occurrence_01
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: beam/occurrence:02
+    contributed_by: [task:beam_assemble]
+    assembly: beam
+    occurrence: occurrence:02
+    part_label: part0
+    source_native_id: part0:1
+    prim: /World/Objects/beam__occurrence_02
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: beam/occurrence:03
+    contributed_by: [task:beam_assemble]
+    assembly: beam
+    occurrence: occurrence:03
+    part_label: part3
+    source_native_id: part3:1
+    prim: /World/Objects/beam__occurrence_03
+    role: task_part
+    dynamics: rigid_body
+
+  - frame_id: beam/occurrence:04
+    contributed_by: [task:beam_assemble]
+    assembly: beam
+    occurrence: occurrence:04
+    part_label: part1
+    source_native_id: part1:1
+    prim: /World/Objects/beam__occurrence_04
+    role: task_part
+    dynamics: rigid_body
+
+# ------------------------------------------------------------------------------ the contents
+# How this simulator realises each non-robot entry the environment declares: which prim it
+# becomes, and how. The environment says WHAT and WHERE; this says HOW, here.
+contents:
+  # pedestal + place_seat removed (dimelab is table-only; tracer-task supports).
+  - name: work_table
+    prim: /World/WorkTable
+    realised_by: reference
+    # STATIC, as of 2026-08-24: the table IS the work surface now — its representation carries a
+    # box collider + the audited material, and the infinite default ground plane is removed
+    # (compose_rig_ns no longer adds it). The realiser reads this field and asserts the realised
+    # prim carries a collider to match; a table that arrived WITHOUT one would now be the refusal.
+    collision: static
+
+# -------------------------------------------------------------------------------- the robots
+# Runtime robot rows are derived from the environment roster and each digest-pinned, in-home
+# sidecar. The sidecar's `sim:` block is the single owner of per-deployment prims and controller
+# edges; repeating them here would create two statements that can drift.
+
+# -------------------------------------------------------------------------------- the streams
+# Not here. `refcell.yaml`'s `streams:` key is the single declaration of the observation
+# infrastructure, and `scripts/streams.py` joins it to the objects above when it composes the
+# graph. This pointer exists so a reader of the old file's shape finds out where it went.
+streams: see_environment_declaration
+# Live component-prefixer output captured by the simulator-only dimelab composition on 2026-09-14.
+assets:
+  rig_manifest: assets/rig_manifest.json
+  rig_manifest_sha256: a982d39d27162e70e188f0aea6c28e1008a0dc2907c22cb36b8b1bd91bfe1476
+  authored_by: live component prefixer during environment composition on 2026-09-14

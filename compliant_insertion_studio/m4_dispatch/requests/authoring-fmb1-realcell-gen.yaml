@@ -1,0 +1,66 @@
+# Harbor AUTHORING request (a planner build) for fmb1_assemble_ur5e_rg2_realcell_gen on dimelab_elevated.
+# A copy of the real request that built fmb1flat x Opus 5.5 attempt 12 on dual-a4500 (.pa/runs/02f640fb...,
+# 2026-10-13), with the task, id, series and seat changed. FILL THE THREE <...> FIELDS before the walk:
+#   generation_digest  the generation the lane of README steps 1-4 promoted:
+#                      git -C ~/prompt2assembly/plan-anything for-each-ref refs/pa/generations --sort=-committerdate --format='%(refname:short)' | head -1
+#   seat               the seat label to spend (personal2 / personal3 / lab_team were used in October)
+#   model / provider   claude-opus-5-5 + claude (the pair that cleared flat_gen) or claude-fable-5-1 + claude
+# Then: python3 plan-anything/scripts/harbor_ready.py --request <this file>   (exit 0 on every box), and
+#       $PA dispatch harbor <this file>   with the relay upstreams declared in the shell (README step 6).
+schema: pa.dispatch-request/2
+id: m4--fmb1_assemble_ur5e_rg2_realcell_gen--claude-opus-5-5--attempt-01
+host: dual-a4500
+selected_by: operator
+workload: harbor
+harbor_phase: authoring
+machinery_source: admitted-generation
+generation_digest: sha256:<PUBLISHED_GENERATION>
+task: fmb1_assemble_ur5e_rg2_realcell_gen
+evaluate_planner_road: in_cell
+images:
+- pa-authoring
+runtime_requirements:
+  schema: pa.runtime-requirements/1
+  simulator:
+    required: true
+    backend: isaac
+    capabilities:
+      physics: true
+  ros2:
+    required: true
+    target: simulator
+overrides:
+  render: 'off'
+harbor:
+  benchmark: b1
+  authoring_context: /home/aaugus11/prompt2assembly/harness-integration/images/authoring-environment
+  model: claude-opus-5-5
+  provider: claude
+  agent_import_path: harness_integration.authoring_driver:PausingClaudeCode
+  seat: <SEAT>
+  admission_image: pa-scoring
+  series:
+    name: fmb1_assemble_ur5e_rg2_realcell_gen-claude-opus-5-5
+    index: 1
+  seat_swap: true
+requires:
+  schema: pa.requires/1
+  requires:
+  - subject: task/fmb1_assemble_ur5e_rg2_realcell_gen
+    part: assembly_environment_pins
+    minimum: verified
+    closure_edge:
+      source: job
+      relation: executes
+  - subject: task/fmb1_assemble_ur5e_rg2_realcell_gen
+    part: layouts
+    minimum: verified
+    closure_edge:
+      source: task/fmb1_assemble_ur5e_rg2_realcell_gen
+      relation: loads
+  - subject: task/fmb1_assemble_ur5e_rg2_realcell_gen
+    part: task_gate
+    minimum: verified
+    closure_edge:
+      source: job
+      relation: admits

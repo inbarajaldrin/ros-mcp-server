@@ -1,0 +1,127 @@
+{
+ "record": {
+  "schema": "layout/2.0",
+  "layout": "fmb1_realcell_base_static",
+  "semantics_revision": "r1",
+  "created": "2026-10-26",
+  "provenance": "FALLBACK A for fmb1_assemble_ur5e_rg2_realcell_gen: Body1 at the measured base1 pose of real run 78 (2026-10-23 21:57 MST, 4/4 certified; UR base (0.1066, -0.4892, -0.0625) yaw 21.44 deg -> world (-0.1066, 0.4892), graph yaw = world yaw 201.44 + 90 = 291.44 deg through the cell->graph map p_graph = Rz(-90) p_cell, translation-checked on base1 only, orientation UNVERIFIED; z = the twin's Body1 rest 0.0167). Body2-5 are fmb1_flat_start's witness positions (twin frames), kept only because a fixed record names every occurrence; they are NOT measured real-cell spots. Use only as the static pose source for Body1 (layouts.static pose_from_fixed_layout)."
+ },
+ "assembly": "fmb1",
+ "embodiment": "ur5e_rg2",
+ "root": "placed",
+ "seed": 1,
+ "poses_absolute": true,
+ "parts": {
+  "Body1": {
+   "occurrence": "occurrence:00",
+   "instance_name": "fmb1_body1",
+   "spawn": "measured",
+   "pos_m": [
+    -0.1066,
+    0.4892,
+    0.01669998844220138
+   ],
+   "quat_wxyz": [
+    0.82629,
+    0.0,
+    0.0,
+    -0.56324
+   ],
+   "xy_range_m": null,
+   "yaw_range_deg": null,
+   "footprint_xy_m": [
+    0.160999998,
+    0.160999998
+   ]
+  },
+  "Body2": {
+   "occurrence": "occurrence:01",
+   "instance_name": "fmb1_body2",
+   "spawn": "staged",
+   "pos_m": [
+    -0.346292,
+    0.389583,
+    0.03069594594594595
+   ],
+   "quat_wxyz": [
+    1,
+    0,
+    0,
+    0
+   ],
+   "xy_range_m": null,
+   "yaw_range_deg": null,
+   "footprint_xy_m": [
+    0.021,
+    0.07
+   ]
+  },
+  "Body3": {
+   "occurrence": "occurrence:02",
+   "instance_name": "fmb1_body3",
+   "spawn": "staged",
+   "pos_m": [
+    -0.356386,
+    0.489927,
+    0.01295
+   ],
+   "quat_wxyz": [
+    1,
+    0,
+    0,
+    0
+   ],
+   "xy_range_m": null,
+   "yaw_range_deg": null,
+   "footprint_xy_m": [
+    0.140000001,
+    0.025900001
+   ]
+  },
+  "Body4": {
+   "occurrence": "occurrence:03",
+   "instance_name": "fmb1_body4",
+   "spawn": "staged",
+   "pos_m": [
+    -0.452875,
+    0.308354,
+    0.027456145397489543
+   ],
+   "quat_wxyz": [
+    1,
+    0,
+    0,
+    0
+   ],
+   "xy_range_m": null,
+   "yaw_range_deg": null,
+   "footprint_xy_m": [
+    0.021,
+    0.1127
+   ]
+  },
+  "Body5": {
+   "occurrence": "occurrence:04",
+   "instance_name": "fmb1_body5",
+   "spawn": "staged",
+   "pos_m": [
+    -0.237751,
+    0.392167,
+    0.03069594594594595
+   ],
+   "quat_wxyz": [
+    1,
+    0,
+    0,
+    0
+   ],
+   "xy_range_m": null,
+   "yaw_range_deg": null,
+   "footprint_xy_m": [
+    0.021,
+    0.07
+   ]
+  }
+ },
+ "fixtures": {}
+}

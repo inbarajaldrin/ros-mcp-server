@@ -40,7 +40,7 @@
      "id": "M4",
      "title": "Twin planner transfer",
      "status": "next",
-     "note": "FMB1 planner on the cell, _correct_seat -> drive-mate"
+     "note": "FMB1 planner on the cell, _correct_seat -> drive-mate | 10-26: dispatch pack built (compliant_insertion_studio/m4_dispatch/): bench dimelab_elevated (dimelab, base_link z 0.08), task fmb1_assemble_ur5e_rg2_realcell_gen (Body1 free in the measured base area, cell staging/reorient regions, tipped domains, M4 seam task_layer), the harbor authoring request (copy of the 10-13 Opus 5.5 one), runbook for dual-a4500. Operator dispatches; nothing written on dual-a4500"
     },
     {
      "id": "M3b",
