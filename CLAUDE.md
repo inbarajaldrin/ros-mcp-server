@@ -14,6 +14,10 @@ with one operator action — placing a part on the table.
 
 ## 1. Bring up the cell
 
+A person new to the cell starts with `ONBOARDING.md` (install, bring-up, FMB1 and FMB3 runs, safety). The CAD data
+is in `assets/cad_data/` (`$FMB_CAD_DATA` overrides), the UR dashboard client in `compliant_insertion_studio/scripts/`,
+and the ROS workspace is `$FMB_ROS_WS` (default `~/Desktop/ros2_ws`); nothing is read from `~/Documents` any more.
+
 Total ~1 minute. Sequence matters: driver → gripper → camera → grasp points.
 **One command does all of 1.1–1.5:** `bash compliant_insertion_studio/scripts/stack_up.sh`
 (no arm motion; `stack_down.sh` reverses it). The steps below are what it runs.
@@ -33,8 +37,7 @@ Total ~1 minute. Sequence matters: driver → gripper → camera → grasp point
 Only the pendant needs to be booted. No program loaded, nothing played.
 
 ```bash
-cd ~/Documents/prismatic-manipulation
-python3 scripts/ur_dashboard.py --host 192.168.1.111 --real mode safety remote
+python3 compliant_insertion_studio/scripts/ur_dashboard.py --host 192.168.1.111 --real mode safety remote
 # want:  Robotmode: RUNNING | Safetystatus: NORMAL | remote: true
 ```
 
@@ -58,7 +61,7 @@ path; then you must press Play yourself.
 ### 1.2 Gripper
 
 ```bash
-nohup bash -c 'source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+nohup bash -c 'source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash;
   ros2 run onrobot_ros gripper_control' > /tmp/gripper.log 2>&1 &
 sleep 10; tail -3 /tmp/gripper.log      # want "Gripper initialized successfully"
 ```
@@ -72,7 +75,7 @@ bash compliant_insertion_studio/scripts/launch_camera.sh --background
 ### 1.4 Grasp points — **must run from THIS tree**
 
 ```bash
-nohup bash -c 'source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+nohup bash -c 'source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash;
   cd '"$PWD"'; python3 -u utils/grasp_points_publisher.py --mode real' > /tmp/grasp_pub.log 2>&1 &
 ```
 
@@ -280,10 +283,9 @@ differ by 9.2 mm; safety-circuit latch needs a Compute Box power-cycle) — `SET
 `Circuit1:True` or `Circuit2:True` (e.g. after a force-stop / safety FAULT) and the gripper
 ignores commands. An **arm power cycle from the dashboard** clears it on this cell:
 ```bash
-cd ~/Documents/prismatic-manipulation
-python3 scripts/ur_dashboard.py --host 192.168.1.111 --real raw "power off"   # brakes hold the arm
+python3 compliant_insertion_studio/scripts/ur_dashboard.py --host 192.168.1.111 --real raw "power off"   # brakes hold the arm
 sleep 10
-python3 scripts/ur_dashboard.py --host 192.168.1.111 --real power_up         # power on + brake release
+python3 compliant_insertion_studio/scripts/ur_dashboard.py --host 192.168.1.111 --real power_up         # power on + brake release
 # then: resend the program, activate the controller, re-set the payload
 ros2 service call /io_and_status_controller/resend_robot_program std_srvs/srv/Trigger "{}"
 ros2 control switch_controllers --activate scaled_joint_trajectory_controller
