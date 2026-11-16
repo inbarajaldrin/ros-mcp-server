@@ -52,7 +52,7 @@ die()  { printf '  \033[31m✗ %s\033[0m\n' "$1"; exit "${2:-1}"; }
 
 set +u
 source /opt/ros/humble/setup.bash 2>/dev/null
-source "$HOME/Desktop/ros2_ws/install/setup.bash" 2>/dev/null
+source "${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash" 2>/dev/null
 set -u
 
 [[ -n "${DISPLAY:-}" ]] || die "no DISPLAY — run this from the desktop session" 2

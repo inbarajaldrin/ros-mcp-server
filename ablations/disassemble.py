@@ -33,7 +33,7 @@ def _load_x_cam():
     """The wrist camera mount from the localizer's config - the single source (the depth path used to carry its
     own copy, and after the 2026-10-20 recalibration markers and depth disagreed by 10 mm)."""
     import yaml
-    c = yaml.safe_load(open('/home/aldrin/Desktop/ros2_ws/src/aruco_camera_localizer/config/robot_config.yaml'))
+    c = yaml.safe_load(open(__import__('primitives.shared.config', fromlist=['LOCALIZER_CONFIG']).LOCALIZER_CONFIG))
     X = np.eye(4)
     X[:3, :3] = R.from_quat(c['cam_offset_quat']).as_matrix()
     X[:3, 3] = c['cam_offset_position']

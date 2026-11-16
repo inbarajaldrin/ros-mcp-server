@@ -1,0 +1,26 @@
+# Drive one mate closed under uncertainty (ARCHITECTURE_SEAMS.md 2026-10-19). The driver reads the assembly
+# graph itself (closing path, acceptance, symmetry) and derives stages and clearances from CAD; nothing here names
+# a part's constants. Certification is NOT this action's: ExecuteMate (pa_assembly_msgs) certifies afterwards.
+#
+# mate_id  assembly-qualified mate, e.g. "fmb1/mate:00" (the assembly graph's mate address)
+# target   the observed pose of the mate's parent (the base, or the seated part it goes into)
+# held     the held part's pose in the gripper (tool) frame, measured once per grasp
+# corrections_json  the planner's aim corrections (seams.aim.corrections_json: follow / bias / yaw_exp), applied by the
+#          driver on the base its own alignment arrives at (2026-10-22, AR3: vision measures, drive-mate moves)
+string mate_id
+fmb_seam_msgs/VisionPose target
+fmb_seam_msgs/VisionPose held
+string corrections_json
+---
+bool seated                         # the driver's own end-state claim (raw-trace based); ExecuteMate decides
+string stage_reached                # SEAT | BASE_RIM | OBJ:<part> | WEDGED | NONE - from the trace vs the CAD contact heights
+float64[2] slide                    # x/y travel of the held part from first contact to the end (m, base frame)
+string trace_path                   # raw telemetry of the attempt(s)
+float64[3] measured_correction      # where the part ended vs the commanded target (m, base frame)
+string refusal                      # why it did not try / stopped, by name; empty if it ran
+fmb_seam_msgs/VisionPose base_measured   # the base as the driver last measured it (its alignment's read; the planner
+                                    # aims the next insert from it, never from this insert's aim)
+string align_json                   # the alignment: route, measured, log, aim, corrections applied
+---
+string stage
+float64 z_above_seat

@@ -24,7 +24,9 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
 
-CFG = '/home/aldrin/Desktop/ros2_ws/src/aruco_camera_localizer/config/robot_config.yaml'
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from primitives.shared.config import LOCALIZER_CONFIG as CFG   # noqa: E402
 S_P, S_YAW, S_TILT = 0.001, np.radians(0.2), np.radians(0.2)   # weights: 1 mm, 0.2 deg
 
 

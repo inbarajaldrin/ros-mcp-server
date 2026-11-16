@@ -6,7 +6,7 @@
 #   bash compliant_insertion_studio/scripts/when_lit.sh 'bash ablations/part_loop.sh u_brown 3'
 #   bash compliant_insertion_studio/scripts/when_lit.sh 'python3 -u ablations/fmb1_loop.py --cycles 3 --layout spots'
 REPO=$(cd "$(dirname "$0")/../.." && pwd); cd "$REPO"
-source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
+source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash
 CMD=${1:?command to run once lit}; NEED=${WHEN_LIT_PARTS:-0}   # optional: also require this many parts detected (default: brightness only)
 probe() { timeout 20 python3 - <<'EOF'
 import rclpy, numpy as np, time

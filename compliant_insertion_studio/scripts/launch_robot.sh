@@ -67,9 +67,7 @@ LOG_FILE="$LOG_DIR/${MODE}_bringup_${TS}.log"
 # --- source ROS env ---
 source_ros() {
     source /opt/ros/humble/setup.bash 2>/dev/null
-    source /home/aaugus11/ros2_ws/install/setup.bash 2>/dev/null
-    [[ -f /home/aaugus11/Desktop/ros2_ws/install/setup.bash ]] && \
-        source /home/aaugus11/Desktop/ros2_ws/install/setup.bash 2>/dev/null
+    [[ -f "${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash" ]] && source "${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash" 2>/dev/null
 }
 
 # --- launch ---

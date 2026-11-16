@@ -9,7 +9,7 @@
 # (no set -u: ROS setup.bash references unbound variables)
 PART=${1:?part}; N=${2:-3}; OUT=${3:-/tmp/claude-1000/part_loop_${PART}.out}
 cd "$(dirname "$0")/.."
-source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
+source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash
 J=ablations/ground_truth_resources/Assembly_fmb_assembly_1_results.json
 : > "$OUT"
 # Parts seated ON TOP of PART (later in the assembly order and verified seated in the ledger) are pulled

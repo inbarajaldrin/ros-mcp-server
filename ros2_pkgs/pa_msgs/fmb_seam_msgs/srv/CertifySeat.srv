@@ -1,0 +1,9 @@
+# The certification measurement for one mate (vision.certify in ARCHITECTURE_SEAMS): the child's pose relative to its
+# declared seat, judged against the mate's acceptance modulo the symmetry the task allows. Measurement only.
+string mate_id
+---
+bool inside                         # inside the accepted seated set
+float64[3] error_mate_frame_m       # child vs declared seat, in the mate (base) frame
+float64 tilt_deg
+string method                       # depth_seat_check | markers | both
+string evidence_json                # every number the judgement rested on

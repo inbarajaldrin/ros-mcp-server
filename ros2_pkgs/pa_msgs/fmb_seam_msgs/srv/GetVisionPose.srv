@@ -1,0 +1,8 @@
+# Ask the vision layer for one pose. kind: "base" | "part" | "held" (the part in the gripper frame, once per grasp)
+string name
+string kind
+float64 timeout_s
+---
+bool ok
+string error
+fmb_seam_msgs/VisionPose pose

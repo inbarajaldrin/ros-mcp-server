@@ -33,7 +33,7 @@ step() { printf '\n\033[1m[%s] %s\033[0m\n' "$1" "$2"; }
 
 set +u
 source /opt/ros/humble/setup.bash 2>/dev/null
-source "$HOME/Desktop/ros2_ws/install/setup.bash" 2>/dev/null
+source "${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash" 2>/dev/null
 set -u
 
 # Patterns are assembled at runtime so this script's own command line can never match

@@ -1,0 +1,265 @@
+# The fastening verb's ROS surface: fasten a mate at the seat the caller drove it to.
+#
+# Reference: plan-anything/setup/fastening-emitter-20260827.md (Design A as applied, the
+#            engagement measurement, the journal, and every field below — this MIRRORS what
+#            `ExecuteMate.run` returns and what `MateRefusal` raises; nothing here is invented
+#            for the wire)
+# Reference: plan-anything/wayfinder/tickets/024-rg2-threading-mate-spike.md (Design A, ruled
+#            2026-08-27: the agent drives, this verb owns the terminal attach and typed feedback)
+# Reference: plan-anything/wayfinder/tickets/009-isaacsim-control-surface-scope.md (a namespaced
+#            action per robot instance, declared and not derived)
+#
+# Reference: plan-anything/wayfinder/tickets/082-execute-mate-after-the-end-to-end-ruling.md (the
+#            lock function, ruled 2026-09-06: order gate, drift gate, the shared verify, lock only
+#            where the class holds it, and a journal event for EVERY class)
+#
+# WHAT IT IS. The mandatory door onto ONE platform-owned lock function. The agent does the whole
+# job — carry, thread, seat, release, rest — and is scored on the physical end state; this is the
+# place the platform checks that claim against measurement, in the declared order, and refuses by
+# name. Five questions, one sequence, each able only to say no: every earlier step of the declared
+# placement order is certified seated; every predecessor still passes NOW; the seat passes the
+# mate's own declared acceptance read with the symmetry the task allows; a joint is authored ONLY
+# where the fastening class holds one; and the event is journalled for every class either way.
+#
+# WHAT THIS DOES NOT DO, and it is the ruling rather than an omission: it owns NO MOTION AT ALL.
+# The object trajectory a mate needs is in the assembly graph and the agent already has it; the
+# joint trajectory that follows it is the agent's own graded work. So this neither serves a path
+# nor commands a joint, and the `legs`/`approach_commanded` fields an earlier shape carried are
+# gone rather than defaulted — a field reporting that the platform did not drive is a field
+# implying it could have.
+#
+# THE TYPED FEEDBACK IS 024's, as corrected 2026-08-27: `gripped_on_mover`, `engaged` (+
+# `engagement_depth_m`), and the `slip` event. `stall` is NOT on this surface — it was originally
+# listed beside `slip` as a mid-closure observation of a driven screw segment, Design A deleted
+# the driven segment, and the ticket moved it onto the gripper's own `Grip.action` verdict, which
+# measures over its own closure and already carries it.
+#
+# THE VERB NEVER REPAIRS AND NEVER SELECTS. It reports. It does not pick a grasp, does not
+# re-grip, does not drive; the agent owns every grasp and the whole open-rewind-regrasp cycle.
+#
+# mate  the mate to fasten, addressed `<assembly>/<address>` — `fmb1/mate:00`. The same scoping
+#       the frame ids use, for the same reason: an occurrence address is unique only WITHIN an
+#       assembly, and this bench holds two that both declare mates. A bare address is accepted
+#       only where exactly one assembly on the bench declares any; where more than one does it
+#       is refused as `assembly_ambiguous` rather than resolved by pin order.
+string mate
+---
+# fastened  a seat joint was authored on the stage
+# refusal   "" on success, else the typed code — the contract's two fields, and a consumer that
+#           reads only these two is a conforming consumer.
+#
+# READ `fastened` WITH `placed`. They are the two ways this ends well and they are exclusive: a
+# welded class comes back `fastened: true, placed: false`; a `free` mate is accepted where it came
+# to rest and nothing is authored to FASTEN it, so it comes back `fastened: false, placed: true`
+# with an EMPTY refusal. That is a success. Only `refusal` says something went wrong.
+#
+# ONE THING MAY STILL BE AUTHORED FOR A FREE MATE, AND IT IS NOT A FASTENING. Where the assembly's
+# exact geometry says the part's bore CAPTURES its pin (it wraps the pin more than half way round
+# and opens narrower than the pin — a door hung on a rod), the platform keeps the part on that
+# pin's line with a joint that stands in for the capturing lip, which is thinner than a collider
+# cell. It holds the part across the pin and against tipping, never along the pin and never about
+# it: the swing stays free. It is authored at THIS call and not before, so a part seated and never
+# claimed is not kept. `fastened` stays false, `placed` stays true, `weld_prim` stays "", and
+# `next_move` says the part is kept on its pin.
+#
+# `placed` EXISTS BECAUSE `fastened: false` ALONE COULD NOT SAY IT. A free mate used to return that
+# with an empty refusal and no record anywhere, which a caller had to read together with
+# `fastening_class` to tell from a failure — and left the offline verdict nothing at all to read
+# about the mate. Both halves are fixed together: the flag here, and a `placed` event on the
+# fastening journal carrying the same step this result reports.
+#
+# THE ATTACH FIRES ONLY ON A VALID HANDOFF — gripped on the mover AND the part at its seat within
+# the execution gate AND the engagement valid. 024's three reasons name which one failed, and the
+# FEEDBACK FIELDS BELOW RIDE EVERY REFUSAL so a regrasp loop branches on the measurements rather
+# than on the sentence:
+#   not_gripped_on_mover     nothing on the stage is holding the mover. Read `slip` beside it:
+#                            set, the part was in the pads and turned out of them (regrasp on a
+#                            better face); clear, it was never picked up (go and get it). One
+#                            reason, two next moves
+#   not_at_seat              the mover is not touching the reference, it sits outside the
+#                            execution gate the mate declares, or it touches and does not pass the
+#                            mate's own declared acceptance. Measured, and the answer is no. The
+#                            third case is the gate in FRONT of the fastening and it carries the
+#                            numbers: the same reading the offline verdict takes, refused live so
+#                            the author can act on it rather than meeting it hours later
+#   engagement_invalid       a question could not be MEASURED — no instrument, one whose silence
+#                            means nothing, a seat judgement that could not be taken, or a
+#                            predecessor that could not be re-read. A fault of the apparatus, not
+#                            of the placement, and deliberately not the same code
+#
+# And the two the CLASS-DEPENDENT PREMISE decides between. A welded mate is judged HELD, so it
+# raises `not_gripped_on_mover`; a free mate is judged AT REST after the hand has opened, so it
+# raises this instead and never asks about the grip at all:
+#   not_at_rest              the mover is still moving. A mate that closes free is accepted where
+#                            it comes to rest, so a seat read now would describe a pose the part
+#                            is about to leave — and journalling it would make that pose look
+#                            like the placement
+#
+# And the two the LOCK FUNCTION's gates raise, before anything about this mate is measured. They
+# are about the ASSEMBLY rather than about this handoff, and each names the step or the mate:
+#   order_violated           a step before this one in the declared placement order is not
+#                            certified seated, and the reason names the step and the mate whose
+#                            event is missing. The sequence IS the assembly; this is the one
+#                            harness that stops a part being skipped. Steps are judged, not parts,
+#                            so which member of an equivalence class filled a step is free
+#   predecessor_unseated     a mate this one builds on was certified and does not pass now: the
+#                            sub-assembly under it has moved. Named per mate, because which one
+#                            moved decides whether one part is re-placed or the run is over
+#   order_undeclared         the graph states no placement order, or states one this mate's mover
+#                            is not in. A fault in the declarations, and no regrasp answers it
+#
+# The one raised AFTER the seat was granted and BEFORE the hand may open:
+#   seat_attach_failed       the mover reached its seat, the fastening was granted, and the attach
+#                            mechanism authored no joint — so nothing holds the part and the hand
+#                            must NOT open. `refusal_detail` carries the mechanism's own kind and
+#                            sentence (`absent_body`, `drift_gate`, …), which is the layer that
+#                            failed. An apparatus fault and not a placement one: there is no
+#                            regrasp that answers it. This used to be reported as `fastened:
+#                            false` with an empty refusal, which a caller read past — it released
+#                            the hand and the part spun free, and a settle check several steps
+#                            later named the consequence instead of the fastening that never was
+#   grip_release_unattested  the mate was closed from a fixed GRIP and the attach mechanism
+#                            authored the seat without attesting that the grip was released. The
+#                            handoff exists so those two never coexist across a physics step, so
+#                            this answer means either both constraints are live over one mover or
+#                            the release went unrecorded. Both are apparatus faults: a release
+#                            journalled on this answer would attest a removal nothing measured,
+#                            and one omitted would leave the offline verdict reading the tool as
+#                            still holding a part it let go of
+#
+# The rest, every one raised BEFORE anything is authored:
+#   mate_unknown             the assembly graph declares no such mate
+#   fastening_undeclared     the mate declares no fastening class, which is what decides whether
+#                            a joint is authored at all
+#   mechanism_unsupported    the mate's class is not one the attached end effector closes
+#   occurrence_unbound       an endpoint names an occurrence nothing binds to a part here
+#   journal_unreachable      the mate ends welded and no fastening journal is reachable, so the
+#                            weld would be authored onto a stage and onto no stream. A rigid mate
+#                            is judged at the instant of its weld and nothing else in a bag
+#                            identifies it, so this refuses BEFORE the joint exists rather than
+#                            making the episode unscorable
+#   mate_realization_undeclared  the TASK's `mate_realization` does not say whether this mate's
+#                            seat is welded or left free. That is the task's declaration
+#                            (operator, 2026-09-29), never read off the assembly's fastening
+#                            class, so an undeclared mate refuses before anything is authored
+#
+# And the four the ADDRESS RESOLVER raises, before the verb class sees the goal at all. They are
+# on this list for the same reason as the rest: a caller meets them through this action, and a
+# refusal a consumer cannot interpret is the same defect wherever in the stack it is thrown.
+#   assembly_ambiguous       a bare address where more than one assembly declares mates
+#   assembly_unbound         the goal names an assembly this bench does not bind
+#   no_assembly_declares_mates   the binding map pins no assembly graph, so no mate exists
+#   end_effector_undeclared  no composite here declares a gripper class, and the mechanism that
+#                            closes a mate is dispatched on it
+#   release_journal_unreachable  this fastening surface has no attachment journal to record a grip
+#                            release on. A mate closed from a fixed GRIP ends the tool's hold
+#                            inside the handoff and that instant is attested nowhere else in an
+#                            episode, so the stream is required before any mate is attempted —
+#                            one step earlier than an episode that scores as one whose tool never
+#                            let go. A declaration fault: no regrasp answers it
+#   watcher_window_required  a direct service caller omitted the watcher window. ExecuteMate has
+#                            no window default: one tick would be the forbidden one-shot form.
+#                            The served ROS path always supplies the goal's simulated lifetime
+#   attach_mechanism_undeclared  this instance's descriptor is unreadable or names no gripper
+#                            backend, so the doorway a seat fastening would be authored through
+#                            is not declared. The fastening is a stage write and there is no
+#                            default stage to write to
+#
+# Every code above reaches `refusal` AS ITSELF whichever shape the cell's answer took — raised in
+# the cell, a dict, or a bare code — and never wrapped as a transport failure. Two are left:
+#   backend_unavailable      the doorway to the cell was NOT reached, or answered with something
+#                            that is not an object. Never a refusal the cell made
+#   cell_refusal_uncoded     the cell WAS reached and refused, and its answer names no refusal
+#                            code. `refusal_detail` quotes what it did carry. A defect in the
+#                            refusal's shape, not in the placement: no regrasp answers it
+#
+# And ONE the ATTACH HANDOFF GUARD raises in front of all of them, on a guarded surface. It is a
+# single code with two sentences behind it, the same shape the trajectory and grip surfaces use:
+#   held_by_interlock        the goal never reached the verb. `refusal_detail` says why — the
+#                            goal named no mate, or robot health is not `ok` (and then it names
+#                            the state and the two cures). It deliberately does NOT borrow one of
+#                            the verb's own codes: those mean the world is not ready, and a goal
+#                            that never reached the world would send a caller to look at a stage
+#                            nobody consulted.
+bool fastened
+string refusal
+# --- the other way this ends well, and where in the assembly it happened ---
+bool placed                     # a free mate was accepted where it came to rest and RECORDED as
+                                # `placed` on the fastening journal. Nothing was authored to
+                                # FASTEN it, and that is the mate's own declaration rather than a
+                                # failure. (A captured pin is kept on its line — see above.)
+int32 order_position            # which step of the assembly's declared placement order this mate
+                                # closes, 0-based, as the graph's own linear extension numbers it.
+                                # -1 where the goal was refused before the order was resolved — a
+                                # step is a fact about a mate that resolved, and 0 would name the
+                                # first one. The same number rides the journal event, so an
+                                # offline reader finds the order stated rather than inferred
+string premise                  # which class-dependent premise this mate was judged under, and
+                                # what the premise measured. A welded mate is judged HELD (the
+                                # hand still controls the part when the joint is authored); a free
+                                # mate is judged AT REST after release. `gripped_on_mover: false`
+                                # is CORRECT on a free mate and this is the field that says the
+                                # grip was never the question
+# --- what was fastened ---
+string mate_id                  # the mate as resolved, always assembly-qualified
+string child                    # the moving part's frame, resolved through the bench's binding
+string parent                   # the reference part's frame
+string mate_class               # insertion | flush — the graph's own vocabulary, not a guess
+string fastening_class          # rigid | weld | threaded | free — what holds it once seated, and
+                                # what decided whether a joint was authored
+string ee_class                 # the end effector the mechanism was chosen for
+# --- the typed feedback the agent steers its regrasp loop by, present on EVERY answer ---
+bool gripped_on_mover           # is the mover actually in the pads. READ FROM THE GRIP-SIDE TRUTH
+                                # (the stage's grip attachment, or both pads reporting admitted
+                                # contact under grasp_mode friction) — never a plan's claim
+bool engaged                    # is the insertion or thread caught at all
+float64 engagement_depth_m      # and how far in. NaN where the mate declares no axial travel to
+                                # measure a depth against — which is NOT the same claim as 0.0,
+                                # a measured depth of nothing
+bool slip                       # the grip could not transmit what the seat asked of it and the
+                                # part moved in the pads. Regrasp, on a better face
+string next_move                # what to do about it, in one sentence, so nothing needs a manual
+# --- the evidence the fastening was granted against ---
+bool engagement_measured        # was contact between the two parts actually observed. FALSE means
+                                # the probe could not answer, which is not the same as not touching
+string engagement_json          # everything the admitting look measured: the contact reading, the
+                                # SEAT judgement (`error_mate_frame_m`, `quat_dot`, `residual`, the
+                                # symmetry elements chosen and the reasons behind a FAIL), the rest
+                                # reading where the class asked for one, and the execution gate
+                                # where the mate declares one. ON A WELD the seat is the RE-READ
+                                # after the attach settled (the instant the event is stamped), and
+                                # `seat_looks` carries both looks: the first and that re-read. On a
+                                # refusal the re-read raised, this is `{"seat_looks": ...}` alone.
+                                # What the fastening rested on, auditable without re-reading it
+string granted_on               # the verb's own statement of what the fastening rests on
+# --- the record, without which no mate of any class is scorable offline ---
+bool journalled                 # the event reached the declared fastening stream — `welded` for a
+                                # class that holds, `placed` for a free one. EVERY class journals:
+                                # a mate with no event fails the offline verdict whatever the
+                                # parts did, because the platform never certified that it happened
+string weld_prim                # the FASTENING joint the platform created, or "" where none was —
+                                # which is every free mate, by declaration. The joint that keeps a
+                                # captured pin on its line is not a fastening and is not named here
+string journal_detail           # why not, where it was not
+#
+# THE `placed` EVENT, so a consumer of the journal and a consumer of this result read one schema.
+# It rides the same `/objects/fastening_events` stream as `welded`, with `kind: placed`, and
+# carries: `mate_id`, `assembly`, `fastening_class`, `order_position` (the same integer this result
+# reports), `mover_frame` / `reference_frame`, `sim_time_s` (the physics clock, as every other
+# stamp in a bag is), `pose_at_placement` for both parts read off the scene at that instant, and
+# `seated` — the acceptance reading the placement was granted on: `error_mate_frame_m`, `quat_dot`,
+# `residual`, `verdict`, and the `symmetry` elements chosen for each side. Nothing here is a claim:
+# every field is either the declaration or a measurement taken at the instant of the event.
+# --- the ordering clause, read back off the stage rather than believed ---
+bool coexists_grip              # the part still carries its grip attachment at return. FALSE is
+                                # correct under grasp_mode friction, where a grasp authors none
+bool coexists_seat              # and now carries the seat
+string grip_disposition         # what happened to the grip — untouched, and says so
+string refusal_detail           # the human sentence behind `refusal`, empty on success
+---
+# Where the verb is, and what it has concluded so far. There are no legs to count: the verb owns
+# no motion, so progress is which QUESTION it is on rather than how far along a path it is.
+string stage                    # preconditions | engagement | fastening | journal
+bool gripped_on_mover           # the measurements as they stand, so a caller watching a goal
+bool engaged                    #   learns them the moment they are taken rather than at the
+float64 engagement_depth_m      #   result

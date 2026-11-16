@@ -8,13 +8,13 @@
 #   launch_camera.sh --background       # nohup background, log to /tmp/aruco_logs/
 #
 # Side effects:
-#   - Sources /opt/ros/humble + /home/aaugus11/Desktop/ros2_ws/install
+#   - Sources /opt/ros/humble + ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install
 #   - Runs `ros2 run aruco_camera_localizer localize --suppress-prints`
 #   - In --background mode logs to /tmp/aruco_logs/aruco_<ts>.log
 #
 # After it's up, read u_brown's current quaternion with:
 #   ros2 topic echo --once /objects_poses_real | grep -A8 "child_frame_id: u_brown"
-# (or use the helper at /home/aaugus11/Desktop/ros2_ws/src/aruco_camera_localizer/utils/read_object_pose.py)
+# (or use the helper at ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/src/aruco_camera_localizer/utils/read_object_pose.py)
 
 BACKGROUND=false
 EXTRA_ARGS=()
@@ -28,12 +28,12 @@ done
 
 set +u
 source /opt/ros/humble/setup.bash 2>/dev/null
-source /home/aaugus11/Desktop/ros2_ws/install/setup.bash 2>/dev/null
+source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash 2>/dev/null
 set -u
 
 if ! ros2 pkg list 2>/dev/null | grep -q '^aruco_camera_localizer$'; then
     echo "ERROR: aruco_camera_localizer not found on the ROS2 path." >&2
-    echo "       Did you build /home/aaugus11/Desktop/ros2_ws? (colcon build)" >&2
+    echo "       Did you build ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}? (colcon build)" >&2
     exit 1
 fi
 

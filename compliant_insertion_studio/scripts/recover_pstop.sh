@@ -19,7 +19,7 @@ HOST="${ROBOT_IP:-192.168.1.111}"
 DASH="${DASH:-$REPO/compliant_insertion_studio/scripts/ur_dashboard.py}"
 NO_HOME=0; [ "${1:-}" = "--no-home" ] && NO_HOME=1
 cd "$REPO" || exit 1
-set +u; source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash; set -u
+set +u; source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash; set -u
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 die()  { printf '  \033[31m✗\033[0m %s\n' "$1"; exit "${2:-1}"; }

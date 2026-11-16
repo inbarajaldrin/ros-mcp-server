@@ -1,0 +1,69 @@
+# The parallel_jaw class contract's one action, as ratified: {width_m, force} -> {reached, holding}.
+#
+# Reference: plan-anything/wayfinder/tickets/019-robot-contract-small-print.md
+#            ("per class one normalized surface (parallel_jaw: {width,force}->{reached,holding}
+#             action + measured joint state + declared attach semantics)")
+#
+# The goal fields and the two leading result fields ARE the contract. Everything after them in
+# the result is evidence, added so a verdict can be audited rather than trusted, and a consumer
+# that reads only `reached` and `holding` is a conforming consumer.
+#
+# width_m  target jaw opening, metres, inside the descriptor's declared width domain.
+# force    target grip force, newtons, inside the descriptor's declared force domain.
+#          IN SIM THIS IS A POSITIONAL PROXY: see the descriptor's force_model field and the
+#          build report. It is carried, declared and measured against, never silently ignored.
+# expect   the part this close is declared to be onto, by NAME. Required, and "none" is legal —
+#          a declared close onto free space, which is a claim about the world and can be wrong.
+#          Required because identity is the one thing a simulator can discover and a rig cannot:
+#          a simulator can be asked what is between its pads, and reality has only the width its
+#          jaws settled at against the span the expected part is declared to have. Letting the
+#          simulator discover what it grasped would put a capability in the sim path that the
+#          real path can never have, and every verdict built on it would stop crossing over.
+# expect_span_m  the declared span of `expect` across the clamp axis, metres. OPTIONAL and
+#          ADDITIVE: absent (0.0) leaves `identity_verified` false exactly as before, which is the
+#          truthful answer when nothing measured identity. Present, it arms the RIG instrument this
+#          contract already names above — the measured width compared against the part's declared
+#          span — which is the half of identity that crosses from a simulator to a rig unchanged.
+#          The CALLER supplies it from the assembly declaration, so assembly knowledge stays on the
+#          domain side and never enters the robot contract.
+float64 width_m
+float64 force
+string expect
+float64 expect_span_m
+---
+# reached  the measured width settled within the declared tolerance of width_m
+# holding  the jaws stalled short of the commanded width against something solid, i.e. a part
+#          is between them. reached and holding are independent: a successful grasp is
+#          normally holding=true, reached=false.
+bool reached
+bool holding
+# --- evidence ---
+float64 width_measured_m        # DERIVED from the measured joint angle via the declared coupling
+float64 width_commanded_m
+float64 theta_measured_rad      # the raw measured articulation state the width came from
+float64 effort_measured_nm      # measured joint effort at rest, the holding evidence
+float64 stall_margin_m          # width_measured - width_commanded; the stall gate's quantity
+bool attach_applied             # did the declared attach fire
+string attached_body            # SIM-ONLY: the body prim the attach bound, empty if none
+float64 attach_drift_mm         # the attach health number; refused above the declared gate
+string attach_refusal           # SIM-ONLY: the typed kind an attach was refused on, empty if none
+# --- identity, per world ---
+# expected_part crosses between a simulator and a rig; discovered_part does not exist on a rig at
+# all and is empty there. `identity_verified` is the verdict, and WHICH instrument reached it is
+# the deployment's: a simulator compares the expectation against the body it found between the
+# pads, and a rig compares the measured width against the expected part's declared span.
+string expected_part
+string discovered_part
+bool identity_verified
+# identity_authority  WHICH instrument set identity_verified, ADDITIVE: `discovered_body` (the
+#          simulator's judge found the body between the pads), `width_vs_span` (the measured width
+#          against expect_span_m), or `none` (nothing measured identity; identity_verified is then
+#          false as an absence, not a measurement). The words are pa_attach's AUTHORITY_BY_WORLD.
+#          Any nested engine verdict an adapter publishes beside the result is the engine's own
+#          report and may disagree; this field is what says which answer the flag carries.
+string identity_authority
+string verdict                  # reached | holding | slip | refused | unreachable
+---
+float64 width_measured_m
+float64 theta_measured_rad
+float64 effort_measured_nm

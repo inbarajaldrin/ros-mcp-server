@@ -5,7 +5,7 @@
 # CAD fit (BASE_FROM=icp, falls back to the outline, then the markers).
 #   bash ablations/assembly_cycle.sh ablations/ground_truth_resources/Assembly_fmb_assembly_3_results.json c1
 cd "$(dirname "$0")/.."
-source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash
+source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash
 J=$1; L=${2:-cycle}
 TS=$(date +%Y%m%d_%H%M%S); B=~/Documents/fmb1_frames/cycles/${L}_$TS; mkdir -p ~/Documents/fmb1_frames/cycles
 REC=""

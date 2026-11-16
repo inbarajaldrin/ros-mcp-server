@@ -14,7 +14,7 @@
 #
 # Preconditions this script checks rather than assumes:
 #   - robot powered, brakes released, pendant in REMOTE CONTROL
-#   - overlay workspace built (~/Desktop/ros2_ws)
+#   - overlay workspace built (${FMB_ROS_WS:-$HOME/Desktop/ros2_ws})
 #
 # Idempotent: re-running skips whatever is already healthy.
 #
@@ -35,7 +35,7 @@ step() { printf '\n\033[1m[%s] %s\033[0m\n' "$1" "$2"; }
 # script before its first line of output. Disable u only across the sourcing.
 set +u
 source /opt/ros/humble/setup.bash 2>/dev/null
-source "$HOME/Desktop/ros2_ws/install/setup.bash" 2>/dev/null
+source "${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash" 2>/dev/null
 set -u
 
 # A wedged CLI daemon silently breaks every check below (queries return empty, so
@@ -87,7 +87,7 @@ step 2/5 "OnRobot RG2 bridge"
 if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/gripper_status$"; then
     ok "gripper bridge already up"
 else
-    nohup bash -c 'source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+    nohup bash -c 'source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash;
         ros2 run onrobot_ros gripper_control' >/tmp/gripper.log 2>&1 &
     for _ in $(seq 1 20); do
         sleep 1; grep -q "Gripper node ready\|initialized successfully" /tmp/gripper.log && break
@@ -111,7 +111,7 @@ RS=realsense2; IMG=/camera/camera/color/image_raw
 if timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$"; then
     ok "RealSense node already publishing"
 else
-    nohup bash -c "source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash; \
+    nohup bash -c "source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash; \
         exec ros2 launch ${RS}_camera rs_launch.py rgb_camera.color_profile:=1280,720,15 \
         depth_module.depth_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=false \
         enable_infra2:=false rgb_camera.auto_exposure_priority:=false" >/tmp/realsense.log 2>&1 &
@@ -150,7 +150,7 @@ if pgrep -f "python3.*${P}_publisher" >/dev/null 2>&1; then
     ok "grasp publisher already running"
     warn "if it was started from another tree, ids may be composite — stack_down first to be sure"
 else
-    nohup bash -c "source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash;
+    nohup bash -c "source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash;
         cd '$REPO'; python3 -u utils/grasp_points_publisher.py --mode real" >/tmp/grasp_pub.log 2>&1 &
     for _ in $(seq 1 20); do
         sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^/grasp_points_real$" && break
