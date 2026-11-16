@@ -1,0 +1,133 @@
+{
+  "timestamp": "2025-12-14T12:25:21.623Z",
+  "components": [
+    {
+      "name": "base1",
+      "type": "board",
+      "assembly_order": 0,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "rotation": {
+        "rpy": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "w": 1
+        }
+      }
+    },
+    {
+      "name": "inverted_u_yellow",
+      "type": "object",
+      "subtype": "block",
+      "assembly_order": 4,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.021
+      },
+      "rotation": {
+        "rpy": {
+          "x": -1.5707963267948966,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": -0.7071067811865475,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865476
+        }
+      },
+      "seated_drop_mm": 6.0
+    },
+    {
+      "name": "u_brown",
+      "type": "object",
+      "subtype": "block",
+      "assembly_order": 1,
+      "position": {
+        "x": 0,
+        "y": -0.0475,
+        "z": 0.021
+      },
+      "rotation": {
+        "rpy": {
+          "x": -1.5707963267948966,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": -0.7071067811865475,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865476
+        }
+      },
+      "seated_drop_mm": 0.5
+    },
+    {
+      "name": "u_orange",
+      "type": "object",
+      "subtype": "block",
+      "assembly_order": 2,
+      "position": {
+        "x": 0,
+        "y": 0.0485,
+        "z": 0.021
+      },
+      "rotation": {
+        "rpy": {
+          "x": -1.5707963267948966,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": -0.7071067811865475,
+          "y": 0,
+          "z": 0,
+          "w": 0.7071067811865476
+        }
+      },
+      "seated_drop_mm": 0.5
+    },
+    {
+      "name": "line_green",
+      "type": "object",
+      "subtype": "block",
+      "assembly_order": 3,
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0.02345
+      },
+      "rotation": {
+        "rpy": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "quaternion": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "w": 1
+        }
+      },
+      "seated_drop_mm": 1.05
+    }
+  ],
+  "seated": {
+    "from": "fmb_assembly1.json",
+    "by": "ablations/write_seated_cad.py",
+    "how": "each part dropped along the base z onto the base + parts seated before it (CAD, 1.5 mm height maps); seated_drop_mm per part"
+  }
+}

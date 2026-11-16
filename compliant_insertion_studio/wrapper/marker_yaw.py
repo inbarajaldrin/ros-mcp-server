@@ -9,7 +9,7 @@ not when the yaw itself is so off" (the image showed the U 15-20 deg off the bas
 this from the localizer's published poses, but the localizer drops a HELD U part (its pose filters expect a part at
 rest: 0 samples in 12 s with the part plainly in the image). Here: one still colour frame, ArUco detections
 (the localizer's dictionary, sizes and corner convention), each object's pose in the CAMERA frame by solvePnP over
-all its visible markers (CAD layouts from aruco-grasp-annotator/data/aruco), then the part in the base frame against
+all its visible markers (CAD layouts from assets/cad_data/aruco), then the part in the base frame against
 the CAD seat orientation (fold-aware). Base and part come from the same frame, so the hand-eye cancels.
 --align turns the flange about world z by the error (the part turns with it) and re-measures until < tol.
 Prints __RESULT_JSON__ {result, iterations, final_err_deg}.
@@ -26,7 +26,7 @@ from scipy.spatial.transform import Rotation as R
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO), str(REPO / 'ablations')]
-ARUCO_DIR = Path.home() / 'Documents' / 'aruco-grasp-annotator' / 'data' / 'aruco'
+ARUCO_DIR = Path(os.environ.get('FMB_CAD_DATA') or REPO / 'assets' / 'cad_data') / 'aruco'
 STILL_WINDOW_S, STILL_TOL_M = 0.8, 0.0005
 
 

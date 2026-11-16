@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import numpy as np
 
 ROBOT_BASE_Z = 0.08         # Robot base origin Z in world/table frame (meters)
@@ -16,10 +19,17 @@ RG2_TIP_CLOSED_M = 0.23086          # flange -> fingertip end, gripper closed (g
 RG2_PAD_HALF_M = 0.0149             # fingertip end -> pad centre
 GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above the table
 # Rubber gap when closed on each part: the CAD width across the jaws at the part's assembly grasp
-# (aruco-grasp-annotator grasp_validity, which adds its 14 mm grasp clearance - removed here). Checked
+# (grasp_points grasp_validity, which adds its 14 mm grasp clearance - removed here). Checked
 # against the /gripper_status readback on FMB1 (logs 2026-10-07..14): u_brown/u_orange 21.0 (CAD 21.0),
 # line_green 25.9 (25.8), inverted_u_yellow 42.0 (42.7). Any part of fmb1/2/3_assembly.json (2026-10-20).
-_GRASP_POINTS_DIR = '/home/aldrin/Documents/aruco-grasp-annotator/data/grasp_points'
+# The CAD data (meshes, ArUco layouts, grasp points, symmetry, assembly JSONs) lives in this repo at assets/cad_data;
+# FMB_CAD_DATA overrides it (utils/data_path_finder.py applies the same rule).
+CAD_DATA_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')
+_GRASP_POINTS_DIR = str(CAD_DATA_DIR / 'grasp_points')
+
+
+def get_symmetry_dir() -> str:
+    return str(CAD_DATA_DIR / 'symmetry')
 
 
 def cad_grip_width_mm(object_name: str, grasp_id: int | None = None) -> float:

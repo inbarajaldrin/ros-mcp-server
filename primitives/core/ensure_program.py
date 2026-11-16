@@ -10,6 +10,7 @@ status is not NORMAL (a protective stop is for a person to look at first).
 Prints __RESULT_JSON__ {result, was_running, recovered}.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -42,7 +43,7 @@ def _dashboard(cmd, host='192.168.1.111'):
 
 def safety_normal():
     r = subprocess.run(['python3', 'scripts/ur_dashboard.py', '--host', '192.168.1.111', '--real', 'safety'],
-                       cwd='/home/aldrin/Documents/prismatic-manipulation', capture_output=True, text=True, timeout=20)
+                       cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'compliant_insertion_studio'), capture_output=True, text=True, timeout=20)
     return 'NORMAL' in r.stdout
 
 

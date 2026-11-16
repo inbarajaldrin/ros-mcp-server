@@ -23,7 +23,7 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROBOT_IP="${ROBOT_IP:-192.168.1.111}"
-DASH="${DASH:-$HOME/Documents/prismatic-manipulation/scripts/ur_dashboard.py}"
+DASH="${DASH:-$REPO/compliant_insertion_studio/scripts/ur_dashboard.py}"
 cd "$REPO" || exit 1
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }

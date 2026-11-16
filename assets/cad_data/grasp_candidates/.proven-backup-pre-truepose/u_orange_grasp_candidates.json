@@ -1,0 +1,163 @@
+{
+  "object_name": "u_orange",
+  "schema_version": 2,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "clearance_mm": 14,
+    "tip_thickness_mm": 20
+  },
+  "total_grasp_candidates": 5,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.02550870976794511,
+        "y": -0.013207987692560999,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 70.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.0002019335957057774,
+        "y": 0.023570721574705092,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 2,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 90.0,
+      "closing_axis": "y",
+      "object_solid_mm": 24.5,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.0002019335957057774,
+        "y": 0.023570721574705092,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": -0.7071067811865475,
+        "y": 0.7071067811865476,
+        "z": 4.329780281177467e-17,
+        "w": -4.329780281177466e-17
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -90.0
+      }
+    },
+    {
+      "grasp_point_id": 3,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": -0.02591257695935667,
+        "y": -0.013207987692560999,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    },
+    {
+      "grasp_point_id": 1,
+      "direction_id": 3,
+      "approach_name": "standing_top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 1.0,
+        "z": 0.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "z",
+      "object_solid_mm": 21.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.02550870976794511,
+        "y": -0.013207987692560999,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 0.5,
+        "y": 0.5,
+        "z": 0.5,
+        "w": -0.5
+      },
+      "approach_rpy": {
+        "roll": -90.0,
+        "pitch": -90.0,
+        "yaw": 0.0
+      }
+    }
+  ]
+}

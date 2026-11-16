@@ -62,7 +62,7 @@ class GraspPointsPublisher(Node):
         
         # Set up data directory
         if data_dir is None:
-            # Auto-discover aruco-grasp-annotator data directory
+            # The CAD data directory (assets/cad_data, or FMB_CAD_DATA)
             aruco_data_dir = get_aruco_data_dir()
             self.data_dir = aruco_data_dir / "grasp_points"
         else:

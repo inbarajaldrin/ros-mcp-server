@@ -1,6 +1,6 @@
 """Save one still wrist-camera frame (emitter off, brightened) + TCP pose: python3 look.py OUT.png [gain]"""
 import sys, subprocess, time, numpy as np, cv2, json
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from compliant_insertion_studio.wrapper.marker_yaw import still_frame, _tcp_pose_now
 out=sys.argv[1]; gain=float(sys.argv[2]) if len(sys.argv)>2 else 3.0
 def em(on): subprocess.run(['ros2','param','set','/camera/camera','depth_module.emitter_enabled','1' if on else '0'],capture_output=True,timeout=10); time.sleep(0.8)

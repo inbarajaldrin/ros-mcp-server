@@ -1,7 +1,7 @@
 """One agent step: lift clear (10 mm), turn, move, lower to the measuring height, measure (same_frame), and if
 within tolerance descend guarded and report the stop height.  python3 loop_step.py TAG TURN_DEG DX_MM DY_MM [force_descend]"""
 import sys, subprocess, json, numpy as np, time
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; S='/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/89794742-dc22-4591-870c-0904ba3621f7/scratchpad/'
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); S='/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/89794742-dc22-4591-870c-0904ba3621f7/scratchpad/'
 sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from compliant_insertion_studio.wrapper.marker_yaw import _tcp_pose_now
 from compliant_insertion_studio.wrapper.align_at_hover import turn_wrist

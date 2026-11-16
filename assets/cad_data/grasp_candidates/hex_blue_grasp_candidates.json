@@ -1,0 +1,103 @@
+{
+  "object_name": "hex_blue",
+  "schema_version": 2,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "clearance_mm": 14,
+    "tip_thickness_mm": 20
+  },
+  "total_grasp_candidates": 3,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 10.4,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.1288627292960885e-05,
+        "y": -0.010171943454984575,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 16.2,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.8721356415189803e-05,
+        "y": 0.010855279507017696,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    },
+    {
+      "grasp_point_id": 2,
+      "direction_id": 3,
+      "approach_name": "standing_top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 1.0,
+        "z": 0.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "z",
+      "object_solid_mm": 14.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 2.8721356415189803e-05,
+        "y": 0.010855279507017696,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 0.5,
+        "y": -0.5,
+        "z": 0.5,
+        "w": 0.5
+      },
+      "approach_rpy": {
+        "roll": 90.0,
+        "pitch": -90.0,
+        "yaw": 0.0
+      }
+    }
+  ]
+}

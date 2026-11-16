@@ -3,7 +3,7 @@
 
     python3 -u ablations/spacing_check.py          # arm at home: every table part in view
 
-Each part's CAD outline (aruco-grasp-annotator mesh) is placed at its camera-observed pose and
+Each part's CAD outline (assets/cad_data mesh) is placed at its camera-observed pose and
 projected on the table; base1 is its 161 mm square at the observed base pose. Every table part
 must stand MIN_GAP_MM clear of the base and of every other part: an RG2 finger at the pre-grasp
 width reaches ~18-21 mm past a part's side, so a part closer than that to anything gets a finger
@@ -27,7 +27,8 @@ sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 MIN_GAP_MM = 25.0
 CLUSTER_MM = 10.0            # pose samples within this belong to the same reading
 AMBIG_MM = 25.0              # two readings further apart than this: ask depth which one is real
-MESH = Path.home() / 'Documents/aruco-grasp-annotator/data/models/{}.obj'
+from primitives.shared.config import CAD_DATA_DIR   # noqa: E402
+MESH = CAD_DATA_DIR / 'models/{}.obj'
 class _BaseSide(dict):
     """Base side length (m) from the base's CAD mesh (all FMB bases are 161 mm square) - not a per-base table."""
     def __missing__(self, base):
@@ -210,7 +211,7 @@ def _depth_pick(name, cands):
 
 
 PARTS = ('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')
-GRASPS = Path.home() / 'Documents/aruco-grasp-annotator/data/grasp_points/{}_grasp_points.json'
+GRASPS = CAD_DATA_DIR / 'grasp_points/{}_grasp_points.json'
 FINGER_T_M, FINGER_W_M = 0.0134, 0.0242          # RG2 finger block: thickness (closing axis) x width
 FINGER_GAP_MIN_MM = 5.0
 

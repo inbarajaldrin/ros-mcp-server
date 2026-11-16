@@ -1,7 +1,7 @@
 """Record the held part's far/left outline over bare table (rigid in the image for this grasp), then return over the
 aim at the clear height.  python3 outline_table.py OUT.json"""
 import sys, subprocess, json, time, numpy as np, cv2
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; S='/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/89794742-dc22-4591-870c-0904ba3621f7/scratchpad/'
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); S='/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/89794742-dc22-4591-870c-0904ba3621f7/scratchpad/'
 sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from compliant_insertion_studio.wrapper.marker_yaw import _tcp_pose_now, still_frame, held_outline_px
 out=sys.argv[1]; BX,BY=0.106,-0.477; Z_CLEAR=0.229

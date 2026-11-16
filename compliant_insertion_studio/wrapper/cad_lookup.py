@@ -74,8 +74,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 # Search paths — match what translate_object reads.
-ASSEMBLY_INDEX_DIR = Path.home() / "Documents" / "aruco-grasp-annotator" / "data"
-GRASP_POINTS_DIR   = Path.home() / "Documents" / "aruco-grasp-annotator" / "data" / "grasp_points"
+ASSEMBLY_INDEX_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')   # repo CAD data; FMB_CAD_DATA overrides
+GRASP_POINTS_DIR   = ASSEMBLY_INDEX_DIR / "grasp_points"
 
 # OnRobot RG2 mounted on UR5e — flange (EE) → gripper-center distance along
 # the tool-frame +Z axis. Matches primitives.shared.config.GRIPPER_CENTER_TOOL_OFFSET.

@@ -44,6 +44,9 @@ if pgrep -f "aruco_camera_localizer.*localize" >/dev/null 2>&1; then
     exit 2
 fi
 
+# The localizer reads part meshes, ArUco layouts and symmetry from this repo's CAD data (aruco_camera_localizer
+# data_path_finder.py honours FMB_CAD_DATA); an FMB_CAD_DATA already set in the shell wins.
+export FMB_CAD_DATA="${FMB_CAD_DATA:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/assets/cad_data}"
 CMD=(ros2 run aruco_camera_localizer localize --suppress-prints "${EXTRA_ARGS[@]}")
 
 if [[ "$BACKGROUND" == "true" ]]; then

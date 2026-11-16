@@ -44,7 +44,8 @@ X_CAM = _load_x_cam()
 from primitives.shared.config import CLEAR_AREA_XY as STAGING_XY   # the clear area (FMB_CLEAR_AREA overrides)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
 FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the opened fingers (spacing_check needs 25 mm)
-ANN = "/home/aldrin/Documents/aruco-grasp-annotator/data/aruco/{}_aruco.json"
+from primitives.shared.config import CAD_DATA_DIR   # noqa: E402
+ANN = str(CAD_DATA_DIR / "aruco" / "{}_aruco.json")
 
 
 RUN = {'base': 'base1', 'parts': ('u_brown', 'u_orange', 'line_green', 'inverted_u_yellow')}   # set in main from --assembly-json

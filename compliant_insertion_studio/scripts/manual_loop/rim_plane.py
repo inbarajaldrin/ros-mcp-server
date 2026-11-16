@@ -1,7 +1,7 @@
 """Base-top tilt from guarded touches with the held part at 4 offsets around the aim (world axes); returns to the aim
 at Z_CLEAR.  python3 rim_plane.py"""
 import sys, subprocess, json, numpy as np
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from compliant_insertion_studio.wrapper.marker_yaw import _tcp_pose_now
 Z_CLEAR=0.229
 def mv(x,y,z,q,guard=None,dur=None):

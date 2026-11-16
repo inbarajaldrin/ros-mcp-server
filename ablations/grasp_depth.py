@@ -12,7 +12,7 @@ grasp point at the seat, finds the highest CAD surface of the base + the parts a
 them, and limits the grasp depth so the tips stay SEAT_CLEARANCE_M above it.
 Updates that assembly's parts in ablations/eval_resources/grasp_depth.json (read by
 config.grasp_tool_offset_floor_m; was fmb1_grasp_depth.json until 2026-10-20).
-Meshes: aruco-grasp-annotator OBJ (cm, object frame). Seat poses: cad_lookup.load_seat_pose_in_base.
+Meshes: assets/cad_data/models OBJ (cm, object frame). Seat poses: cad_lookup.load_seat_pose_in_base.
 """
 import argparse
 import json
@@ -24,7 +24,7 @@ from scipy.spatial.transform import Rotation as R
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-DATA = Path('/home/aldrin/Documents/aruco-grasp-annotator/data')
+from primitives.shared.config import CAD_DATA_DIR as DATA   # noqa: E402  (assets/cad_data, FMB_CAD_DATA overrides)
 OUT = REPO / 'ablations/eval_resources/grasp_depth.json'
 SEAT_CLEARANCE_M = 0.004        # base1 z is snapped to the config table, not measured: keep 4 mm
 TIP_THICK_M = 0.0114 + 0.002        # RG2 tip block along the closing axis (CAD) + margin

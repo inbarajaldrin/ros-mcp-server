@@ -1,7 +1,7 @@
 """Fine dip grid around the current aim: hex lattice PITCH within RMAX, each a guarded dip from 1.5 mm over the rim;
 a dip that goes >2 mm below the rim contact continues to the seat.  python3 dip_grid.py PITCH_MM RMAX_MM [YAW_DEG]"""
 import sys, subprocess, json, math, numpy as np, time
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from scipy.spatial.transform import Rotation as R
 from compliant_insertion_studio.wrapper.marker_yaw import _tcp_pose_now
 pitch,rmax=float(sys.argv[1])/1000,float(sys.argv[2])/1000; yaw=float(sys.argv[3]) if len(sys.argv)>3 else 0.0

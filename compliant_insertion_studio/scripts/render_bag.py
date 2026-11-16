@@ -124,7 +124,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('bag'); ap.add_argument('out')
     ap.add_argument('--localizer-src', required=True, help='aruco_camera_localizer package dir (has config/)')
-    ap.add_argument('--wireframes', required=True, help='aruco-grasp-annotator/data/wireframe')
+    ap.add_argument('--wireframes', required=True, help='assets/cad_data/wireframe')
     ap.add_argument('--workers', type=int, default=os.cpu_count())
     a = ap.parse_args()
     out = os.path.realpath(a.out)

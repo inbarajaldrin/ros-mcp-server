@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
-DATA = Path('/home/aldrin/Documents/aruco-grasp-annotator/data')
+from primitives.shared.config import CAD_DATA_DIR as DATA   # noqa: E402  (assets/cad_data, FMB_CAD_DATA overrides)
 
 
 def main():
@@ -60,7 +60,7 @@ def main():
             ok(True, 'grip width (CAD)', f"{C.cad_grip_width_mm(p, gid):.1f} mm closed, pre-grasp {o['gripper_width_mm']} mm")
         except Exception as e:
             ok(False, 'grip width (CAD)', str(e))
-        ok(any((REPO / 'data').rglob(f'{p}*symmetry*')) or any(Path('/home/aldrin/Documents').glob(f'**/symmetry/{p}*')),
+        ok(any((REPO / 'data').rglob(f'{p}*symmetry*')) or any((DATA / 'symmetry').glob(f'{p}*')),
            'symmetry file', '(fold-aware planner/rotate)')
         try:
             sp, sq = load_seat_pose_in_base(base, p)

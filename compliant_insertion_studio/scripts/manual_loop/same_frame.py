@@ -3,7 +3,7 @@
   part = its own far/left edges in THIS frame; socket_shift_world -> d_world (real - target) and image yaw.
 python3 same_frame.py OUT.png BASE_YAW_GUESS_DEG [TURN_DEG]   (TURN_DEG: turn the wrist about world z first)"""
 import sys, subprocess, time, json, numpy as np, cv2
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from scipy.spatial.transform import Rotation as R
 from seat_check import X_CAM
 from handeye_icp_survey import T as _T

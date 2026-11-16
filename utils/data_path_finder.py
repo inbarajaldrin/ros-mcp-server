@@ -1,51 +1,35 @@
 """
 Path Finder Utility
-Recursively searches for aruco-grasp-annotator data directory in Documents folder.
-Provides shared assembly JSON loading functions.
+Locates the CAD data (part meshes, ArUco layouts, grasp points, symmetry, assembly JSONs) and provides shared
+assembly JSON loading functions.
+
+The data lives IN this repo at assets/cad_data/ (copied 2026-11-16 from the former external aruco-grasp-annotator
+data dir, so the repo runs without it). FMB_CAD_DATA overrides the location.
 """
 import json
+import os
 import glob as glob_module
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+REPO_CAD_DATA = Path(__file__).resolve().parents[1] / "assets" / "cad_data"
+
 
 def find_aruco_data_dir() -> Optional[Path]:
-    """
-    Recursively search Documents folder for aruco-grasp-annotator/data directory.
-    
-    Returns:
-        Path to data directory if found, None otherwise
-    """
-    # Recursively search only in Documents folder
-    documents_dir = Path.home() / "Documents"
-    if not documents_dir.exists():
-        return None
-    
-    # Search for aruco-grasp-annotator directory
-    target_name = "aruco-grasp-annotator"
-    for path in documents_dir.rglob(target_name):
-        if path.is_dir():
-            data_dir = path / "data"
-            # Verify it has the expected structure (grasp_points subdirectory)
-            if data_dir.exists() and (data_dir / "grasp_points").exists():
-                return data_dir
-    
-    return None
+    """The CAD data directory: $FMB_CAD_DATA if set, else <repo>/assets/cad_data. None if it has no grasp_points/."""
+    data_dir = Path(os.environ["FMB_CAD_DATA"]) if os.environ.get("FMB_CAD_DATA") else REPO_CAD_DATA
+    return data_dir if (data_dir / "grasp_points").is_dir() else None
 
 
 def get_aruco_data_dir() -> Path:
-    """
-    Get aruco-grasp-annotator data directory.
-    
-    Returns:
-        Path to data directory (raises FileNotFoundError if not found)
-    """
+    """The CAD data directory (raises FileNotFoundError if it is missing)."""
     found_dir = find_aruco_data_dir()
     if found_dir:
         return found_dir
-    
+
     raise FileNotFoundError(
-        "Could not find aruco-grasp-annotator data directory in Documents folder."
+        f"No CAD data directory with grasp_points/ at {os.environ.get('FMB_CAD_DATA') or REPO_CAD_DATA} "
+        "(set FMB_CAD_DATA or restore assets/cad_data)."
     )
 
 
@@ -57,6 +41,9 @@ def get_symmetry_dir() -> Path:
 def get_assembly_data_dir() -> Path:
     """Get assembly data directory path (same as data dir)."""
     return get_aruco_data_dir()
+
+
+ASSEMBLY_JSON_FOR_BASE = {"base1": "fmb_assembly1_seated.json", "base3": "fmb_assembly3.json"}
 
 
 def find_assembly_json_by_base_name(base_name: str, data_dir: str = None, logger=None) -> Optional[str]:
@@ -83,7 +70,13 @@ def find_assembly_json_by_base_name(base_name: str, data_dir: str = None, logger
             logger.error(f"Data directory not found: {data_dir}")
         return None
 
-    json_files = glob_module.glob(os.path.join(data_dir, "*.json"))
+    json_files = sorted(glob_module.glob(os.path.join(data_dir, "*.json")))
+    # Two JSONs name each of base1 and base3, and the first match used to depend on the filesystem's directory order
+    # (an unsorted glob). Pin the file every run so far resolved to (checked 2026-11-16 on the cell PC), so a clone on
+    # another machine picks the same one; any other base takes the first match in sorted order.
+    pinned = os.path.join(data_dir, ASSEMBLY_JSON_FOR_BASE.get(base_name, ""))
+    if base_name in ASSEMBLY_JSON_FOR_BASE and os.path.isfile(pinned):
+        json_files = [pinned] + [f for f in json_files if f != pinned]
 
     for json_file in json_files:
         try:
@@ -193,8 +186,8 @@ def find_object_cad_file(object_name: str) -> Optional[Path]:
     Find CAD .obj file for an object by name.
 
     Searches in common locations:
-    - aruco-grasp-annotator/data/models/
-    - aruco-grasp-annotator/data/objects/
+    - <cad data>/models/
+    - <cad data>/objects/
     - etc.
 
     Args:

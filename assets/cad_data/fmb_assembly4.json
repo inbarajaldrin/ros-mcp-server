@@ -1,0 +1,150 @@
+{
+ "timestamp": "2026-06-16T00:00:00",
+ "assembly_id": "fmb_assembly_4",
+ "base_name": "base4",
+ "components": [
+  {
+   "name": "base4",
+   "type": "board",
+   "assembly_order": 0,
+   "position": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  },
+  {
+   "name": "jenga_01",
+   "type": "object",
+   "subtype": "block",
+   "assembly_order": 1,
+   "position": {
+    "x": -0.024,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  },
+  {
+   "name": "jenga_03",
+   "type": "object",
+   "subtype": "block",
+   "assembly_order": 2,
+   "position": {
+    "x": 0.024,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  },
+  {
+   "name": "jenga_04",
+   "type": "object",
+   "subtype": "block",
+   "assembly_order": 3,
+   "position": {
+    "x": -0.012,
+    "y": 0.0,
+    "z": 0.014
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  },
+  {
+   "name": "jenga_05",
+   "type": "object",
+   "subtype": "block",
+   "assembly_order": 4,
+   "position": {
+    "x": 0.012,
+    "y": 0.0,
+    "z": 0.014
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  },
+  {
+   "name": "jenga_06",
+   "type": "object",
+   "subtype": "block",
+   "assembly_order": 5,
+   "position": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.028
+   },
+   "rotation": {
+    "rpy": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0
+    },
+    "quaternion": {
+     "x": 0.0,
+     "y": 0.0,
+     "z": 0.0,
+     "w": 1.0
+    }
+   }
+  }
+ ]
+}

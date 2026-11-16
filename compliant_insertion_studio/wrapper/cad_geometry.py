@@ -22,13 +22,14 @@ All three within ±2mm purely from CAD chain (no fudge).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-ARUCO_DATA_DIR = Path.home() / "Documents" / "aruco-grasp-annotator" / "data"
+ARUCO_DATA_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')   # repo CAD data; FMB_CAD_DATA overrides
 GRASP_POINTS_DIR = ARUCO_DATA_DIR / "grasp_points"
 MODELS_DIR = ARUCO_DATA_DIR / "models"
 ASSEMBLY_INDEX_DIR = ARUCO_DATA_DIR

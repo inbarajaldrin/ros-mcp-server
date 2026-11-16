@@ -1,0 +1,43 @@
+{
+  "object_name": "line_green",
+  "schema_version": 2,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "clearance_mm": 14,
+    "tip_thickness_mm": 20
+  },
+  "total_grasp_candidates": 1,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 1,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 0.0,
+      "closing_axis": "x",
+      "object_solid_mm": 25.8,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 0.00010623046522960067,
+        "y": -0.00010623046522959908,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": 6.123233995736766e-17,
+        "y": 1.0,
+        "z": 6.123233995736766e-17,
+        "w": 3.749399456654644e-33
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -180.0
+      }
+    }
+  ]
+}

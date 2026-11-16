@@ -73,11 +73,12 @@ def grasp_offset(name):
     """(along the part's x, along its y) from the part's centre to its grasp point, standing as seated
     — the gripper holds the U parts by a LEG (+25.5 mm): place_xy is the part's centre, the flange
     goes to centre + this (2026-10-19: aiming by the flange put u_orange's strike 50 mm out, past the
-    part's end). CAD: aruco-grasp-annotator grasp points + mesh bbox centre + seat pose."""
+    part's end). CAD: assets/cad_data grasp points + mesh bbox centre + seat pose."""
     from grasp_depth import load_mesh
     from scipy.spatial.transform import Rotation as R
     from compliant_insertion_studio.wrapper.cad_lookup import load_seat_pose_in_base
-    d = json.load(open(f"/home/aldrin/Documents/aruco-grasp-annotator/data/grasp_points/{name}_grasp_points.json"))
+    from primitives.shared.config import _GRASP_POINTS_DIR
+    d = json.load(open(f"{_GRASP_POINTS_DIR}/{name}_grasp_points.json"))
     gp = next(g for g in d['grasp_points'] if g['id'] == GRASP_ID[name])['position']
     V, _ = load_mesh(name)
     off = R.from_quat(load_seat_pose_in_base('base1', name)[1]).apply(

@@ -16,7 +16,7 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HOST="${ROBOT_IP:-192.168.1.111}"
-DASH="${DASH:-$HOME/Documents/prismatic-manipulation/scripts/ur_dashboard.py}"
+DASH="${DASH:-$REPO/compliant_insertion_studio/scripts/ur_dashboard.py}"
 NO_HOME=0; [ "${1:-}" = "--no-home" ] && NO_HOME=1
 cd "$REPO" || exit 1
 set +u; source /opt/ros/humble/setup.bash; source ~/Desktop/ros2_ws/install/setup.bash; set -u

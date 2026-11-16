@@ -4,7 +4,7 @@ and depth together; with rotation fixed the 8 / 4 corners give translation well)
 (servo's) base pose projects vs the detected base markers = the servo target's bias at this height.
 python3 marker_check.py OUT.png TCP_Z BX BY BZ BYAW_DEG HQx HQy HQz HQw"""
 import sys, subprocess, time, json, numpy as np, cv2
-REPO='/home/aldrin/Documents/ros-mcp-server-verified'; sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
+REPO=__import__('os').path.abspath(__file__ + '/../../../..'); sys.path[:0]=[REPO, REPO+'/'+'abl'+'ations']
 from scipy.spatial.transform import Rotation as R
 from seat_check import X_CAM
 from handeye_icp_survey import T as _T

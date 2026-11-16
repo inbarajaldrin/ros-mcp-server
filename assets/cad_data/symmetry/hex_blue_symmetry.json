@@ -1,0 +1,92 @@
+{
+    "object_name": "hex_blue",
+    "fold_axes": {
+        "x": {
+            "fold": 1,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                }
+            ]
+        },
+        "y": {
+            "fold": 6,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                },
+                {
+                    "angle_deg": 60,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0.5,
+                        "z": 0,
+                        "w": 0.866025
+                    }
+                },
+                {
+                    "angle_deg": 120,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0.866025,
+                        "z": 0,
+                        "w": 0.5
+                    }
+                },
+                {
+                    "angle_deg": 180,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 1,
+                        "z": 0,
+                        "w": 0
+                    }
+                },
+                {
+                    "angle_deg": 240,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0.866025,
+                        "z": 0,
+                        "w": -0.5
+                    }
+                },
+                {
+                    "angle_deg": 300,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0.5,
+                        "z": 0,
+                        "w": -0.866025
+                    }
+                }
+            ]
+        },
+        "z": {
+            "fold": 1,
+            "quaternions": [
+                {
+                    "angle_deg": 0,
+                    "quaternion": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0,
+                        "w": 1
+                    }
+                }
+            ]
+        }
+    }
+}

@@ -1,0 +1,43 @@
+{
+  "object_name": "jenga_03",
+  "schema_version": 2,
+  "coordinate_frame": "cad_center",
+  "gripper": {
+    "max_width_mm": 100,
+    "clearance_mm": 14,
+    "tip_thickness_mm": 20
+  },
+  "total_grasp_candidates": 1,
+  "grasp_candidates": [
+    {
+      "grasp_point_id": 1,
+      "direction_id": 2,
+      "approach_name": "top",
+      "approach_vector": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "in_plane_rotation_deg": 90.0,
+      "closing_axis": "y",
+      "object_solid_mm": 54.0,
+      "standoff_m": 0.115,
+      "grasp_candidate_position": {
+        "x": 1.1074218268040573e-05,
+        "y": -1.1074218268040251e-05,
+        "z": 0.0
+      },
+      "approach_quaternion": {
+        "x": -0.7071067811865475,
+        "y": 0.7071067811865476,
+        "z": 4.329780281177467e-17,
+        "w": -4.329780281177466e-17
+      },
+      "approach_rpy": {
+        "roll": -180.0,
+        "pitch": 0.0,
+        "yaw": -90.0
+      }
+    }
+  ]
+}
