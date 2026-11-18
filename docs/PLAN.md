@@ -47,6 +47,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   frames.base_link_above_table); the lab's environment declares it.
 - **R16 Deadline** (2026-11-18): none. P1 -> P3 as fast as the evidence allows; the lead tells the operator in Dimelab when P3
   needs him at the cell (plugging the D415 in, the real runs' go).
+- **R17 OnRobot models may be published** (2026-11-18): "dont worry about the do not publish we are going to be publishing i already
+  told plan47 that is why we are releasing it with paper itself". The OnRobot RG2 / quick changer models are released with the
+  paper; the "never public" part of P47-1 for them no longer binds our work. Keep NOTICE-OnRobot.md beside them wherever they go.
+  The cell's own source for the RG2 is the lab's DIME-LAB packages (onrobot_rg2_description, onrobot_quick_changer_description,
+  onrobot_rg2_control: the CAD meshes, the 4-bar arc width <-> joint model); the paper's ur5e_rg2 was reconciled against them.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
