@@ -36,15 +36,15 @@ def track_base_in_hand(base, observed_base, say, log_fh=None, held_obj=None):
     if observed_base is None:
         return observed_base
     from compliant_insertion_studio.wrapper.marker_yaw import base_pose_world
-    from seat_check import X_CAM
     snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
     if not tcp.get('quat_xyzw'):
         return observed_base
     (bx, by, _), _ = observed_base
-    Rt = R_.from_quat(tcp['quat_xyzw']).as_matrix()
-    cam = Rt @ np.asarray(X_CAM)[:3, 3]                            # camera offset from the flange, world frame
-    tx, ty = bx - cam[0], by - cam[1]                               # camera straight over the base centre
-    r = _move_unless_there((tx, ty, TRACK_VIEW_Z), list(tcp['quat_xyzw']), 'base track view (part in hand)', log_fh)
+    # the camera's optical axis through the base centre (move_cartesian --look-at-z, the calibrated hand-eye): the old
+    # "camera position straight over the base" put the base at the image bottom on the v3.1 mount, which looks 30 deg
+    # off-axis (11-18 insert-view audit, lab 0343911: (632.7, 867.2) px, out of frame)
+    r = _move_unless_there((bx, by, TRACK_VIEW_Z), list(tcp['quat_xyzw']), 'base track view (part in hand)', log_fh,
+                           extra=('--look-at-z', '-0.0805'))
     if r.get('result') == 'failure':
         say(f"  [base-track] view not reached ({r.get('error', '')}) - aiming at the previous read"); return observed_base
     # The pose comes from the 6-dof CAD fit to the depth cloud (operator 10-21: depth + CAD carry far more than the

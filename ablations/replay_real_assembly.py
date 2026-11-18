@@ -1116,7 +1116,8 @@ def record_follow_reads(obj, say, observed_base=None, log_fh=None, part_at_stagi
         try:
             (bx_, by_, bz_), _ = observed_base
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                f"{bx_:.4f}", f"{by_:.4f}", "0.56", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                                f"{bx_:.4f}", f"{by_:.4f}", "0.56", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
                                label='follow read: depth view of the base', timeout_s=60, log_fh=log_fh)
             if r.get('result') == 'success':
                 time.sleep(1.0)
@@ -1499,7 +1500,8 @@ def certify_once_at_end(objs, base, observed_base, say, log_fh=None):
     out = {}
     for q in (('0', '1', '0', '0'), ('1', '0', '0', '0')):    # top-down, or pi-turned if wrist_3 would wind past 4 rad
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz', f"{bx:.4f}",
-                            f"{by:.4f}", f"{_VZ:.2f}", '--quat', *q], label='certify view (one, over the base)',
+                            f"{by:.4f}", f"{_VZ:.2f}", '--quat', *q, '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
+                           label='certify view (one, over the base)',
                            timeout_s=60, log_fh=log_fh)
         if r.get('result') != 'failure':
             break
