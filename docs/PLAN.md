@@ -76,7 +76,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   in the digital twin with a regular (non-compliant) insert, rendered and shown in the Dimelab group. Compliance in sim is queued
   for later. On the real cell the insert stays compliant, through the drive-mate / execute_mate seam. Wanted ("would be nice"):
   paper2's idea - ground-truth poses only for what the camera can see, so the planner works as it must on the real cell.
-- **plan47** (2026-11-19 ~00:30Z): the system-mode kit/render_warm/ROS probes are DroidStack's top priority; our worker may be named a
+- **plan47 correction** (2026-11-19 ~01:00Z): the system-mode Kit/render_warm/ROS probes ARE built on DroidStack dev (a52865ca,
+  1a321bf6, dbc2274e, 11-13..15); our engine abbd0a57 (platform 2648fe53, 11-13) predates them, and its cardless sizes are unmeasured
+  bounds (dev: collision model 1024 MiB, isaac-python:usd 256 MiB). Fix = upgrade the cell PC to dev (platform f1748570, engine
+  5dcce0724ab4) and re-prepare a4500 from it; plan47 re-prepares dual. Lane A retired. rtx6000 flags when space is reclaimed:
+  --system-service, our own Isaac 6.1 under a root-controlled path, --ros-distro humble, --disk-floor-mib 20480.
+- **plan47** (2026-11-19 ~00:30Z, superseded by the correction above): the system-mode kit/render_warm/ROS probes are DroidStack's top priority; our worker may be named a
   DroidStack lane to build them (GPT builds, Claude reviews, droidstack-opus lands) - no private fork. Cardless class sizes sent for a
   ruling. rtx6000: HOLD until the builder names flags + disk floor (plan29 reclaiming box copies there). a4500 one-off renders fine.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
