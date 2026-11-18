@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<!-- What the cell's arm carries, rooted at tool0, for RViz: the OnRobot quick changer and RG2 from the lab's description
+     packages (DIME-LAB onrobot_quick_changer_description / onrobot_rg2_description: CAD meshes, the RG2's revolute drive
+     joint + 9 mimics), coupled as the robot composite does (tool0 -> quick_changer_link rpy (0,0,-pi/2) -> rg2_base_link
+     xyz (0,0,0.0181) rpy (0,-pi/2,0); the macro's 18.1 mm standoff and coupler rotation), plus the v3.1 camera mount
+     saddles, the D415 body (assets/cell/camera_mount_v31, rg2_base_link mm) and the CAD colour optical frame.
+
+     Links are prefixed tool_ so they never collide with the driver's /rg2 description (whose rg2_base_link sits at
+     tool0 rpy (0,0,pi), a different frame). Finger joints: /tool/joint_states from tool_joint_states.py
+     (onrobot_rg2_control's arc model on the live /gripper_width).
+
+       xacro cell_tool_v31.urdf.xacro mount_dir:=<repo>/assets/cell/camera_mount_v31 -->
+<robot name="cell_tool_v31" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="mount_dir" default=""/>
+  <xacro:property name="mount_dir" value="$(arg mount_dir)"/>
+  <xacro:include filename="$(find onrobot_quick_changer_description)/urdf/onrobot_quick_changer_macro.xacro"/>
+  <xacro:include filename="$(find onrobot_rg2_description)/urdf/onrobot_rg2_macro.xacro"/>
+
+  <link name="tool0"/>
+  <xacro:onrobot_quick_changer prefix="tool_" parent="tool0" child="tool_quick_changer_tool" rotation="${-pi/2}"/>
+  <xacro:onrobot_rg2 prefix="tool_" parent="tool_quick_changer_tool">
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+  </xacro:onrobot_rg2>
+
+  <link name="tool_camera_mount_v31">
+    <visual>
+      <geometry><mesh filename="file://${mount_dir}/V31_upper_saddle_camera_tower_assembly_coordinates.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="mount_grey"><color rgba="0.62 0.63 0.65 1"/></material>
+    </visual>
+    <visual>
+      <geometry><mesh filename="file://${mount_dir}/V31_lower_saddle_captive_M4_assembly_coordinates.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="mount_grey"><color rgba="0.62 0.63 0.65 1"/></material>
+    </visual>
+  </link>
+  <joint name="tool_rg2_base_to_camera_mount_v31" type="fixed">
+    <parent link="tool_rg2_base_link"/><child link="tool_camera_mount_v31"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="tool_d415_body_v31">
+    <visual>
+      <geometry><mesh filename="file://${mount_dir}/D415_body_rg2_base_link.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="d415_dark"><color rgba="0.22 0.23 0.25 1"/></material>
+    </visual>
+  </link>
+  <joint name="tool_rg2_base_to_d415_body_v31" type="fixed">
+    <parent link="tool_rg2_base_link"/><child link="tool_d415_body_v31"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- rg2_base_link -> camera_color_optical_frame from the mount job (TF-FOR-AGENT.md): xyz (0.065816, 0, 0.08891),
+       quat xyzw (0.612372, 0.612372, 0.353553, 0.353553); from tool0 that is (0, 0.0889, 0.0839), (0.258819, 0, 0, 0.965926) -->
+  <link name="tool_d415_color_optical_v31"/>
+  <joint name="tool_rg2_base_to_d415_color_optical_v31" type="fixed">
+    <parent link="tool_rg2_base_link"/><child link="tool_d415_color_optical_v31"/>
+    <origin xyz="0.065816 0 0.08891" rpy="2.094395 0 1.570796"/>
+  </joint>
+</robot>

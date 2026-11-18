@@ -64,14 +64,15 @@ if pgrep -f "${R} -d .*fmb1_demo" >/dev/null 2>&1; then
 fi
 
 echo "[rviz_demo] pre-flight"
-# What the arm carries, drawn as one model on tool0 (namespace tool): the robot composite's quick changer + RG2 (the
-# fuzzydroid demo's fmb1_ros_description; OnRobot meshes stay local) and the v3.1 camera mount + D415 (2026-11-10), all
-# on the composite's rg2_base_link — the frame the mount CAD is in. The driver's own /rg2 model sits at a different
-# rg2_base_link (tool0 rpy 0 0 pi), so the mount can't hang off it. make_tool_urdf.py writes it; without the local RG2
-# description, the mount alone (urdf/camera_mount_v31).
+# What the arm carries, drawn as one model on tool0 (namespace tool, urdf/cell_tool_v31.urdf.xacro): the quick changer
+# and RG2 from the lab's onrobot_*_description packages, coupled as the robot composite does, plus the v3.1 camera mount
+# + D415 (2026-11-10) on that rg2_base_link — the frame the mount CAD is in. The driver's own /rg2 model sits at a
+# different rg2_base_link (tool0 rpy 0 0 pi), so the mount can't hang off it. The fingers follow /gripper_width through
+# tool_joint_states.py (onrobot_rg2_control's arc). Without the packages: the mount alone (urdf/camera_mount_v31).
 if ! timeout 8 ros2 topic list 2>/dev/null | grep -qx /tool/robot_description; then
-    python3 "$REPO/compliant_insertion_studio/scripts/make_tool_urdf.py" "$RUN_DIR/cell_tool_v31.urdf" \
-        || { warn "no local RG2 description (FMB_RG2_DESCRIPTION) — drawing the camera mount without the gripper"
+    xacro "$REPO/compliant_insertion_studio/urdf/cell_tool_v31.urdf.xacro" mount_dir:="$REPO/assets/cell/camera_mount_v31" \
+        > "$RUN_DIR/cell_tool_v31.urdf" 2> "$RUN_DIR/cell_tool_xacro.err" \
+        || { warn "onrobot_quick_changer_description / onrobot_rg2_description not found — drawing the camera mount without the gripper"
              sed "s#@ASSETS@#$REPO/assets/cell/camera_mount_v31#g" \
                  "$REPO/compliant_insertion_studio/urdf/camera_mount_v31/camera_mount_v31.urdf.in" > "$RUN_DIR/cell_tool_v31.urdf"; }
     # the URDF goes in a params file: passed with -p it breaks rcl's argument parser (arguments.c)
@@ -80,6 +81,10 @@ if ! timeout 8 ros2 topic list 2>/dev/null | grep -qx /tool/robot_description; t
     nohup ros2 run robot_state_publisher robot_state_publisher --ros-args -r __ns:=/tool \
         --params-file "$RUN_DIR/tool_rsp.yaml" > "$RUN_DIR/tool_rsp.log" 2>&1 &
     sleep 2
+fi
+TJ=tool_joint_states
+if ! pgrep -f "${TJ}[.]py" >/dev/null 2>&1; then
+    nohup python3 "$REPO/compliant_insertion_studio/scripts/${TJ}.py" > "$RUN_DIR/${TJ}.log" 2>&1 &
 fi
 TOPICS="$(timeout 8 ros2 topic list 2>/dev/null)"
 for t in /robot_description /tool/robot_description; do

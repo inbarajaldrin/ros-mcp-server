@@ -47,7 +47,7 @@ Versions the cell runs: ur-robot-driver 2.14.0, realsense2-camera 4.58.3, numpy 
 
 ### 2.2 The ROS 2 workspace
 
-Four packages, built together. The scripts look for the workspace at `$FMB_ROS_WS` (default `~/Desktop/ros2_ws`).
+Four packages, built together (three more for the demo RViz's gripper). The scripts look for the workspace at `$FMB_ROS_WS` (default `~/Desktop/ros2_ws`).
 
 ```bash
 export FMB_ROS_WS=~/Desktop/ros2_ws            # or wherever you want it; put this in ~/.bashrc
@@ -56,6 +56,10 @@ git clone git@github.com:inbarajaldrin/aruco_camera_localizer.git   # the marker
 git clone git@github.com:inbarajaldrin/max_camera_msgs.git
 git clone -b dev git@github.com:inbarajaldrin/ros-mcp-server.git ~/ros-mcp-server   # THIS repo (dev branch, never main)
 cp -r ~/ros-mcp-server/ros2_pkgs/onrobot_ros ~/ros-mcp-server/ros2_pkgs/pa_msgs .
+# optional, for the demo RViz's gripper (quick changer + RG2 meshes, finger joints from the measured width):
+git clone git@github.com:DIME-LAB/onrobot_quick_changer_description.git
+git clone git@github.com:DIME-LAB/onrobot_rg2_description.git
+git clone git@github.com:DIME-LAB/onrobot_rg2_control.git
 cd $FMB_ROS_WS && source /opt/ros/humble/setup.bash && colcon build --symlink-install
 ```
 
