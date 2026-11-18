@@ -27,7 +27,8 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 
 ## P2 Prove the new camera mount in sim (R3)
 - [ ] 2.1 Rendered D415 views at the cell's view poses (home, part view, base view, clear area) match what the code expects;
-  (home rendered in Isaac 6.1 on a4500, fingertips within 3.4 px of the CAD camera, lab 66011a2; real-joint + calibrated-camera comparison running)
+  (home: calibrated sim vs real 0.42 px, lab b0e161e; camera-aimed base / part / depth / staging views all in frame, lab 594fbb5;
+  open: the clear area and the insert-path views - audit running)
   view poses re-derived for the 30 degree tilt
 - [ ] 2.2 The localizer + depth CAD fits on rendered frames find the parts within the cell's bars (pick seed, base read)
 - [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
