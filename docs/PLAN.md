@@ -45,6 +45,8 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   what we are doing ewith droidstack". The robot's base sits 0.080 m above the table top, as in the 10-23/10-26 elevated-bench work
   (`compliant_insertion_studio/m4_dispatch/environments/dimelab_elevated/`, `realcell_env/MEASURED_CELL.yaml`
   frames.base_link_above_table); the lab's environment declares it.
+- **R16 Deadline** (2026-11-18): none. P1 -> P3 as fast as the evidence allows; the lead tells the operator in Dimelab when P3
+  needs him at the cell (plugging the D415 in, the real runs' go).
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
