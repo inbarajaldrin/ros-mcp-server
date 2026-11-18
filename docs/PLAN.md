@@ -55,7 +55,8 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R18 All boxes** (2026-11-18 ~22:00Z): "mac, a4500, dual-a4500, rtx6000 all of them are for use". Supersedes P29-2's "a4500 stays
   off for us". The box rules still apply on each (check the card right before, a hold where a hold tool exists, never touch another
   user's work: a4500's local user and rtx6000's borrower win). P29-1 (dual) is unchanged: on dual, Isaac/ROS only through DroidStack.
-  Off dual, an Isaac run of ours loads no ROS bridge and publishes no DDS, so nothing simulated can reach the cell's domain.
+  Off dual, nothing simulated may reach the cell's DDS domain: an Isaac run of ours either loads no ROS bridge, or runs its whole
+  ROS graph host-local (ROS_LOCALHOST_ONLY=1 and its own ROS_DOMAIN_ID) on a box that is not the cell PC (lead, 11-18).
 - **R19 DroidStack issues** (2026-11-18 ~22:10Z): "you can interact with plan47 when needed to launch and issues with droidstack or you
   fork and fix it yourself isaacsim for the planner and you dont have to start from scratch because we already have a codebase".
   Relaxes R10 for launch blockers and DroidStack issues: message plan47 (claude 13eddc on dual), or fork DroidStack and fix it,
@@ -68,6 +69,16 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   is the whole ponit". Both get `droidstack boxes prepare` (engine + supervisor under aaugus11, the --system-service root step
   where Ubuntu 24.04 needs it), so live checks / collision / renders run through DroidStack there too. The box rules hold:
   a4500's local user and rtx6000's borrower win; check the card right before; disk floors; never touch others' processes.
+- **R22 Sim proof = the full FMB1 assembly in the twin** (2026-11-19 ~00:30Z): "sim can perform the full assembly fmb1 has been
+  solved so many tiumes in my paper end to end without compliance ... a regular insert will reach the target because all the pose
+  is knownw ... as long as i can see a assembly performed in dt and rendered shown in whatsapp we can use that ... the seam where we
+  use execute mate or drive mate ... to perform the insert with compliance". The R3 bar: the cell's code assembles FMB1 end to end
+  in the digital twin with a regular (non-compliant) insert, rendered and shown in the Dimelab group. Compliance in sim is queued
+  for later. On the real cell the insert stays compliant, through the drive-mate / execute_mate seam. Wanted ("would be nice"):
+  paper2's idea - ground-truth poses only for what the camera can see, so the planner works as it must on the real cell.
+- **plan47** (2026-11-19 ~00:30Z): the system-mode kit/render_warm/ROS probes are DroidStack's top priority; our worker may be named a
+  DroidStack lane to build them (GPT builds, Claude reviews, droidstack-opus lands) - no private fork. Cardless class sizes sent for a
+  ruling. rtx6000: HOLD until the builder names flags + disk floor (plan29 reclaiming box copies there). a4500 one-off renders fine.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
