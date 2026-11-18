@@ -3219,6 +3219,12 @@ def main() -> int:
                         print(m)
                         if log_fh: log_fh.write(m + "\n")
                     ok = seat_check.run(obj, w, say=_say)
+            if _STOP_BEFORE_FIRED or _STOP_AFTER_FIRED:
+                # halted mid-part on purpose: the part is wherever the halt left it (often still in the gripper) - it is
+                # not done, and nothing after this may move the arm (2026-11-18: --stop-after place_down counted
+                # inverted_u_yellow as completed, so the final check flew the still-gripped part from the clear area to
+                # 0.56 m over base1 and the release that followed would have dropped it there)
+                break
             if ok:
                 completed.append(obj)
             else:
@@ -3234,6 +3240,7 @@ def main() -> int:
         if one_node():
             pass        # one node: every seat was checked (depth) and certified (ExecuteMate) right after its insert
         elif (not failed and completed and not args.dry_run and not cell_io._SAFETY_STOP
+                and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED
                 and getattr(args, 'observed_base', None) is not None):
             args.observed_base = reread_base(bname, args.observed_base, log_fh=log_fh)
             seated_all = [e_.get('object_name') for e_ in entries if e_.get('object_name') in completed]
