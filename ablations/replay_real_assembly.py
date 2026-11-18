@@ -1621,14 +1621,13 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     tr = tracked(obj) or (LAST_SEEN_XY.get(obj) and (*LAST_SEEN_XY[obj], 0.0))
     if not tr:
         say(f"  [depth-pick] {obj}: no last sighting to look above - markers as before"); return None
-    ok = False
-    cur = (snapshot_robot_state().get('tcp') or {}).get('xyz')
-    if cur and np.hypot(cur[0] - tr[0], cur[1] - tr[1]) < 0.005 and abs(cur[2] - DEPTH_VIEW_ZS[0]) < 0.005:
-        ok = True             # the part view just put the camera here (same pose: a 3.7 s move + settle saved)
-    for vz in ([] if ok else DEPTH_VIEW_ZS):
+    ok = False                # (the camera-aimed view always moves; the old "flange already over the part" shortcut assumed
+                              # a flange-above view and would now skip the aim)
+    for vz in DEPTH_VIEW_ZS:
         r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                             f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{vz:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
-                            '--min-z', '0.15'], label=f'depth-pick view above {obj} at {vz:.2f} m', timeout_s=90,
+                            '--min-z', '0.15', '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
+                           label=f'depth-pick view above {obj} at {vz:.2f} m', timeout_s=90,
                            log_fh=log_fh)
         if r.get('result') != 'failure':
             ok = True; break
@@ -1642,7 +1641,8 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
                           label='home (turn top-down for the view)', timeout_s=60, log_fh=log_fh).get('result') != 'failure':
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
                                 f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{DEPTH_VIEW_ZS[0]:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
-                                '--min-z', '0.15'], label=f'depth-pick view above {obj} at {DEPTH_VIEW_ZS[0]:.2f} m (from home)',
+                                '--min-z', '0.15', '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
+                               label=f'depth-pick view above {obj} at {DEPTH_VIEW_ZS[0]:.2f} m (from home)',
                                timeout_s=90, log_fh=log_fh)
             ok = r.get('result') != 'failure'
     if not ok:
@@ -1657,8 +1657,9 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
             seed = None
             if cur:
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                    f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{PART_VIEW_Z_LOW_LIGHT:.4f}", '--quat', '0.0', '1.0',
-                                    '0.0', '0.0', '--min-z', '0.15'], label=f'depth-pick seed view above {obj} (low light)',
+                                    f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{PART_VIEW_Z_LOW_LIGHT:.4f}", '--quat', '0.0', '1.0',
+                                    '0.0', '0.0', '--min-z', '0.15', '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
+                                   label=f'depth-pick seed view above {obj} (low light)',
                                    timeout_s=60, log_fh=log_fh)
                 S_ = (observe_many([obj], 8.0, n_samples=8).get(obj) or []) if r.get('result') != 'failure' else []
                 if S_:
@@ -1690,8 +1691,9 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
             r = {'result': 'success'}
             if abs(alt - cur[2]) > 0.02:
                 r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                    f"{cur[0]:.4f}", f"{cur[1]:.4f}", f"{alt:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
-                                    '--min-z', '0.15'], label=f'depth-pick re-measure above {obj} at {alt:.2f} m',
+                                    f"{tr[0]:.4f}", f"{tr[1]:.4f}", f"{alt:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                    '--min-z', '0.15', '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
+                                   label=f'depth-pick re-measure above {obj} at {alt:.2f} m',
                                    timeout_s=60, log_fh=log_fh)
             else:
                 alt = cur[2]

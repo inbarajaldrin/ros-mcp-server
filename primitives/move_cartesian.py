@@ -98,7 +98,17 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
         Rt = R.from_euler('xyz', [180.0, 0.0, yaw], degrees=True).as_matrix()
     if look is not None:
         from primitives.scan_workspace import aim_camera, localizer_cam_X
-        target = aim_camera((target, Rt, ''), look, localizer_cam_X())[0]
+        X = localizer_cam_X()
+        view = np.array(target)
+        target = aim_camera((view, Rt, ''), look, X)[0]
+        if np.hypot(target[0], target[1]) < min_radius:
+            # a point near the robot: the camera on the other side of the tool (wrist turned 180 deg about world z) looks
+            # back toward the base, which moves the flange outward instead of inward
+            Rz = R.from_euler('z', 180.0, degrees=True).as_matrix() @ Rt
+            t2 = aim_camera((view, Rz, ''), look, X)[0]
+            if np.hypot(t2[0], t2[1]) >= min_radius:
+                target, Rt = t2, Rz
+                out["wrist_turned_180"] = True
         out["target"] = list(map(float, target)); out["look_at"] = list(map(float, look))
         if target[2] < min_z:
             out["error"] = f"camera-aimed flange z {target[2]:.3f} below min_z {min_z:.3f}"; return out
