@@ -14,10 +14,13 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 - [x] 1.1 Lab decided: private `~/Documents/fmb-cell-lab` on the cell PC, Isaac on dual-a4500, delivery vs adapters (PLAN.md D1, D2)
 - [x] 1.0 `droidstack init` the lab (lab commit 74888ca, `~/Documents/fmb-cell-lab`); machine paths: owed with the dual dispatch setup
 - [ ] 1.2 Robot: `robots/ur5e_rg2` copied from prompt-to-assembly (P47-1) with its NOTICE; `droidstack cell check` passes
+  (copied + local `cell check` valid for all four tasks, lab b4ef879, re-run by the lead 11-18; LIVE check on dual owed: L3/L4)
 - [ ] 1.3 The v3.1 mount + D415 body added to the robot copy's collision and visual geometry (R14), and the D415 declared as a
   camera stream on tool0 at the CAD transform, so the sim renders what the real camera sees and planning keeps the mount off the table
+  (sim USD: saddles + D415 box + camera at the CAD transform, done; the planner's collision model is still the paper's, regeneration owed)
 - [ ] 1.4 Environment: robot base 0.080 m above the table top (R15), base1 placement and the cell's staging / clear regions
-  (`realcell_env/MEASURED_CELL.yaml`, `primitives/shared/cell_layout.yaml`)
+  (`realcell_env/MEASURED_CELL.yaml`, `primitives/shared/cell_layout.yaml`) (declared, base at 0.080 m checked by the lead; table size is
+  the paper's, a typed gap)
 - [ ] 1.5 FMB1 parts as assets; `pose` tasks: pick each part, place it at its pre-insertion pose (P47-2)
 - [x] 1.6 Told plan47 the FMB1 needs for the assembly pack's phase 2; recorded as acceptance input (PLAN.md P47-6)
 
