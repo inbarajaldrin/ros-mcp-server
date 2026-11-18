@@ -26,11 +26,15 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 
 ## P2 Prove the new camera mount in sim (R3)
 - [ ] 2.1 Rendered D415 views at the cell's view poses (home, part view, base view, clear area) match what the code expects;
+  (home rendered in Isaac 6.1 on a4500, fingertips within 3.4 px of the CAD camera, lab 66011a2; real-joint + calibrated-camera comparison running)
   view poses re-derived for the 30 degree tilt
 - [ ] 2.2 The localizer + depth CAD fits on rendered frames find the parts within the cell's bars (pick seed, base read)
 - [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
 
 ## P3 Back on the real cell (done = R13: 3 hands-off certified FMB1 cycles in a row, untipped reset, v3.1 calibrated)
-- [ ] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view
+- [x] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view (2026-11-18: lab
+  lab-notes/2026-11-18-real-home/real-d415-home.png; survey frames ~/Documents/calib_bags/v31_20261118_141729, _151830_spot2b)
 - [ ] 3.2 Hand-eye calibration for v3.1 from the base1 survey; written to `robot_config.yaml` with the old values kept
+  (solved 11-18: two ChArUco spots + base1, 123 frames, 0.95 px; held-out 0.73 px vs 9.0 px CAD; t (-0.8, 84.8, 92.7) mm;
+  lab lab-notes/2026-11-18-real-home/handeye-v31-final_nof.json. Writing it waits on the operator)
 - [ ] 3.3 View poses checked on real frames; one FMB1 part, then a full FMB1 run
