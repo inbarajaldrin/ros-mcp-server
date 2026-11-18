@@ -21,3 +21,8 @@ the evidence, and what DroidStack would need.
   reconciled against them but does not point at them. Onboarding a real cell should ask for the cell's own description packages
   and the driver's width <-> joint model before copying a robot record, so a lab's finger state can be driven from the real
   gripper's reading.
+- **L6** (2026-11-19) Our refusals L3/L4 (ROAD_PROBE_FAILED "system-mode probe not built yet", BOX_NO_RESOURCE_CLASS on 8192/16384 MiB)
+  were the command host's OWN stale engine (abbd0a57, platform 2648fe53, 2026-11-13): dev had built the system-mode Kit/render_warm/
+  ROS probes and measured the cardless sizes (1024 / 256 MiB) within two days. Nothing told us: `doctor`, `status` and the refusal
+  text all read as a platform gap. Needed: a refusal or doctor row that says when the engine is behind the fleet/dev ("probe built in
+  a52865ca; this engine is 2648fe53"), so a lab doesn't chase a gap that's already closed.
