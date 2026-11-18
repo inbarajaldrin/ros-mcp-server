@@ -34,6 +34,17 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R11 Approvals** (2026-11-18): "approvals yes as written": the standing approvals table below is in force.
 - **R12 WhatsApp via /text** (2026-11-18): "my whatsapp is already logged in mac use /text": post with
   `~/.devdroid/text/runtime/scripts/text.cjs send 120363415188889698@g.us` (Dimelab).
+- **R13 Bar** (2026-11-18 ~21:20Z): option A. Done = 3 hands-off certified FMB1 cycles in a row on the real cell from a normal
+  (untipped) reset, with the v3.1 mount calibrated. No cycle-time target; tipped starts and speed come after.
+- **R14 Camera mount in the robot model** (2026-11-18): "we also have to import our camnera mount cad into what we have in prompt to
+  asemly becuase it doesnt have that yet in the env so that the planning program written doesnt involve in the camera mount hiting
+  the table". The v3.1 saddle + tower and the D415 body join the robot's collision and visual geometry, so planning keeps them off
+  the table. Done in OUR lab's copy of `robots/ur5e_rg2` (P47-1: copy, don't change the shared record; R10: no request to plan47).
+  CAD source: robo-chain `.scratchpad/jobs/rg2-camera-mount/cad/` (camera_mount_v31_rg2.step, the DIME assembly STEP, the D415 STEP).
+- **R15 Elevated robot base** (2026-11-18): "we have to fix where the ur5e is mounted with extra height liek we already planned for
+  what we are doing ewith droidstack". The robot's base sits 0.080 m above the table top, as in the 10-23/10-26 elevated-bench work
+  (`compliant_insertion_studio/m4_dispatch/environments/dimelab_elevated/`, `realcell_env/MEASURED_CELL.yaml`
+  frames.base_link_above_table); the lab's environment declares it.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
