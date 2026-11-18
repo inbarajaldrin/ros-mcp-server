@@ -9,6 +9,8 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 - [x] 0.4 Heartbeat: session cron a3dd7e9e, hourly at :23 (expires after 7 days; re-create on resume); "Dimelab" WhatsApp group carries project posts
 - [x] 0.5 First worker running: w1-lab-cell, Codex thread 01a1f073-6860-7881-8b70-3939ccd5ee9b on the cell PC (2026-11-18)
 - [ ] 0.7 a4500 and rtx6000 prepared as DroidStack boxes (R21): w2-boxes, Codex thread 01a1f103-ad0d-7870-8754-0194075d4040 (2026-11-18)
+  (a4500 system-mode prepared 11-18 23:44Z, tx 00b2141e; Isaac/ROS dispatch waits on DroidStack's system-mode probes, plan47's lane;
+  rtx6000 on hold: 34 GiB free, no Isaac, borrower's work on the card)
 - [x] 0.6 pose6d notes written (R2): `docs/POSE6D_NOTES.md`
 
 ## P1 The cell in DroidStack (R1, R3)
@@ -32,6 +34,8 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   view poses re-derived for the 30 degree tilt
 - [ ] 2.2 The localizer + depth CAD fits on rendered frames find the parts within the cell's bars (pick seed, base read)
 - [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
+- [ ] 2.4 R22: FMB1 assembled end to end in the twin by the cell's code (regular insert), rendered for the operator; then with
+  FOV-gated poses (paper2). w3-sim-assembly, Codex 01a1f10e-baa8-7ea3-8a39-07fec69100a7, on a4500 (2026-11-19)
 
 ## P3 Back on the real cell (done = R13: 3 hands-off certified FMB1 cycles in a row, untipped reset, v3.1 calibrated)
 - [x] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view (2026-11-18: lab
