@@ -33,6 +33,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   - P47-6 (2026-11-18): the FMB1 phase-2 needs are recorded as the assembly pack's acceptance input. Split: the force-limited
     search (<= 5 N, lateral <= 6 N, rotation locked) is OUR planner's behaviour; the pack provides the `assembled` kind, its judge
     and the force limits as declared bounds the planner reads. plan47 says when phase 2 has a shape to review.
+- **plan29/co-coordinator facts** (2026-11-18, ref 656953):
+  - P29-1 SAFETY: DDS isolation is a safety control. Every Isaac or ROS 2 run of ours on dual goes through DroidStack dispatch
+    with its DDS island, NEVER a bare `ros2 launch` on a shared network, so no simulated /joint_states or trajectory can reach the
+    real robot's domain beside the cell PC. A step that needs the cell PC and dual on one DDS domain = message plan29 first.
+  - P29-2: dual's / is tight (~106 GiB free vs the 90 GiB floor; ledger /var/tmp/.pa-disk-headroom.lock.d). Bulk data stays on
+    the cell PC or a USB drive, never dual's /. a4500 stays off for us.
 - Parked: pose6d integration (R2); FMB3 runs; the tipping-start (phase 2) cycles; the M4 prompt2assembly planner
   (`compliant_insertion_studio/m4_dispatch/`); the M3b RL driver.
 
