@@ -8,6 +8,7 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 - [x] 0.3 Neighbours told: plan47 (answered, P47-1..6), plan29/co-coordinator (told 2026-11-18), robosort (answered; pattern in PLAN.md facts)
 - [x] 0.4 Heartbeat: session cron a3dd7e9e, hourly at :23 (expires after 7 days; re-create on resume); "Dimelab" WhatsApp group carries project posts
 - [x] 0.5 First worker running: w1-lab-cell, Codex thread 01a1f073-6860-7881-8b70-3939ccd5ee9b on the cell PC (2026-11-18)
+- [ ] 0.7 a4500 and rtx6000 prepared as DroidStack boxes (R21): w2-boxes, Codex thread 01a1f103-ad0d-7870-8754-0194075d4040 (2026-11-18)
 - [x] 0.6 pose6d notes written (R2): `docs/POSE6D_NOTES.md`
 
 ## P1 The cell in DroidStack (R1, R3)
