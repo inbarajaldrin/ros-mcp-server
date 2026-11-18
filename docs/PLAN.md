@@ -27,6 +27,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   - P47-4: a sim pass is not hardware qualification; only a qualified real binding (conformance checker on the real robot) plus a
     sim-proven delivery goes to hardware, and that decision is the operator's. Ask plan47 before changing any robot record shared
     with the paper workspace.
+  - P47-5 (2026-11-18): card use on dual = RoboSort's interim rule: right before use check `nvidia-smi --query-compute-apps`,
+    `docker ps` and the card holds; take a hold for the run; never touch another session's process; message plan47 only on
+    trouble; switch to the DroidStack claim tool when plan47 says it is live. The lab staying local with no remote is confirmed.
+  - P47-6 (2026-11-18): the FMB1 phase-2 needs are recorded as the assembly pack's acceptance input. Split: the force-limited
+    search (<= 5 N, lateral <= 6 N, rotation locked) is OUR planner's behaviour; the pack provides the `assembled` kind, its judge
+    and the force limits as declared bounds the planner reads. plan47 says when phase 2 has a shape to review.
 - Parked: pose6d integration (R2); FMB3 runs; the tipping-start (phase 2) cycles; the M4 prompt2assembly planner
   (`compliant_insertion_studio/m4_dispatch/`); the M3b RL driver.
 
