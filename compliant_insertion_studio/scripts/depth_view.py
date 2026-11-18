@@ -25,6 +25,7 @@ from sensor_msgs.msg import CameraInfo, Image
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO)); sys.path.insert(0, str(REPO / 'ablations'))
 from seat_check import _load_x_cam   # noqa: E402
+from primitives.shared.config import depth_to_m   # noqa: E402
 
 TABLE_Z = -0.0625 - 0.0175            # world z of the table (base origin -62.5 mm, base half-height 17.5 mm)
 H_MAX_MM = 80.0                       # colour scale 0..80 mm above the table
@@ -46,7 +47,7 @@ def main():
         if time.time() - last < PERIOD_S or not all(k in st for k in 'dit'):
             continue
         last = time.time()
-        d = br.imgmsg_to_cv2(st['d'], 'passthrough').astype(np.float32)[::4, ::4] / 1000.0
+        d = depth_to_m(br.imgmsg_to_cv2(st['d'], 'passthrough')[::4, ::4]).astype(np.float32)
         K = np.array(st['i'].k).reshape(3, 3).copy(); K[:2] /= 4.0
         p, o = st['t'].pose.position, st['t'].pose.orientation
         Tw = np.eye(4); Tw[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); Tw[:3, 3] = [p.x, p.y, p.z]

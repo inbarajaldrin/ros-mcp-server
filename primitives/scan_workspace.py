@@ -495,6 +495,11 @@ class Survey(Node):
         if image_topic:
             from sensor_msgs.msg import Image
             self.create_subscription(Image, image_topic, lambda m: setattr(self, 'image', (time.time(), m)), 2)
+        self.depth = None
+        depth_topic = os.environ.get('SURVEY_DEPTH_TOPIC')        # e.g. /camera/camera/aligned_depth_to_color/image_raw
+        if image_topic and depth_topic:
+            from sensor_msgs.msg import Image
+            self.create_subscription(Image, depth_topic, lambda m: setattr(self, 'depth', (time.time(), m)), 2)
 
     def _joint_cb(self, msg):
         d = dict(zip(msg.name, msg.position))
@@ -671,7 +676,12 @@ def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=Fals
                 if image_dir and node.image is not None and node.tcp is not None and node.image[0] > t_settled + 0.4:
                     fn = f"{image_dir}/{i:02d}_{label}_{k}.png"
                     cv2.imwrite(fn, bridge.imgmsg_to_cv2(node.image[1], 'bgr8'))
-                    frames.append({"file": fn, "tcp": node.tcp[1], "joints": node.joints.tolist()})
+                    fr = {"file": fn, "tcp": node.tcp[1], "joints": node.joints.tolist()}
+                    if node.depth is not None and node.depth[0] > t_settled + 0.4:   # aligned depth (uint16 mm), same rule
+                        fd = fn[:-4] + "_depth.png"
+                        cv2.imwrite(fd, bridge.imgmsg_to_cv2(node.depth[1]))
+                        fr["depth_file"] = fd
+                    frames.append(fr)
             rec, node.rec = node.rec, None
             tgt = np.array(rec['objects'].get(target_name, []))
             poses.append({"label": label, "tilt_deg": tilt, "still": still, "joints": node.joints.tolist(), "frames": frames,

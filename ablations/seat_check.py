@@ -112,7 +112,8 @@ def capture_world(n=10, timeout=6.0):
     if len(frames) < 3 or 'i' not in st or 't' not in st:
         return None
     br = CvBridge()
-    d = np.median(np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(float) for m in frames]), 0) / 1000.0
+    from primitives.shared.config import depth_to_m
+    d = depth_to_m(np.median(np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(float) for m in frames]), 0))
     K = np.array(st['i'].k).reshape(3, 3)
     p, o = st['t'].pose.position, st['t'].pose.orientation
     Tw = np.eye(4); Tw[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); Tw[:3, 3] = [p.x, p.y, p.z]

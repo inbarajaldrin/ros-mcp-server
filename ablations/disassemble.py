@@ -44,7 +44,7 @@ X_CAM = _load_x_cam()
 from primitives.shared.config import CLEAR_AREA_XY as STAGING_XY   # the clear area (FMB_CLEAR_AREA overrides)
 TABLE_TOL = 0.006                # "flat" = within this of the table plane (paper board counts)
 FINGER_CLEAR = 0.03              # clear gap between part outlines: room for the opened fingers (spacing_check needs 25 mm)
-from primitives.shared.config import CAD_DATA_DIR   # noqa: E402
+from primitives.shared.config import CAD_DATA_DIR, depth_to_m   # noqa: E402
 ANN = str(CAD_DATA_DIR / "aruco" / "{}_aruco.json")
 
 
@@ -182,7 +182,7 @@ def depth_free_spots(extents, exclude_xy):
     D = np.stack([br.imgmsg_to_cv2(m, 'passthrough').astype(float) for m in st['d'][-N_DEPTH:]])
     D[D == 0] = np.nan                                         # no-return pixels don't vote
     with np.errstate(all='ignore'):
-        d = np.nan_to_num(np.nanmedian(D, 0), nan=0.0) / 1000.0
+        d = depth_to_m(np.nan_to_num(np.nanmedian(D, 0), nan=0.0))
     K = np.array(st['i'].k).reshape(3, 3); p, o = st['t'].pose.position, st['t'].pose.orientation
     n.destroy_node(); rclpy.shutdown()
     T = np.eye(4); T[:3, :3] = R.from_quat([o.x, o.y, o.z, o.w]).as_matrix(); T[:3, 3] = [p.x, p.y, p.z]

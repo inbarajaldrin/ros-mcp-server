@@ -31,6 +31,27 @@ LOCALIZER_CONFIG = str(Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Deskt
                        / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
 
 
+def _depth_correction():
+    """(scale, offset_m) of the D415's depth against the true distance, measured on the ChArUco sheet (raw = scale * true +
+    offset): robot_config.yaml depth_scale / depth_offset_m, (1, 0) when absent."""
+    try:
+        import yaml
+        c = yaml.safe_load(open(LOCALIZER_CONFIG)) or {}
+        return float(c.get('depth_scale', 1.0)), float(c.get('depth_offset_m', 0.0))
+    except Exception:
+        return 1.0, 0.0
+
+
+DEPTH_SCALE, DEPTH_OFFSET_M = _depth_correction()
+
+
+def depth_to_m(raw_mm):
+    """Aligned D415 depth (uint16 mm, 0 = no return) -> corrected metres, 0 kept as 0 (no return). Every depth reader of the
+    cell goes through this, so one measured correction applies everywhere."""
+    d = np.asarray(raw_mm, dtype=float) / 1000.0
+    return np.where(d > 0, (d - DEPTH_OFFSET_M) / DEPTH_SCALE, 0.0)
+
+
 def get_symmetry_dir() -> str:
     return str(CAD_DATA_DIR / 'symmetry')
 

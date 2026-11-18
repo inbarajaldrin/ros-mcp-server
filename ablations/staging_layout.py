@@ -224,7 +224,8 @@ def depth_raised(say=print):
     n.destroy_node(); rclpy.shutdown()
     if len(st['d']) < 10 or 'i' not in st or 't' not in st:
         say("no depth / pose for the staging look"); return None, None
-    D = np.median(np.stack([np.frombuffer(m.data, np.uint16).reshape(m.height, m.width) for m in st['d'][-10:]]), 0) / 1000.0
+    from primitives.shared.config import depth_to_m
+    D = depth_to_m(np.median(np.stack([np.frombuffer(m.data, np.uint16).reshape(m.height, m.width) for m in st['d'][-10:]]), 0))
     K = np.array(st['i'].k).reshape(3, 3); p, o = st['t'].pose.position, st['t'].pose.orientation
     ee = R.from_quat([o.x, o.y, o.z, o.w])
     from seat_check import X_CAM            # the localizer config's mount (single source, 2026-10-20)
