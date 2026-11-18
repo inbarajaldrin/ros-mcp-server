@@ -1,4 +1,4 @@
-from ablations.replay_sim_assembly import _command_for_step, _result_from_output
+from ablations.replay_sim_assembly import _command_for_step, _result_from_output, _staging_view_command
 
 
 def test_commands_preserve_recorded_sim_calls():
@@ -24,3 +24,11 @@ def test_last_result_envelope_wins():
     text = "__RESULT_JSON__\n{\"result\":\"failure\"}\n__END_RESULT_JSON__\n" \
            "__RESULT_JSON__\n{\"result\":\"success\"}\n__END_RESULT_JSON__\n"
     assert _result_from_output(text) == {"result": "success"}
+
+
+def test_fov_view_uses_production_camera_aim():
+    cmd, timeout = _staging_view_command()
+    assert cmd[3] == "primitives.move_cartesian"
+    assert "--look-at-z" in cmd
+    assert "--quat" in cmd
+    assert timeout == 120

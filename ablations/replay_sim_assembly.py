@@ -50,6 +50,16 @@ def _command_for_step(step: str) -> tuple[list[str], int]:
     raise ValueError(f"unsupported replay tool: {name}")
 
 
+def _staging_view_command() -> tuple[list[str], int]:
+    """The production replay's camera-aimed view of the whole staging region."""
+    from ablations.staging_layout import STAGING_VIEW, TOP_DOWN_Q
+    from primitives.shared.config import TABLE_HEIGHT
+    return ([sys.executable, "-u", "-m", "primitives.move_cartesian", "--mode", "real",
+             "--xyz", *(f"{v:.4f}" for v in STAGING_VIEW),
+             "--quat", *(str(v) for v in TOP_DOWN_Q),
+             "--look-at-z", f"{TABLE_HEIGHT:.4f}"], 120)
+
+
 def _result_from_output(text: str) -> dict:
     begin, end = "__RESULT_JSON__", "__END_RESULT_JSON__"
     if begin not in text or end not in text:
@@ -85,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--assembly-json", required=True)
     ap.add_argument("--only", default=None)
     ap.add_argument("--no-startup", action="store_true")
+    ap.add_argument("--fov-gated", action="store_true",
+                    help="fly the production camera-aimed staging view before each part's first pick")
     ap.add_argument("--log-dir", default="ablations/logs/sim-replay")
     args = ap.parse_args(argv)
 
@@ -114,12 +126,17 @@ def main(argv: list[str] | None = None) -> int:
         ])
     for row in entries:
         obj = row["object_name"]
-        steps.extend((obj, step) for step in row.get("tool_sequence", []))
+        first_grasp = True
+        for step in row.get("tool_sequence", []):
+            if args.fov_gated and first_grasp and "__move_to_grasp(" in step:
+                steps.append((obj, "__camera_staging_view__"))
+                first_grasp = False
+            steps.append((obj, step))
 
     completed: list[str] = []
     with transcript_path.open("w", buffering=1) as transcript, receipt_path.open("w", buffering=1) as receipt:
         for index, (obj, step) in enumerate(steps, 1):
-            cmd, timeout = _command_for_step(step)
+            cmd, timeout = _staging_view_command() if step == "__camera_staging_view__" else _command_for_step(step)
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             transcript.write(f"\n{'=' * 72}\nSTEP {index}/{len(steps)} [{obj}] {step}\n{'=' * 72}\n")
             rc, output, result = _run(cmd, timeout, env)
