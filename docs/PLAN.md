@@ -64,6 +64,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R20 Real pick/place tests now** (2026-11-18 ~23:30Z): "im assuming trying to grasp and move home or place it down doesnt have
   to wait for the new program to assemble". The cell's existing, proven code (primitives, replay) runs real pick / place / home
   tests on the v3.1 mount now; R3's sim-first gate applies to the NEW planner delivery. Each motion run still gets his go.
+- **R21 Prepare a4500 and rtx6000 as DroidStack boxes** (2026-11-18 ~23:55Z): "both a4500 and rtx600 has to have that setup that
+  is the whole ponit". Both get `droidstack boxes prepare` (engine + supervisor under aaugus11, the --system-service root step
+  where Ubuntu 24.04 needs it), so live checks / collision / renders run through DroidStack there too. The box rules hold:
+  a4500's local user and rtx6000's borrower win; check the card right before; disk floors; never touch others' processes.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
