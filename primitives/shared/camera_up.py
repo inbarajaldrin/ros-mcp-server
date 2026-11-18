@@ -1,7 +1,8 @@
 """Keep the gripper camera away from the table when reorienting a held part.
 
-The D415 sits on the tool's -Y side (aruco_camera_localizer robot_config.yaml:
-cam_offset_position [-0.015, -0.037, 0.07] in the EE frame). When a part is laid on its
+The D415 sits on one side of the tool (the old mount: -Y, cam_offset_position [-0.015, -0.037, 0.07]; the v3.1 mount since
+2026-11-10: +Y, [-0.0008, 0.0848, 0.0927]); CAMERA_SIDE_TOOL is read from the localizer's robot_config.yaml so a mount change
+flips it with the calibration. When a part is laid on its
 side the gripper is horizontal, and the two wrist rolls that give the same object
 orientation differ by 180 deg about the tool axis: one has the camera above the gripper,
 the other below it, facing the table.
@@ -29,7 +30,21 @@ from primitives.shared.fold_symmetry import equivalent_orientations, load_symmet
 from utils.data_path_finder import (find_assembly_json_by_base_name, get_assembly_data_dir,
                                     get_symmetry_dir)
 
-CAMERA_SIDE_TOOL = np.array([0.0, -1.0, 0.0])
+def _camera_side_tool():
+    """Unit vector in the tool's XY plane toward the camera, from the hand-eye mount in the localizer config."""
+    import yaml
+    from primitives.shared.config import LOCALIZER_CONFIG
+    try:
+        t = np.asarray(yaml.safe_load(open(LOCALIZER_CONFIG))['cam_offset_position'], dtype=float)
+        v = np.array([t[0], t[1], 0.0])
+        if np.linalg.norm(v) > 0.01:
+            return v / np.linalg.norm(v)
+    except Exception:
+        pass
+    raise RuntimeError(f"camera_up: no camera side in {LOCALIZER_CONFIG} (cam_offset_position)")
+
+
+CAMERA_SIDE_TOOL = _camera_side_tool()
 
 
 def camera_z(R_EE) -> float:

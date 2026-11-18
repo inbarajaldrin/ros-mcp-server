@@ -61,6 +61,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   Relaxes R10 for launch blockers and DroidStack issues: message plan47 (claude 13eddc on dual), or fork DroidStack and fix it,
   handing the fix back through plan47. The planner is proven in Isaac Sim, built from the code we have (this repo's planner,
   the paper's Isaac twin), not from scratch.
+- **R20 Real pick/place tests now** (2026-11-18 ~23:30Z): "im assuming trying to grasp and move home or place it down doesnt have
+  to wait for the new program to assemble". The cell's existing, proven code (primitives, replay) runs real pick / place / home
+  tests on the v3.1 mount now; R3's sim-first gate applies to the NEW planner delivery. Each motion run still gets his go.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
