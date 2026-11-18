@@ -52,6 +52,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   paper; the "never public" part of P47-1 for them no longer binds our work. Keep NOTICE-OnRobot.md beside them wherever they go.
   The cell's own source for the RG2 is the lab's DIME-LAB packages (onrobot_rg2_description, onrobot_quick_changer_description,
   onrobot_rg2_control: the CAD meshes, the 4-bar arc width <-> joint model); the paper's ur5e_rg2 was reconciled against them.
+- **R18 All boxes** (2026-11-18 ~22:00Z): "mac, a4500, dual-a4500, rtx6000 all of them are for use". Supersedes P29-2's "a4500 stays
+  off for us". The box rules still apply on each (check the card right before, a hold where a hold tool exists, never touch another
+  user's work: a4500's local user and rtx6000's borrower win). P29-1 (dual) is unchanged: on dual, Isaac/ROS only through DroidStack.
+  Off dual, an Isaac run of ours loads no ROS bridge and publishes no DDS, so nothing simulated can reach the cell's domain.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
