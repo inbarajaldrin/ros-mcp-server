@@ -165,7 +165,7 @@ def main():
         if not r['ok']:
             return 1
         go(['primitives.move_cartesian', '--mode', 'real', '--xyz', *[f"{v:.4f}" for v in STAGING_VIEW],
-            '--quat', *map(str, TOP_DOWN_Q)], 'staging view')
+            '--quat', *map(str, TOP_DOWN_Q), '--look-at-z', '-0.0805'], 'staging view')
         time.sleep(1.5)
         seen = observe_parts([a.part])
         flat = a.part in seen and is_flat(seen[a.part][1])

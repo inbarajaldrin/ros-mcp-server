@@ -63,14 +63,19 @@ class Mover(Node):
 
 
 def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, min_z=SAFE_HEIGHT - 0.10,
-              max_joint_step=1.5, max_wrist3_step=3.2, min_radius=0.25, duration=None, on_sample=None):
+              max_joint_step=1.5, max_wrist3_step=3.2, min_radius=0.25, duration=None, on_sample=None, look_at_z=None):
     """One straight Cartesian move on a live Mover node (the CLI's whole behaviour, 2026-10-22: callers that make many
     small moves - the touch insert's probes - keep one node instead of a process, rclpy init and joint wait per move).
     orient: ('quat', [qx, qy, qz, qw]) | ('keep', None) | ('yaw', deg or None). duration: exact seconds, for guarded
     probe moves of a few mm (otherwise compute_duration's floor, >= min_duration). on_sample(t, dF, F, q): called with
     each guarded-loop sample (s since the goal, |F - baseline|, F, joints) - the force record of a tap or press.
+    look_at_z: xyz is a VIEW request - "look at (x, y, look_at_z) from flange height z with this orientation". The flange
+    moves so the CAMERA's optical axis (the localizer config's hand-eye) passes through that point at the distance the
+    flange-above view had: on an off-axis camera (the v3.1 mount: +Y side, tilted 30 deg) a flange-above view puts the
+    table point ~0.2 m from where the camera looks.
     Returns the result dict."""
     target = np.array(xyz, dtype=float)
+    look = None if look_at_z is None else np.array([xyz[0], xyz[1], look_at_z], dtype=float)
     out = {"result": "failure", "mode": "real", "movement_type": "move_cartesian", "target": list(map(float, xyz))}
     if target[2] < min_z:
         out["error"] = f"target z {target[2]:.3f} below min_z {min_z:.3f}"; return out
@@ -91,6 +96,14 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
     else:
         yaw = val if val is not None else R.from_matrix(T0[:3, :3]).as_euler('xyz', degrees=True)[2]
         Rt = R.from_euler('xyz', [180.0, 0.0, yaw], degrees=True).as_matrix()
+    if look is not None:
+        from primitives.scan_workspace import aim_camera, localizer_cam_X
+        target = aim_camera((target, Rt, ''), look, localizer_cam_X())[0]
+        out["target"] = list(map(float, target)); out["look_at"] = list(map(float, look))
+        if target[2] < min_z:
+            out["error"] = f"camera-aimed flange z {target[2]:.3f} below min_z {min_z:.3f}"; return out
+        if np.hypot(target[0], target[1]) < min_radius:
+            out["error"] = f"camera-aimed flange within {min_radius} m of the base axis"; return out
     # sample the straight line for the near-base guard
     for s in np.linspace(0, 1, 21):
         p = T0[:3, 3] + s * (target - T0[:3, 3])
@@ -182,6 +195,9 @@ def main():
     ap.add_argument('--keep-orientation', action='store_true', help='keep the current flange orientation')
     ap.add_argument('--quat', type=float, nargs=4, default=None, help='flange orientation qx qy qz qw')
     ap.add_argument('--min-z', type=float, default=SAFE_HEIGHT - 0.10, help='refuse targets below this flange z')
+    ap.add_argument('--look-at-z', type=float, default=None,
+                    help='view move: --xyz x y = the point to look at (at this z), --xyz z = the flange height; the flange '
+                         'shifts so the wrist camera (not the tool axis) points there')
     ap.add_argument('--max-joint-step', type=float, default=1.5,
                     help='refuse if any of the five arm joints (shoulder..wrist_2) would move more than this (rad)')
     ap.add_argument('--max-wrist3-step', type=float, default=3.2,
@@ -213,7 +229,7 @@ def main():
                 result({'result': 'failure', 'error': '--duration is for moves of <= 10 mm'}); return 1
         out = plan_move(n, a.xyz, orient, max_force=a.max_force, min_duration=a.min_duration, min_z=a.min_z,
                         max_joint_step=a.max_joint_step, max_wrist3_step=a.max_wrist3_step, min_radius=a.min_radius,
-                        duration=a.duration)
+                        duration=a.duration, look_at_z=a.look_at_z)
         result(out); return 0 if out.get('result') == 'success' else 1
     finally:
         n.destroy_node(); rclpy.shutdown()

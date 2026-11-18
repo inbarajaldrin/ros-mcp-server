@@ -201,7 +201,7 @@ def look(say=print):
     import subprocess, os
     env = dict(os.environ, PYTHONPATH=f"{REPO}:{os.environ.get('PYTHONPATH', '')}")
     r = subprocess.run([sys.executable, '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                        *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q)],
+                        *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q), '--look-at-z', '-0.0805'],
                        capture_output=True, text=True, timeout=90, env=env, cwd=str(REPO))
     if '"result": "success"' not in r.stdout:
         say("staging view move failed"); return None, None

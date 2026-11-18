@@ -460,7 +460,7 @@ def _staging_view(log_fh=None):
     height or above): where the generated-layout disassembly puts parts — home sees x <= ~0.42 only."""
     from staging_layout import STAGING_VIEW, TOP_DOWN_Q
     r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                        *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q)],
+                        *[f"{v:.4f}" for v in STAGING_VIEW], '--quat', *map(str, TOP_DOWN_Q), '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
                        label='staging view', timeout_s=90, log_fh=log_fh)
     if r.get('result') != 'failure':
         time.sleep(1.5)                   # let the localizer catch up after the move
@@ -470,6 +470,10 @@ def _staging_view(log_fh=None):
 
 LAST_SEEN_XY = {}                 # part -> (x, y) from its latest observation (derive step, view checks)
 PLACED_T = {}                     # part -> time it was last set down by the arm: older tracker sightings are stale
+# View moves aim the wrist CAMERA at the table point (move_cartesian --look-at-z), not the flange: the v3.1 mount (2026-11-10)
+# looks 30 deg off-axis from the tool's +Y side, so a flange-above view at 0.52-0.62 m looks ~0.2 m away (2026-11-18: u_brown
+# and base1 unseen from every view).
+TABLE_TOP_Z = -0.0805
 PART_VIEW_Z = 0.52                # flange height for a look straight above one part (RGB only; depth not needed)
 PART_VIEW_Z_LOW_LIGHT = 0.40      # in low light the markers need the closer view (2026-10-20)
 
@@ -708,7 +712,8 @@ def _part_view(obj, log_fh=None) -> bool:
         # come lower until one is reachable - the pick itself happens lower still
         for vz_ in [vz] + [z_ for z_ in PART_VIEW_Z_FALLBACKS if z_ < vz]:
             r = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{vz_:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0'],
+                                f"{xy[0]:.4f}", f"{xy[1]:.4f}", f"{vz_:.4f}", '--quat', '0.0', '1.0', '0.0', '0.0',
+                                '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
                                label=f'view above {obj} at {vz_:.2f} m', timeout_s=90, log_fh=log_fh)
             if r.get('result') != 'failure':
                 break
@@ -2970,7 +2975,7 @@ def main() -> int:
             print(msg, flush=True)
             if log_fh: log_fh.write(msg + "\n")
             r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                 f"{_bx:.4f}", f"{_by:.4f}", f"{_VZ:.2f}"],
+                                 f"{_bx:.4f}", f"{_by:.4f}", f"{_VZ:.2f}", '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
                                 label='base-view move', timeout_s=60, log_fh=log_fh)
             above = r_.get('result') == 'success'
             ob = None

@@ -15,9 +15,16 @@
 # Pick the layout with `active:` below or FMB_LAYOUT=<name> for one run; FMB_CLEAR_AREA="x,y" still moves
 # only the clear area. Add a layout instead of editing one that a past run used.
 
-active: fmb1_home_2026_10_21   # 10-23: every run sets FMB_LAYOUT=fmb1_home_2026_10_21; the default now matches
+active: fmb1_home_2026_11_18   # 11-18: fmb1_home_2026_10_21 with the clear area moved (u_orange left on the old one)
 
 layouts:
+  # 2026-11-18 first v3.1-mount pick tests: u_orange was set down on the old clear area (-0.320, -0.500) and stays there;
+  # the clear area moves to the empty patch the 10-20 FMB3 layout used (off the ChArUco sheet's near edge at survey spot 2).
+  fmb1_home_2026_11_18:
+    assembly_region: {center: [0.032, -0.450], half: [0.120, 0.120]}
+    clear_area: [-0.300, -0.270]
+    staging_region: {x: [0.19, 0.62], y: [-0.62, -0.25], view: [0.400, -0.450, 0.62]}
+    base_fixed: false
   # operator 2026-10-21 16:15: scene reset by hand - base1 empty near home (read (0.032, -0.450) from the
   # staging view), the four FMB1 parts lying in the staging region (u_brown 258/-446, u_orange 456/-496,
   # line_green 406/-341, yellow 568/-425 mm), FMB3 moved away (not part of this run)
