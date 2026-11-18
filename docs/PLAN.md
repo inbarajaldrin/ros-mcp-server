@@ -76,6 +76,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   in the digital twin with a regular (non-compliant) insert, rendered and shown in the Dimelab group. Compliance in sim is queued
   for later. On the real cell the insert stays compliant, through the drive-mate / execute_mate seam. Wanted ("would be nice"):
   paper2's idea - ground-truth poses only for what the camera can see, so the planner works as it must on the real cell.
+- **plan47, measured** (2026-11-19 ~01:20Z): dual's LIVE engine is 989cff8d9172 (platform 3e6b494c, prepared 11-17), both cards kit +
+  render_warm OK; our refusals named our old abbd0a57. So the cell PC installs 3e6b494c (not dev f1748570), re-submits to dual today,
+  and re-prepares a4500 from 989cff8d9172. Not on dual yet: ROS (no --ros-distro) and card-scoped image steps (no --probe-image) -
+  tell plan47 if our road needs them; they go into dual's next re-prepare.
 - **plan47 correction** (2026-11-19 ~01:00Z): the system-mode Kit/render_warm/ROS probes ARE built on DroidStack dev (a52865ca,
   1a321bf6, dbc2274e, 11-13..15); our engine abbd0a57 (platform 2648fe53, 11-13) predates them, and its cardless sizes are unmeasured
   bounds (dev: collision model 1024 MiB, isaac-python:usd 256 MiB). Fix = upgrade the cell PC to dev (platform f1748570, engine
