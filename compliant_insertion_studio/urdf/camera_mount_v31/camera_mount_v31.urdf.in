@@ -1,11 +1,18 @@
 <?xml version="1.0"?>
-<!-- Camera mount v3.1 (since 2026-11-10) + Intel RealSense D415, carried by the RG2. Root = rg2_base_link (the RG2
-     description's base; tool0 -> rg2_base_link comes from the driver's static transform). Meshes are in rg2_base_link,
+<!-- Camera mount v3.1 (since 2026-11-10) + Intel RealSense D415, carried by the RG2. Root = tool0. The meshes are in the
+     ROBOT COMPOSITE's rg2_base_link (prompt-to-assembly robots/ur5e_rg2: tool0 -> quick_changer_link rpy (0,0,-pi/2) ->
+     rg2_base_link xyz (0,0,0.0181) rpy (0,-pi/2,0)), named rg2_base_composite here: the cell's own RG2 description also
+     has an rg2_base_link, hung off tool0 at rpy (0,0,pi) with no offset (ur5e_with_rg2.launch.py), a different frame. Meshes are in that rg2 frame,
      millimetres (assets/cell/camera_mount_v31/README.md). @ASSETS@ is replaced with that folder by launch_rviz_demo.sh.
      d415_color_optical_v31 = the CAD colour optical frame (robo-chain TF-FOR-AGENT.md); it is the design pose, not a
      calibration: the localizer's robot_config.yaml holds what the cell uses. -->
 <robot name="camera_mount_v31">
-  <link name="rg2_base_link"/>
+  <link name="tool0"/>
+  <link name="rg2_base_composite"/>
+  <joint name="tool0_to_rg2_base_composite" type="fixed">
+    <parent link="tool0"/><child link="rg2_base_composite"/>
+    <origin xyz="0.000000 0.000000 0.018100" rpy="-1.570796 -1.570796 0.000000"/>
+  </joint>
   <link name="camera_mount_v31">
     <visual>
       <geometry><mesh filename="file://@ASSETS@/V31_upper_saddle_camera_tower_assembly_coordinates.stl" scale="0.001 0.001 0.001"/></geometry>
@@ -24,13 +31,13 @@
   </link>
   <link name="d415_color_optical_v31"/>
   <joint name="rg2_to_camera_mount_v31" type="fixed">
-    <parent link="rg2_base_link"/><child link="camera_mount_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="rg2_base_composite"/><child link="camera_mount_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
   <joint name="rg2_to_d415_body_v31" type="fixed">
-    <parent link="rg2_base_link"/><child link="d415_body_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="rg2_base_composite"/><child link="d415_body_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
   <joint name="rg2_to_d415_color_optical_v31" type="fixed">
-    <parent link="rg2_base_link"/><child link="d415_color_optical_v31"/>
+    <parent link="rg2_base_composite"/><child link="d415_color_optical_v31"/>
     <origin xyz="0.065816 0 0.08891" rpy="2.094395 0 1.570796"/>
   </joint>
 </robot>

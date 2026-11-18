@@ -12,7 +12,7 @@
 #   ... --depth          a depth panel under the camera: /depth_view (height above the table in colour,
 #                        compliant_insertion_studio/scripts/depth_view.py - started here if it is not running)
 #
-# Left half: UR5e + RG2 models from the live driver, plus /grasp_points_real.
+# Left half: the UR5e from the live driver, the tool (quick changer + RG2 + v3.1 mount + D415), /grasp_points_real.
 # Right half: the D415 image (marker detections drawn by aruco_camera_localizer).
 # No Displays/Views panels — reopen one from RViz's Panels menu if needed.
 #
@@ -64,17 +64,25 @@ if pgrep -f "${R} -d .*fmb1_demo" >/dev/null 2>&1; then
 fi
 
 echo "[rviz_demo] pre-flight"
-# The v3.1 camera mount + D415 (2026-11-10) as a third robot model hung off rg2_base_link, published once by its own
-# robot_state_publisher (namespace camera_mount); the RG2 description does not carry them.
-if ! timeout 8 ros2 topic list 2>/dev/null | grep -qx /camera_mount/robot_description; then
-    sed "s#@ASSETS@#$REPO/assets/cell/camera_mount_v31#g" "$REPO/compliant_insertion_studio/urdf/camera_mount_v31/camera_mount_v31.urdf.in" \
-        > "$RUN_DIR/camera_mount_v31.urdf"
-    nohup ros2 run robot_state_publisher robot_state_publisher --ros-args -r __ns:=/camera_mount \
-        -p robot_description:="$(cat "$RUN_DIR/camera_mount_v31.urdf")" > "$RUN_DIR/camera_mount_rsp.log" 2>&1 &
+# What the arm carries, drawn as one model on tool0 (namespace tool): the robot composite's quick changer + RG2 (the
+# fuzzydroid demo's fmb1_ros_description; OnRobot meshes stay local) and the v3.1 camera mount + D415 (2026-11-10), all
+# on the composite's rg2_base_link — the frame the mount CAD is in. The driver's own /rg2 model sits at a different
+# rg2_base_link (tool0 rpy 0 0 pi), so the mount can't hang off it. make_tool_urdf.py writes it; without the local RG2
+# description, the mount alone (urdf/camera_mount_v31).
+if ! timeout 8 ros2 topic list 2>/dev/null | grep -qx /tool/robot_description; then
+    python3 "$REPO/compliant_insertion_studio/scripts/make_tool_urdf.py" "$RUN_DIR/cell_tool_v31.urdf" \
+        || { warn "no local RG2 description (FMB_RG2_DESCRIPTION) — drawing the camera mount without the gripper"
+             sed "s#@ASSETS@#$REPO/assets/cell/camera_mount_v31#g" \
+                 "$REPO/compliant_insertion_studio/urdf/camera_mount_v31/camera_mount_v31.urdf.in" > "$RUN_DIR/cell_tool_v31.urdf"; }
+    # the URDF goes in a params file: passed with -p it breaks rcl's argument parser (arguments.c)
+    python3 -c 'import sys, yaml; print(yaml.safe_dump({"/tool/robot_state_publisher": {"ros__parameters": {"robot_description": open(sys.argv[1]).read()}}}))' \
+        "$RUN_DIR/cell_tool_v31.urdf" > "$RUN_DIR/tool_rsp.yaml"
+    nohup ros2 run robot_state_publisher robot_state_publisher --ros-args -r __ns:=/tool \
+        --params-file "$RUN_DIR/tool_rsp.yaml" > "$RUN_DIR/tool_rsp.log" 2>&1 &
     sleep 2
 fi
 TOPICS="$(timeout 8 ros2 topic list 2>/dev/null)"
-for t in /robot_description /rg2/robot_description /camera_mount/robot_description; do
+for t in /robot_description /tool/robot_description; do
     grep -qx "$t" <<<"$TOPICS" && ok "$t" \
         || warn "$t missing — robot model will be blank until the driver is up (stack_up.sh)"
 done
