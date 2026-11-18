@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- Camera mount v3.1 (since 2026-11-10) + Intel RealSense D415, carried by the RG2. Root = rg2_base_link (the RG2
+     description's base; tool0 -> rg2_base_link comes from the driver's static transform). Meshes are in rg2_base_link,
+     millimetres (assets/cell/camera_mount_v31/README.md). @ASSETS@ is replaced with that folder by launch_rviz_demo.sh.
+     d415_color_optical_v31 = the CAD colour optical frame (robo-chain TF-FOR-AGENT.md); it is the design pose, not a
+     calibration: the localizer's robot_config.yaml holds what the cell uses. -->
+<robot name="camera_mount_v31">
+  <link name="rg2_base_link"/>
+  <link name="camera_mount_v31">
+    <visual>
+      <geometry><mesh filename="file://@ASSETS@/V31_upper_saddle_camera_tower_assembly_coordinates.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="mount_orange"><color rgba="0.95 0.55 0.15 1.0"/></material>
+    </visual>
+    <visual>
+      <geometry><mesh filename="file://@ASSETS@/V31_lower_saddle_captive_M4_assembly_coordinates.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="mount_orange"/>
+    </visual>
+  </link>
+  <link name="d415_body_v31">
+    <visual>
+      <geometry><mesh filename="file://@ASSETS@/D415_body_rg2_base_link.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="d415_grey"><color rgba="0.55 0.57 0.6 1.0"/></material>
+    </visual>
+  </link>
+  <link name="d415_color_optical_v31"/>
+  <joint name="rg2_to_camera_mount_v31" type="fixed">
+    <parent link="rg2_base_link"/><child link="camera_mount_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="rg2_to_d415_body_v31" type="fixed">
+    <parent link="rg2_base_link"/><child link="d415_body_v31"/><origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="rg2_to_d415_color_optical_v31" type="fixed">
+    <parent link="rg2_base_link"/><child link="d415_color_optical_v31"/>
+    <origin xyz="0.065816 0 0.08891" rpy="2.094395 0 1.570796"/>
+  </joint>
+</robot>

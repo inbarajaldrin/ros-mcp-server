@@ -64,8 +64,17 @@ if pgrep -f "${R} -d .*fmb1_demo" >/dev/null 2>&1; then
 fi
 
 echo "[rviz_demo] pre-flight"
+# The v3.1 camera mount + D415 (2026-11-10) as a third robot model hung off rg2_base_link, published once by its own
+# robot_state_publisher (namespace camera_mount); the RG2 description does not carry them.
+if ! timeout 8 ros2 topic list 2>/dev/null | grep -qx /camera_mount/robot_description; then
+    sed "s#@ASSETS@#$REPO/assets/cell/camera_mount_v31#g" "$REPO/compliant_insertion_studio/urdf/camera_mount_v31/camera_mount_v31.urdf.in" \
+        > "$RUN_DIR/camera_mount_v31.urdf"
+    nohup ros2 run robot_state_publisher robot_state_publisher --ros-args -r __ns:=/camera_mount \
+        -p robot_description:="$(cat "$RUN_DIR/camera_mount_v31.urdf")" > "$RUN_DIR/camera_mount_rsp.log" 2>&1 &
+    sleep 2
+fi
 TOPICS="$(timeout 8 ros2 topic list 2>/dev/null)"
-for t in /robot_description /rg2/robot_description; do
+for t in /robot_description /rg2/robot_description /camera_mount/robot_description; do
     grep -qx "$t" <<<"$TOPICS" && ok "$t" \
         || warn "$t missing — robot model will be blank until the driver is up (stack_up.sh)"
 done
