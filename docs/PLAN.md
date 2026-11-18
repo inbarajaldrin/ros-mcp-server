@@ -17,6 +17,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   simulation.
 - **R4 Learn from robosort** (2026-11-18): "you can ask robosort agent how it is rescuing a workspace that is what we will also be doing
   in a way".
+- **R5 Separate from DroidStack** (2026-11-18 ~21:00Z): "we will be learning a lot about real world deployment that is relevant for droidstack
+  which is why we work separately so the droidstack work can happen on the side without issues". This project runs on its own;
+  real-deployment lessons are written down for DroidStack (sent to plan47), and DroidStack's own work proceeds in parallel.
+- **R6 Public repo** (2026-11-18): "leave the repo as is not an issue right now" (ros-mcp-server stays public with its current files).
+- **R7 WhatsApp** (2026-11-18): "whjatsapp yes we alreaduy have a group so we continue there": the Dimelab group.
+- **R8 Grill first** (2026-11-18): "we are yet to grill on what we are going to do": the scope and what "done" means are settled in a
+  grill before workers start.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
@@ -75,6 +82,7 @@ PROPOSED 2026-11-18, awaiting the operator's yes.
   aruco_camera_localizer) are adapters behind it (plan47 §1). DroidStack itself is a pinned, read-only dependency (robosort's pattern).
 
 ## Operator-only actions outstanding
+- Relink WhatsApp on the Mac (`wa login`, scan the QR): the daemon reports "device was unlinked" since 2026-11-16; posts to Dimelab fail until then.
 - Plug the D415 back in on a USB 3 (5000 Mbps) port (not enumerated on 2026-11-16).
 
 ## Facts established (don't re-derive)
