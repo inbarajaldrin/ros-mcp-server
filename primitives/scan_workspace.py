@@ -544,6 +544,40 @@ class Survey(Node):
                     return True
         return False
 
+    def move_joints(self, q_goal):
+        """Joint-space move to q_goal (the survey's own start joints: same arm configuration, so no swing), checked for
+        table and self collision along the path. Returns (ok, reason)."""
+        from primitives.shared.velocity_profiles import s_curve_profile
+        from primitives.shared.collision import check_collision_with_table, check_self_collision
+        q0 = self.joints.copy()
+        q_goal = np.asarray(q_goal, dtype=float)
+        wps = [q0 + (q_goal - q0) * k / 60 for k in range(1, 61)]
+        hit = next((k for k, w in enumerate(wps) if check_collision_with_table(w) or check_self_collision(w)), None)
+        if hit is not None:
+            return False, f"collision at waypoint {hit}"
+        step = float(np.max(np.abs(q_goal - q0)))
+        if step < 1e-3:
+            return True, "already there"
+        dur = compute_duration(joint_distance=step, profile='s_curve')
+        traj = JointTrajectory()
+        traj.joint_names = JOINT_NAMES
+        for p, v, t in s_curve_profile([q0] + wps, dur):
+            traj.points.append(JointTrajectoryPoint(positions=p, velocities=v, time_from_start=Duration(
+                sec=int(t), nanosec=int((t - int(t)) * 1e9))))
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+        goal.goal_time_tolerance = Duration(sec=1)
+        fut = self.action_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+        gh = fut.result()
+        if gh is None or not gh.accepted:
+            return False, "goal rejected"
+        res = gh.get_result_async()
+        rclpy.spin_until_future_complete(self, res, timeout_sec=dur + 15.0)   # never cancel: runs to completion
+        if res.result() is None or res.result().result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
+            return False, "trajectory did not complete"
+        return True, f"{dur:.1f}s"
+
     def move_to(self, pos, R):
         """Cartesian move from the current joints. Returns (ok, reason)."""
         from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinematics, dh_params
@@ -583,7 +617,9 @@ class Survey(Node):
 def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=False, close=False, aim_cam=False):
     from primitives.shared.ik import forward_kinematics, dh_params
     rclpy.init()
-    node = Survey(target_name, os.environ.get('SURVEY_IMAGE_TOPIC', '/intel_camera_rgb_raw') if image_dir else None)
+    # realsense2_camera's colour topic (the stack's old /intel_camera_rgb_raw is gone); SURVEY_IMAGE_TOPIC overrides
+    image_topic = os.environ.get('SURVEY_IMAGE_TOPIC', '/camera/camera/color/image_raw')
+    node = Survey(target_name, image_topic if image_dir else None)
     if image_dir:
         import cv2
         from cv_bridge import CvBridge
@@ -598,7 +634,11 @@ def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=Fals
         if node.joints is None or (target_xyz is None and target_name not in node.frames):
             result["error"] = f"no joints or '{target_name}' not visible from the start pose"
             return result
+        if image_dir and node.image is None:          # a frame-saving survey with no frames is a wasted flight: refuse before moving
+            result["error"] = f"--image-dir given but no image on {image_topic} (set SURVEY_IMAGE_TOPIC)"
+            return result
         target = np.array(target_xyz if target_xyz is not None else node.frames[target_name][1:4], dtype=float)
+        q_start = node.joints.copy()
         T0 = forward_kinematics(dh_params, node.joints)
         views = survey_viewpoints(target, T0[:3, :3], wide=wide, close=close,
                                   cam_X=localizer_cam_X() if aim_cam else None)
@@ -651,6 +691,13 @@ def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=Fals
         with open(out_path, 'w') as f:
             json.dump({"target": target_name, "target_start": target.tolist(), "poses": poses}, f)
         result["dataset"] = out_path
+        if "error" not in result:
+            # back to where the survey started (home, normally); after a motion failure the arm stays put (fail closed)
+            ok, why = node.move_joints(q_start)
+            node.get_logger().info(f"return to the start pose: {'done ' + why if ok else 'NOT DONE: ' + why}")
+            result["returned_to_start"] = ok
+            if not ok:
+                result["error"] = f"survey done, return to the start pose failed: {why}"
         if "error" not in result:
             result["result"] = "success"
         return result

@@ -7,8 +7,15 @@ PINNED), base1 marker edge length (free: annotation's 21 mm may or may not inclu
 Two planes 35 mm apart at known heights separate "focal length off" from "camera sits lower".
 
 usage: final_solve.py LOC:file1,file2 [LOC:...]
+env:   HE_BOARD_INIT  board pose json ({"T_world_board": 4x4}) for every LOC (default: identity -> weak start)
+       HE_BASE1_XY    "x,y" (m) starting base1 centre (default 0.0513,-0.4855, the 10-13 spot)
+       HE_OUT         directory for final_nof.json / final_f.json (default: the first survey's folder)
+The starting mount X0 is the localizer config's (primitives.shared.config.LOCALIZER_CONFIG).
 """
-import json, sys
+import json, os, sys
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
 import numpy as np, cv2
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import least_squares
@@ -39,7 +46,10 @@ for g in sys.argv[1:]:
     for path in files.split(","):
         for p in json.load(open(path))["poses"]:
             for f in p.get("frames", []):
-                img = cv2.imread(f["file"], 0)
+                fp = Path(f["file"])
+                if not fp.exists():                       # survey copied to another machine: frames/ beside survey.json
+                    fp = Path(path).parent / "frames" / fp.name
+                img = cv2.imread(str(fp), 0)
                 cc, ci, _, _ = cdet.detectBoard(img)
                 if ci is None or len(ci) < 12:
                     continue
@@ -54,9 +64,34 @@ locs = sorted({v["loc"] for v in views})
 print(f"views {len(views)} ({', '.join(f'{l}:{sum(v[chr(108)+chr(111)+chr(99)] == l for v in views)}' for l in locs)}), "
       f"with base1 markers: {sum(bool(v['b1']) for v in views)}, base1 marker detections: {sum(len(v['b1']) for v in views)}")
 
-prev = json.load(open(sys.argv[1].split(":", 1)[1].split(",")[0].replace(".json", "_clean_solution.json")
-                      if False else "/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/ea57148e-0725-43d9-bc03-e3166467076b/scratchpad/charuco/survey_charuco_A_clean_joint_free.json"))
-X0 = np.array(prev["X"])
+import yaml
+LOCALIZER_CONFIG = os.environ.get("HE_LOCALIZER_CONFIG")       # off the cell PC: the robot_config.yaml copied with the survey
+if not LOCALIZER_CONFIG:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from primitives.shared.config import LOCALIZER_CONFIG
+_c = yaml.safe_load(open(LOCALIZER_CONFIG))
+X0 = T(R.from_quat(_c["cam_offset_quat"]).as_matrix(), _c["cam_offset_position"])
+_bi = os.environ.get("HE_BOARD_INIT")
+# HE_BOARD_INIT: one file for every LOC, or "LOC=file,LOC=file" (one board spot per survey)
+if _bi and "=" in _bi:
+    prev = {"boards": {k: json.load(open(v))["T_world_board"] for k, v in (kv.split("=", 1) for kv in _bi.split(","))}}
+else:
+    prev = {"boards": {l: json.load(open(_bi))["T_world_board"] for l in locs} if _bi else {}}
+# HE_FIX_X=<final_*.json>: held-out check - the camera transform fixed at that solve's X, only the targets' poses fitted
+_fx = os.environ.get("HE_FIX_X")
+if _fx:
+    X0 = np.array(json.load(open(_fx))["X"])
+
+def bounds(n, fit_f):
+    """X frozen (+-1e-9) under HE_FIX_X; the focal scale kept within +-5 % (unbounded it ran off to 0.0009)."""
+    lo, hi = np.full(n, -np.inf), np.full(n, np.inf)
+    if _fx:
+        x0 = np.r_[R.from_matrix(X0[:3, :3]).as_rotvec(), X0[:3, 3]]
+        lo[:6], hi[:6] = x0 - 1e-9, x0 + 1e-9
+    lo[6], hi[6] = (0.95, 1.05) if fit_f else (1.0 - 1e-9, 1.0 + 1e-9)
+    return lo, hi
+B1_XY0 = [float(v) for v in os.environ.get("HE_BASE1_XY", "0.0513,-0.4855").split(",")]
+OUT_DIR = Path(os.environ.get("HE_OUT") or Path(sys.argv[1].split(":", 1)[1].split(",")[0]).parent)
 
 def init_pose(points_fn, zpin):
     """rough target pose from the X0 chain (mean of per-view PnP), plane at zpin"""
@@ -100,25 +135,30 @@ def initial(prev):
             Tb = np.eye(4)
         rpy = R.from_matrix(Tb[:3, :3]).as_euler("xyz")
         x.append([rpy[0], rpy[1], rpy[2], Tb[0, 3], Tb[1, 3]])
-    x.append([0.0, 0.0, 0.0, 0.0513, -0.4855])          # base1 near where the localizer sees it
+    x.append([0.0, 0.0, 0.0, B1_XY0[0], B1_XY0[1]])     # base1 near where the localizer sees it
     x.append([0.021])
     return np.concatenate(x)
 
 # base1 yaw: try a coarse grid, the solver refines
-best = None
-for rot90 in range(4):
-    for fit_f in (False,):
-        unpack, res = build(fit_f, rot90)
-        x0 = initial(prev)
-        for yaw0 in np.radians([0, 90, 180, 270]):
-            x0[7 + 5 * len(locs) + 2] = yaw0
-            s = least_squares(res, x0, loss="soft_l1", f_scale=1.0, max_nfev=60)
-            if best is None or s.cost < best[0]:
-                best = (s.cost, rot90, s.x)
+def _coarse(args):
+    rot90, yaw0 = args
+    _, res = build(False, rot90)
+    x0 = initial(prev)
+    x0[7 + 5 * len(locs) + 2] = yaw0
+    s = least_squares(res, x0, loss="soft_l1", f_scale=1.0, max_nfev=60, bounds=bounds(len(x0), False))
+    return s.cost, rot90, s.x
+
+# the 16 starts are independent: one process each (fork, so the views loaded above are shared)
+starts = [(r, y) for r in range(4) for y in np.radians([0, 90, 180, 270])]
+if not any(v["b1"] for v in views):           # no base1 in any frame: its corner order and yaw don't matter
+    best = _coarse((0, 0.0))
+else:
+    with ProcessPoolExecutor(max_workers=min(len(starts), os.cpu_count() or 1), mp_context=mp.get_context("fork")) as ex:
+        best = min(ex.map(_coarse, starts), key=lambda t: t[0])
 print(f"base1 corner order rot90={best[1]}, yaw {np.degrees(best[2][7 + 5 * len(locs) + 2]) % 360:.1f} deg")
 for fit_f in (False, True):
     unpack, res = build(fit_f, best[1])
-    sol = least_squares(res, best[2], loss="soft_l1", f_scale=1.0)
+    sol = least_squares(res, best[2], loss="soft_l1", f_scale=1.0, bounds=bounds(len(best[2]), fit_f))
     X, f, bo, b1, msz = unpack(sol.x)
     e = np.linalg.norm(res(sol.x).reshape(-1, 2), axis=1)
     nb_res = sum(len(v["op"]) for v in views)
@@ -132,4 +172,4 @@ for fit_f in (False, True):
     for l in locs:
         print(f"   board {l}: xy {np.round(1000 * bo[l][:2, 3], 1).tolist()} mm, tilt {np.degrees(np.arccos(abs(bo[l][2, 2]))):.2f} deg")
     json.dump({"X": X.tolist(), "f": f, "base1": b1.tolist(), "marker_edge": msz},
-              open(f"/tmp/claude-1000/-home-aldrin-Documents-ros-mcp-server-verified/ea57148e-0725-43d9-bc03-e3166467076b/scratchpad/charuco/final_{'f' if fit_f else 'nof'}.json", "w"))
+              open(OUT_DIR / f"final_{'f' if fit_f else 'nof'}.json", "w"))
