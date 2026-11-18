@@ -4,7 +4,7 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 
 ## P0 Setup
 - [x] 0.1 Home and steering files: this repo, branch `dev`; `docs/PLAN.md`, `ROADMAP.md`, `docs/findings.md` (e66c88f); lead folder `~/Documents/fmb-cell-lead/`
-- [ ] 0.2 Standing approvals recorded (operator's yes on the PLAN.md table)
+- [x] 0.2 Standing approvals recorded (R11, 2026-11-18)
 - [x] 0.3 Neighbours told: plan47 (answered, P47-1..6), plan29/co-coordinator (told 2026-11-18), robosort (answered; pattern in PLAN.md facts)
 - [x] 0.4 Heartbeat: session cron a3dd7e9e, hourly at :23 (expires after 7 days; re-create on resume); "Dimelab" WhatsApp group carries project posts
 - [ ] 0.5 First worker running

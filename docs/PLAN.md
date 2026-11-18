@@ -19,11 +19,21 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   in a way".
 - **R5 Separate from DroidStack** (2026-11-18 ~21:00Z): "we will be learning a lot about real world deployment that is relevant for droidstack
   which is why we work separately so the droidstack work can happen on the side without issues". This project runs on its own;
-  real-deployment lessons are written down for DroidStack (sent to plan47), and DroidStack's own work proceeds in parallel.
+  real-deployment lessons are written down for DroidStack (kept here, see R10), and DroidStack's own work proceeds in parallel.
 - **R6 Public repo** (2026-11-18): "leave the repo as is not an issue right now" (ros-mcp-server stays public with its current files).
 - **R7 WhatsApp** (2026-11-18): "whjatsapp yes we alreaduy have a group so we continue there": the Dimelab group.
 - **R8 Grill first** (2026-11-18): "we are yet to grill on what we are going to do": the scope and what "done" means are settled in a
   grill before workers start.
+- **R9 Done** (2026-11-18 ~21:10Z): option A. FMB1 assembles hands-off again on the real cell with the new (v3.1) camera mount;
+  every new piece of code (camera transform, view poses, picks) is proven in a DroidStack sim cell on dual before it touches the
+  robot; a written record of what real deployment taught us is kept for DroidStack.
+- **R10 Hold DroidStack requests** (2026-11-18): "we dont message droidstack to plan47 yet we figure out what to do ourself and then we
+  can do a final desciision before we decide what to do". No DroidStack requests, needs or lessons go to plan47 until the operator's
+  final decision; collect them in `docs/DROIDSTACK_LESSONS.md`. (The FMB1 phase-2 needs in P47-6 were sent before this ruling.)
+  Card/box coordination on trouble (P47-5, P29-1) still goes to plan47 / plan29.
+- **R11 Approvals** (2026-11-18): "approvals yes as written": the standing approvals table below is in force.
+- **R12 WhatsApp via /text** (2026-11-18): "my whatsapp is already logged in mac use /text": post with
+  `~/.devdroid/text/runtime/scripts/text.cjs send 120363415188889698@g.us` (Dimelab).
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
@@ -60,7 +70,7 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - The repo is self-contained: no reads from `~/Documents/aruco-grasp-annotator` or `prismatic-manipulation` (11-16).
 
 ## Standing approvals (see ~/.claude/skills/autopilot/references/authority.md)
-PROPOSED 2026-11-18, awaiting the operator's yes.
+APPROVED 2026-11-18 (R11).
 
 | Without asking | Ask first |
 |---|---|
@@ -69,7 +79,7 @@ PROPOSED 2026-11-18, awaiting the operator's yes.
 | Removing our own re-creatable bytes, with a receipt (path, bytes, re-creates-from) | Scope/acceptance changes; instruction files that bind others (incl. this repo's CLAUDE.md) |
 | Downloading public models/weights/images to the data root, within disk floors | Paid compute or API spend |
 | Commits and pushes to this repo's `dev` branch | Anything public: repos, posts, PRs, registering/submitting |
-| Coordination messages to plan47, plan29, robosort and other leads | Changes to other projects' repos or shared envs |
+| Coordination messages to plan29, robosort and other leads; to plan47 only for card/box trouble until R10 is lifted | Changes to other projects' repos or shared envs |
 | Robot motion on the real cell that the replay/primitives already do, with the operator's run go | Robot motion from new code not yet proven in sim (R3); protective-stop unlocks; table work |
 
 ## Decisions (the lead's, inside the rulings)
@@ -82,7 +92,6 @@ PROPOSED 2026-11-18, awaiting the operator's yes.
   aruco_camera_localizer) are adapters behind it (plan47 §1). DroidStack itself is a pinned, read-only dependency (robosort's pattern).
 
 ## Operator-only actions outstanding
-- Relink WhatsApp on the Mac (`wa login`, scan the QR): the daemon reports "device was unlinked" since 2026-11-16; posts to Dimelab fail until then.
 - Plug the D415 back in on a USB 3 (5000 Mbps) port (not enumerated on 2026-11-16).
 
 ## Facts established (don't re-derive)
