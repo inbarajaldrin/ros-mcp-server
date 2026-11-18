@@ -56,6 +56,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   off for us". The box rules still apply on each (check the card right before, a hold where a hold tool exists, never touch another
   user's work: a4500's local user and rtx6000's borrower win). P29-1 (dual) is unchanged: on dual, Isaac/ROS only through DroidStack.
   Off dual, an Isaac run of ours loads no ROS bridge and publishes no DDS, so nothing simulated can reach the cell's domain.
+- **R19 DroidStack issues** (2026-11-18 ~22:10Z): "you can interact with plan47 when needed to launch and issues with droidstack or you
+  fork and fix it yourself isaacsim for the planner and you dont have to start from scratch because we already have a codebase".
+  Relaxes R10 for launch blockers and DroidStack issues: message plan47 (claude 13eddc on dual), or fork DroidStack and fix it,
+  handing the fix back through plan47. The planner is proven in Isaac Sim, built from the code we have (this repo's planner,
+  the paper's Isaac twin), not from scratch.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
