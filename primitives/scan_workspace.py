@@ -413,8 +413,21 @@ SURVEY_CLOSE_RING = {0.28: 0.04, 0.24: 0.03}
 SURVEY_CLOSE_FLOOR = 0.235
 
 
-def survey_viewpoints(target, R_start, wide=False, close=False):
-    """[(flange_pos, R_flange, label)] aiming the tool z axis at `target`.
+def aim_camera(view, target, cam_X):
+    """Keep the view's flange orientation, move the flange so the CAMERA's optical axis (cam_X: tool -> optical,
+    4x4) passes through `target` at the camera-to-target distance the tool-aimed view had. For an off-axis
+    camera (the v3.1 mount, 2026-11-10: 89 mm off the tool axis, tilted 30 deg) a tool-aimed view puts the
+    target at the image edge."""
+    pos, R, label = view
+    d_cam = R @ cam_X[:3, 2]
+    o_cam = R @ cam_X[:3, 3]
+    dist = float(np.linalg.norm(pos - target))
+    return (target - d_cam * dist - o_cam, R, label + "_cam")
+
+
+def survey_viewpoints(target, R_start, wide=False, close=False, cam_X=None):
+    """[(flange_pos, R_flange, label)] aiming the tool z axis at `target`, or the camera's optical axis when
+    cam_X (tool -> optical) is given (aim_camera).
     wide=True (calibration target): wrist yaws at every height + rings at every height,
     and a +45 deg yaw copy of the middle ring — rotation diversity for a hand-eye solve."""
     from scipy.spatial.transform import Rotation as Rot
@@ -445,7 +458,21 @@ def survey_viewpoints(target, R_start, wide=False, close=False):
             for yaw in yaws:
                 Ry = R @ Rot.from_euler('z', yaw, degrees=True).as_matrix()
                 out.append((p, Ry, f"h{h:.2f}_dx{dx:+.2f}_dy{dy:+.2f}_yaw{yaw:+.0f}"))
+    if cam_X is not None:
+        out = [aim_camera(v, np.asarray(target, dtype=float), cam_X) for v in out]
     return out
+
+
+def localizer_cam_X():
+    """tool -> camera optical (4x4) from the localizer's config, the same one every camera reader uses."""
+    import yaml
+    from scipy.spatial.transform import Rotation as Rot
+    from primitives.shared.config import LOCALIZER_CONFIG
+    c = yaml.safe_load(open(LOCALIZER_CONFIG))
+    X = np.eye(4)
+    X[:3, :3] = Rot.from_quat(c['cam_offset_quat']).as_matrix()
+    X[:3, 3] = c['cam_offset_position']
+    return X
 
 
 class Survey(Node):
@@ -553,7 +580,7 @@ class Survey(Node):
         return True, f"{dur:.1f}s"
 
 
-def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=False, close=False):
+def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=False, close=False, aim_cam=False):
     from primitives.shared.ik import forward_kinematics, dh_params
     rclpy.init()
     node = Survey(target_name, os.environ.get('SURVEY_IMAGE_TOPIC', '/intel_camera_rgb_raw') if image_dir else None)
@@ -573,7 +600,8 @@ def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=Fals
             return result
         target = np.array(target_xyz if target_xyz is not None else node.frames[target_name][1:4], dtype=float)
         T0 = forward_kinematics(dh_params, node.joints)
-        views = survey_viewpoints(target, T0[:3, :3], wide=wide, close=close)
+        views = survey_viewpoints(target, T0[:3, :3], wide=wide, close=close,
+                                  cam_X=localizer_cam_X() if aim_cam else None)
         node.get_logger().info(f"Survey of {target_name} at {np.round(target, 4).tolist()}: {len(views)} viewpoints")
         poses = []
         for i, (pos, R, label) in enumerate(views):
@@ -655,6 +683,8 @@ def main(args=None):
     parser.add_argument('--wide', action='store_true', help='Survey: calibration viewpoint set (more wrist yaws)')
     parser.add_argument('--close', action='store_true',
                         help='Survey: grasp-range pass, flange 0.28/0.24 m (BELOW safe height; flat target, clear table only)')
+    parser.add_argument('--aim-camera', action='store_true',
+                        help='Survey: aim the camera optical axis (localizer config mount) at the target, not the tool z axis')
 
     args = parser.parse_args()
 
@@ -663,12 +693,13 @@ def main(args=None):
             from primitives.shared.config import DEFAULT_BASE_POSITION
             tgt = np.array(args.target_xyz or DEFAULT_BASE_POSITION, dtype=float)
             R0 = rpy_to_matrix([FIXED_ROLL, FIXED_PITCH, FIXED_YAW])
-            for pos, R, label in survey_viewpoints(tgt, R0, wide=args.wide, close=args.close):
+            for pos, R, label in survey_viewpoints(tgt, R0, wide=args.wide, close=args.close,
+                                                   cam_X=localizer_cam_X() if args.aim_camera else None):
                 tilt = np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1)))
                 print(f"{label:32s} flange {np.round(pos, 3).tolist()} tilt {tilt:4.1f} deg")
             sys.exit(0)
         out = args.out or time.strftime(f"/tmp/survey_{args.object_name}_%Y%m%d_%H%M%S.json")
-        result = run_survey(args.object_name, out, args.target_xyz, args.image_dir, args.wide, args.close)
+        result = run_survey(args.object_name, out, args.target_xyz, args.image_dir, args.wide, args.close, args.aim_camera)
         output_result(result)
         sys.exit(0 if result["result"] == "success" else 1)
 
