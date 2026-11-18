@@ -104,13 +104,15 @@ def main():
     for v in (['here'] if a.no_move else a.views):
         if v != 'here':
             (bx, by, bz), bq = ob0
-            if v == 'top':
+            look = []
+            if v == 'top':                 # the camera looks at the base from the flange-above height (v3.1 mount: off-axis)
                 pf, qf = [bx, by, VIEW_FLANGE_Z], [0, 1, 0, 0]
+                look = ['--look-at-z', f"{bz:.4f}"]
             else:
                 d = np.zeros(3); d['xy'.index(v[-1])] = 1.0 if v[-2] == '+' else -1.0
                 pf, qf, _ = aimed_flange(np.array([bx, by, bz + 0.0175]), d, 25.0, 0.55, X_CAM, 0.0)
             r = subprocess.run(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                                *[f"{x:.4f}" for x in pf], '--quat', *[f"{x:.6f}" for x in qf], '--min-z', '0.15'],
+                                *[f"{x:.4f}" for x in pf], '--quat', *[f"{x:.6f}" for x in qf], '--min-z', '0.15', *look],
                                cwd=str(REPO), capture_output=True, text=True, timeout=90)
             if r.returncode != 0:
                 print(f"{v}: move refused"); continue

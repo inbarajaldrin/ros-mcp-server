@@ -1183,7 +1183,7 @@ def reread_base(bname, prev, log_fh=None):
     from primitives.shared.config import DEFAULT_BASE_POSITION as _DBP
     cx, cy = (prev[0][0], prev[0][1]) if prev is not None else (_DBP[0], _DBP[1])
     r_ = run_subprocess(['python3', '-u', '-m', 'primitives.move_cartesian', '--mode', 'real', '--xyz',
-                         f"{cx:.4f}", f"{cy:.4f}", f"{_VZ:.2f}"],
+                         f"{cx:.4f}", f"{cy:.4f}", f"{_VZ:.2f}", '--look-at-z', f"{TABLE_TOP_Z:.4f}"],
                         label='base re-read move', timeout_s=60, log_fh=log_fh)
     if r_.get('result') != 'success':
         return prev
