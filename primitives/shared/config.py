@@ -27,8 +27,9 @@ GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above th
 CAD_DATA_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')
 _GRASP_POINTS_DIR = str(CAD_DATA_DIR / 'grasp_points')
 # The camera localizer's config (hand-eye mount, intrinsics) in the ROS 2 workspace; FMB_ROS_WS names the workspace.
-LOCALIZER_CONFIG = str(Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Desktop' / 'ros2_ws')
-                       / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
+LOCALIZER_CONFIG = os.environ.get('FMB_LOCALIZER_CONFIG') or str(
+    Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Desktop' / 'ros2_ws')
+    / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
 
 
 def _depth_correction():
