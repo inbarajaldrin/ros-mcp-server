@@ -139,7 +139,18 @@ def cancel_active_goals(node=None, spin=_spin_until, client=None) -> list[str]:
     return problems
 
 
+_stop_signals_seen: list[int] = []
+
+
 def _raise_interrupt(signum, frame):
+    """The first SIGINT/SIGTERM raises KeyboardInterrupt; every later one is recorded, not raised, so a second
+    signal cannot cut the cancel or the safe-state cleanup the first one started (review r5 P3-1).  The process is
+    already on its way out; a caller that must end it escalates (cell_io: SIGTERM, then the dashboard stop)."""
+    _stop_signals_seen.append(signum)
+    if len(_stop_signals_seen) > 1:
+        print(f"[goal_guard] signal {signum} deferred: the stop already under way finishes first",
+              file=sys.stderr, flush=True)
+        return
     raise KeyboardInterrupt(f"signal {signum}")
 
 

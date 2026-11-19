@@ -108,3 +108,49 @@ def test_stop_group_waits_for_a_grandchild_still_cleaning_up(tmp_path, monkeypat
     how = cell_io._stop_group(proc, 8.0, "safe-state test")
     assert how == "SIGINT" and time.monotonic() - t0 >= 2.0               # it waited for the 2.5 s restore
     assert "controllers restored" in _lines(log)
+
+
+def test_the_stop_handler_raises_once_and_defers_the_rest():
+    """Review r5 P3-1: the second signal cannot cut what the first one started, even before deferred_signals."""
+    code = textwrap.dedent('''
+        import os, signal, sys, time
+        sys.path.insert(0, {root!r})
+        from primitives.shared import goal_guard as gg
+        signal.signal(signal.SIGINT, gg._raise_interrupt)
+        signal.signal(signal.SIGTERM, gg._raise_interrupt)
+        raised = 0
+        try:
+            os.kill(os.getpid(), signal.SIGINT); time.sleep(1)
+        except KeyboardInterrupt:
+            raised += 1
+            os.kill(os.getpid(), signal.SIGTERM); os.kill(os.getpid(), signal.SIGINT)   # during the "cleanup"
+            time.sleep(0.2)
+            print("CLEANUP DONE", flush=True)
+        print("RAISED", raised, "SEEN", len(gg._stop_signals_seen), flush=True)
+    ''').format(root=str(ROOT))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=20)
+    assert "CLEANUP DONE" in out.stdout and "RAISED 1 SEEN 3" in out.stdout, out.stdout + out.stderr
+
+
+def test_an_orphaned_cli_call_dies_with_its_parent(tmp_path):
+    """Review r5 P3-2: a `ros2 control` stand-in in its own session dies when the process that started it dies."""
+    pidfile = tmp_path / "child.pid"
+    code = textwrap.dedent('''
+        import subprocess, sys
+        sys.path.insert(0, {root!r})
+        from primitives.shared.signal_safety import die_with_parent
+        p = subprocess.Popen(["sleep", "60"], start_new_session=True, preexec_fn=die_with_parent)
+        open({pid!r}, "w").write(str(p.pid))
+        import os; os._exit(0)                                       # the parent dies with the call running
+    ''').format(root=str(ROOT), pid=str(pidfile))
+    subprocess.run([sys.executable, "-c", code], timeout=20)
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

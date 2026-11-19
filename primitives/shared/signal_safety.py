@@ -36,3 +36,15 @@ def deferred_signals(signals=STOP_SIGNALS):
     finally:
         for s, handler in previous.items():
             signal.signal(s, handler)
+
+
+import ctypes as _ctypes
+
+_LIBC = _ctypes.CDLL("libc.so.6", use_errno=True)   # loaded here: a preexec_fn must not import (fork + lock)
+_PR_SET_PDEATHSIG = 1
+
+
+def die_with_parent():
+    """preexec_fn: the child gets SIGKILL when its parent dies (Linux PR_SET_PDEATHSIG), so an orphaned CLI call
+    (`ros2 control` waits forever for the controller manager) cannot apply a stale switch later (review r5 P3-2)."""
+    _LIBC.prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL))

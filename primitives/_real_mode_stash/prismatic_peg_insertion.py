@@ -35,6 +35,7 @@ _project_root = str(Path(__file__).parent.parent.parent)  # primitives/_real_mod
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r3)
+from primitives.shared.signal_safety import die_with_parent as _die_with_parent  # orphaned CLI calls die
 
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset, held_tool_offset_for
 BAR_ALONG_MAX_M = 0.030   # a bar may slide this far along its free axis while the compliance finds the slot
@@ -167,7 +168,7 @@ def switch_controllers(activate, deactivate):
     """Switch ROS2 controllers."""
     result = subprocess.run(['ros2', 'control', 'list_controllers'],
                             capture_output=True, text=True, timeout=10,
-                            start_new_session=True)
+                            start_new_session=True, preexec_fn=_die_with_parent)
     if result.returncode != 0:
         print(f"ERROR: list_controllers failed: {result.stderr}")
         return False
@@ -194,22 +195,29 @@ def switch_controllers(activate, deactivate):
         cmd += ['--deactivate'] + to_deactivate
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
-                            start_new_session=True)   # the group's stop signals must not cut a switch
+                            start_new_session=True, preexec_fn=_die_with_parent)   # the group's stop signals must not cut a switch
     if result.returncode != 0:
         print(f"ERROR: Controller switch failed: {result.stderr}")
     return result.returncode == 0
 
 
 def restore_controllers():
-    """Restore scaled_joint_trajectory_controller."""
+    """Restore scaled_joint_trajectory_controller; a call that times out is retried once (review r5 P3-3)."""
     print("[CLEANUP] Restoring controllers...")
     # One switch: the driver refuses scaled_joint_trajectory_controller while passthrough is
     # still active ("Starting position together with trajectory_passthrough is not allowed"),
     # and the old two-call version left the arm uncommandable when the second call was rejected.
-    if switch_controllers([SCALED_CONTROLLER], [PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER]):
-        print("[CLEANUP] Controllers restored")
-    else:
-        print("[CLEANUP] ERROR restoring controllers (stop_run.sh restores them)")
+    for attempt in (1, 2):
+        try:
+            if switch_controllers([SCALED_CONTROLLER], [PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER]):
+                print("[CLEANUP] Controllers restored")
+                return True
+            print("[CLEANUP] ERROR restoring controllers (stop_run.sh restores them)")
+            return False
+        except subprocess.TimeoutExpired:
+            print(f"[CLEANUP] controller switch timed out (attempt {attempt}/2)"
+                  + (", retrying" if attempt == 1 else " - stop_run.sh restores them"))
+    return False
 
 
 def safe_state_cleanup(node):
@@ -1486,7 +1494,7 @@ def main():
         print("Deactivating scaled_joint_trajectory_controller...")
         result = subprocess.run(
             ['ros2', 'control', 'switch_controllers', '--deactivate', SCALED_CONTROLLER],
-            capture_output=True, text=True, timeout=10, start_new_session=True)
+            capture_output=True, text=True, timeout=10, start_new_session=True, preexec_fn=_die_with_parent)
         if result.returncode != 0:
             print(f"ERROR: {result.stderr}")
             return 1
