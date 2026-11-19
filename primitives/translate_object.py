@@ -822,10 +822,12 @@ class TranslateObject(Node):
             # height (0.1625 m) while still above the table. Applying
             # check_ee_below_base here makes every table-level insertion
             # geometrically impossible. Keep the actual table, self, and
-            # compact-configuration guards; move_down owns the final descent.
+            # guards; move_down owns the final descent. The compact-radius
+            # heuristic is also inapplicable here: a sideways-held part can
+            # reach the base while its flange is legitimately close to the
+            # shoulder. Capsule self-collision remains authoritative.
             return (check_collision_with_table(joint_angles)
-                    or check_self_collision(joint_angles)
-                    or check_compact_configuration(joint_angles))
+                    or check_self_collision(joint_angles))
 
         joint_bounds = [
             (-np.pi, np.pi),
