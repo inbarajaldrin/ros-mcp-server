@@ -50,7 +50,7 @@ from primitives.shared.robot_contract import (
     ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
     arm_positions, public_arm_joints)
 from primitives.shared.collision import (UR5E_LINK_RADII, compute_all_joint_positions,
-    check_collision_with_table, segment_distance, check_self_collision,
+    check_collision_with_table, check_trajectory_collision, segment_distance, check_self_collision,
     check_ee_below_base, check_compact_configuration)
 
 
@@ -688,6 +688,28 @@ class ReorientForAssembly(Node):
             return True
 
         return False
+
+    def _plan_reorient_route(self, start, target, held):
+        """The admissible joint route start -> target (direct line first, then route_split's splits and
+        detours), or (None, reasons).  Every segment passes the same full check set: the arm against the
+        table and itself along the joint line (check_trajectory_collision, 20 samples, both ends included),
+        every stance the segment ends at against this primitive's IK stance rules (_check_collision: table,
+        EE below base, compact, EE facing the robot, camera toward -X, extended gripper, self-collision),
+        the camera hard rule and the held-part rule."""
+        from primitives.shared.camera_up import camera_route_refusal
+        from primitives.shared.held_part_collision import held_part_route_refusal
+        from primitives.shared.route_split import admissible_route
+
+        def segment_refusal(a, b, is_last):
+            if check_trajectory_collision(np.asarray(a, float), np.asarray(b, float),
+                                          z_threshold=TABLE_HEIGHT, num_samples=20):
+                return "ARM_TABLE_OR_SELF_COLLISION along the joint line"
+            if self._check_collision(b):
+                return "ARM_STANCE_REFUSED: a route stance fails the reorient IK rules"
+            return (camera_route_refusal(a, b, near_table_end=is_last)
+                    or held_part_route_refusal(a, b, held))
+
+        return admissible_route(start, target, segment_refusal)
 
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001, try_yaw_flip=True):
         from primitives.shared.ik import IKSolverConfig, IKSolver
@@ -1671,9 +1693,7 @@ class ReorientForAssembly(Node):
         # camera side may not face the table; the mount/D415 keeps its clearance from the table and the arm; the
         # held part stays clear of the arm and the table; joint travel is bounded.  When the direct joint line breaks
         # a rule, the joint groups move one after another (route_split), each segment checked the same way.
-        from primitives.shared.camera_up import camera_route_refusal
-        from primitives.shared.held_part_collision import held_part_model, held_part_route_refusal
-        from primitives.shared.route_split import admissible_route
+        from primitives.shared.held_part_collision import held_part_model
         T_flange_now = forward_kinematics(dh_params, self.current_joint_angles)
         T_part_now = None
         if self.mode == 'sim' and object_name in self.current_poses:
@@ -1684,11 +1704,7 @@ class ReorientForAssembly(Node):
         held = held_part_model(object_name, T_flange_now, T_part=T_part_now,
                                held_quat=current_object_orientation)
 
-        def segment_refusal(a, b, is_last):
-            return (camera_route_refusal(a, b, near_table_end=is_last)
-                    or held_part_route_refusal(a, b, held))
-
-        route, refusals = admissible_route(self.current_joint_angles, joint_angles, segment_refusal)
+        route, refusals = self._plan_reorient_route(self.current_joint_angles, joint_angles, held)
         if route is None:
             self.error_message = ("Reorient refused: no admissible route (direct or split by joint group): "
                                   + "; ".join(sorted(set(refusals))[:3]))

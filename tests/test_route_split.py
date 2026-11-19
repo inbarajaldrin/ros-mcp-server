@@ -43,12 +43,66 @@ def test_an_admissible_direct_line_is_kept_and_none_refuses():
     assert sum(1 for _ in candidate_routes(START, TARGET)) == 75 + 4
 
 
-def test_rotate_object_uses_the_split_route_with_the_full_rule_set():
-    source = (ROOT / "primitives/rotate_object.py").read_text()
-    assert "admissible_route(self.current_joint_angles, joint_angles, segment_refusal)" in source
-    assert "held_part_route_refusal(a, b, held)" in source
-    assert "camera_route_refusal(a, b, near_table_end=is_last)" in source
-    assert "no admissible route (direct or split by joint group)" in source
+def _reorient_node():
+    """rotate_object's planner on an instance built without a ROS node (its checks are pure geometry)."""
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    import primitives.rotate_object as ro
+    node = object.__new__(ro.ReorientForAssembly)
+    node.tcp_to_gripper_center_offset = ro.GRIPPER_CENTER_TOOL_OFFSET
+    return node
+
+
+# Both stances pass the reorient IK rules and the direct joint line is clear of the table and the arm, but moving
+# wrist_1 + wrist_2 first stops at a stance that self-collides (DH capsules, conservative radii).
+SPLIT_START = np.array([1.914, -1.7228, 2.761, -2.7811, -1.4732, 2.5738])
+SPLIT_TARGET = np.array([2.163, -1.668, 1.633, -0.1665, -3.7406, -0.1339])
+SPLIT_MIDDLE = np.array([1.914, -1.7228, 2.761, -0.1665, -3.7406, 2.5738])
+
+
+def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeypatch):
+    from primitives.shared import route_split
+    from primitives.shared.collision import check_self_collision, check_trajectory_collision
+    from primitives.shared.config import TABLE_HEIGHT
+    node = _reorient_node()
+    assert not node._check_collision(SPLIT_START) and not node._check_collision(SPLIT_TARGET)
+    assert not check_trajectory_collision(SPLIT_START, SPLIT_TARGET, z_threshold=TABLE_HEIGHT)
+    assert check_self_collision(SPLIT_MIDDLE)
+    # Offer the planner only that split, as if the camera rule had refused everything else.
+    monkeypatch.setattr(route_split, "candidate_routes",
+                        lambda start, target, vias=(): iter([[start, SPLIT_MIDDLE.copy(), target]]))
+    route, reasons = node._plan_reorient_route(SPLIT_START, SPLIT_TARGET, None)
+    assert route is None
+    assert reasons and reasons[0].startswith("ARM_TABLE_OR_SELF_COLLISION")
+
+
+def test_rotate_object_routes_pass_the_arm_checks_on_every_segment_and_stance():
+    from primitives.shared.collision import check_trajectory_collision
+    from primitives.shared.config import TABLE_HEIGHT
+    node = _reorient_node()
+    for start, target in ((START, TARGET), (SPLIT_START, SPLIT_TARGET)):
+        route, reasons = node._plan_reorient_route(start, target, None)
+        assert route is not None, reasons
+        assert np.allclose(route[0], start) and np.allclose(route[-1], target)
+        for a, b in zip(route[:-1], route[1:]):
+            assert not check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT, num_samples=20)
+            assert not node._check_collision(b)
+            assert camera_route_refusal(a, b) is None
+
+
+def test_rotate_object_refuses_a_stance_the_reorient_ik_rules_refuse(monkeypatch):
+    """A route stance that clears the arm capsules but fails another IK rule (here: the planner is told the
+    middle stance faces the robot) is refused too."""
+    from primitives.shared import route_split
+    node = _reorient_node()
+    middle = START.copy()
+    middle[5] = TARGET[5]
+    real_check = node._check_collision
+    monkeypatch.setattr(node, "_check_collision", lambda q: np.allclose(q, middle) or real_check(q))
+    monkeypatch.setattr(route_split, "candidate_routes",
+                        lambda start, target, vias=(): iter([[start, middle.copy(), target]]))
+    route, reasons = node._plan_reorient_route(START, TARGET, None)
+    assert route is None and reasons[0].startswith("ARM_STANCE_REFUSED")
 
 
 def test_r48f_clear_area_carry_needs_a_wrist3_detour():
