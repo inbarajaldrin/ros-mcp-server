@@ -203,6 +203,11 @@ APPROVED 2026-11-18 (R11).
   controller stays off), and a failed activation leaves the scaled controller off. Fixed on cell branch w4-mujoco 654044d (with a
   deferred-signal safe-state cleanup): MERGED into dev 0d42b1a. Before the first real run: a twin live check of prismatic killed
   mid-force-phase, rotate_object's 60 s budget, and the round-1 deferred items (review-w4-mujoco-cell-r5.md P2s).
+- SAFETY (w5, 2026-11-19, after the merge): dev's physical arm capsules (from the twin's Menagerie collision geometry) do NOT enclose
+  the real UR5e surface (UR visual meshes): up to 27 mm outside on the upper arm, 10-14 mm on others. The physical self/mount/held-part
+  checks can under-estimate clearance by that much; the review's 94/94 sweep used the same capsules as truth (circular). Fix: capsules
+  proven to enclose the visual meshes (triangle-level test), branch w5-enclose -> review -> merge, with the flown-history re-check.
+  No real run before it merges.
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
