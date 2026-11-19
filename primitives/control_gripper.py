@@ -444,7 +444,11 @@ def main(args=None):
         controller.get_logger().info(f"Checking if topic {topic_name} is available...")
         
         # First check if topic exists and has publishers
-        if not controller.check_topic_available(topic_name, timeout=0.5):
+        # A fresh Humble subprocess can need more than 0.5 s to discover the
+        # long-lived sim sidecar publisher even on a host-local graph. Keep
+        # the real-cell fail-fast window unchanged.
+        discovery_timeout = 5.0 if known_args.mode == 'sim' else 0.5
+        if not controller.check_topic_available(topic_name, timeout=discovery_timeout):
             error_msg = f"Topic {topic_name} not found or has no publishers. Cannot proceed with gripper control."
             controller.get_logger().error(error_msg)
             error = error_msg
