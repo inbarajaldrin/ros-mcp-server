@@ -144,9 +144,10 @@ def test_r48f_clear_area_carry_needs_a_wrist3_detour():
     assert max(abs(w[5]) for w in route) <= 4.0
 
 
-def test_r48g_carry_has_no_admissible_route_against_the_real_surface():
-    """MuJoCo r48g's clear-area carry (flown there via home with a wrist_3 detour): against the arm's enclosed real
-    surface every route - direct, split, detour, via home, via home with a detour - is refused (w5-enclose)."""
+def test_r48g_carry_needs_home_plus_a_wrist3_detour_for_the_held_part():
+    """MuJoCo r48g: the detours alone swing the held u_orange into the upper arm, the via-home route sweeps the
+    mount through the arm; via home WITH a wrist_3 detour passes every rule (the arm's self-check on its real
+    surfaces: two tiers)."""
     from scipy.spatial.transform import Rotation as Rot
     from primitives.shared.collision import check_trajectory_collision
     from primitives.shared.config import HOME_JOINTS, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
@@ -167,8 +168,8 @@ def test_r48g_carry_has_no_admissible_route_against_the_real_surface():
 
     route, _ = admissible_route(start, target, seg)
     assert route is None
-    route, reasons = admissible_route(start, target, seg, vias=(np.array(HOME_JOINTS, float),))
-    assert route is None and reasons
+    route, _ = admissible_route(start, target, seg, vias=(np.array(HOME_JOINTS, float),))
+    assert route is not None and len(route) == 5 and np.allclose(route[2][:5], np.array(HOME_JOINTS)[:5])
 
 
 def test_clear_area_in_between_stances_get_the_stance_rules():

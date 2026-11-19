@@ -265,13 +265,55 @@ def physical_self_clearances(joint_angles):
 
 def physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
     """None, or a typed reason: two physical bodies of the arm and gripper closer than the margin, or the camera
-    mount/D415 within its margin of the arm (camera_up.camera_mount_arm_refusal)."""
-    worst = min(physical_self_clearances(joint_angles))
-    if worst[0] < margin:
-        return (f"PHYSICAL_SELF_COLLISION: {worst[1]} vs {worst[2]} {1000 * worst[0]:.1f} mm apart "
-                f"(needs {1000 * margin:.0f})")
+    mount/D415 within its margin of the arm (camera_up.camera_mount_arm_refusal).
+
+    Two tiers (review w5-enclose r1): the enclosing capsules first; a pair they refuse is admitted only when the
+    lower bound on its real surfaces' distance (arm_surface.pair_lower_bound: UR's meshes, allowances included)
+    clears the same margin.  Tier 2 unavailable (meshes missing or not the pinned ones): the refusal stands."""
+    from primitives.shared import arm_surface
+    q = np.asarray(joint_angles, float)
+    tier1 = sorted(c for c in physical_self_clearances(q) if c[0] < margin)
+    if tier1:
+        frames, caps = _physical_bodies(q)
+        capsule_of = {label: (a, b, r) for a, b, r, label in caps}
+        for d1, la, lb in tier1:
+            d2 = arm_surface.pair_lower_bound(la, lb, frames, capsule_of, margin)
+            if d2 is None:
+                return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb} {1000 * d1:.1f} mm apart (needs {1000 * margin:.0f}; "
+                        f"real-surface check unavailable: {arm_surface.why_unavailable()})")
+            if d2 < margin:
+                return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb}: real surfaces >= {1000 * d2:.1f} mm apart "
+                        f"(capsules {1000 * d1:.1f}; needs {1000 * margin:.0f})")
     from primitives.shared.camera_up import camera_mount_arm_refusal
-    return camera_mount_arm_refusal(joint_angles)
+    return camera_mount_arm_refusal(q)
+
+
+def arm_table_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
+    """None, or a typed reason: the arm's real surface (shoulder to wrist_3) within the margin of the table plane.
+
+    Tier 1: each enclosing capsule's lowest point (its lower end's z less its radius).  Tier 2 for a capsule tier 1
+    refuses: the lowest vertex of UR's mesh pieces in it, exact, less the allowance (arm_surface.table_lower_bound).
+    The base stands on the table and is not checked; the gripper is the grasp's own business."""
+    from primitives.shared import arm_surface
+    q = np.asarray(joint_angles, float)
+    frames = dh_link_frames(q)
+    caps = list(physical_link_capsules(q, frames))
+    for k, a, b, r, label in PHYSICAL_WRIST_CAPSULES:
+        if label != "quick changer":
+            F = frames[k]
+            caps.append((F[:3, :3] @ np.asarray(a) + F[:3, 3], F[:3, :3] @ np.asarray(b) + F[:3, 3], r, label))
+    for a, b, r, label in sorted(caps, key=lambda c: min(c[0][2], c[1][2]) - c[2]):
+        d1 = min(float(a[2]), float(b[2])) - r - TABLE_HEIGHT
+        if d1 >= margin:
+            break
+        d2 = arm_surface.table_lower_bound(label, frames, TABLE_HEIGHT)
+        if d2 is None:
+            return (f"ARM_TABLE_COLLISION: {label} capsule {1000 * d1:.1f} mm above the table (needs "
+                    f"{1000 * margin:.0f}; real-surface check unavailable: {arm_surface.why_unavailable()})")
+        if d2 < margin:
+            return (f"ARM_TABLE_COLLISION: {label} real surface {1000 * d2:.1f} mm above the table "
+                    f"(capsule {1000 * d1:.1f}; needs {1000 * margin:.0f})")
+    return None
 
 
 def compute_all_joint_positions(joint_angles):
@@ -297,7 +339,8 @@ def compute_all_joint_positions(joint_angles):
 
 def check_collision_with_table(joint_angles, z_threshold=TABLE_HEIGHT, verbose=False, logger=None):
     """
-    Check if any part of the robot (all joints) goes below the table.
+    Check if any part of the robot goes below the table: the DH joint origins against z_threshold, and the arm's
+    enclosed real surface against the table plane (arm_table_refusal, review w5-enclose r1 P2-1).
 
     Args:
         joint_angles: Array of 6 joint angles
@@ -306,8 +349,14 @@ def check_collision_with_table(joint_angles, z_threshold=TABLE_HEIGHT, verbose=F
         logger: ROS logger instance for verbose output
 
     Returns:
-        True if collision detected (any joint below threshold), False otherwise
+        True if collision detected (any joint below threshold, or the arm's surface within 10 mm of the table:
+        arm_table_refusal), False otherwise
     """
+    table = arm_table_refusal(joint_angles)
+    if table:
+        if verbose and logger:
+            logger.warn(f"Collision detected: {table}")
+        return True
     joint_positions = compute_all_joint_positions(joint_angles)
 
     for i, pos in enumerate(joint_positions):
