@@ -11,7 +11,9 @@ part is re-scored at the end of the run.
 This is the standalone entrance for the same sim tool sequence that
 ``replay_verify.py`` invokes through unified_api.  It deliberately refuses
 real mode: a simulator process must serve the ROS contract and this process
-only starts the existing primitive subprocesses against that contract.
+only starts the existing primitive subprocesses against that contract.  Before the
+first command it proves it is inside a DroidStack simulator (ablations/sim_guard.py)
+and refuses otherwise; every step it runs is a mode-sim primitive.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import subprocess
 import sys
 
 from ablations.replay_verify import _parse_tool_call
+from ablations.sim_guard import require_sim_container
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,16 +69,6 @@ def _command_for_step(step: str, object_name: str | None = None,
                      "--object-name", kwargs["object_name"], "--base-name", kwargs["base_name"],
                      f"--{action}"], 360
     raise ValueError(f"unsupported replay tool: {name}")
-
-
-def _staging_view_command() -> tuple[list[str], int]:
-    """The production replay's camera-aimed view of the whole staging region."""
-    from ablations.staging_layout import STAGING_VIEW, TOP_DOWN_Q
-    from primitives.shared.config import TABLE_HEIGHT
-    return ([sys.executable, "-u", "-m", "primitives.move_cartesian", "--mode", "real",
-             "--xyz", *(f"{v:.4f}" for v in STAGING_VIEW),
-             "--quat", *(str(v) for v in TOP_DOWN_Q),
-             "--look-at-z", f"{TABLE_HEIGHT:.4f}"], 120)
 
 
 def _result_from_output(text: str) -> dict:
@@ -177,14 +170,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--assembly-json", required=True)
     ap.add_argument("--only", default=None)
     ap.add_argument("--no-startup", action="store_true")
-    ap.add_argument("--fov-gated", action="store_true",
-                    help="fly the production camera-aimed staging view before each part's first pick")
     ap.add_argument("--derive-sequence", action=argparse.BooleanOptionalAction, default=True,
                     help="observe every part after the startup and let the cell's sequence planner "
                          "choose one or two passes (default, as replay_real_assembly)")
     ap.add_argument("--base-name", default="base1")
     ap.add_argument("--log-dir", default="ablations/logs/sim-replay")
     args = ap.parse_args(argv)
+    refusal = require_sim_container()
+    if refusal:
+        print(json.dumps({"replay": "refused", "error": refusal}, indent=2))
+        return 3
 
     path = Path(args.assembly_json).resolve()
     data = json.loads(path.read_text())
@@ -228,9 +223,8 @@ def main(argv: list[str] | None = None) -> int:
                 if "__move_to_grasp(" in step:
                     _name, parsed = _parse_tool_call(step)
                     active_grasp[obj] = int(parsed["grasp_id"])
-                cmd, timeout = (_staging_view_command() if step == "__camera_staging_view__" else
-                                _command_for_step(step, None if obj == "startup" else obj,
-                                                  active_grasp.get(obj)))
+                cmd, timeout = _command_for_step(step, None if obj == "startup" else obj,
+                                                 active_grasp.get(obj))
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             transcript.write(f"\n{'=' * 72}\nSTEP {index} [{obj}] {step}\n{'=' * 72}\n")
             rc, output, result = _run(cmd, timeout, env)
@@ -275,15 +269,9 @@ def main(argv: list[str] | None = None) -> int:
 
         for entry in entries:
             obj = entry["object_name"]
-            first_grasp = True
             executed: list[str] = []
             placed_at_staging = False
             for step in entry.get("tool_sequence", []):
-                if args.fov_gated and first_grasp and "__move_to_grasp(" in step:
-                    row = run_step(obj, "__camera_staging_view__")
-                    first_grasp = False
-                    if row["result"].get("result") != "success":
-                        return fail(row)
                 row = run_step(obj, step)
                 if row["result"].get("result") != "success":
                     return fail(row)

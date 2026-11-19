@@ -138,9 +138,12 @@ def main(argv=None):
     ap.add_argument("--steady-s", type=float, default=0.3)
     ap.add_argument("--timeout-s", type=float, default=20.0)
     args = ap.parse_args(argv)
-    if os.environ.get("ROS_MCP_MODE") != "sim":
+    from ablations.sim_guard import require_sim_container
+    refusal = ("NOT_SIM: ROS_MCP_MODE is not sim" if os.environ.get("ROS_MCP_MODE") != "sim"
+               else require_sim_container())
+    if refusal:
         print("__RESULT_JSON__\n" + json.dumps({"result": "failure",
-              "error": "sim_seat_scorer reads simulator ground truth; it refuses outside ROS_MCP_MODE=sim"})
+              "error": f"sim_seat_scorer reads simulator ground truth; refused: {refusal}"})
               + "\n__END_RESULT_JSON__")
         return 2
     names = [n for n in (args.score or args.observe or args.drop).split(",") if n]
