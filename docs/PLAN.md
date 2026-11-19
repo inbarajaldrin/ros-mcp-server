@@ -196,13 +196,13 @@ APPROVED 2026-11-18 (R11).
   is on tool +Y.
 - SAFETY (w5, 2026-11-19): the October FMB1 u_orange/yellow two-pass stances were camera-up on the OLD (-Y) mount but are
   camera-DOWN on v3.1; replayed with the v3.1 geometry, u_orange's place-down puts the mount 33-34 mm into the table. No real
-  two-pass run on v3.1 until the camera hard rule (cell branch w4-mujoco b1b45b1: camera side not below horizontal within 150 mm
-  of the table, mount/D415 >= 30 mm above it, fail closed) is reviewed and merged.
+  two-pass run on v3.1 without the camera hard rule (camera side not below horizontal within 150 mm of the table, mount/D415
+  >= 30 mm above it and >= 10 mm from the arm, fail closed): MERGED into dev 0d42b1a (5 review rounds, final READY TO MERGE).
 - SAFETY (w5, 2026-11-19): on dev, prismatic_peg_insertion (line_green / inverted_u_yellow / FMB3 bars) switches passthrough + force
   mode ON and sleeps 2.5 s BEFORE its try: a stop signal in that window skips every restore (force mode stays on, the trajectory
   controller stays off), and a failed activation leaves the scaled controller off. Fixed on cell branch w4-mujoco 654044d (with a
-  deferred-signal safe-state cleanup), in review round 5. Until merged: after any interrupted prismatic insert, run stop_run.sh and
-  check the controllers before anything else.
+  deferred-signal safe-state cleanup): MERGED into dev 0d42b1a. Before the first real run: a twin live check of prismatic killed
+  mid-force-phase, rotate_object's 60 s budget, and the round-1 deferred items (review-w4-mujoco-cell-r5.md P2s).
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
