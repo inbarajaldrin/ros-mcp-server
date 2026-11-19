@@ -47,10 +47,12 @@ class FollowJointTrajectory(_Any):
 
 
 def install():
-    """Stand in for every ROS module, installed or not (a real rclpy would let a test shut down or join a graph);
-    a module this process already imported is left alone."""
+    """Stand in for every ROS module, installed or not: the suite never imports a real rclpy (a real one would let a
+    test shut a context down or join a graph on the cell PC).  tests/conftest.py installs these before any test
+    module is imported."""
     for name in ROS_MODULES:
-        sys.modules.setdefault(name, _Module(name))
+        if not isinstance(sys.modules.get(name), _Module):
+            sys.modules[name] = _Module(name)
     if isinstance(sys.modules["action_msgs.msg"], _Module):
         sys.modules["action_msgs.msg"].GoalStatus = GoalStatus
     if isinstance(sys.modules["control_msgs.action"], _Module):
