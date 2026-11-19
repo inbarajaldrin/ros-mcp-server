@@ -55,7 +55,6 @@ from primitives.core.force_filter import median_wrench_window
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
 # Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
 SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
-SIM_Z_FORCE_THRESHOLD = 20.0  # Match the real cell's 20 N wrist F/T delta stop
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
@@ -63,8 +62,20 @@ SIM_Z_FORCE_THRESHOLD = 20.0  # Match the real cell's 20 N wrist F/T delta stop
 # Z force uses directional threshold (negative = upward resistance)
 FORCE_THRESHOLD = 20.0  # Stop when force/torque changes by this amount from baseline (Newtons)
 CONTACT_MEDIAN_N = 51      # wrench samples (~100 ms at 500 Hz) in the contact median
-SIM_CONTACT_MEDIAN_WINDOW_S = 0.100
+BASELINE_MEDIAN_N = 150    # wrench samples (~0.3 s at 500 Hz) in the at-rest baseline median
+BASELINE_SETTLE_S = 0.35   # the at-rest wait before the baseline median
+REAL_WRENCH_HZ = 500.0     # the UR e-series F/T broadcaster rate the sample counts assume
 Z_FORCE_THRESHOLD = -5.0  # Z force threshold in N (negative = upward force/resistance)
+
+# Sim contact-axis stop = the real one (lead 2026-11-19).  A DroidStack sim run makes the real comparison: the same
+# threshold and sign (negative = upward resistance on the axis the tool's contact loads), an at-rest baseline over
+# the same span after the same settle, and a contact median over the same span.  The sim wrench topic is not at
+# 500 Hz, so the real sample counts are taken as time spans.  (An earlier SIM_Z_FORCE_THRESHOLD = 20 N, labelled
+# "the real 20 N", was the real OFF-axis threshold: the twin stopped 4x less sensitively than the arm, overtravelled
+# ~100 ms at ~67 mm/s, and slid u_brown 9 mm through the force-limited grip in r48i.)
+SIM_Z_FORCE_THRESHOLD = Z_FORCE_THRESHOLD
+SIM_CONTACT_MEDIAN_WINDOW_S = CONTACT_MEDIAN_N / REAL_WRENCH_HZ
+SIM_BASELINE_WINDOW_S = BASELINE_MEDIAN_N / REAL_WRENCH_HZ
 
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
 MOVE_DOWN_INCREMENT = 0.6  # Distance to move down per increment in meters
@@ -385,11 +396,13 @@ class MoveDown(Node):
         self.movement_start_time = time.time()
 
         if self.mode == 'sim':
-            # Use settled samples immediately preceding trajectory motion. A
-            # single in-motion baseline let distal pad/equality impulses look
-            # like seat contact even when no seat geom was touching.
+            # The real baseline: wait at rest, then the median over the same span of samples.  A single
+            # in-motion baseline let distal pad/equality impulses look like seat contact.
+            end = time.time() + BASELINE_SETTLE_S
+            while time.time() < end:
+                rclpy.spin_once(self, timeout_sec=0.01)
             m = median_wrench_window(
-                getattr(self, '_sim_wbuf', ()), SIM_CONTACT_MEDIAN_WINDOW_S
+                getattr(self, '_sim_wbuf', ()), SIM_BASELINE_WINDOW_S
             )
             if m is None:
                 m = (self.current_force_x, self.current_force_y, self.current_force_z,
@@ -398,15 +411,15 @@ class MoveDown(Node):
              self.baseline_torque_x, self.baseline_torque_y, self.baseline_torque_z) = (float(v) for v in m)
             self._sim_raw_transient_peak_n = 0.0
             self.get_logger().info(
-                f"Sim baseline captured at rest over {SIM_CONTACT_MEDIAN_WINDOW_S * 1000:.0f}ms: "
+                f"Sim baseline captured at rest over {SIM_BASELINE_WINDOW_S * 1000:.0f}ms: "
                 f"Fx={self.baseline_force_x:.2f}, Fy={self.baseline_force_y:.2f}, "
                 f"Fz={self.baseline_force_z:.2f}")
         else:
             # Real mode: take baseline at start (stationary) — median over ~0.3 s
-            end = time.time() + 0.35
+            end = time.time() + BASELINE_SETTLE_S
             while time.time() < end:
                 rclpy.spin_once(self, timeout_sec=0.01)
-            m = self._median_wrench(150)
+            m = self._median_wrench(BASELINE_MEDIAN_N)
             if m is None:
                 m = (self.current_force_x, self.current_force_y, self.current_force_z,
                      self.current_torque_x, self.current_torque_y, self.current_torque_z)
@@ -479,7 +492,7 @@ class MoveDown(Node):
             ]
             raw_contact = raw_force_deltas[self.contact_axis] * self.contact_direction
             if raw_contact > max(
-                    z_threshold, getattr(self, '_sim_raw_transient_peak_n', 0.0) + 1.0):
+                    -z_threshold, getattr(self, '_sim_raw_transient_peak_n', 0.0) + 1.0):
                 self._sim_raw_transient_peak_n = raw_contact
                 self.get_logger().warn(
                     f"Sim raw wrench transient: {raw_contact:.2f}N at "
@@ -508,9 +521,10 @@ class MoveDown(Node):
         # Real mode: uses Fz with negative delta (upward resistance from F/T sensor)
         if self.mode == 'sim':
             force_deltas = [f_x, f_y, f_z]
-            # Project onto contact axis with sign correction: positive = contact
+            # Project onto contact axis with sign correction: positive = contact; the real comparison is on the
+            # upward-resistance delta (negative = resistance), so compare -f_contact with the real threshold
             f_contact = force_deltas[self.contact_axis] * self.contact_direction
-            z_triggered = f_contact > z_threshold
+            z_triggered = -f_contact <= z_threshold
         else:
             z_triggered = f_z <= z_threshold  # Real: negative delta on contact
 

@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 from primitives.core.force_filter import median_wrench_window
 
 
@@ -27,10 +29,38 @@ def test_sim_endpoint_without_contact_is_a_failure():
     assert "already at its endpoint without a measured contact" in execute_source
 
 
-def test_sim_wrist_reaction_stop_matches_real_20n_delta():
-    source = MOVE_DOWN.read_text()
-    assert "SIM_Z_FORCE_THRESHOLD = 20.0" in source
-    assert "FORCE_THRESHOLD = 20.0" in source
+def test_sim_contact_stop_is_the_real_one():
+    """Lead 2026-11-19: the sim contact-axis stop is the real one - threshold, sign, baseline and median spans."""
+    _n, md = _move_down_node()
+    assert md.SIM_Z_FORCE_THRESHOLD == md.Z_FORCE_THRESHOLD < 0
+    assert md.SIM_CONTACT_MEDIAN_WINDOW_S == md.CONTACT_MEDIAN_N / md.REAL_WRENCH_HZ
+    assert md.SIM_BASELINE_WINDOW_S == md.BASELINE_MEDIAN_N / md.REAL_WRENCH_HZ
+
+
+@pytest.mark.parametrize("resistance_n", [2.0, 4.9, 5.0, 6.0, 20.0])
+def test_sim_and_real_make_the_same_contact_decision(resistance_n):
+    """The same upward resistance on the contact axis (the tool pointing down: Fz), held for longer than the median
+    span, stops sim and real alike: at the real 5 N, not at 20 N."""
+    import time
+    verdicts = {}
+    for mode in ("real", "sim"):
+        n, md = _move_down_node(mode=mode)
+        n.moving, n.movement_start_time, n.force_check_grace_period = True, time.time() - 10.0, 0.0
+        base = (0.0, 0.0, -26.0, 0.0, 0.0, 0.0)
+        (n.baseline_force_x, n.baseline_force_y, n.baseline_force_z,
+         n.baseline_torque_x, n.baseline_torque_y, n.baseline_torque_z) = base
+        loaded = (0.0, 0.0, -26.0 - resistance_n, 0.0, 0.0, 0.0)      # resistance: Fz delta negative
+        (n.current_force_x, n.current_force_y, n.current_force_z,
+         n.current_torque_x, n.current_torque_y, n.current_torque_z) = loaded
+        n.contact_axis, n.contact_direction, n.contact_axis_name = 2, -1.0, "Fz"
+        from collections import deque
+        n._wbuf = deque([loaded] * 200, maxlen=200)
+        n._sim_wbuf = deque([(i * 0.002,) + loaded for i in range(200)], maxlen=2000)
+        n.stopped, n._sim_raw_transient_peak_n, n._last_wrench_stamp_s = [], 0.0, 0.4
+        n.contact_detected_stop = lambda n=n: n.stopped.append(True)
+        n.check_force_during_execution()
+        verdicts[mode] = bool(n.stopped)
+    assert verdicts["sim"] == verdicts["real"] == (resistance_n >= 5.0)
 
 
 def test_contact_stop_admits_confirmed_cancel_but_never_aborted():
@@ -80,10 +110,13 @@ def test_sim_timestamp_window_rejects_a_short_60n_impulse_but_admits_sustained_c
 
 
 def test_real_force_baseline_and_contact_median_contract_is_unchanged():
+    """The real arm's stop: 5 N upward resistance, 20 N off-axis, a 0.35 s settle, a 150-sample baseline median and a
+    51-sample contact median."""
+    _n, md = _move_down_node()
+    assert (md.Z_FORCE_THRESHOLD, md.FORCE_THRESHOLD) == (-5.0, 20.0)
+    assert (md.BASELINE_SETTLE_S, md.BASELINE_MEDIAN_N, md.CONTACT_MEDIAN_N) == (0.35, 150, 51)
     source = MOVE_DOWN.read_text()
-    assert "end = time.time() + 0.35" in source
-    assert "m = self._median_wrench(150)" in source
-    assert "CONTACT_MEDIAN_N = 51" in source
+    assert "m = self._median_wrench(BASELINE_MEDIAN_N)" in source
     assert "m = self._median_wrench(CONTACT_MEDIAN_N)" in source
 
 
@@ -126,8 +159,6 @@ def _result(status, error_code=0):
     msg = types.SimpleNamespace(error_code=error_code, error_string="")
     return types.SimpleNamespace(result=lambda: types.SimpleNamespace(status=status, result=msg))
 
-
-import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize("status,ok", [(4, True), (5, True), (6, False), (2, False), (0, False), (3, False)])
