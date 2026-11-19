@@ -106,3 +106,19 @@ def test_planner_and_real_replay_pass_the_held_state():
     assert "'--held-quat', *[f\"{float(v):.6f}\" for v in state.held_quat]" in replay
     translate = ast.unparse(ast.parse((ROOT / "primitives/translate_object.py").read_text()))
     assert "held_quat=args.current_object_orientation" in translate
+
+
+def test_the_physical_upper_arm_catches_what_the_dh_capsule_misses():
+    """Review P2-2: at alpha 0.75 of r48's carry the held u_orange is 45 mm inside the physical upper-arm tube
+    (the twin's capsules: -45.3 mm), while the DH upper-arm capsule, 0.138 m off the tube, reports it clear."""
+    from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
+    held = _r48_held()
+    q = R48_START + 0.75 * (R48_TARGET - R48_START)
+    T_f = forward_kinematics(dh_params, q)
+    P = held.points_flange @ T_f[:3, :3].T + T_f[:3, 3]
+    J = [np.asarray(p) for p in compute_all_joint_positions(q)]
+    dh_upper = float(np.min(hpc._point_segment_distance(P, J[1], J[2]))) - UR5E_LINK_RADII[1]
+    assert dh_upper > 0.05                                       # the DH model alone: clear by more than 50 mm
+    reason = hpc.held_part_route_refusal(q, q, held)
+    assert reason.startswith("HELD_PART_ARM_COLLISION") and "physical upper arm" in reason
+    assert hpc.held_part_min_clearances(q, q, held)["physical"]["upper arm"] < -0.050

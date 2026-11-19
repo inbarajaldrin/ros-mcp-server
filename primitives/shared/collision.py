@@ -21,6 +21,42 @@ from primitives.shared.ik import dh_transform
 UR5E_LINK_RADII = (0.075, 0.065, 0.055, 0.045, 0.045, 0.040)
 
 
+# The physical link capsules, for the checks of things the arm carries (held part, camera mount) against the
+# arm.  The DH segments above are not on the physical links: the upper-arm tube runs 0.138 m off its DH segment
+# along the elbow axis, and there the DH capsule overstated the clearance by up to 128 mm (fmb-cell-lab
+# mujoco/capsule_model_check.py, review P2-2).  These are the twin's UR5e collision capsules (fmb_cell.xml, the
+# MuJoCo Menagerie geometry), expressed in this DH chain's link frames, where they are fixed to < 1 mm:
+# (DH frame index, end a, end b, radius m, arm link label).  The checks use BOTH models; neither replaces the other.
+PHYSICAL_LINK_CAPSULES = (
+    (1, (0.0002, -0.1002, 0.0), (0.0002, 0.0198, 0.0), 0.060, "shoulder"),
+    (2, (0.4251, 0.0, 0.1584), (0.4251, 0.0, 0.0384), 0.060, "upper arm (shoulder end)"),
+    (2, (0.4251, 0.0, 0.1384), (0.0251, 0.0, 0.1384), 0.050, "upper arm"),
+    (3, (0.3924, 0.0, 0.1477), (0.3924, 0.0, 0.0277), 0.055, "forearm (elbow end)"),
+    (3, (0.3824, 0.0, 0.0077), (0.0024, 0.0, 0.0079), 0.038, "forearm"),
+    (4, (0.0, -0.005, 0.0), (0.0, -0.145, 0.0), 0.040, "wrist_1"),
+)
+
+
+def dh_link_frames(joint_angles):
+    """The base frame and the six DH link frames (7 4x4 transforms)."""
+    T = np.eye(4)
+    frames = [T.copy()]
+    for i, (theta, d, a, alpha) in enumerate(DH_PARAMS):
+        T = T @ dh_transform(joint_angles[i] + theta, d, a, alpha)
+        frames.append(T.copy())
+    return frames
+
+
+def physical_link_capsules(joint_angles):
+    """[(a, b, radius, label)] of PHYSICAL_LINK_CAPSULES in the base frame."""
+    frames = dh_link_frames(joint_angles)
+    out = []
+    for k, a, b, r, label in PHYSICAL_LINK_CAPSULES:
+        F = frames[k]
+        out.append((F[:3, :3] @ np.asarray(a) + F[:3, 3], F[:3, :3] @ np.asarray(b) + F[:3, 3], r, label))
+    return out
+
+
 def compute_all_joint_positions(joint_angles):
     """
     Compute the 3D positions of all joints given joint angles.

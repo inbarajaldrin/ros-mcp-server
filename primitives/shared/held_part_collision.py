@@ -32,7 +32,7 @@ from functools import lru_cache
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
+from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions, physical_link_capsules
 from primitives.shared.config import CAD_DATA_DIR, TABLE_HEIGHT
 from primitives.shared.ik import WRIST3_LIMIT_RAD, dh_params, forward_kinematics
 
@@ -148,13 +148,20 @@ def held_part_route_refusal(start, target, held: HeldPart | None, num_samples: i
             if clearance < need:
                 return (f"HELD_PART_ARM_COLLISION: {held.name} ({held.source}) {1000 * clearance:.1f} mm from link "
                         f"{link} axis (needs {1000 * need:.1f}) at alpha={alpha:.3f}")
+        for a, b, r, label in physical_link_capsules(q):
+            clearance = float(np.min(_point_segment_distance(P, a, b))) - held.radius_m - r
+            if clearance < HELD_LINK_MARGIN_M:
+                return (f"HELD_PART_ARM_COLLISION: {held.name} ({held.source}) {1000 * clearance:.1f} mm from the "
+                        f"physical {label} (needs {1000 * HELD_LINK_MARGIN_M:.0f}) at alpha={alpha:.3f}")
     return None
 
 
 def held_part_min_clearances(start, target, held: HeldPart, num_samples: int = 40):
-    """Diagnostics: per-link minimum (clearance - needed) along the route, metres (negative = would refuse)."""
+    """Diagnostics: per-link minimum (clearance - needed) along the route, metres (negative = would refuse): the DH
+    capsules ("links") and the physical capsules ("physical", by label)."""
     start, target = np.asarray(start, float), np.asarray(target, float)
     worst = {link: np.inf for link in range(ARM_LINKS_CHECKED)}
+    physical = {}
     table = np.inf
     for i in range(num_samples + 1):
         q = start + (i / num_samples) * (target - start)
@@ -162,10 +169,13 @@ def held_part_min_clearances(start, target, held: HeldPart, num_samples: int = 4
         P = held.points_flange @ T_f[:3, :3].T + T_f[:3, 3]
         table = min(table, float(np.min(P[:, 2])) - held.radius_m - TABLE_HEIGHT - HELD_TABLE_MARGIN_M)
         joints = [np.asarray(p) for p in compute_all_joint_positions(q)]
-        for link in worst:
+        for link in range(ARM_LINKS_CHECKED):
             c = float(np.min(_point_segment_distance(P, joints[link], joints[link + 1]))) - held.radius_m
             worst[link] = min(worst[link], c - UR5E_LINK_RADII[link] - HELD_LINK_MARGIN_M)
-    return {"links": worst, "table": table}
+        for a, b, r, label in physical_link_capsules(q):
+            c = float(np.min(_point_segment_distance(P, a, b))) - held.radius_m - r - HELD_LINK_MARGIN_M
+            physical[label] = min(physical.get(label, np.inf), c)
+    return {"links": worst, "physical": physical, "table": table}
 
 
 def held_part_model(name, T_flange, T_part=None, held_quat=None, grasp_id=None):
