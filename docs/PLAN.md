@@ -109,6 +109,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   sim slip gate bounds the mass instead of measuring it: CAD volume x solid PLA density as the upper bound, 20 % of it as the lower,
   no slip at both ends at the real 40 N grip; the real grasp's observed no-slip is the reference; no friction tuning unless a declared
   physical value is wrong.
+- **R27 Use the fork now, land later** (2026-11-19 ~07:20Z, WhatsApp): "there is no point in waiting for droidstack to land ... i dont
+  see why we arent using the fork to do the work we can incorporate it in droidstack dev branch later". The MuJoCo assembly video is
+  built and RUN from our lane fork ds-mujoco-robot-cell (slice 1 c1f21ed2 + Phase A + Phase B + C) without waiting for any landing or
+  plan47's live-graph word; landing into DroidStack dev follows later through plan47's gate. Runs off dual (P29-1): a4500 CPU (or
+  the Mac), ROS host-local (R18), never on the cell PC's ROS network. plan47 informed, not asked.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
