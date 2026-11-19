@@ -143,21 +143,36 @@ MOUNT_ARM_LINKS = 4                 # base, upper arm, forearm, wrist_1 (wrist_2
 
 
 def camera_mount_arm_refusal(joints):
-    """None, or a typed reason: the v3.1 mount/D415 (fitted CAD boxes) within the margin of an arm-link capsule
-    of collision.py's model (DH joint origins, UR5E_LINK_RADII).  r48c (MuJoCo, 2026-11-19): a camera-up yellow
+    """None, or a typed reason: the v3.1 mount/D415 (fitted CAD boxes, faces sampled at <= 5 mm, the sampling
+    gap subtracted) within the margin of an arm-link capsule of collision.py's model (DH joint origins,
+    UR5E_LINK_RADII).  r48c (MuJoCo, 2026-11-19): a camera-up yellow
     reorient drove the mount 16.6 mm inside the wrist_1 capsule; the arm-only self-collision check could not see it."""
-    from primitives.shared.camera_geometry import mount_points_tool
+    from primitives.shared.camera_geometry import mount_box_spheres_tool, mount_surface_tool
     from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
     from primitives.shared.ik import dh_params, forward_kinematics
     q = np.asarray(joints, float)
     T = forward_kinematics(dh_params, q)
-    W = mount_points_tool() @ T[:3, :3].T + T[:3, 3]
+    surface, gap, owner = mount_surface_tool()
+    centres, radii = mount_box_spheres_tool()
+    C = centres @ T[:3, :3].T + T[:3, 3]
     J = [np.asarray(p) for p in compute_all_joint_positions(q)]
+
+    def axis_distance(P, a, ab):
+        t = np.clip(((P - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+        return np.linalg.norm(P - (a + t[:, None] * ab), axis=1)
+
     for link in range(MOUNT_ARM_LINKS):
         a, b = J[link], J[link + 1]
         ab = b - a
-        t = np.clip(((W - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
-        clearance = float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - UR5E_LINK_RADII[link]
+        # skip only the boxes whose bounding sphere clears the margin plus the sampling gap (their samples would
+        # too); sample the faces of the others
+        near = np.flatnonzero(axis_distance(C, a, ab) - radii - gap - UR5E_LINK_RADII[link]
+                              < CAMERA_MOUNT_ARM_MARGIN_M)
+        if near.size == 0:
+            continue
+        W = surface[np.isin(owner, near)] @ T[:3, :3].T + T[:3, 3]
+        # the nearest surface sample, less the sampling gap: a lower bound on the true box-to-capsule clearance
+        clearance = float(np.min(axis_distance(W, a, ab))) - gap - UR5E_LINK_RADII[link]
         if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
             return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from arm link {link} "
                     f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")

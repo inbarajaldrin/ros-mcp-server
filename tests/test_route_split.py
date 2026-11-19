@@ -20,17 +20,18 @@ def rule(a, b, is_last):
     return camera_route_refusal(a, b, near_table_end=is_last)
 
 
-def test_direct_line_is_refused_and_a_split_route_is_admitted():
+def test_direct_line_is_refused_and_a_detour_route_is_admitted():
+    """With the conservative link radii and the mount's faces sampled (no corner-only blind spot), every
+    joint-group split of r48e's reorient sweeps the mount within 10 mm of the forearm too; a +90 deg wrist_3
+    detour turns it away."""
     assert camera_route_refusal(START, TARGET, near_table_end=True).startswith("CAMERA_MOUNT_ARM_COLLISION")
     route, _ = admissible_route(START, TARGET, rule)
-    assert route is not None and len(route) > 2
+    assert route is not None and len(route) == 4
     assert np.allclose(route[0], START) and np.allclose(route[-1], TARGET)
-    for a, b in zip(route[:-1], route[1:]):
-        moved = np.abs(b - a) > 1e-9
-        assert moved.any()
-    # same end pose, no more travel than the direct line (axis splits move each joint once)
+    assert np.isclose(route[1][5] - START[5], np.pi / 2) and np.allclose(route[1][:5], START[:5])
+    assert max(abs(w[5]) for w in route) <= 4.0
     travel = sum(np.sum(np.abs(b - a)) for a, b in zip(route[:-1], route[1:]))
-    assert travel <= np.sum(np.abs(TARGET - START)) + 1e-9
+    assert travel <= np.sum(np.abs(TARGET - START)) + np.pi + 1e-9      # the direct travel plus the detour out and back
 
 
 def test_an_admissible_direct_line_is_kept_and_none_refuses():

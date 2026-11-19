@@ -64,11 +64,61 @@ def test_mount_vs_arm_refuses_r48c_yellow_reorient_and_admits_flown_poses():
     # r48c (MuJoCo) t=255.2 s: a camera-up yellow reorient that drove the v3.1 mount into the forearm/wrist_1.
     q_bad = [2.0117, -1.5065, 1.7891, -0.8216, -3.1744, 0.0055]
     from primitives.shared.camera_up import camera_mount_arm_refusal
-    from primitives.shared.camera_geometry import mount_points_tool
-    assert mount_points_tool().shape[1] == 3
     home = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
     assert camera_mount_arm_refusal(home) is None
     assert camera_mount_arm_refusal(R48C_HIGH_CARRY) is None
     reason = camera_mount_arm_refusal(q_bad)
     assert reason is not None and reason.startswith("CAMERA_MOUNT_ARM_COLLISION")
     assert cu.camera_route_refusal(home, q_bad) is not None
+
+
+def test_mount_surface_sampling_bounds_the_true_box_distance():
+    """Review P2-1: corners and centres miss mid-face/mid-edge points (up to ~16 mm on the 32 mm boxes).  The face
+    grid (<= 5 mm) with its gap subtracted never overstates the clearance."""
+    import numpy as np
+    from primitives.shared.camera_geometry import CAMERA_MOUNT_BOXES_TOOL, mount_surface_tool
+    surface, gap, _owner = mount_surface_tool()
+    assert gap <= 0.0036
+    boxes = [(np.asarray(lo), np.asarray(hi)) for bs in CAMERA_MOUNT_BOXES_TOOL.values() for lo, hi in bs]
+    corners = np.array([[x, y, z] for lo, hi in boxes for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                        for z in (lo[2], hi[2])] + [(lo + hi) / 2 for lo, hi in boxes])
+    rng = np.random.default_rng(0)
+    lo_all = np.min([lo for lo, _ in boxes], axis=0) - 0.03
+    hi_all = np.max([hi for _, hi in boxes], axis=0) + 0.03
+    worst_corner_miss = 0.0
+    for p in rng.uniform(lo_all, hi_all, size=(400, 3)):
+        exact = min(float(np.linalg.norm(np.maximum(np.maximum(lo - p, 0.0), p - hi))) for lo, hi in boxes)
+        if exact == 0.0:
+            continue                                    # inside a box
+        sampled = float(np.min(np.linalg.norm(surface - p, axis=1)))
+        assert sampled - gap <= exact + 1e-9 <= sampled + 1e-9
+        worst_corner_miss = max(worst_corner_miss, float(np.min(np.linalg.norm(corners - p, axis=1))) - exact)
+    assert worst_corner_miss > 0.010                    # what the corner sampling could hide
+
+
+def test_mount_vs_arm_prefilter_matches_the_full_surface():
+    """The bounding-sphere prefilter only skips boxes that clear the margin: same verdict as every sample."""
+    import numpy as np
+    from primitives.shared.camera_geometry import mount_surface_tool
+    from primitives.shared.camera_up import CAMERA_MOUNT_ARM_MARGIN_M, MOUNT_ARM_LINKS, camera_mount_arm_refusal
+    from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
+    from primitives.shared.ik import dh_params, forward_kinematics
+    surface, gap, _owner = mount_surface_tool()
+    rng = np.random.default_rng(3)
+    refused = 0
+    for _ in range(300):
+        q = np.array([1.9, -1.4, 1.7, -0.8, -3.1, 0.0]) + rng.normal(0, 0.8, 6)
+        T = forward_kinematics(dh_params, q)
+        W = surface @ T[:3, :3].T + T[:3, 3]
+        J = [np.asarray(p) for p in compute_all_joint_positions(q)]
+        brute = False
+        for link in range(MOUNT_ARM_LINKS):
+            a, ab = J[link], J[link + 1] - J[link]
+            t = np.clip(((W - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+            d = float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - gap - UR5E_LINK_RADII[link]
+            if d < CAMERA_MOUNT_ARM_MARGIN_M:
+                brute = True
+                break
+        assert (camera_mount_arm_refusal(q) is not None) == brute
+        refused += brute
+    assert 0 < refused < 300
