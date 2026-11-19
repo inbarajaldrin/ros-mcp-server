@@ -68,6 +68,25 @@ class Mover(Node):
             self.q = np.array(positions)
 
 
+REORIENT_CHECK_RAD = np.radians(1.0)
+
+
+def camera_path_refusal(T0, wps):
+    """The camera hard rule on a Cartesian move (CLAUDE.md "Camera away from the table"): the final stance, and
+    every waypoint when the move turns the tool by more than REORIENT_CHECK_RAD.  A place-down landing ends here,
+    below the stance move_down checked, so the 30 mm mount clearance is judged where the move ends."""
+    from primitives.shared.camera_up import camera_stance_refusal
+    T_end = forward_kinematics(dh_params, wps[-1])
+    turn = R.from_matrix(T0[:3, :3].T @ T_end[:3, :3]).magnitude()
+    checked = range(len(wps)) if turn > REORIENT_CHECK_RAD else [len(wps) - 1]
+    for i in checked:
+        why = camera_stance_refusal(forward_kinematics(dh_params, wps[i]))
+        if why:
+            where = "at the end" if i == len(wps) - 1 else f"at waypoint {i + 1}/{len(wps)}"
+            return f"{why} ({where} of the Cartesian move)"
+    return None
+
+
 def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, min_z=SAFE_HEIGHT - 0.10,
               max_joint_step=1.5, max_wrist3_step=3.2, min_radius=0.25, duration=None, on_sample=None, look_at_z=None):
     """One straight Cartesian move on a live Mover node (the CLI's whole behaviour, 2026-10-22: callers that make many
@@ -143,6 +162,9 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
         out["error"] = f"wrist_3 would end at {float(wps[-1][5]):+.2f} rad (|.| > {WRIST3_ABS_MAX}) - unwind first"; return out
     if float(dq[5]) > max_wrist3_step:
         out["error"] = f"wrist_3 step {float(dq[5]):.2f} rad > {max_wrist3_step}"; return out
+    why = camera_path_refusal(T0, wps)
+    if why:
+        out["error"] = why; return out
     step = float(np.max(dq))                                           # the duration still follows the largest joint
     dur = (float(duration) if duration is not None
            else max(compute_duration(joint_distance=step, cartesian_distance=dist, profile='s_curve'), min_duration))

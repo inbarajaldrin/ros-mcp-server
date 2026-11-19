@@ -37,7 +37,10 @@ class GoalStatus:
 
 
 class FollowJointTrajectory(_Any):
-    """control_msgs/action/FollowJointTrajectory result codes."""
+    """control_msgs/action/FollowJointTrajectory: a settable Goal and the result codes."""
+    class Goal(_Any):
+        pass
+
     class Result:
         SUCCESSFUL, INVALID_GOAL, INVALID_JOINTS = 0, -1, -2
         OLD_HEADER_TIMESTAMP, PATH_TOLERANCE_VIOLATED, GOAL_TOLERANCE_VIOLATED = -3, -4, -5
