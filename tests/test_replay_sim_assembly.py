@@ -20,6 +20,12 @@ def test_non_sim_step_is_refused():
         raise AssertionError("real step was not refused")
 
 
+def test_move_home_uses_sim_primitive():
+    command, timeout = _command_for_step("ros-mcp-server__move_home(mode='sim')")
+    assert command[-3:] == ["primitives.move_home", "--mode", "sim"]
+    assert timeout == 120
+
+
 def test_last_result_envelope_wins():
     text = "__RESULT_JSON__\n{\"result\":\"failure\"}\n__END_RESULT_JSON__\n" \
            "__RESULT_JSON__\n{\"result\":\"success\"}\n__END_RESULT_JSON__\n"

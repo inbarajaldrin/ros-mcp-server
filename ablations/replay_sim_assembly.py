@@ -29,6 +29,8 @@ def _command_for_step(step: str) -> tuple[list[str], int]:
         raise ValueError(f"standalone sim replay refuses non-sim step: {step}")
     short = name.removeprefix("ros_mcp_server__")
     py = [sys.executable, "-u", "-m"]
+    if short == "move_home":
+        return py + ["primitives.move_home", "--mode", "sim"], 120
     if short == "control_gripper":
         return py + ["primitives.control_gripper", str(kwargs["command"]), "--mode", "sim"], 90
     if short == "move_to_grasp":
