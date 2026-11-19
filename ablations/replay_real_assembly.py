@@ -815,6 +815,11 @@ FOLLOW_READ_Z = 0.30          # flange height for the close read of a seated ref
 FOLLOW_READ_S = 10.0
 
 
+HELD_FRAME_MAX_MM = 60.0      # same-frame held check (v3.1 mount, 2026-11-19): a chain error up to a mirrored leg grasp
+HELD_FRAME_MIN_MM = 3.0       # (2 x 24.5 mm on the U parts) is corrected; below this it is noise, above HELD_FRAME_MAX_MM a misread
+HELD_FRAME_MAX_SPREAD_MM = 1.5
+HELD_FRAME_MAX_DZ_MM = 15.0   # the camera's held-part height must agree with the chain's, or the read is of something else
+HELD_FRAME_SHIFT = {}         # obj -> (dx, dy) m: camera minus chain, held part centre, world (consumed by the insert aim)
 HELD_YAW_MAX_DEG = 6.0        # a larger difference is a misread or a wrong fold branch, not a grasp error
 HELD_YAW_APPLY = False        # 2026-10-20: three corrected line_green inserts (+2.26, +1.68, +1.92 deg read) had the
                               # slot turn the TCP by +0.05, -1.96, -2.96 deg at entry vs <= 0.8 deg uncorrected -
@@ -872,6 +877,40 @@ def pre_insert_base_read(obj, state, args, say, log_fh=None):
     return _pre_insert_base_read_shifted(obj, state, args, say, log_fh)
 
 
+def _held_frame_check(obj, Tfo, say):
+    """Same-frame held check (2026-11-19, v3.1 mount: the camera sees a held U/yellow part, the old mount never did).
+    In the clear view the held part is in frame with the base: compare its centre from the camera (the localizer's raw
+    pose, unsnapped) with where the orientation chain puts it (flange * Tfo, Tfo = held_in_flange from state.held_quat).
+    The difference is the chain's own error - 49 mm on 11-18's u_orange, a mirrored leg grasp (the fold-branch trap) - and
+    the insert aim shifts by minus it (HELD_FRAME_SHIFT, consumed when the insert argv is built). Gated: >= 3 still reads,
+    spread <= 1.5 mm, height within 15 mm of the chain's, |shift| in [3, 60] mm; anything else changes nothing (logged).
+    HELD_FRAME_APPLY=0 logs without applying."""
+    HELD_FRAME_SHIFT.pop(obj, None)
+    try:
+        snap = snapshot_robot_state(); tcp = snap.get('tcp') or {}
+        if not tcp.get('xyz') or Tfo is None:
+            return
+        Tf = np.eye(4); Tf[:3, :3] = R_.from_quat(tcp['quat_xyzw']).as_matrix(); Tf[:3, 3] = tcp['xyz']
+        p_chain = (Tf @ np.asarray(Tfo))[:3, 3]
+        S = observe_many([obj], 4.0, n_samples=6, settle_s=0.5).get(obj) or []
+    except Exception as e:
+        say(f"  [held-frame] {obj}: no check ({e})"); return
+    if len(S) < 3:
+        say(f"  [held-frame] {obj}: held part read {len(S)}x in the clear view - no check"); return
+    P = np.array([s_['xyz'] for s_ in S]); p_cam = np.median(P, 0); spread = 1000 * float(np.max(np.std(P, 0)))
+    d = p_cam - p_chain; dxy = 1000 * float(np.hypot(d[0], d[1])); dz = 1000 * float(d[2])
+    msg = (f"  [held-frame] {obj}: camera {np.round(1000 * p_cam, 1).tolist()} vs chain {np.round(1000 * p_chain, 1).tolist()} mm "
+           f"-> {np.round(1000 * d, 1).tolist()} mm (|xy| {dxy:.1f}, spread {spread:.1f}, n {len(S)})")
+    if spread > HELD_FRAME_MAX_SPREAD_MM or abs(dz) > HELD_FRAME_MAX_DZ_MM or dxy > HELD_FRAME_MAX_MM:
+        say(msg + " - not trusted, insert aims at the chain"); return
+    if dxy < HELD_FRAME_MIN_MM:
+        say(msg + " - chain agrees"); return
+    if os.environ.get('HELD_FRAME_APPLY', '1') == '0':
+        say(msg + " - logged only (HELD_FRAME_APPLY=0)"); return
+    HELD_FRAME_SHIFT[obj] = (float(d[0]), float(d[1]))
+    say(msg + f" - the insert aim shifts by {np.round(-1000 * d[:2], 1).tolist()} mm")
+
+
 def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
     """Operator 2026-10-20: "reading a pose before insertion to correct can be done even with a part in hand if
     you rotate the wrist". The held part is rigid with the camera, so it always fills the same image region;
@@ -926,6 +965,7 @@ def _pre_insert_base_read_shifted(obj, state, args, say, log_fh=None):
         if r.get('result') != 'success':
             continue
         nb = observe_base_pose(bname, timeout_s=6.0)
+        _held_frame_check(obj, Tfo, say)
         if nb is not None and os.environ.get('BASE_FROM', 'marker') in ('depth', 'icp'):
             nd, info = _depth(nb, bname)
             say(f"  [base@insert] {obj}: depth outline {json.dumps(info)}")
@@ -1823,6 +1863,10 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                     _APPLIED_BIAS[obj_] = aim.shift('bias')
                 state.aim = aim
                 px, py, pz = aim.argv_pos()
+                if obj_ in HELD_FRAME_SHIFT:          # same-frame held check: the held part sits off the chain by this much
+                    hx, hy = HELD_FRAME_SHIFT.pop(obj_)
+                    px, py = px - hx, py - hy
+                    print(f"  [held-frame] {obj_}: insert base aim shifted by ({-1000 * hx:.1f}, {-1000 * hy:.1f}) mm", flush=True)
                 argv += ['--final-base-pos', f"{px:.6f}", f"{py:.6f}", f"{pz:.6f}",
                          '--final-base-orientation', *[f"{v:.6f}" for v in aim.quat]]
                 argv = [a for a in argv if a != '--use-default-base-position']
