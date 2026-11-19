@@ -54,7 +54,11 @@ class Mover(Node):
         self.q = None
         self.create_subscription(JointState, JOINT_STATES_TOPIC, self._cb, 10)
         self.F = deque(maxlen=51)
-        self.create_subscription(WrenchStamped, WRENCH_TOPIC,
+        # The real arm's force guard reads the real F/T broadcaster; only a
+        # DroidStack sim run reads the simulator's tool wrench.
+        wrench_topic = (WRENCH_TOPIC if DROIDSTACK_SIM
+                        else '/force_torque_sensor_broadcaster/wrench')
+        self.create_subscription(WrenchStamped, wrench_topic,
                                  lambda m: self.F.append((m.wrench.force.x, m.wrench.force.y, m.wrench.force.z)), 50)
         self.ac = ActionClient(self, FollowJointTrajectory, ACTION)
 
