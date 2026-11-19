@@ -102,6 +102,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   place. Four rounds of independent Opus review (lane .pa/REVIEW-r1..r4.md).
 - **R24 Hold live tests** (2026-11-19 ~02:50Z): "lets hold off on the live test let me see the assembnly video in mujoco first". No
   real-cell runs (the u_orange retry, the cable test) until the operator has seen an FMB1 assembly video in MuJoCo.
+- **R25 MuJoCo video the DroidStack way** (2026-11-19 ~03:05Z): "we can do it with A itself then but do you really have to wait for it to
+  land before use?" - no interim connector; the video comes from the cell code on DroidStack's MuJoCo road (ds-mujoco-robot-cell
+  phases A-C). Start as early as plan47 allows (asked: phase A on ds-mujoco's gate-passed head c1f21ed2, rebase at landing).
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
