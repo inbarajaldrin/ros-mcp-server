@@ -15,7 +15,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--object-name", required=True)
     parser.add_argument("--base-name", required=True)
-    parser.add_argument("--operation", choices=("insert", "place-down"), default="insert")
     args = parser.parse_args()
     rclpy.init()
     node = Node("sim_regular_insert")
@@ -36,7 +35,7 @@ def main():
         if time.time() >= next_publish:
             message = String()
             message.data = json.dumps({"id": request_id, "object": args.object_name,
-                                       "base": args.base_name, "operation": args.operation})
+                                       "base": args.base_name})
             publisher.publish(message)
             next_publish = time.time() + 0.25
         rclpy.spin_once(node, timeout_sec=0.05)
@@ -47,8 +46,7 @@ def main():
     else:
         result = {"result": "success" if result.get("ok") else "failure",
                   "object_name": args.object_name, "base_name": args.base_name,
-                  "movement_type": "regular_insert" if args.operation == "insert" else "place_down",
-                  **result}
+                  "movement_type": "regular_insert", **result}
     print("__RESULT_JSON__")
     print(json.dumps(result))
     print("__END_RESULT_JSON__")
