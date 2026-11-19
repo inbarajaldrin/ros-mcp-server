@@ -918,9 +918,9 @@ class MoveDown(Node):
             self._current_goal_handle = None
             
             # A force-triggered stop can finish as SUCCEEDED (the endpoint won
-            # the race) or CANCELED (the controller confirmed our stop).  None
-            # is a place-down success by itself: the force threshold is still
-            # required below.  ABORTED is a controller/path/protective-stop
+            # the race) or CANCELED (the controller confirmed our stop).  Neither
+            # status is a place-down success by itself: the force threshold is
+            # still required below.  ABORTED is a controller/path/protective-stop
             # failure on the real arm and must never be promoted by a force
             # sample.  Use ROS 2 GoalStatus constants, not legacy action codes.
             if result.status in (
