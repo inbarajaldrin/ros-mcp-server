@@ -1,6 +1,7 @@
 """Split a refused joint-linear move into short joint-linear segments (lead approval 2026-11-19).
 
-Candidates, in order: the direct line; every ordered split of the moving joint groups; wrist_3 detours.
+Candidates, in order: the direct line; every ordered split of the moving joint groups; wrist_3 detours;
+wrist_3 detours through the caller's via waypoints (move_to_clear_area: the home joints).
 
 rotate_object sends one joint target and the controller interpolates a straight line in joint space.  In MuJoCo
 r48e that line swept the v3.1 camera mount through the forearm / wrist_1 zone for a flat u_orange held camera-up.
@@ -22,9 +23,10 @@ WRIST3_DETOURS_RAD = (np.pi / 2, -np.pi / 2, 3 * np.pi / 4, -3 * np.pi / 4, np.p
 WRIST3_ABS_MAX_RAD = 4.0          # the cable limit (ik.WRIST3_LIMIT_RAD)
 
 
-def candidate_routes(start, target):
+def candidate_routes(start, target, vias=()):
     """Waypoint lists start -> ... -> target: the direct line first, then every ordered split of the joint
-    groups that move, fewest segments first."""
+    groups that move, fewest segments first, then wrist_3 detours, then detours through each via waypoint
+    (e.g. the home joints: start, start+d, via+d, target+d, target)."""
     start, target = np.asarray(start, float), np.asarray(target, float)
     moving = [g for g, idx in GROUPS.items() if np.max(np.abs(target[list(idx)] - start[list(idx)])) > 1e-6]
     yield [start, target]
@@ -51,14 +53,22 @@ def candidate_routes(start, target):
         b[5] += d3
         if max(abs(a[5]), abs(b[5])) <= WRIST3_ABS_MAX_RAD:
             yield [start, a, b, target]
+    for via in vias:
+        via = np.asarray(via, float)
+        for d3 in WRIST3_DETOURS_RAD:
+            route = [start.copy(), start.copy(), via.copy(), target.copy(), target.copy()]
+            for w in route[1:4]:
+                w[5] += d3
+            if max(abs(w[5]) for w in route) <= WRIST3_ABS_MAX_RAD:
+                yield route
 
 
-def admissible_route(start, target, segment_refusal):
+def admissible_route(start, target, segment_refusal, vias=()):
     """The admissible route of least total joint travel (ties: fewer segments), or (None, reasons).
 
     segment_refusal(a, b, is_last) -> None or a typed reason."""
     best, reasons = None, []
-    for wps in candidate_routes(start, target):
+    for wps in candidate_routes(start, target, vias):
         segs = list(zip(wps[:-1], wps[1:]))
         why = None
         for i, (a, b) in enumerate(segs):

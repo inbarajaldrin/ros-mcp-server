@@ -803,6 +803,7 @@ class MoveToClearArea(Node):
                     # Split by joint group (route_split; lead approval 2026-11-19): every segment a straight joint
                     # line from where the last one ended, checked by the arm, camera and held-part rules alike.
                     from primitives.shared.route_split import admissible_route
+                    from primitives.shared.config import HOME_JOINTS
                     margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
 
                     def segment_refusal(a, b, is_last):
@@ -815,7 +816,8 @@ class MoveToClearArea(Node):
                         tj = np.array(candidate_joints).copy()
                         if check_collision_with_table(tj) or check_self_collision(tj):
                             continue
-                        route, why = admissible_route(start_joints, tj, segment_refusal)
+                        route, why = admissible_route(start_joints, tj, segment_refusal,
+                                                      vias=(np.array(HOME_JOINTS, dtype=float),))
                         if route is None:
                             held_refusals.append(f"split: {'; '.join(sorted(set(why))[:2])}")
                             continue
