@@ -46,7 +46,9 @@ ROTATE_SHORT = os.environ.get('ROTATE_SHORT', '1') == '1'
 ROTATE_SHORT_RAD, ROTATE_SHORT_RAD_S, ROTATE_SHORT_MIN_S = 0.10, 0.07, 1.0
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
-from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
+from primitives.shared.collision import (UR5E_LINK_RADII, compute_all_joint_positions,
+    check_collision_with_table, segment_distance, check_self_collision,
+    check_ee_below_base, check_compact_configuration)
 
 
 def _json_dumps_decimal(obj, **kwargs):
@@ -614,7 +616,7 @@ class ReorientForAssembly(Node):
         Returns the smallest (segment_distance - combined_radii).
         Higher values indicate more spread-out configurations.
         """
-        link_radii = [0.075, 0.065, 0.055, 0.045, 0.045, 0.040]
+        link_radii = UR5E_LINK_RADII
         joint_positions = compute_all_joint_positions(joint_angles)
         num_links = len(joint_positions) - 1
         min_clearance = float('inf')

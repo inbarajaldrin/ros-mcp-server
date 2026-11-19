@@ -10,6 +10,12 @@ import numpy as np
 from primitives.shared.config import DH_PARAMS, TABLE_HEIGHT
 from primitives.shared.ik import dh_transform
 
+# UR5e link radii from the vendored robot description's manually measured
+# physical parameters (description/ur_description/config/ur5e/
+# physical_parameters.yaml). Keep one source for collision rejection and
+# rotate_object's clearance ranking.
+UR5E_LINK_RADII = (0.060, 0.054, 0.040, 0.045, 0.045, 0.040)
+
 
 def compute_all_joint_positions(joint_angles):
     """
@@ -129,15 +135,7 @@ def check_self_collision(joint_angles, verbose=False, logger=None):
     Returns:
         True if self-collision detected, False otherwise
     """
-    # UR5e approximate link radii (meters) - conservative estimates
-    link_radii = [
-        0.075,  # Base (joint 0-1)
-        0.065,  # Shoulder to elbow (joint 1-2) - upper arm
-        0.055,  # Elbow to wrist1 (joint 2-3) - forearm
-        0.045,  # Wrist1 to wrist2 (joint 3-4)
-        0.045,  # Wrist2 to wrist3 (joint 4-5)
-        0.040,  # Wrist3 to EE (joint 5-6)
-    ]
+    link_radii = UR5E_LINK_RADII
 
     safety_margin = 0.01  # 1cm extra margin
 
