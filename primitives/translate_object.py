@@ -838,8 +838,8 @@ class TranslateObject(Node):
         # reaches. Every solve uses the exact target pose: the former
         # perturbations shifted X by up to 4 mm, larger than the seat tolerance.
         for shoulder_pan in (0.0, np.pi / 2, -np.pi / 2, np.pi):
-            for shoulder_lift in (-2.0, -1.5, -1.0):
-                for elbow in (1.0, 1.5, 2.0):
+            for shoulder_lift in (-2.5, -2.0, -1.0, 1.0, 2.0, 2.5):
+                for elbow in (-2.8, -2.0, -1.0, 1.0, 2.0, 2.8):
                     seed = self.current_joint_angles.copy()
                     seed[0] = shoulder_pan
                     seed[1] = shoulder_lift
