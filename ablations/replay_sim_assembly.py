@@ -46,9 +46,9 @@ def _command_for_step(step: str) -> tuple[list[str], int]:
                      "--base-name", kwargs["base_name"], "--mode", "sim"], 150
     if short == "translate_object":
         action = str(kwargs["action"]).replace("_", "-")
-        if action == "insert":
+        if action in ("insert", "place-down"):
             return py + ["ablations.sim_regular_insert", "--object-name", kwargs["object_name"],
-                         "--base-name", kwargs["base_name"]], 30
+                         "--base-name", kwargs["base_name"], "--operation", action], 30
         return py + ["primitives.translate_object", "--mode", "sim",
                      "--object-name", kwargs["object_name"], "--base-name", kwargs["base_name"],
                      f"--{action}"], 120
