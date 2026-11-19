@@ -815,20 +815,6 @@ class TranslateObject(Node):
             self.get_logger().error("Current joint angles not available!")
             return None
 
-        def collision_checker(joint_angles):
-            if self.mode != 'sim':
-                return False
-            # The regular insert hover is intentionally below the UR base
-            # height (0.1625 m) while still above the table. Applying
-            # check_ee_below_base here makes every table-level insertion
-            # geometrically impossible. Keep the actual table, self, and
-            # guards; move_down owns the final descent. The compact-radius
-            # heuristic is also inapplicable here: a sideways-held part can
-            # reach the base while its flange is legitimately close to the
-            # shoulder. Capsule self-collision remains authoritative.
-            return (check_collision_with_table(joint_angles)
-                    or check_self_collision(joint_angles))
-
         joint_bounds = [
             (-np.pi, np.pi),
             (-np.pi, np.pi),
@@ -837,23 +823,66 @@ class TranslateObject(Node):
             (-np.pi, np.pi),
             (-2 * np.pi, 2 * np.pi),
         ]
-        solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
+        solver = IKSolver(IKSolverConfig(
+            joint_bounds=joint_bounds,
+            acceptable_cost=0.01,
+            early_termination=False,
+        ))
         from primitives.shared.config import HOME_JOINTS
         seeds = [self.current_joint_angles.copy(), np.asarray(HOME_JOINTS, dtype=float)]
         for shoulder_pan in (0.0, np.pi / 2, -np.pi / 2, np.pi):
             seed = self.current_joint_angles.copy()
             seed[0] = shoulder_pan
             seeds.append(seed)
-        result = solver.solve(
+        # Add a deterministic elbow/lift lattice for near-base sideways
+        # reaches. Every solve uses the exact target pose: the former
+        # perturbations shifted X by up to 4 mm, larger than the seat tolerance.
+        for shoulder_pan in (0.0, np.pi / 2, -np.pi / 2, np.pi):
+            for shoulder_lift in (-2.0, -1.5, -1.0):
+                for elbow in (1.0, 1.5, 2.0):
+                    seed = self.current_joint_angles.copy()
+                    seed[0] = shoulder_pan
+                    seed[1] = shoulder_lift
+                    seed[2] = elbow
+                    seeds.append(seed)
+        candidates = solver.solve_collect(
             seeds=seeds,
             target_pose=target_pose,
-            collision_checker=collision_checker,
-            perturbations=max_tries,
-            dx=dx,
+            collision_checker=None,
+            perturbations=1,
         )
-        if result is not None:
+        if not candidates:
+            self.get_logger().error(
+                "Motion planning failed: no exact IK candidate converged for the target position"
+            )
+            return None
+
+        safe = []
+        rejected = {"table": 0, "self": 0}
+        for joints, cost in candidates:
+            if check_collision_with_table(joints):
+                rejected["table"] += 1
+                continue
+            if check_self_collision(joints):
+                rejected["self"] += 1
+                continue
+            travel = float(np.sum(np.abs(np.asarray(joints) - self.current_joint_angles)))
+            safe.append((cost, travel, joints))
+        self.get_logger().info(
+            f"Exact hover IK: {len(candidates)} candidate(s), {len(safe)} safe, "
+            f"rejected table={rejected['table']} self={rejected['self']}"
+        )
+        if safe:
+            safe.sort(key=lambda item: (item[0], item[1]))
+            cost, travel, result = safe[0]
+            self.get_logger().info(
+                f"Selected exact hover IK: cost={cost:.6f}, travel={np.degrees(travel):.1f}deg"
+            )
             return result
-        self.get_logger().error("Motion planning failed: no reachable joint configuration exists for the target position")
+        self.get_logger().error(
+            "Motion planning failed: exact IK candidates exist but all collide "
+            f"(table={rejected['table']}, self={rejected['self']})"
+        )
         return None
 
     def execute_trajectory(self, trajectory):
