@@ -36,10 +36,15 @@ from primitives.shared.robot_contract import (
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
 
 class MoveToClearArea(Node):
-    def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None):
+    def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None,
+                 held_quat=None, grasp_id=None):
         super().__init__('move_to_clear_area')
         self.mode = mode  # 'move' or 'fix_orientation'
         self.object_name = object_name  # If set, verify grasp before moving
+        # Held-part route check (primitives/shared/held_part_collision.py): the chained held
+        # orientation (world xyzw) and grasp id place the part's CAD on the flange.
+        self.held_quat = held_quat
+        self.grasp_id = grasp_id
         self.robot_mode = robot_mode  # 'sim' or 'real'
         self.joint_names = BARE_ARM_JOINTS
 
@@ -170,6 +175,33 @@ class MoveToClearArea(Node):
                 self.ee_position = transform[:3, 3].copy()
                 self.ee_quat = R.from_matrix(transform[:3, :3]).as_quat()
                 self.ee_pose_received = True
+
+    def _held_part_model(self, start_joints):
+        """The part this carry holds, for the route check; None for an empty gripper.
+
+        sim: measured from the simulator's ground-truth part pose and the measured joints.
+        real: the cell's chained held orientation + the CAD grasp point at the executed grasp
+        depth; with no orientation passed, the orientation-free CAD envelope (fail closed)."""
+        if not self.object_name:
+            return None
+        from primitives.shared import held_part_collision as hpc
+        from primitives.shared.config import held_tool_offset_for
+        T_f = forward_kinematics(dh_params, start_joints)
+        if self.robot_mode == 'sim' and self.object_name in self.object_poses:
+            tf = self.object_poses[self.object_name].transform
+            T_part = np.eye(4)
+            T_part[:3, :3] = R.from_quat([tf.rotation.x, tf.rotation.y, tf.rotation.z, tf.rotation.w]).as_matrix()
+            T_part[:3, 3] = [tf.translation.x, tf.translation.y, tf.translation.z]
+            return hpc.measured_held_part(self.object_name, np.linalg.inv(T_f) @ T_part)
+        grasp_id = self.grasp_id
+        if grasp_id is None:
+            from primitives.shared.config import default_grasp_id
+            grasp_id = default_grasp_id(self.object_name)
+        offset = float(held_tool_offset_for(self.object_name)[2])
+        if self.held_quat is not None:
+            return hpc.chained_held_part(self.object_name, grasp_id, self.held_quat, T_f[:3, 3],
+                                         R.from_matrix(T_f[:3, :3]).as_quat(), offset)
+        return hpc.envelope_held_part(self.object_name, grasp_id, offset)
 
     def _object_pose_cb(self, msg):
         """Callback for sim object poses."""
@@ -708,6 +740,12 @@ class MoveToClearArea(Node):
 
                 # Check each candidate for collision-free trajectory (no joint wrapping)
                 collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
+                from primitives.shared.held_part_collision import held_part_route_refusal
+                held_part = self._held_part_model(start_joints)
+                held_refusals = []
+                if held_part is not None:
+                    self.get_logger().info(
+                        f"Held-part route check: {held_part.name} ({held_part.source} model)")
 
                 for cost, candidate_joints, yaw in candidate_solutions:
                     target_joints = np.array(candidate_joints).copy()
@@ -721,6 +759,11 @@ class MoveToClearArea(Node):
 
                     traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
                     if not check_trajectory_collision(start_joints, target_joints, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
+                        refusal = held_part_route_refusal(start_joints, target_joints, held_part)
+                        if refusal:
+                            held_refusals.append(refusal)
+                            self.get_logger().warn(f"Held-part route refused: {refusal}")
+                            continue
                         travel_distance = np.sum(np.abs(target_joints - start_joints))
                         collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw))
 
@@ -738,12 +781,21 @@ class MoveToClearArea(Node):
                             continue
                         if (not check_trajectory_collision(start_joints, home, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())
                                 and not check_trajectory_collision(home, tj, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())):
+                            refusal = (held_part_route_refusal(start_joints, home, held_part)
+                                       or held_part_route_refusal(home, tj, held_part))
+                            if refusal:
+                                held_refusals.append(f"via home: {refusal}")
+                                self.get_logger().warn(f"Held-part route via home refused: {refusal}")
+                                continue
                             collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)), tj, cost, yaw))
                     if collision_free_trajectories:
                         via = home
                         self.get_logger().info("Direct path collides - going through the home joints")
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
+                    if held_refusals:
+                        self.error_message = ("HELD_PART_ROUTE_REFUSED: every route to the clear area was refused for "
+                                              f"the held part ({'; '.join(held_refusals[:3])})")
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
@@ -935,6 +987,10 @@ def main(args=None):
                        help='Object name for grasp verification (checks gripper is holding object)')
     parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'],
                        help='Robot mode: sim varies placement Y to avoid stacking (default: real)')
+    parser.add_argument('--held-quat', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'), default=None,
+                       help="Held part's chained world orientation (xyzw) for the held-part route check")
+    parser.add_argument('--grasp-id', type=int, default=None,
+                       help="Grasp id the part is held by (default: the assembly's grasp id for it)")
 
     args = parser.parse_args()
 
@@ -946,7 +1002,8 @@ def main(args=None):
 
     rclpy.init()
     node = MoveToClearArea(mode=mode, object_name=args.object_name,
-                           robot_mode=args.mode, target_xy=args.target_xy)
+                           robot_mode=args.mode, target_xy=args.target_xy,
+                           held_quat=args.held_quat, grasp_id=args.grasp_id)
     try:
         # Spin until operation is complete with timeout
         import time

@@ -1800,13 +1800,18 @@ def run_perform_insert_real(args):
     return run_subprocess(script_path, cmd_args)
 
 
-def run_move_to_clear_area(object_name=None, mode=None):
-    """Run move_to_clear_area subprocess."""
+def run_move_to_clear_area(object_name=None, mode=None, held_quat=None, grasp_id=None):
+    """Run move_to_clear_area subprocess.  The chained held orientation and grasp id let its
+    held-part route check place the part's CAD on the flange."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_to_clear_area.py')
     logger.info("Moving object to clear area")
     cmd_args = ['--move']
     if object_name:
         cmd_args += ['--object-name', object_name]
+    if held_quat is not None:
+        cmd_args += ['--held-quat', *[f"{float(v):.6f}" for v in held_quat]]
+    if grasp_id is not None:
+        cmd_args += ['--grasp-id', str(int(grasp_id))]
     if mode:
         cmd_args += ['--mode', mode]
     return run_subprocess(script_path, cmd_args)
@@ -1893,7 +1898,9 @@ def main():
     # --- Subprocess-only paths (no ROS node needed) ---
 
     if args.place_down:
-        success, output_text = run_move_to_clear_area(object_name=args.object_name, mode=args.mode)
+        success, output_text = run_move_to_clear_area(object_name=args.object_name, mode=args.mode,
+                                                      held_quat=args.current_object_orientation,
+                                                      grasp_id=args.grasp_id)
         if not success:
             subprocess_json = extract_json_from_output(output_text)
             if subprocess_json:
