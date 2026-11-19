@@ -198,6 +198,11 @@ APPROVED 2026-11-18 (R11).
   camera-DOWN on v3.1; replayed with the v3.1 geometry, u_orange's place-down puts the mount 33-34 mm into the table. No real
   two-pass run on v3.1 until the camera hard rule (cell branch w4-mujoco b1b45b1: camera side not below horizontal within 150 mm
   of the table, mount/D415 >= 30 mm above it, fail closed) is reviewed and merged.
+- SAFETY (w5, 2026-11-19): on dev, prismatic_peg_insertion (line_green / inverted_u_yellow / FMB3 bars) switches passthrough + force
+  mode ON and sleeps 2.5 s BEFORE its try: a stop signal in that window skips every restore (force mode stays on, the trajectory
+  controller stays off), and a failed activation leaves the scaled controller off. Fixed on cell branch w4-mujoco 654044d (with a
+  deferred-signal safe-state cleanup), in review round 5. Until merged: after any interrupted prismatic insert, run stop_run.sh and
+  check the controllers before anything else.
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
