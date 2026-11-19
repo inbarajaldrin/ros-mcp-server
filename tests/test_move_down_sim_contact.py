@@ -102,3 +102,61 @@ def test_only_the_insert_requires_contact_and_the_place_down_drop_is_bounded():
     scorer = (root / "ablations/sim_seat_scorer.py").read_text()
     assert "drop <= TABLE_COLLISION_MARGIN_SIDEWAYS" in scorer
     assert "SIM_PLACE_DOWN_DROP_EXCEEDS_FLOOR" in scorer
+
+
+def _move_down_node(mode="real", require_contact=False, force_reached=False, at_endpoint=False):
+    import types
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    n = object.__new__(md.MoveDown)
+    n.mode, n.require_contact, n.error_message = mode, require_contact, None
+    n.force_threshold_reached, n.moving, n._current_goal_handle = force_reached, True, object()
+    n.target_height, n.ee_position = 0.10, ([0.0, 0.0, 0.10] if at_endpoint else [0.0, 0.0, 0.30])
+    n.stop_force_monitoring = lambda: None
+    n.scheduled = []
+    n.schedule_next_movement = lambda: n.scheduled.append(True)
+    log = types.SimpleNamespace(info=lambda *a: None, warn=lambda *a: None, error=lambda *a: None)
+    n.get_logger = lambda: log
+    return n, md
+
+
+def _result(status, error_code=0):
+    import types
+    msg = types.SimpleNamespace(error_code=error_code, error_string="")
+    return types.SimpleNamespace(result=lambda: types.SimpleNamespace(status=status, result=msg))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("status,ok", [(4, True), (5, True), (6, False), (2, False), (0, False), (3, False)])
+def test_goal_result_admits_only_succeeded_or_canceled_with_a_contact(status, ok):
+    """Executed with GoalStatus values: SUCCEEDED/CANCELED plus a force stop are a landing; ABORTED,
+    EXECUTING, UNKNOWN and CANCELING are failures even with a coincident force sample."""
+    n, _md = _move_down_node(force_reached=True)
+    n.goal_result(_result(status))
+    assert (n.error_message is None) == ok
+    if not ok:
+        assert f"status: {status}" in n.error_message
+
+
+def test_goal_result_names_a_path_tolerance_abort():
+    n, md = _move_down_node(force_reached=True)
+    n.goal_result(_result(6, md.FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED))
+    assert "Velocity or acceleration limits exceeded" in n.error_message
+
+
+def test_goal_result_sim_endpoint_without_contact_fails_and_real_succeeds():
+    n, _md = _move_down_node(mode="sim", require_contact=True, at_endpoint=True)
+    n.goal_result(_result(4))
+    assert "without a measured contact" in n.error_message
+    n, _md = _move_down_node(mode="real", at_endpoint=True)
+    n.goal_result(_result(4))
+    assert n.error_message is None and not n.scheduled
+
+
+def test_goal_result_short_of_the_endpoint_continues_the_descent():
+    n, _md = _move_down_node(mode="sim", require_contact=True, at_endpoint=False)
+    n.goal_result(_result(4))
+    assert n.error_message is None and n.scheduled == [True]
