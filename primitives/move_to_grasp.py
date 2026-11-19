@@ -24,6 +24,7 @@ import re
 # Heavy imports follow — only loaded when run as __main__
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -2614,7 +2615,7 @@ def main(args=None):
     else:
         args = parser.parse_args(args)
     
-    rclpy.init(args=None)
+    init_ros(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,

@@ -2120,12 +2120,13 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             return None
         label = f"{obj}#{step_idx}{tag} place_down"
         py3 = ['python3', '-u', '-m']
+        from primitives.shared.config import CLEAR_AREA_CALLER_TIMEOUT_S   # > the primitive's own watchdog
         # The chained held orientation + grasp id let move_to_clear_area check the route for the HELD
         # part, not only the arm (r48 MuJoCo, 2026-11-19: the clear-area carry swung u_orange into the upper arm).
         r = run_subprocess(py3 + ['primitives.core.move_to_clear_area', '--move', '--mode', 'real',
                                   '--object-name', obj, '--grasp-id', str(int(gid)),
                                   '--held-quat', *[f"{float(v):.6f}" for v in state.held_quat]],
-                           label=f"{label} (clear area)", timeout_s=45, log_fh=log_fh)
+                           label=f"{label} (clear area)", timeout_s=CLEAR_AREA_CALLER_TIMEOUT_S, log_fh=log_fh)
         if r.get('result') == 'failure':
             return dict(r, movement_type='place_down')
         snap = snapshot_robot_state()

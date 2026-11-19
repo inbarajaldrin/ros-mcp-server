@@ -12,6 +12,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -426,7 +427,7 @@ def main(args=None):
         raise SystemExit("--lift-by must be in (0, 0.05] m")
     if known.translate_xy is not None and max(abs(v) for v in known.translate_xy) > 0.02:
         raise SystemExit("--translate-xy components must be within +-0.02 m")
-    rclpy.init(args=args)
+    init_ros(args=args)
 
     node = MoveToSafeHeight(lift_by=known.lift_by, translate_xy=known.translate_xy)
 

@@ -23,6 +23,7 @@ from collections import deque
 
 import numpy as np
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -249,7 +250,7 @@ def main():
     ap.add_argument('--duration', type=float, default=None,
                     help='exact seconds, for a short move of a few mm only (a tap: nudge_part.py); refused over 10 mm')
     a = ap.parse_args()
-    rclpy.init(); n = Mover()
+    init_ros(); n = Mover()
     try:
         if a.quat is not None:
             orient = ('quat', a.quat)

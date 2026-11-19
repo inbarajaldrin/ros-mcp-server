@@ -35,6 +35,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -268,7 +269,7 @@ class MoveJoints(Node):
 
 def run_move_joints(target_positions, duration=DEFAULT_DURATION):
     """Run joint movement. Returns (success, error, current_angles)."""
-    rclpy.init()
+    init_ros()
     node = MoveJoints(target_positions, duration)
     success = False
     error = None
@@ -300,7 +301,7 @@ def run_move_joints(target_positions, duration=DEFAULT_DURATION):
 
 def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
     """Rotate a single joint by a relative angle. Returns (success, error)."""
-    rclpy.init()
+    init_ros()
 
     # We need to read current angles first, then compute target
     node = Node('rotate_joint_reader')

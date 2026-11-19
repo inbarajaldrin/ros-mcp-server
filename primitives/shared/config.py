@@ -390,6 +390,12 @@ PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
 #   wrist_1 = -90°        wrist neutral so gripper hangs aligned
 #   wrist_2 = -90°        gripper opening axis aligned with workspace
 #   wrist_3 = 0°          no final rotation
+# A caller's outer timeout for move_to_clear_area (s).  It must exceed the primitive's own watchdog so the primitive
+# cancels its goal itself; move_to_clear_area refuses a route whose planning + accept + execution limit would not
+# fit inside it (review r2).  Callers stop it with SIGINT first, then SIGTERM, never SIGKILL.
+CLEAR_AREA_CALLER_TIMEOUT_S = 300.0
+CHILD_STOP_GRACE_S = 20.0           # SIGINT -> SIGTERM grace for a child the caller stops
+
 HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)

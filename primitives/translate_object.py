@@ -185,7 +185,10 @@ def _subprocess_fast_path():
             rc = proc.wait(timeout=timeout)
             t.join(timeout=1.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            # SIGINT first: the child's goal_guard cancels its arm goal and confirms the stop; then SIGTERM after
+            # the grace.  Never SIGKILL (CLAUDE.md stop order).
+            proc.send_signal(signal.SIGINT)
+            _settle_child(proc, forward_sigint=False)
             t.join(timeout=1.0)
             return False, '\n'.join(lines)
         return rc == 0, '\n'.join(lines)
@@ -229,7 +232,8 @@ def _subprocess_fast_path():
             ca += ['--held-quat', *[f"{float(v):.6f}" for v in args.current_object_orientation]]
         if args.grasp_id is not None:
             ca += ['--grasp-id', str(int(args.grasp_id))]
-        ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
+        from primitives.shared.config import CLEAR_AREA_CALLER_TIMEOUT_S   # > the primitive's own watchdog
+        ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=CLEAR_AREA_CALLER_TIMEOUT_S)
         if not ok:
             _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
@@ -585,6 +589,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.action import ActionClient
@@ -1982,7 +1987,7 @@ def main():
                      "error": f"Grasp check failed before {movement_type}: {err}"})
             sys.exit(1)
 
-    rclpy.init()
+    init_ros()
     node = None
     success = False
     error = None

@@ -188,11 +188,22 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
     timed_out = threading.Event()
 
     def _expire():
+        # SIGINT first (each primitive's goal_guard cancels its running arm goal and confirms the stop), SIGTERM
+        # after the grace if the group is still alive; never SIGKILL (CLAUDE.md stop order, review r2).
+        from primitives.shared.config import CHILD_STOP_GRACE_S
         timed_out.set()
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGINT)
         except Exception:
-            proc.kill()
+            return
+        try:
+            proc.wait(timeout=CHILD_STOP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except Exception:
+                pass
     watchdog = threading.Timer(timeout_s, _expire)
     watchdog.daemon = True
     watchdog.start()
@@ -238,10 +249,16 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
                     "label": label}
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
+        from primitives.shared.config import CHILD_STOP_GRACE_S
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGINT)
+            try:
+                proc.wait(timeout=CHILD_STOP_GRACE_S)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGTERM)
         except Exception:
-            proc.kill()
+            pass
     finally:
         watchdog.cancel()
         done_ev.set()

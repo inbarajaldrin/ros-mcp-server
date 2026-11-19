@@ -10,6 +10,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -108,6 +109,7 @@ class MoveToClearArea(Node):
         # Execution watchdog: the clock starts when the controller ACCEPTS the goal (planning is not
         # execution); on timeout the goal is cancelled and the cancel confirmed, never left running.
         self.trajectory_duration_s = None
+        self.started_at = time.monotonic()      # the caller's clock starts about here (process start + node init)
         self.goal_sent_at = None
         self.goal_accepted_at = None
         self._goal_handle = None
@@ -949,9 +951,23 @@ class MoveToClearArea(Node):
                     self.get_logger().warn(f"Large trajectory tracking error: {np.degrees(max_error):.1f}deg")
 
     def _dispatch(self, goal, feedback_callback=None):
-        """Send the trajectory goal; the watchdog's execution clock starts at acceptance."""
+        """Send the trajectory goal; the watchdog's execution clock starts at acceptance.  A route whose watchdog
+        limit would end after the caller's outer timeout is refused unsent: the caller's kill must never be what
+        stops a running goal."""
+        from primitives.shared.config import CLEAR_AREA_CALLER_TIMEOUT_S, CHILD_STOP_GRACE_S
         last = goal.trajectory.points[-1].time_from_start
         self.trajectory_duration_s = float(last.sec) + float(last.nanosec) * 1e-9
+        worst_end = (time.monotonic() - self.started_at + GOAL_ACCEPT_TIMEOUT_S
+                     + max(EXECUTION_TIMEOUT_MIN_S, self.trajectory_duration_s + EXECUTION_TIMEOUT_MARGIN_S)
+                     + CANCEL_CONFIRM_TIMEOUT_S)
+        if worst_end > CLEAR_AREA_CALLER_TIMEOUT_S - CHILD_STOP_GRACE_S:
+            self.error_message = (f"ROUTE_OUTLASTS_CALLER_TIMEOUT: a {self.trajectory_duration_s:.1f}s trajectory after "
+                                  f"{time.monotonic() - self.started_at:.0f}s of planning could run to {worst_end:.0f}s, past "
+                                  f"the caller's {CLEAR_AREA_CALLER_TIMEOUT_S:.0f}s timeout less its stop grace; not sent")
+            self.get_logger().error(self.error_message)
+            self.operation_success = False
+            self.operation_complete = True
+            return
         if feedback_callback is None:
             self._send_goal_future = self.action_client.send_goal_async(goal)
         else:
@@ -1129,7 +1145,7 @@ def main(args=None):
     else:
         mode = 'move'  # Default mode
 
-    rclpy.init()
+    init_ros()
     node = MoveToClearArea(mode=mode, object_name=args.object_name,
                            robot_mode=args.mode, target_xy=args.target_xy,
                            held_quat=args.held_quat, grasp_id=args.grasp_id)

@@ -22,6 +22,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -303,7 +304,7 @@ class SnapToCardinal(Node):
 
 
 def main():
-    rclpy.init()
+    init_ros()
     node = SnapToCardinal()
     try:
         start_time = time.time()

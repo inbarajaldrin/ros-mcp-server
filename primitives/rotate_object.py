@@ -21,6 +21,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped
@@ -1982,8 +1983,8 @@ def main(args=None):
         if args.current_object_orientation is None:
             parser.error("--current-object-orientation is required in real mode")
     
-    # Ensure finally blocks run on SIGTERM (from timeout command) so output is always produced
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    # SIGTERM/SIGINT: init_ros (goal_guard) raises KeyboardInterrupt, so the finally blocks run, the output is produced
+    # and a running arm goal is cancelled before the node goes.
 
     # === Verify grasp before starting (unless caller already did it) ===
     if not args.skip_verify_grasp:
@@ -2005,7 +2006,7 @@ def main(args=None):
     node = None
     success = False
     try:
-        rclpy.init()
+        init_ros()
         node = ReorientForAssembly(mode=args.mode)
         if not node.action_client.wait_for_server(timeout_sec=15):
             raise RuntimeError("Action server not available after 15s")

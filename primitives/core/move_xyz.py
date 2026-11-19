@@ -12,6 +12,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import ListControllers
@@ -257,7 +258,7 @@ class PerformIKRunner(Node):
 
 def run_ik(target_position, target_rpy, duration=None, reference_frame='ee'):
     """Run IK and execute trajectory. Returns (success, error)."""
-    rclpy.init(args=None)
+    init_ros(args=None)
     node = PerformIKRunner(target_position, target_rpy, duration, reference_frame)
     success = False
     error = None

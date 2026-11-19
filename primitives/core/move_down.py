@@ -15,6 +15,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -1036,7 +1037,7 @@ def main(args=None):
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
     
-    rclpy.init(args=args)
+    init_ros(args=args)
     node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table,
                     require_contact=known_args.require_contact)
     
