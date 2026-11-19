@@ -91,6 +91,7 @@ class MoveDown(Node):
         # A place-down ends at its floor exactly as on the real arm (a sideways stance stops above the
         # table and the release drops the part; replay_real_assembly._gentle_place_down).
         self.require_contact = require_contact
+        self.finish_requested = False
         self.joint_names = BARE_ARM_JOINTS
         
         # Mode: 'sim' or 'real'
@@ -593,19 +594,9 @@ class MoveDown(Node):
         if self.ee_position is not None:
             self.current_z_position = self.ee_position[2]
 
-        # Graceful shutdown - use a timer to shutdown after brief delay to allow logging
-        def delayed_shutdown():
-            try:
-                rclpy.shutdown()
-            except:
-                pass
-            # Force exit if rclpy.shutdown() doesn't work
-            os._exit(0)
-
-        # Start shutdown in a separate thread after 100ms to allow log messages to flush
-        shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-        shutdown_timer.daemon = True
-        shutdown_timer.start()
+        # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a timer
+        # thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+        self.finish_requested = True
 
     def emergency_stop(self):
         """Emergency stop for actual failures (not contact detection).
@@ -628,19 +619,9 @@ class MoveDown(Node):
             except Exception as e:
                 self.get_logger().error(f"Failed to cancel trajectory: {e}")
 
-        # Force immediate exit - use a timer to shutdown after brief delay to allow logging
-        def delayed_shutdown():
-            try:
-                rclpy.shutdown()
-            except:
-                pass
-            # Force exit if rclpy.shutdown() doesn't work
-            os._exit(0)
-
-        # Start shutdown in a separate thread after 100ms to allow log messages to flush
-        shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-        shutdown_timer.daemon = True
-        shutdown_timer.start()
+        # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a timer
+        # thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+        self.finish_requested = True
 
     def move_down_continue(self):
         """Continue moving down using stored position (non-blocking, called from timer)"""
@@ -784,18 +765,9 @@ class MoveDown(Node):
                 rclpy.shutdown()
                 return
             self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Exiting.")
-            # Use delayed shutdown with os._exit() to ensure clean exit
-            # (same pattern as contact_detected_stop)
-            def delayed_shutdown():
-                try:
-                    rclpy.shutdown()
-                except:
-                    pass
-                os._exit(0)
-
-            shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-            shutdown_timer.daemon = True
-            shutdown_timer.start()
+            # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a
+            # timer thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+            self.finish_requested = True
             return
 
         # Check workspace limit (safety check)
@@ -1042,7 +1014,7 @@ def main(args=None):
                     require_contact=known_args.require_contact)
     
     try:
-        while rclpy.ok():
+        while rclpy.ok() and not node.finish_requested:
             rclpy.spin_once(node, timeout_sec=0.1)
 
             # Check for robot safety issues (protective stop, program stopped)

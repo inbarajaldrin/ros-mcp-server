@@ -112,11 +112,16 @@ FAKE_ROS = textwrap.dedent('''
         def done(self): return self._done
         def result(self): return self.value
 
+    class InvalidHandle(Exception):
+        pass
+
     class Handle:
         accepted = True
-        def __init__(self): self.result_future = Future(types.SimpleNamespace(status=5))
+        def __init__(self, client): self.client, self.result_future = client, Future(types.SimpleNamespace(status=5))
         def get_result_async(self): return self.result_future
         def cancel_goal_async(self):
+            if self.client.destroyed:                     # Humble: a destroyed ActionClient cannot send a cancel
+                raise InvalidHandle("action client destroyed")
             log.append("cancel"); print("CANCEL REQUESTED", flush=True); return Future(object())
 
     class Node:
@@ -124,9 +129,12 @@ FAKE_ROS = textwrap.dedent('''
         def destroy_node(self): log.append("destroy")
 
     class ActionClient:
-        def __init__(self, node, action_type, name): self._node, self._action_type = node, action_type
+        def __init__(self, node, action_type, name):
+            self._node, self._action_type, self.destroyed = node, action_type, False
         def send_goal_async(self, goal, **kw):
-            f = Future(Handle()); f.complete(); return f
+            f = Future(Handle(self)); f.complete(); return f
+        def destroy(self):
+            log.append("client destroy"); self.destroyed = True
 
     state = {{"ok": True}}
     rclpy = types.ModuleType("rclpy")
@@ -203,8 +211,6 @@ def test_no_guarded_primitive_waits_without_a_timeout():
     import re
     offenders = []
     for path in sorted((ROOT / "primitives").rglob("*.py")):
-        if "_real_mode_stash" in path.parts:
-            continue
         text = path.read_text()
         if "init_ros(" not in text:
             continue
@@ -214,3 +220,54 @@ def test_no_guarded_primitive_waits_without_a_timeout():
                     "spin_until_future_complete(" in code and "timeout_sec" not in code):
                 offenders.append(f"{path.relative_to(ROOT)}:{n}")
     assert offenders == []
+
+
+def test_the_cancel_runs_before_the_action_client_is_destroyed():
+    """Review r3 P1-1: move_down, rotate_object, translate_object, move_to_grasp, both move_to_safe_heights and
+    scan_workspace destroy their action client before their node.  Their exact exit order, on SIGINT mid-motion."""
+    out = run_script('''
+        client = ActionClient(node, FollowJointTrajectory, "arm")
+        client.send_goal_async(object())
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+            time.sleep(5)
+        except KeyboardInterrupt:
+            pass                                          # these primitives only log here
+        finally:
+            client.destroy()
+            node.destroy_node()
+            rclpy.shutdown()
+        print("LOG", log)
+    ''')
+    assert "LOG ['init NO', 'cancel', 'client destroy', 'destroy', 'shutdown']" in out.stdout, out.stdout + out.stderr
+    assert "CANCEL_UNCONFIRMED" not in out.stderr and "cancelled and confirmed stopped" in out.stderr
+
+
+def test_a_shutdown_from_another_thread_defers_the_cancel_to_the_main_thread():
+    """Review r3 P2-1: no executor spin off the main thread; the main thread's own exit path cancels."""
+    out = run_script('''
+        import threading
+        client = ActionClient(node, FollowJointTrajectory, "arm")
+        client.send_goal_async(object())
+        t = threading.Thread(target=rclpy.shutdown); t.start(); t.join()
+        print("AFTER THREAD", log, flush=True)
+    ''')
+    assert "AFTER THREAD ['init NO', 'shutdown']" in out.stdout, out.stdout + out.stderr
+    assert "cancel deferred: not on the main thread" in out.stderr
+
+
+def test_a_second_signal_during_the_cancel_still_destroys_the_node():
+    """Review r3 P3-4: KeyboardInterrupt inside the cancel; the original destroy_node runs, then it is re-raised."""
+    out = run_script('''
+        client = ActionClient(node, FollowJointTrajectory, "arm")
+        client.send_goal_async(object())
+        def interrupting(node, future, timeout_sec=None):
+            raise KeyboardInterrupt("second signal")
+        rclpy.spin_until_future_complete = interrupting
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            print("RE-RAISED", flush=True)
+        print("LOG", log, flush=True)
+    ''')
+    assert "RE-RAISED" in out.stdout and "'destroy'" in out.stdout, out.stdout + out.stderr
