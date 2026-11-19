@@ -183,7 +183,13 @@ APPROVED 2026-11-18 (R11).
 - The cell: UR5e `192.168.1.111` (PolyScope 5.17.3), RG2 on a quick changer, wrist D415, cell PC i5-8500T with no GPU
   (`ONBOARDING.md` §1).
 - New camera mount v3.1 since 2026-11-10; CAD tool0 -> colour optical (0, 0.0889, 0.0839) m, quat xyzw (0.258819, 0, 0, 0.965926);
-  the localizer's `robot_config.yaml` still holds the old mount's calibration (robo-chain `.scratchpad/jobs/rg2-camera-mount/TF-FOR-AGENT.md`).
+  calibrated 2026-11-18 (two-height ChArUco hand-eye): the localizer's `robot_config.yaml` holds tool0 -> colour optical
+  (-0.000801, 0.084790, 0.092719) m, quat xyzw (0.25427, -0.00818, -0.00632, 0.96708), plus the D415 depth correction; the camera
+  is on tool +Y.
+- SAFETY (w5, 2026-11-19): the October FMB1 u_orange/yellow two-pass stances were camera-up on the OLD (-Y) mount but are
+  camera-DOWN on v3.1; replayed with the v3.1 geometry, u_orange's place-down puts the mount 33-34 mm into the table. No real
+  two-pass run on v3.1 until the camera hard rule (cell branch w4-mujoco b1b45b1: camera side not below horizontal within 150 mm
+  of the table, mount/D415 >= 30 mm above it, fail closed) is reviewed and merged.
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
