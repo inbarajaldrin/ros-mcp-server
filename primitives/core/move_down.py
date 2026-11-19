@@ -423,11 +423,9 @@ class MoveDown(Node):
     def check_force_during_execution(self):
         """Check force during trajectory execution and cancel if threshold exceeded.
 
-        Sim mode: force sensing disabled — hover offset prevents ground contact.
+        Sim mode: uses the Isaac PhysX contact-report wrench from the held part.
         Real mode: uses WrenchStamped delta-based detection with real thresholds.
         """
-        if self.mode == 'sim':
-            return
         if not self.moving:
             return
 

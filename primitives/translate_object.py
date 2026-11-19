@@ -832,8 +832,14 @@ class TranslateObject(Node):
             (-2 * np.pi, 2 * np.pi),
         ]
         solver = IKSolver(IKSolverConfig(joint_bounds=joint_bounds))
+        from primitives.shared.config import HOME_JOINTS
+        seeds = [self.current_joint_angles.copy(), np.asarray(HOME_JOINTS, dtype=float)]
+        for shoulder_pan in (0.0, np.pi / 2, -np.pi / 2, np.pi):
+            seed = self.current_joint_angles.copy()
+            seed[0] = shoulder_pan
+            seeds.append(seed)
         result = solver.solve(
-            seeds=[self.current_joint_angles.copy()],
+            seeds=seeds,
             target_pose=target_pose,
             collision_checker=collision_checker,
             perturbations=max_tries,
@@ -1733,7 +1739,15 @@ def main():
                         rclpy.spin_once(node, timeout_sec=0.1)
                     node.current_joint_angles = None
                     node.read_current_joint_angles()
-                    success = node.translate_for_target_sim(args.object_name, args.base_name, hover=False, object_orientation=args.current_object_orientation)
+                    # The regular sim insert is an arm-carried vertical descent
+                    # from the known hover pose. PhysX contact wrench stops the
+                    # unchanged move_down primitive; no compliance/search or
+                    # direct pose write is used.
+                    insert_ok, insert_out = run_move_down(mode='sim')
+                    if not insert_ok:
+                        success = False
+                        insert_json = extract_json_from_output(insert_out)
+                        node.error_message = (insert_json or {}).get('error', 'sim move_down insert failed')
             else:
                 # Real mode: hover above base, then insertion subprocess
                 success = node.translate_for_target_real(
