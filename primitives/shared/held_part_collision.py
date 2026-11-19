@@ -166,3 +166,18 @@ def held_part_min_clearances(start, target, held: HeldPart, num_samples: int = 4
             c = float(np.min(_point_segment_distance(P, joints[link], joints[link + 1]))) - held.radius_m
             worst[link] = min(worst[link], c - UR5E_LINK_RADII[link] - HELD_LINK_MARGIN_M)
     return {"links": worst, "table": table}
+
+
+def held_part_model(name, T_flange, T_part=None, held_quat=None, grasp_id=None):
+    """The held part for a route check, best source first: a measured pose (sim ground truth), the cell's
+    chained orientation + CAD grasp point at the executed grasp depth, else the orientation-free envelope."""
+    from primitives.shared.config import default_grasp_id, held_tool_offset_for
+    T_flange = np.asarray(T_flange, float)
+    if T_part is not None:
+        return measured_held_part(name, np.linalg.inv(T_flange) @ np.asarray(T_part, float))
+    grasp_id = default_grasp_id(name) if grasp_id is None else grasp_id
+    offset = float(held_tool_offset_for(name)[2])
+    if held_quat is not None:
+        return chained_held_part(name, grasp_id, held_quat, T_flange[:3, 3],
+                                 R.from_matrix(T_flange[:3, :3]).as_quat(), offset)
+    return envelope_held_part(name, grasp_id, offset)

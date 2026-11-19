@@ -49,8 +49,7 @@ def test_every_gate_is_wired_and_fails_closed():
     grasp = (ROOT / "primitives/move_to_grasp.py").read_text()
     assert "return 'refuse'" in grasp and grasp.count("CAMERA_TOWARD_TABLE:") == 2
     assert "falling back to the other wrist" not in grasp
-    assert "camera_route_refusal(self.current_joint_angles, joint_angles, near_table_end=True)" in \
-        (ROOT / "primitives/rotate_object.py").read_text()
+    assert "camera_route_refusal(a, b, near_table_end=is_last)" in (ROOT / "primitives/rotate_object.py").read_text()
     clear = (ROOT / "primitives/core/move_to_clear_area.py").read_text()
     assert "camera_route_refusal(start_joints, target_joints, near_table_end=True)" in clear
     assert "camera_route_refusal(home, tj, near_table_end=True)" in clear

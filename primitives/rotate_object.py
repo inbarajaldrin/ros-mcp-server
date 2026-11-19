@@ -1667,14 +1667,36 @@ class ReorientForAssembly(Node):
             self.error_message = f"Motion planning failed: {why_}"
             self.get_logger().error(self.error_message)
             return False
-        # Hard rule (lead, 2026-11-19): a reorient stance is carried to the table (insert, place-down), so the
-        # camera side may not face the table, and the mount/D415 keeps its clearance on the way.
+        # Hard rules (lead, 2026-11-19): a reorient stance is carried to the table (insert, place-down), so the
+        # camera side may not face the table; the mount/D415 keeps its clearance from the table and the arm; the
+        # held part stays clear of the arm and the table; joint travel is bounded.  When the direct joint line breaks
+        # a rule, the joint groups move one after another (route_split), each segment checked the same way.
         from primitives.shared.camera_up import camera_route_refusal
-        camera_refusal = camera_route_refusal(self.current_joint_angles, joint_angles, near_table_end=True)
-        if camera_refusal:
-            self.error_message = f"Reorient refused: {camera_refusal}"
+        from primitives.shared.held_part_collision import held_part_model, held_part_route_refusal
+        from primitives.shared.route_split import admissible_route
+        T_flange_now = forward_kinematics(dh_params, self.current_joint_angles)
+        T_part_now = None
+        if self.mode == 'sim' and object_name in self.current_poses:
+            T_part_now = np.eye(4)
+            T_part_now[:3, :3] = self.get_rotation_from_transform(self.current_poses[object_name].transform)
+            tr = self.current_poses[object_name].transform.translation
+            T_part_now[:3, 3] = [tr.x, tr.y, tr.z]
+        held = held_part_model(object_name, T_flange_now, T_part=T_part_now,
+                               held_quat=current_object_orientation)
+
+        def segment_refusal(a, b, is_last):
+            return (camera_route_refusal(a, b, near_table_end=is_last)
+                    or held_part_route_refusal(a, b, held))
+
+        route, refusals = admissible_route(self.current_joint_angles, joint_angles, segment_refusal)
+        if route is None:
+            self.error_message = ("Reorient refused: no admissible route (direct or split by joint group): "
+                                  + "; ".join(sorted(set(refusals))[:3]))
             self.get_logger().error(self.error_message)
             return False
+        if len(route) > 2:
+            self.get_logger().info(
+                f"Reorient route split into {len(route) - 1} joint-linear segments (the direct line was refused)")
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
@@ -1684,12 +1706,23 @@ class ReorientForAssembly(Node):
             # distance at ~4 deg/s, >= 1 s, not held to the 2.5 s floor - the speed the wrist turns run at (benched 10-23)
             duration = max(ROTATE_SHORT_MIN_S, joint_dist / ROTATE_SHORT_RAD_S)
         self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
-        positions, velocities, t = single_point(joint_angles, duration)[0]
-        trajectory = {"traj1": [{
-            "positions": positions,
-            "velocities": velocities,
-            "time_from_start": Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
-        }]}
+        if len(route) == 2:
+            positions, velocities, t = single_point(joint_angles, duration)[0]
+            trajectory = {"traj1": [{
+                "positions": positions,
+                "velocities": velocities,
+                "time_from_start": Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
+            }]}
+        else:
+            # One point per segment end, at rest: each segment is its own straight joint-space move.
+            points, t_total = [], 0.0
+            for a, b in zip(route[:-1], route[1:]):
+                seg = float(np.max(np.abs(np.asarray(b) - np.asarray(a))))
+                t_total += max(ROTATE_SHORT_MIN_S, compute_duration(joint_distance=seg, profile='s_curve'))
+                points.append({"positions": [float(v) for v in b], "velocities": [0.0] * 6,
+                               "time_from_start": Duration(sec=int(t_total), nanosec=int((t_total % 1) * 1e9))})
+            trajectory = {"traj1": points}
+            self.get_logger().info(f"Split route: {len(points)} segments, {t_total:.2f}s")
         
         success = self.execute_trajectory(trajectory)
 
