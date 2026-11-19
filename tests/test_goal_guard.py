@@ -194,3 +194,23 @@ def test_a_gripper_goal_is_not_cancelled():
         print("LOG", log)
     ''')
     assert "LOG ['init NO', 'destroy', 'shutdown']" in out.stdout, out.stdout + out.stderr
+
+
+def test_no_guarded_primitive_waits_without_a_timeout():
+    """With rclpy's own signal handlers off (goal_guard), nothing wakes an untimed executor wait, so a SIGINT /
+    SIGTERM would only be serviced when the wait returns.  Every primitive that starts with init_ros waits in
+    timed steps."""
+    import re
+    offenders = []
+    for path in sorted((ROOT / "primitives").rglob("*.py")):
+        if "_real_mode_stash" in path.parts:
+            continue
+        text = path.read_text()
+        if "init_ros(" not in text:
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            code = line.split("#")[0]
+            if re.search(r"rclpy\.spin\(", code) or (
+                    "spin_until_future_complete(" in code and "timeout_sec" not in code):
+                offenders.append(f"{path.relative_to(ROOT)}:{n}")
+    assert offenders == []

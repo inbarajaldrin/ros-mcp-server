@@ -1035,7 +1035,8 @@ class TranslateObject(Node):
                 goal.goal_time_tolerance = Duration(sec=1)
 
             future = self.action_client.send_goal_async(goal)
-            rclpy.spin_until_future_complete(self, future)
+            while rclpy.ok() and not future.done():   # 0.1 s waits: a signal is serviced (goal_guard)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=0.1)
             goal_handle = future.result()
 
             if not goal_handle.accepted:
@@ -1045,7 +1046,8 @@ class TranslateObject(Node):
 
             self.get_logger().info(f"Trajectory with {len(points)} waypoints sent and accepted")
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future)
+            while rclpy.ok() and not result_future.done():   # 0.1 s waits: a signal is serviced (goal_guard)
+                rclpy.spin_until_future_complete(self, result_future, timeout_sec=0.1)
             result = result_future.result()
 
             if result.status == 4:  # SUCCEEDED

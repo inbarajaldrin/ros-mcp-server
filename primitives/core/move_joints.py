@@ -277,7 +277,8 @@ def run_move_joints(target_positions, duration=DEFAULT_DURATION):
 
     try:
         if not node.shutdown_called:
-            rclpy.spin(node)
+            while rclpy.ok():                 # rclpy.spin, in 0.1 s waits: a SIGINT/SIGTERM is serviced
+                rclpy.spin_once(node, timeout_sec=0.1)   # within 0.1 s (goal_guard, review r2)
         success = node.success
         error = node.error
         current_angles = node.current_joint_angles
@@ -339,7 +340,8 @@ def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
 
     try:
         if not move_node.shutdown_called:
-            rclpy.spin(move_node)
+            while rclpy.ok():                 # rclpy.spin, in 0.1 s waits: a SIGINT/SIGTERM is serviced
+                rclpy.spin_once(move_node, timeout_sec=0.1)   # within 0.1 s (goal_guard, review r2)
         success = move_node.success
         error = move_node.error
     except KeyboardInterrupt:
