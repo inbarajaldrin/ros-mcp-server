@@ -27,7 +27,8 @@ import argparse
 
 from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
-from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
+from primitives.shared.collision import (compute_all_joint_positions, check_collision_with_table, segment_distance,
+    check_self_collision, check_trajectory_collision, check_ee_below_base, check_compact_configuration)
 from primitives.shared.ik import dh_params, forward_kinematics
 
 # Watchdog (seconds).  Execution counts from goal acceptance, never from planning.
@@ -42,6 +43,22 @@ from primitives.shared.robot_contract import (
     arm_positions, public_arm_joints)
 
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
+
+def clear_area_segment_refusal(a, b, is_last, table_margin, held_part):
+    """One joint-linear segment of a clear-area split / detour route: None, or a typed reason.  The arm against the
+    table and itself along the line (DH and physical models, both ends), an in-between stance against
+    rotate_object's stance rules (review r2 P2-3: EE below the base, compact; the extended-gripper rule is the
+    physical RG2 body inside check_self_collision), then the camera rule and the held-part rule.  The end stance
+    is the IK target, which passed its own rules."""
+    from primitives.shared.camera_up import camera_route_refusal
+    from primitives.shared.held_part_collision import held_part_route_refusal
+    if check_trajectory_collision(np.asarray(a, float), np.asarray(b, float),
+                                  z_threshold=TABLE_HEIGHT - table_margin, num_samples=20):
+        return "ARM_TABLE_OR_SELF_COLLISION"
+    if not is_last and (check_ee_below_base(b) or check_compact_configuration(b)):
+        return "ARM_STANCE_REFUSED: an in-between stance is below the base or compact"
+    return camera_route_refusal(a, b, near_table_end=is_last) or held_part_route_refusal(a, b, held_part)
+
 
 class MoveToClearArea(Node):
     def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None,
@@ -824,10 +841,7 @@ class MoveToClearArea(Node):
                     margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
 
                     def segment_refusal(a, b, is_last):
-                        if check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT - margin, num_samples=20):
-                            return "ARM_TABLE_OR_SELF_COLLISION"
-                        return (camera_route_refusal(a, b, near_table_end=is_last)
-                                or held_part_route_refusal(a, b, held_part))
+                        return clear_area_segment_refusal(a, b, is_last, margin, held_part)
 
                     for cost, candidate_joints, yaw in candidate_solutions:
                         tj = np.array(candidate_joints).copy()

@@ -54,11 +54,12 @@ def _reorient_node():
     return node
 
 
-# Both stances pass the reorient IK rules and the direct joint line is clear of the table and the arm, but moving
-# wrist_1 + wrist_2 first stops at a stance that self-collides (DH capsules, conservative radii).
-SPLIT_START = np.array([1.914, -1.7228, 2.761, -2.7811, -1.4732, 2.5738])
-SPLIT_TARGET = np.array([2.163, -1.668, 1.633, -0.1665, -3.7406, -0.1339])
-SPLIT_MIDDLE = np.array([1.914, -1.7228, 2.761, -0.1665, -3.7406, 2.5738])
+# Both stances pass the reorient IK rules and the direct joint line is clear of the table and the arm (DH and
+# physical models), but moving wrist_1 + wrist_2 first stops at a stance where the RG2 body is 12.7 mm inside the
+# physical upper arm - a stance the DH capsules alone admit (built from a twin-colliding stance of the r2 sweep).
+SPLIT_START = np.array([-2.7529, -1.677, 2.2101, 1.1559, 1.2272, -2.4303])
+SPLIT_TARGET = np.array([-3.1297, -1.6724, 1.6913, 1.9806, 1.4451, -2.4303])
+SPLIT_MIDDLE = np.array([-2.7529, -1.677, 2.2101, 1.9806, 1.4451, -2.4303])
 
 
 def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeypatch):
@@ -69,6 +70,9 @@ def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeyp
     assert not node._check_collision(SPLIT_START) and not node._check_collision(SPLIT_TARGET)
     assert not check_trajectory_collision(SPLIT_START, SPLIT_TARGET, z_threshold=TABLE_HEIGHT)
     assert check_self_collision(SPLIT_MIDDLE)
+    from primitives.shared.collision import dh_self_collision, physical_self_collision_refusal
+    assert not dh_self_collision(SPLIT_MIDDLE)
+    assert "upper arm vs RG2 body" in physical_self_collision_refusal(SPLIT_MIDDLE)
     # Offer the planner only that split, as if the camera rule had refused everything else.
     monkeypatch.setattr(route_split, "candidate_routes",
                         lambda start, target, vias=(): iter([[start, SPLIT_MIDDLE.copy(), target]]))
@@ -154,3 +158,19 @@ def test_r48g_carry_needs_home_plus_a_wrist3_detour_for_the_held_part():
     assert route is None
     route, _ = admissible_route(start, target, seg, vias=(np.array(HOME_JOINTS, float),))
     assert route is not None and len(route) == 5 and np.allclose(route[2][:5], np.array(HOME_JOINTS)[:5])
+
+
+def test_clear_area_in_between_stances_get_the_stance_rules():
+    """Review r2 P2-3: an in-between stance of a clear-area route that clears the arm, table and camera checks but
+    is compact (wrist_2 within 200 mm of the shoulder axis) is refused; as the end stance (the IK target, checked by
+    its own rules) the same stance passes the segment rule."""
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core.move_to_clear_area import clear_area_segment_refusal
+    from primitives.shared.collision import check_compact_configuration
+    from primitives.shared.config import TABLE_COLLISION_MARGIN_SIDEWAYS
+    compact = np.array([1.8114, -2.1509, 2.4791, 0.2636, 2.4133, -0.1371])
+    assert check_compact_configuration(compact)
+    why = clear_area_segment_refusal(compact, compact, False, TABLE_COLLISION_MARGIN_SIDEWAYS, None)
+    assert why is not None and why.startswith("ARM_STANCE_REFUSED")
+    assert clear_area_segment_refusal(compact, compact, True, TABLE_COLLISION_MARGIN_SIDEWAYS, None) is None
