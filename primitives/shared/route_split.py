@@ -1,5 +1,7 @@
 """Split a refused joint-linear move into short joint-linear segments (lead approval 2026-11-19).
 
+Candidates, in order: the direct line; every ordered split of the moving joint groups; wrist_3 detours.
+
 rotate_object sends one joint target and the controller interpolates a straight line in joint space.  In MuJoCo
 r48e that line swept the v3.1 camera mount through the forearm / wrist_1 zone for a flat u_orange held camera-up.
 Moving the joint groups one after another (arm 0-2, wrist_1, wrist_2, wrist_3) reaches the same end pose along a
@@ -13,6 +15,11 @@ import itertools
 import numpy as np
 
 GROUPS = {"arm": (0, 1, 2), "wrist_1": (3,), "wrist_2": (4,), "wrist_3": (5,)}
+# wrist_3 detours (rad): turn the tool (and the mount on its +Y side) away first, move, then turn back.  r48f
+# (MuJoCo, 2026-11-19): with the camera up, any wrist_2 sweep through about -3.3..-2.0 rad passes the v3.1 mount
+# through the forearm / wrist_1 zone whatever the other joints do; a detour turns the mount out of the way.
+WRIST3_DETOURS_RAD = (np.pi / 2, -np.pi / 2, 3 * np.pi / 4, -3 * np.pi / 4, np.pi, -np.pi)
+WRIST3_ABS_MAX_RAD = 4.0          # the cable limit (ik.WRIST3_LIMIT_RAD)
 
 
 def candidate_routes(start, target):
@@ -38,6 +45,12 @@ def candidate_routes(start, target):
                         q[list(GROUPS[g])] = target[list(GROUPS[g])]
                     wps.append(q)
                 yield wps
+    for d3 in WRIST3_DETOURS_RAD:
+        a, b = start.copy(), target.copy()
+        a[5] += d3
+        b[5] += d3
+        if max(abs(a[5]), abs(b[5])) <= WRIST3_ABS_MAX_RAD:
+            yield [start, a, b, target]
 
 
 def admissible_route(start, target, segment_refusal):

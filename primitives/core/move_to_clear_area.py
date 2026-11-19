@@ -769,7 +769,8 @@ class MoveToClearArea(Node):
                             self.get_logger().warn(f"Held-part route refused: {refusal}")
                             continue
                         travel_distance = np.sum(np.abs(target_joints - start_joints))
-                        collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw))
+                        collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw,
+                                                            [target_joints.copy()]))
 
                 via = None
                 if not collision_free_trajectories:
@@ -793,10 +794,36 @@ class MoveToClearArea(Node):
                                 held_refusals.append(f"via home: {refusal}")
                                 self.get_logger().warn(f"Held-part route via home refused: {refusal}")
                                 continue
-                            collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)), tj, cost, yaw))
+                            collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)),
+                                                                tj, cost, yaw, [home.copy(), tj.copy()]))
                     if collision_free_trajectories:
                         via = home
                         self.get_logger().info("Direct path collides - going through the home joints")
+                if not collision_free_trajectories:
+                    # Split by joint group (route_split; lead approval 2026-11-19): every segment a straight joint
+                    # line from where the last one ended, checked by the arm, camera and held-part rules alike.
+                    from primitives.shared.route_split import admissible_route
+                    margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+
+                    def segment_refusal(a, b, is_last):
+                        if check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT - margin, num_samples=20):
+                            return "ARM_TABLE_OR_SELF_COLLISION"
+                        return (camera_route_refusal(a, b, near_table_end=is_last)
+                                or held_part_route_refusal(a, b, held_part))
+
+                    for cost, candidate_joints, yaw in candidate_solutions:
+                        tj = np.array(candidate_joints).copy()
+                        if check_collision_with_table(tj) or check_self_collision(tj):
+                            continue
+                        route, why = admissible_route(start_joints, tj, segment_refusal)
+                        if route is None:
+                            held_refusals.append(f"split: {'; '.join(sorted(set(why))[:2])}")
+                            continue
+                        collision_free_trajectories.append(
+                            (float(sum(np.sum(np.abs(b - a)) for a, b in zip(route[:-1], route[1:]))),
+                             tj, cost, yaw, [np.asarray(w, float) for w in route[1:]]))
+                    if collision_free_trajectories:
+                        self.get_logger().info("Direct and via-home routes refused - joint-group split route")
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
                     if held_refusals:
@@ -811,11 +838,11 @@ class MoveToClearArea(Node):
                 # Sort by travel distance (shortest path first)
                 collision_free_trajectories.sort(key=lambda x: x[0])
 
-                shortest_travel, target_joints, best_cost, best_yaw = collision_free_trajectories[0]
+                shortest_travel, target_joints, best_cost, best_yaw, route_legs = collision_free_trajectories[0]
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
-                legs = [target_joints] if via is None else [via, target_joints]
+                legs = route_legs
                 trajectory_points = []
                 t, prev = 0.0, start_joints
                 for leg in legs:

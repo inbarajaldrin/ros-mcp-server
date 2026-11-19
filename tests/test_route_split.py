@@ -36,7 +36,7 @@ def test_an_admissible_direct_line_is_kept_and_none_refuses():
     assert len(route) == 2
     route, reasons = admissible_route(START, TARGET, lambda a, b, last: "ALWAYS_REFUSED")
     assert route is None and reasons and all(r == "ALWAYS_REFUSED" for r in reasons)
-    assert sum(1 for _ in candidate_routes(START, TARGET)) == 75
+    assert sum(1 for _ in candidate_routes(START, TARGET)) == 75 + 6        # group splits + wrist_3 detours
 
 
 def test_rotate_object_uses_the_split_route_with_the_full_rule_set():
@@ -45,3 +45,26 @@ def test_rotate_object_uses_the_split_route_with_the_full_rule_set():
     assert "held_part_route_refusal(a, b, held)" in source
     assert "camera_route_refusal(a, b, near_table_end=is_last)" in source
     assert "no admissible route (direct or split by joint group)" in source
+
+
+def test_r48f_clear_area_carry_needs_a_wrist3_detour():
+    """MuJoCo r48f: camera up, the clear-area carry's wrist_2 sweep passes the mount through the forearm /
+    wrist_1 zone on every direct or group-split route; a wrist_3 detour turns the mount away."""
+    from primitives.shared.collision import check_trajectory_collision
+    from primitives.shared.config import HOME_JOINTS, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
+    start = np.array([1.9577104621800272, -1.2703251056487066, 1.6572930970066544,
+                      -0.3777497059349086, -4.313742523402642, 0.003576458218420753])
+    target = np.array([-0.640768, -1.767599, 2.185283, -0.420121, -0.633356, 0.003576])
+
+    def seg(a, b, last):
+        if check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, num_samples=20):
+            return "ARM"
+        return camera_route_refusal(a, b, near_table_end=last)
+
+    assert seg(start, target, True) is not None
+    home = np.array(HOME_JOINTS, float)
+    assert seg(start, home, False) or seg(home, target, True)
+    route, _ = admissible_route(start, target, seg)
+    assert route is not None and len(route) == 4
+    assert abs(route[1][5] - start[5]) > 1.0 and np.allclose(route[-1], target)
+    assert max(abs(w[5]) for w in route) <= 4.0
