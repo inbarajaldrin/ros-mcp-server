@@ -10,11 +10,15 @@ import numpy as np
 from primitives.shared.config import DH_PARAMS, TABLE_HEIGHT
 from primitives.shared.ik import dh_transform
 
-# UR5e link radii from the vendored robot description's manually measured
-# physical parameters (description/ur_description/config/ur5e/
-# physical_parameters.yaml). Keep one source for collision rejection and
-# rotate_object's clearance ranking.
-UR5E_LINK_RADII = (0.060, 0.054, 0.040, 0.045, 0.045, 0.040)
+# UR5e link capsule radii (m) about the DH joint-origin segments: base, upper arm,
+# forearm, wrist_1, wrist_2, wrist_3.  Conservative estimates, larger than the
+# measured link radii.  The capsules sit on the DH segments, not on the physical
+# links: the physical upper arm runs about 0.13 m off its DH segment along the
+# shoulder axis, an approximation these radii do NOT cover.  One geometry for the
+# real arm and the simulator; the single source for self-collision rejection,
+# rotate_object's clearance ranking, the camera mount-vs-arm rule and the held-part
+# check.  Do not shrink it to admit a stance.
+UR5E_LINK_RADII = (0.075, 0.065, 0.055, 0.045, 0.045, 0.040)
 
 
 def compute_all_joint_positions(joint_angles):

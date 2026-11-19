@@ -21,7 +21,7 @@ R48_PART_WXYZ = [-0.7105999719225897, 0.70357146657895, -0.003777956154058515, 0
 R48_TARGET = np.array([-0.640851, -1.780175, 2.188892, -0.448530, -0.633096, -3.091593])
 
 # Real cell 2026-10-24 replay_20261024_101941, u_orange#6 place_down: flown successfully (476.6 deg total
-# travel, the closest real carry to the upper arm).  Must stay admitted.
+# travel, the closest real carry to the upper arm).
 REAL_START = np.array([2.052016019821167, -0.9760609430125733, 1.2198908964740198,
                        -0.2443710130504151, -4.622496430073873, 3.142984628677368])
 REAL_TARGET = np.array([0.118188, -1.598051, 2.037364, -0.389651, 0.125315, 3.091593])
@@ -46,11 +46,25 @@ def test_r48_route_into_the_upper_arm_is_refused_and_via_home_is_admitted():
     assert hpc.held_part_route_refusal(home, R48_TARGET, held) is None
 
 
-def test_the_flown_real_near_miss_stays_admitted_with_the_chained_model():
+def test_the_flown_real_near_miss_is_rerouted_not_flown_into_the_upper_arm_margin():
+    """With the conservative link radii the direct line passes 7.8 mm inside the upper-arm margin; the
+    planner's split route (wrist_1 first, then the rest) clears it under the arm and held-part rules."""
+    from primitives.shared.collision import check_trajectory_collision
+    from primitives.shared.config import TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
+    from primitives.shared.route_split import admissible_route
     held = hpc.chained_held_part("u_orange", 1, [0.0006, 1.0, -0.0, 0.0], REAL_TCP_P, REAL_TCP_Q, 0.22038)
-    assert hpc.held_part_route_refusal(REAL_START, REAL_TARGET, held) is None
+    reason = hpc.held_part_route_refusal(REAL_START, REAL_TARGET, held)
+    assert reason is not None and reason.startswith("HELD_PART_ARM_COLLISION") and "link 1" in reason
     margins = hpc.held_part_min_clearances(REAL_START, REAL_TARGET, held)
-    assert 0.0 < min(margins["links"].values()) < 0.010      # close, but admitted
+    assert -0.010 < margins["links"][1] < 0.0
+
+    def seg(a, b, last):
+        if check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, num_samples=20):
+            return "ARM"
+        return hpc.held_part_route_refusal(a, b, held)
+
+    route, _ = admissible_route(REAL_START, REAL_TARGET, seg, vias=(np.array(HOME_JOINTS, float),))
+    assert route is not None and len(route) == 3 and np.allclose(route[-1], REAL_TARGET)
 
 
 def test_empty_gripper_adds_nothing_and_the_planner_builds_no_model():
