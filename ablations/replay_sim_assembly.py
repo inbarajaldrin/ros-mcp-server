@@ -135,6 +135,35 @@ def derive_sim_sequence(obj: str, recorded: list[str], base_name: str,
     return sequence, note
 
 
+def _landing_check(obj, base_name, executed, regrasp_step, row, run_step, transcript):
+    """Re-plan from the landed face exactly as replay_real_assembly does after a place-down."""
+    from ablations.replay_real_assembly import STAGING_MAX_RETRIES, staging_single_pass_ok
+    first = next((i for i, st in enumerate(executed) if "__move_to_grasp(" in st), None)
+    cycle = executed[first + 1:] if first is not None else []
+    for attempt in range(STAGING_MAX_RETRIES + 1):
+        q = (row["result"].get("current_object_orientation") or {}).get("quat")
+        q = [q["x"], q["y"], q["z"], q["w"]] if isinstance(q, dict) else None
+        check = staging_single_pass_ok(obj, base_name, q)
+        if check is None:
+            transcript.write(f"[landing-check] {obj}: could not evaluate the landing - continuing\n")
+            return row, True
+        ok, err = check
+        note = f"[landing-check] {obj}: up-face error {err:.1f} deg -> {'single pass OK' if ok else 'NEEDS ANOTHER PASS'}"
+        transcript.write(note + "\n")
+        print("  " + note, flush=True)
+        if ok:
+            return row, True
+        if attempt == STAGING_MAX_RETRIES or not cycle:
+            row = dict(row, result={"result": "failure", "error":
+                       f"{obj} landing still not insertable after {attempt} extra pass(es)"})
+            return row, False
+        for st in cycle + [regrasp_step]:
+            row = run_step(obj, st)
+            if row["result"].get("result") != "success":
+                return row, False
+    return row, False
+
+
 def _scorer(kind: str, names: list[str], base: str) -> tuple[list[str], int]:
     return ([sys.executable, "-u", "-m", "ablations.sim_seat_scorer", f"--{kind}", ",".join(names),
              "--base", base], 60)
@@ -244,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         for entry in entries:
             obj = entry["object_name"]
             first_grasp = True
+            executed: list[str] = []
+            placed_at_staging = False
             for step in entry.get("tool_sequence", []):
                 if args.fov_gated and first_grasp and "__move_to_grasp(" in step:
                     row = run_step(obj, "__camera_staging_view__")
@@ -253,6 +284,17 @@ def main(argv: list[str] | None = None) -> int:
                 row = run_step(obj, step)
                 if row["result"].get("result") != "success":
                     return fail(row)
+                # The real replay's landing check (replay_real_assembly, staging regrasp): a
+                # landing is a fresh start state; if the regrasp observes a face that one pass
+                # cannot insert, run another place-down pass, at most STAGING_MAX_RETRIES.
+                if "__move_to_grasp(" in step and placed_at_staging:
+                    row, ok = _landing_check(obj, args.base_name, executed, step, row, run_step, transcript)
+                    if not ok:
+                        return fail(row)
+                    placed_at_staging = False
+                executed.append(step)
+                if "action='place_down'" in step:
+                    placed_at_staging = True
             # Ruling A (lead, 2026-11-19): the seat is the part's final pose after
             # release and retract, scored before the next part starts.
             cmd, timeout = _scorer("score", [obj], args.base_name)

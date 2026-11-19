@@ -69,3 +69,29 @@ def test_replay_scores_each_part_then_rescored_all():
     text = ast.unparse(tree)
     assert "__score_final_seat__" in text and "__rescore_all_seats__" in text
     assert "derive_sequence" in text and "default=True" in text
+
+
+def test_sim_landing_check_reruns_the_cycle_like_the_real_replay():
+    import types
+    from ablations import replay_sim_assembly as rs
+    upright = R.from_quat([COMPONENTS["u_brown"]["rotation"]["quaternion"][k] for k in "xyzw"])
+    flat = R.from_euler("x", 90, degrees=True) * upright
+
+    def obs(q):
+        x, y, z, w = q.as_quat()
+        return {"result": {"result": "success", "current_object_orientation": {"quat": {"x": x, "y": y, "z": z, "w": w}}}}
+
+    log = types.SimpleNamespace(write=lambda text: None)
+    executed = ["pick", "close", "lift", "rotate", "place_down", "open", "lift2"]
+    ran = []
+    row, ok = rs._landing_check("u_brown", "base1", ["grasp1__move_to_grasp(", *executed], "regrasp",
+                                obs(upright), lambda o, st: ran.append(st) or obs(upright), log)
+    assert ok and ran == []                                    # insertable landing: nothing re-run
+    landings = iter([obs(upright)])
+    row, ok = rs._landing_check("u_brown", "base1", ["grasp1__move_to_grasp(", *executed], "regrasp",
+                                obs(flat), lambda o, st: ran.append(st) or next(landings, obs(upright)), log)
+    assert ok and ran == executed + ["regrasp"]                # one extra place-down pass, then OK
+    ran.clear()
+    row, ok = rs._landing_check("u_brown", "base1", ["grasp1__move_to_grasp(", *executed], "regrasp",
+                                obs(flat), lambda o, st: ran.append(st) or obs(flat), log)
+    assert not ok and len(ran) == 2 * (len(executed) + 1)      # STAGING_MAX_RETRIES = 2, then refuse
