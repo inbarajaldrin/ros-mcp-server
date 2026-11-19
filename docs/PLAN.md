@@ -116,6 +116,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   the Mac), ROS host-local (R18), never on the cell PC's ROS network. plan47 informed, not asked.
   plan47 (07:30Z): no conflict; conditions: localhost-only DDS + own domain, a4500's colleague wins (check CPU/memory, bounded
   process tree, Humble only in a container or on the Mac), keep receipts/logs/MJCF digests (no OnRobot meshes), each phase still reviewed.
+- **R28 Claude worker for MuJoCo** (2026-11-19 ~14:50Z, WhatsApp "B"): the workspace hit its Codex spend cap at 13:14Z, stopping every
+  Codex worker. The operator chose to continue the MuJoCo work on a Claude worker (w5-mujoco, session 8e48c8b3) rather than raise the
+  cap or wait. Same goal, bars and binding rules as w4; it checkpoints w4's uncommitted work first.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
