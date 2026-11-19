@@ -38,6 +38,10 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 - [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
 - [ ] 2.4 R22: FMB1 assembled end to end in the twin by the cell's code (regular insert), rendered for the operator; then with
   FOV-gated poses (paper2). w3-sim-assembly, Codex 01a1f10e-baa8-7ea3-8a39-07fec69100a7, on a4500 (2026-11-19)
+  Isaac road PARKED 11-19 06:30Z: the wrist-reaction stop gate refused (stop overshoot 157/110/67 N at 60/240/480 Hz vs the
+  30 N bar; the mass-load delta also fell with rate, 0.74 -> 0.49 -> 0.28 N). Rigid contact on a position-controlled arm needs
+  compliant-contact tuning; the assembly video goes through the MuJoCo road (R23-R25). Nothing deleted; cell branch w3-sim kept.
+  w3 moved to 2.2 (perception on Isaac-rendered frames).
 
 ## P3 Back on the real cell (done = R13: 3 hands-off certified FMB1 cycles in a row, untipped reset, v3.1 calibrated)
 - [x] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view (2026-11-18: lab
