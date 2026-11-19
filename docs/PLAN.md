@@ -105,6 +105,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R25 MuJoCo video the DroidStack way** (2026-11-19 ~03:05Z): "we can do it with A itself then but do you really have to wait for it to
   land before use?" - no interim connector; the video comes from the cell code on DroidStack's MuJoCo road (ds-mujoco-robot-cell
   phases A-C). Start as early as plan47 allows (asked: phase A on ds-mujoco's gate-passed head c1f21ed2, rebase at landing).
+- **R26 No part masses** (2026-11-19 ~03:20Z): "I dont have weight of objects what I can tell is a friction grasp doesnt slip". The
+  sim slip gate bounds the mass instead of measuring it: CAD volume x solid PLA density as the upper bound, 20 % of it as the lower,
+  no slip at both ends at the real 40 N grip; the real grasp's observed no-slip is the reference; no friction tuning unless a declared
+  physical value is wrong.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
