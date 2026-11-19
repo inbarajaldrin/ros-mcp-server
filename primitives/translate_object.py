@@ -583,7 +583,7 @@ from primitives.shared.config import (
 )
 from primitives.shared.collision import (
     check_collision_with_table, check_self_collision,
-    check_ee_below_base, check_compact_configuration,
+    check_ee_below_base, check_compact_configuration, check_trajectory_collision,
 )
 from primitives.shared.fold_symmetry import load_symmetry_data, equivalent_orientations
 from primitives.rotate_object import ExtendedCardinalOrientations
@@ -818,9 +818,13 @@ class TranslateObject(Node):
         def collision_checker(joint_angles):
             if self.mode != 'sim':
                 return False
+            # The regular insert hover is intentionally below the UR base
+            # height (0.1625 m) while still above the table. Applying
+            # check_ee_below_base here makes every table-level insertion
+            # geometrically impossible. Keep the actual table, self, and
+            # compact-configuration guards; move_down owns the final descent.
             return (check_collision_with_table(joint_angles)
                     or check_self_collision(joint_angles)
-                    or check_ee_below_base(joint_angles)
                     or check_compact_configuration(joint_angles))
 
         joint_bounds = [
@@ -1040,6 +1044,9 @@ class TranslateObject(Node):
                 f"Hover gripper center Z: {hover_gripper_center[2]:.4f}, "
                 f"hover flange Z: {target_flange[2]:.4f} (offset: {tool_offset_world[2]:.4f})"
             )
+            self.get_logger().info(
+                "Hover flange target: [" + ", ".join(f"{v:.6f}" for v in target_flange) + "]"
+            )
         else:
             # Final position: use EE target directly
             target_flange = ee_target_position
@@ -1070,6 +1077,20 @@ class TranslateObject(Node):
             ik_result, why_ = nearest_joint_equivalent(ik_result, self.current_joint_angles)   # raw = wrapped rank
             if ik_result is None:
                 self.error_message = f"Motion planning failed: {why_}"
+                self.get_logger().error(self.error_message)
+                return False
+
+            self.get_logger().info(
+                "Hover start joints: [" + ", ".join(f"{v:.6f}" for v in self.current_joint_angles) + "]"
+            )
+            self.get_logger().info(
+                "Hover target joints: [" + ", ".join(f"{v:.6f}" for v in ik_result) + "]"
+            )
+            if check_trajectory_collision(
+                    self.current_joint_angles, ik_result,
+                    z_threshold=TABLE_HEIGHT, num_samples=40,
+                    logger=self.get_logger()):
+                self.error_message = "Motion planning failed: interpolated arm path to insert hover is not collision-free"
                 self.get_logger().error(self.error_message)
                 return False
 
