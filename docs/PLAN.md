@@ -88,6 +88,14 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **plan47** (2026-11-19 ~00:30Z, superseded by the correction above): the system-mode kit/render_warm/ROS probes are DroidStack's top priority; our worker may be named a
   DroidStack lane to build them (GPT builds, Claude reviews, droidstack-opus lands) - no private fork. Cardless class sizes sent for a
   ruling. rtx6000: HOLD until the builder names flags + disk floor (plan29 reclaiming box copies there). a4500 one-off renders fine.
+- **R23 MuJoCo road** (2026-11-19 ~01:40Z): operator: "work on gazebo and mujoco ... get started on a fork or however plan47
+  recomends". plan47: as DroidStack work, no fork and no cell-side bridge - lane ds-mujoco-robot-cell on dual (off ds-mujoco 972b0a72,
+  brief .pa/BRIEF.md): slice 2 = a declared robot cell under MujocoAdapter with the ROS 2 robot contract when declared; design note
+  first, Claude review, plan47's ruling, build after ds-mujoco slice 1 lands. The cell's MJCF is lab data (our lab). Gazebo later,
+  through the same SimulatorAdapter seam. Worker w4-mujoco.
+- **Cable** (2026-11-19): the D415's cable runs over the links to the PC. Operator wants it modelled and guarded: a cable test (PC end
+  unplugged, operator watching, slow joint sweeps) -> per-joint limits enforced in one place + the UR safety config; awaiting his
+  photos and a time. Today only move_cartesian caps |wrist_3| at 4.0 rad.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
