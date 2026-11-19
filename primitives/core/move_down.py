@@ -909,6 +909,14 @@ class MoveDown(Node):
                     distance_to_target = abs(current_z - target_z)
                     
                     if distance_to_target < 0.001:  # Already at target (within 1mm)
+                        if self.mode == 'sim':
+                            self.error_message = (
+                                "Sim descent reached its endpoint without a measured contact. "
+                                "A regular insert/place-down must stop on the simulated physics wrench."
+                            )
+                            self.get_logger().error(self.error_message)
+                            rclpy.shutdown()
+                            return
                         self.get_logger().info("Movement completed successfully")
                         rclpy.shutdown()
                         return
