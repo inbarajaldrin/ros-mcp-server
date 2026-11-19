@@ -46,15 +46,10 @@ import argparse
 import math
 import json
 from primitives.shared.velocity_profiles import single_point, compute_duration
+from primitives.shared.robot_contract import (ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM,
+    JOINT_STATES_TOPIC, arm_positions, public_arm_joints)
 
-JOINT_NAMES = [
-    "shoulder_pan_joint",   # 0
-    "shoulder_lift_joint",  # 1
-    "elbow_joint",          # 2
-    "wrist_1_joint",        # 3
-    "wrist_2_joint",        # 4
-    "wrist_3_joint"         # 5
-]
+JOINT_NAMES = BARE_ARM_JOINTS
 
 JOINT_ALIASES = {
     "shoulder_pan": 0, "pan": 0, "sp": 0,
@@ -72,7 +67,7 @@ PRESETS = {
     "forward": [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0],
 }
 
-ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+ACTION_SERVER = ARM_ACTION
 DEFAULT_DURATION = 5.0
 
 
@@ -117,7 +112,7 @@ class MoveJoints(Node):
         self.joint_angles_received = False
 
         self.joint_sub = self.create_subscription(
-            JointState, '/joint_states', self.joint_state_callback, 10
+            JointState, JOINT_STATES_TOPIC, self.joint_state_callback, 10
         )
         self.client = ActionClient(self, FollowJointTrajectory, ACTION_SERVER)
 
@@ -141,13 +136,9 @@ class MoveJoints(Node):
 
     def joint_state_callback(self, msg):
         if len(msg.name) >= 6 and len(msg.position) >= 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = []
-            for name in JOINT_NAMES:
-                if name in joint_dict:
-                    positions.append(joint_dict[name])
-                else:
-                    return
+            positions = arm_positions(msg)
+            if positions is None:
+                return
             self.current_joint_angles = np.array(positions)
             self.joint_angles_received = True
 
@@ -198,10 +189,11 @@ class MoveJoints(Node):
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory(
-            joint_names=JOINT_NAMES,
+            joint_names=public_arm_joints(),
             points=trajectory_points
         )
-        goal.goal_time_tolerance = Duration(sec=1)
+        if not DROIDSTACK_SIM:
+            goal.goal_time_tolerance = Duration(sec=1)
 
         self.get_logger().info(
             f"Sending trajectory ({len(trajectory_points)} waypoints, {self.duration}s)")
@@ -316,17 +308,13 @@ def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
 
     def cb(msg):
         if len(msg.name) >= 6 and len(msg.position) >= 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = []
-            for name in JOINT_NAMES:
-                if name in joint_dict:
-                    positions.append(joint_dict[name])
-                else:
-                    return
+            positions = arm_positions(msg)
+            if positions is None:
+                return
             joint_sub_data['angles'] = np.array(positions)
             joint_sub_data['received'] = True
 
-    node.create_subscription(JointState, '/joint_states', cb, 10)
+    node.create_subscription(JointState, JOINT_STATES_TOPIC, cb, 10)
 
     timeout = 0
     while rclpy.ok() and not joint_sub_data['received'] and timeout < 100:

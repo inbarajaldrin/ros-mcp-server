@@ -24,10 +24,11 @@ from threading import Timer
 from primitives.shared.ik import IKSolver, IKSolverConfig, rpy_to_matrix
 from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.robot_contract import (ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM,
+    JOINT_STATES_TOPIC, arm_positions, public_arm_joints)
 
-ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
-JOINT_NAMES = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-               "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
+ACTION_SERVER = ARM_ACTION
+JOINT_NAMES = BARE_ARM_JOINTS
 
 
 def output_result(result):
@@ -81,7 +82,7 @@ class PerformIKRunner(Node):
         self._user_duration = duration  # None means auto-compute
 
         self.joint_sub = self.create_subscription(
-            JointState, '/joint_states', self._joint_state_callback, 10
+            JointState, JOINT_STATES_TOPIC, self._joint_state_callback, 10
         )
 
         if self.client.wait_for_server(timeout_sec=10.0):
@@ -94,13 +95,9 @@ class PerformIKRunner(Node):
 
     def _joint_state_callback(self, msg):
         if len(msg.name) >= 6 and len(msg.position) >= 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = []
-            for name in JOINT_NAMES:
-                if name in joint_dict:
-                    positions.append(joint_dict[name])
-                else:
-                    return
+            positions = arm_positions(msg)
+            if positions is None:
+                return
             self.current_joint_angles = np.array(positions)
             self.joint_angles_received = True
 
@@ -143,14 +140,15 @@ class PerformIKRunner(Node):
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory(
-            joint_names=JOINT_NAMES,
+            joint_names=public_arm_joints(),
             points=[JointTrajectoryPoint(
                 positions=positions,
                 velocities=velocities,
                 time_from_start=Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
             )]
         )
-        goal.goal_time_tolerance = Duration(sec=1)
+        if not DROIDSTACK_SIM:
+            goal.goal_time_tolerance = Duration(sec=1)
 
         self.goal_accepted = False
         self.goal_rejected = False

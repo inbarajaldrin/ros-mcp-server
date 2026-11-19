@@ -574,13 +574,16 @@ from builtin_interfaces.msg import Duration
 
 from primitives.shared.ik import (
     forward_kinematics, dh_params, compute_cartesian_waypoints_ik,
-    IKSolverConfig, IKSolver, nearest_joint_equivalent,
+    IKSolverConfig, IKSolver, nearest_joint_equivalent, WRIST3_LIMIT_RAD,
 )
 from primitives.shared.velocity_profiles import s_curve_profile, single_point, compute_duration
 from primitives.shared.config import (
     TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset,
     DEFAULT_BASE_POSITION, DEFAULT_BASE_ORIENTATION,
 )
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
 from primitives.shared.collision import (
     check_collision_with_table, check_self_collision,
     check_ee_below_base, check_compact_configuration, check_trajectory_collision,
@@ -603,6 +606,31 @@ HOVER_YAW_FIX = os.environ.get('HOVER_YAW_FIX', '1') == '1'
 # turned line_green a further -9.09 / +3.10 deg on top of it - an Euler 'held yaw' of a part held at pitch 90 deg is
 # noise - and the bar jammed on the U tops twice; before, the same noise happened to fall outside 10 deg and skip it)
 ORIENTATION_TOLERANCE_DEG = 5.0  # Max orientation error before allowing insertion
+# Same arm-step admission as move_cartesian and scan_workspace.  wrist_3 has
+# its own larger equivalent-pose step, but must also stay inside the physical
+# cable-wind limit enforced by nearest_joint_equivalent.
+# A hover move may not wrap any arm joint through more than half a revolution.
+# The separately tighter wrist_3 bound protects the camera/gripper cable, and
+# every admitted route must still pass the sampled whole-path collision gate.
+INSERT_HOVER_MAX_ARM_JOINT_TRAVEL_RAD = np.pi
+INSERT_HOVER_MAX_WRIST3_TRAVEL_RAD = 3.2
+# Fixed command bias is disabled: the first signed-residual experiment must
+# establish the direction before a model-specific correction is declared.
+SIM_INSERT_HOVER_BIAS_M = np.zeros(3)
+# Pinned CAD, assets/cad_data/models/u_brown.obj: the farthest vertex from
+# the part-frame rotation origin is sqrt(35^2 + 35^2 + 10.5^2) = 50.60 mm.
+# base1's corresponding slot planes are at +/-36.4 mm while u_brown spans
+# +/-35.0 mm, leaving 1.4 mm clearance per side.  Use the full 3-D corner
+# radius so one combined envelope conservatively covers any rotation axis.
+SIM_INSERT_PART_CORNER_RADIUS_M = 0.0506
+SIM_INSERT_CLEARANCE_COMMIT_M = 0.0011
+
+
+def insertion_clearance_consumed_m(xy_error_m, orientation_error_deg):
+    """Conservative lateral envelope consumed by pose error at the slot mouth."""
+    return float(xy_error_m) + SIM_INSERT_PART_CORNER_RADIUS_M * np.sin(
+        np.radians(float(orientation_error_deg))
+    )
 
 # Set up Python logging for non-ROS contexts (subprocess helpers)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -628,6 +656,49 @@ def output_result(result):
     print("__RESULT_JSON__")
     print(_json_dumps_decimal(result))
     print("__END_RESULT_JSON__")
+
+
+def settle_sim_observation(node, object_name, duration_s):
+    """Spin through a physical settling window and return a fresh pose pair.
+
+    Sleeping without spinning left the object sample at trajectory completion
+    while wall/sim time advanced.  The object stream is 50 Hz and robot TF is
+    60 Hz, so the final stamps must also be close enough to describe one held
+    transform rather than two different physics frames.
+    """
+    started = time.monotonic()
+    initial_object = node.current_poses.get(object_name)
+    initial_object_stamp = (
+        initial_object.header.stamp.sec + initial_object.header.stamp.nanosec * 1e-9
+        if initial_object is not None else -1.0
+    )
+    initial_tcp_stamp = (
+        node.current_ee_pose.header.stamp.sec + node.current_ee_pose.header.stamp.nanosec * 1e-9
+        if node.current_ee_pose is not None else -1.0
+    )
+    deadline = started + duration_s
+    while time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=min(0.02, max(0.0, deadline - time.monotonic())))
+    observed = node.current_poses.get(object_name)
+    if observed is None or node.current_ee_pose is None:
+        node.error_message = "sim insert settling lost the object or TCP pose"
+        return False
+    object_stamp = observed.header.stamp.sec + observed.header.stamp.nanosec * 1e-9
+    tcp_stamp = node.current_ee_pose.header.stamp.sec + node.current_ee_pose.header.stamp.nanosec * 1e-9
+    skew_s = abs(object_stamp - tcp_stamp)
+    node.get_logger().info(
+        f"Settled pose pair: object={object_stamp:.6f}s TCP={tcp_stamp:.6f}s "
+        f"skew={skew_s * 1000.0:.3f}ms"
+    )
+    if object_stamp <= initial_object_stamp or tcp_stamp <= initial_tcp_stamp:
+        node.error_message = "sim insert settling did not receive fresh object and TCP poses"
+        return False
+    if skew_s > 0.05:
+        node.error_message = (
+            f"sim insert object/TCP pose skew {skew_s * 1000.0:.3f} ms exceeds 50 ms"
+        )
+        return False
+    return True
 
 
 def load_grasp_point_position(object_name, grasp_id, logger=None):
@@ -690,7 +761,7 @@ class TranslateObject(Node):
             depth=10,
         )
         self.ee_sub = self.create_subscription(PoseStamped, EE_TOPIC, self._ee_cb, ee_qos)
-        self.joint_state_sub = self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        self.joint_state_sub = self.create_subscription(JointState, JOINT_STATES_TOPIC, self._joint_state_cb, 10)
 
         self.current_poses = {}
         self.current_ee_pose = None
@@ -698,14 +769,8 @@ class TranslateObject(Node):
         self.joint_angles_received = False
 
         # Action client
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
-        ]
-        self.action_client = ActionClient(
-            self, FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory',
-        )
+        self.joint_names = BARE_ARM_JOINTS
+        self.action_client = ActionClient(self, FollowJointTrajectory, ARM_ACTION)
 
         self.get_logger().info(f"Using {self.mode.upper()} mode")
 
@@ -723,12 +788,23 @@ class TranslateObject(Node):
         self.current_ee_pose = msg
 
     def _joint_state_cb(self, msg: JointState):
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            ordered = [joint_dict[n] for n in self.joint_names if n in joint_dict]
-            if len(ordered) == 6:
-                self.current_joint_angles = np.array(ordered)
-                self.joint_angles_received = True
+        ordered = arm_positions(msg)
+        if ordered is not None:
+            self.current_joint_angles = np.array(ordered)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, ordered)
+                pose = PoseStamped()
+                # This sim-only TCP is derived from the same stamped physics
+                # joint sample.  Preserve that stamp so it can be paired with
+                # the simulator's stamped object pose; the legacy publisher's
+                # PoseStamped header is zero in the live fork.
+                pose.header = msg.header
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = transform[:3, 3]
+                quat = R.from_matrix(transform[:3, :3]).as_quat()
+                pose.pose.orientation.x, pose.pose.orientation.y = quat[:2]
+                pose.pose.orientation.z, pose.pose.orientation.w = quat[2:]
+                self.current_ee_pose = pose
 
     # --- Helpers ---
 
@@ -858,30 +934,52 @@ class TranslateObject(Node):
             return None
 
         safe = []
-        rejected = {"table": 0, "self": 0}
+        rejected = {"limits": 0, "travel": 0, "table": 0, "self": 0, "path": 0}
         for joints, cost in candidates:
+            joints, _reason = nearest_joint_equivalent(joints, self.current_joint_angles)
+            if joints is None:
+                rejected["limits"] += 1
+                continue
+            joints = np.asarray(joints, dtype=float)
+            delta = np.abs(joints - self.current_joint_angles)
+            if (float(np.max(delta[:5])) > INSERT_HOVER_MAX_ARM_JOINT_TRAVEL_RAD
+                    or float(delta[5]) > INSERT_HOVER_MAX_WRIST3_TRAVEL_RAD
+                    or abs(float(joints[5])) > WRIST3_LIMIT_RAD):
+                rejected["travel"] += 1
+                continue
             if check_collision_with_table(joints):
                 rejected["table"] += 1
                 continue
             if check_self_collision(joints):
                 rejected["self"] += 1
                 continue
+            if check_trajectory_collision(
+                    self.current_joint_angles, joints,
+                    z_threshold=TABLE_HEIGHT, num_samples=40):
+                rejected["path"] += 1
+                continue
             travel = float(np.sum(np.abs(np.asarray(joints) - self.current_joint_angles)))
             safe.append((cost, travel, joints))
         self.get_logger().info(
             f"Exact hover IK: {len(candidates)} candidate(s), {len(safe)} safe, "
-            f"rejected table={rejected['table']} self={rejected['self']}"
+            f"rejected limits={rejected['limits']} travel={rejected['travel']} table={rejected['table']} "
+            f"self={rejected['self']} path={rejected['path']}"
         )
         if safe:
-            safe.sort(key=lambda item: (item[0], item[1]))
+            # All collected candidates have already met the solver's exact-pose
+            # admission.  Tiny floating objective differences (which log as
+            # 0.000000) must not select a 600-degree wrist route over a nearby
+            # exact solution; rank path-safe answers by travel, then cost.
+            safe.sort(key=lambda item: (item[1], item[0]))
             cost, travel, result = safe[0]
             self.get_logger().info(
                 f"Selected exact hover IK: cost={cost:.6f}, travel={np.degrees(travel):.1f}deg"
             )
             return result
         self.get_logger().error(
-            "Motion planning failed: exact IK candidates exist but all collide "
-            f"(table={rejected['table']}, self={rejected['self']})"
+            "Motion planning failed: exact IK candidates exist but all are inadmissible "
+            f"(limits={rejected['limits']}, travel={rejected['travel']}, table={rejected['table']}, "
+            f"self={rejected['self']}, path={rejected['path']})"
         )
         return None
 
@@ -893,7 +991,7 @@ class TranslateObject(Node):
 
             points = trajectory['traj1']
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = self.joint_names
+            traj_msg.joint_names = public_arm_joints()
 
             for point in points:
                 tp = JointTrajectoryPoint()
@@ -905,7 +1003,8 @@ class TranslateObject(Node):
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             future = self.action_client.send_goal_async(goal)
             rclpy.spin_until_future_complete(self, future)
@@ -941,7 +1040,9 @@ class TranslateObject(Node):
     # Sim mode: translate to target (hover or final position)
     # ------------------------------------------------------------------
 
-    def translate_for_target_sim(self, object_name, base_name, hover=True, object_orientation=None):
+    def translate_for_target_sim(
+            self, object_name, base_name, hover=True, object_orientation=None,
+            correction_gain=1.0, correct_orientation=True):
         """
         Sim mode: Compute and execute EE translation.
 
@@ -1038,6 +1139,10 @@ class TranslateObject(Node):
 
         # Calculate grasp transformation
         T_grasp = np.linalg.inv(T_EE_current) @ T_object_current
+        self._sim_used_base_pose = T_base_current.copy()
+        self._sim_used_held_in_flange = T_grasp.copy()
+        self._sim_used_object_orientation = R_object_current.as_quat().tolist()
+        self._sim_used_fold_rotation = np.asarray(R_object_snapped, dtype=float).copy()
 
         ee_current_position, _ = self.matrix_to_rpy(T_EE_current)
         base_current_position, _ = self.matrix_to_rpy(T_base_current)
@@ -1052,12 +1157,42 @@ class TranslateObject(Node):
         # Transform to world frame
         R_base_current = T_base_current[:3, :3]
         target_object_position_abs = base_current_position + R_base_current @ target_position_relative
+        self._sim_target_object_position_abs = np.asarray(target_object_position_abs, dtype=float)
+        self._sim_target_object_rotation = np.asarray(R_object_snapped, dtype=float)
+
+        command_object_position = (
+            np.asarray(target_object_position_abs, dtype=float)
+            + (SIM_INSERT_HOVER_BIAS_M if object_name == "u_brown" else 0.0)
+        )
+        command_object_rotation = np.asarray(R_object_snapped, dtype=float).copy()
+        if not correct_orientation:
+            # A held-part yaw correction applies torque through two friction
+            # contacts.  Preserve the measured orientation while closing only
+            # the translational error; the clearance-derived scorer below
+            # still bounds the residual angle before descent.
+            command_object_rotation = T_object_current[:3, :3].copy()
+        if correction_gain > 1.0:
+            command_object_position[:2] += (
+                (correction_gain - 1.0)
+                * (target_object_position_abs[:2] - T_object_current[:2, 3])
+            )
+            orientation_correction = R.from_matrix(
+                R_object_snapped @ T_object_current[:3, :3].T
+            ).as_rotvec()
+            command_object_rotation = (
+                R.from_rotvec((correction_gain - 1.0) * orientation_correction).as_matrix()
+                @ R_object_snapped
+            )
+            self.get_logger().info(
+                f"Applying physical hover correction gain {correction_gain:.1f} "
+                f"for friction-grasp residual"
+            )
 
         # Use snapped orientation for target (not raw current) to eliminate
         # position drift from orientation error propagating through T_grasp
         T_object_target = np.eye(4)
-        T_object_target[:3, :3] = R_object_snapped
-        T_object_target[:3, 3] = target_object_position_abs
+        T_object_target[:3, :3] = command_object_rotation
+        T_object_target[:3, 3] = command_object_position
 
         # Required EE position to place object at target
         T_EE_target = T_object_target @ np.linalg.inv(T_grasp)
@@ -1099,40 +1234,90 @@ class TranslateObject(Node):
                 return False
 
         if hover:
-            # hover: single-point joint-space move — let UR controller
-            # handle interpolation to avoid protective stops from Jacobian IK
-            # velocity spikes on long lateral moves.
-            target_quat = R.from_matrix(ee_target_rot_matrix).as_quat()
-            ik_result = self.compute_ik_with_current_seed(target_flange, target_quat)
-            if ik_result is None:
-                self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
-                self.get_logger().error(self.error_message)
-                return False
-            ik_result, why_ = nearest_joint_equivalent(ik_result, self.current_joint_angles)   # raw = wrapped rank
-            if ik_result is None:
-                self.error_message = f"Motion planning failed: {why_}"
-                self.get_logger().error(self.error_message)
-                return False
-
-            self.get_logger().info(
-                "Hover start joints: [" + ", ".join(f"{v:.6f}" for v in self.current_joint_angles) + "]"
+            # Keep the current IK branch while carrying the part laterally at
+            # safe height.  A global endpoint solve can require a 180-degree
+            # wrist/elbow branch flip even though a local Cartesian road exists.
+            dense = compute_cartesian_waypoints_ik(
+                self.current_joint_angles,
+                target_z=target_flange[2],
+                num_waypoints=60,
+                target_pos=target_flange.tolist(),
+                target_orientation=ee_target_rot_matrix,
             )
-            self.get_logger().info(
-                "Hover target joints: [" + ", ".join(f"{v:.6f}" for v in ik_result) + "]"
-            )
-            if check_trajectory_collision(
-                    self.current_joint_angles, ik_result,
-                    z_threshold=TABLE_HEIGHT, num_samples=40,
-                    logger=self.get_logger()):
-                self.error_message = "Motion planning failed: interpolated arm path to insert hover is not collision-free"
-                self.get_logger().error(self.error_message)
-                return False
+            dense_reason = None
+            if dense is None:
+                dense_reason = "local Cartesian IK did not converge"
+            else:
+                for index, joints in enumerate(dense):
+                    delta = np.abs(np.asarray(joints) - self.current_joint_angles)
+                    if (float(np.max(delta[:5])) > INSERT_HOVER_MAX_ARM_JOINT_TRAVEL_RAD
+                            or float(delta[5]) > INSERT_HOVER_MAX_WRIST3_TRAVEL_RAD
+                            or abs(float(joints[5])) > WRIST3_LIMIT_RAD):
+                        dense_reason = f"waypoint {index + 1} exceeds joint travel/cable bounds"
+                        break
+                    if (check_collision_with_table(joints)
+                            or check_self_collision(joints)
+                            or check_ee_below_base(joints)
+                            or check_compact_configuration(joints)):
+                        dense_reason = f"waypoint {index + 1} is not collision-free"
+                        break
+            if dense_reason is None:
+                final_fk = forward_kinematics(dh_params, dense[-1])
+                position_error_m = float(np.linalg.norm(final_fk[:3, 3] - target_flange))
+                orientation_error_rad = float(
+                    R.from_matrix(ee_target_rot_matrix @ final_fk[:3, :3].T).magnitude()
+                )
+                if position_error_m > 0.0005 or orientation_error_rad > np.radians(0.5):
+                    dense_reason = (
+                        f"local endpoint error {position_error_m * 1000:.3f} mm / "
+                        f"{np.degrees(orientation_error_rad):.3f} deg exceeds 0.5 mm / 0.5 deg"
+                    )
 
-            joint_dist = float(np.max(np.abs(np.array(ik_result) - np.array(self.current_joint_angles))))
-            total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
-            self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+            if dense_reason is None:
+                all_joint_angles = [self.current_joint_angles.copy()] + list(dense)
+                joint_dist = float(np.max(np.abs(np.asarray(dense[-1]) - self.current_joint_angles)))
+                total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+                self.get_logger().info(
+                    f"Selected 60-waypoint local hover: endpoint error "
+                    f"{position_error_m * 1000:.3f}mm / {np.degrees(orientation_error_rad):.3f}deg, "
+                    f"joint={joint_dist:.2f}rad, duration={total_duration:.2f}s"
+                )
+                profile = s_curve_profile(all_joint_angles, total_duration)
+            else:
+                self.get_logger().warn(f"Local hover refused: {dense_reason}; trying exact path-safe endpoint branches")
+                # A single-point fallback is admitted only after the endpoint,
+                # per-joint travel, and its whole interpolated path are safe.
+                target_quat = R.from_matrix(ee_target_rot_matrix).as_quat()
+                ik_result = self.compute_ik_with_current_seed(target_flange, target_quat)
+                if ik_result is None:
+                    self.error_message = "Motion planning failed: no collision-free path to the target position could be computed"
+                    self.get_logger().error(self.error_message)
+                    return False
+                ik_result, why_ = nearest_joint_equivalent(ik_result, self.current_joint_angles)
+                if ik_result is None:
+                    self.error_message = f"Motion planning failed: {why_}"
+                    self.get_logger().error(self.error_message)
+                    return False
 
-            profile = single_point(ik_result, total_duration)
+                self.get_logger().info(
+                    "Hover start joints: [" + ", ".join(f"{v:.6f}" for v in self.current_joint_angles) + "]"
+                )
+                self.get_logger().info(
+                    "Hover target joints: [" + ", ".join(f"{v:.6f}" for v in ik_result) + "]"
+                )
+                if check_trajectory_collision(
+                        self.current_joint_angles, ik_result,
+                        z_threshold=TABLE_HEIGHT, num_samples=40,
+                        logger=self.get_logger()):
+                    self.error_message = "Motion planning failed: interpolated arm path to insert hover is not collision-free"
+                    self.get_logger().error(self.error_message)
+                    return False
+
+                joint_dist = float(np.max(np.abs(np.array(ik_result) - np.array(self.current_joint_angles))))
+                total_duration = compute_duration(joint_distance=joint_dist, profile='s_curve')
+                self.get_logger().info(f"Duration: {total_duration:.2f}s (joint={joint_dist:.2f}rad)")
+                profile = single_point(ik_result, total_duration)
+
             trajectory_points = []
             for positions, velocities, t_i in profile:
                 trajectory_points.append({
@@ -1627,11 +1812,13 @@ def run_move_to_clear_area(object_name=None, mode=None):
     return run_subprocess(script_path, cmd_args)
 
 
-def run_move_down(mode=None):
+def run_move_down(mode=None, *, to_table=False):
     """Run move_down subprocess."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_down.py')
     logger.info("Lowering object onto table")
     cmd_args = ['--mode', mode] if mode else []
+    if to_table:
+        cmd_args.append('--to-table')
     return run_subprocess(script_path, cmd_args, timeout=310)
 
 
@@ -1788,21 +1975,171 @@ def main():
                     # Let the robot settle at hover before reading fresh poses.
                     # The old two-subprocess approach had ~3-5s of LLM round-trip
                     # between hover and insert; this replicates that settling window.
-                    time.sleep(1.0)
-                    node.current_ee_pose = None
-                    while node.current_ee_pose is None:
-                        rclpy.spin_once(node, timeout_sec=0.1)
+                    success = settle_sim_observation(node, args.object_name, 1.0)
+                    if not success:
+                        raise RuntimeError(node.error_message)
                     node.current_joint_angles = None
                     node.read_current_joint_angles()
-                    # The regular sim insert is an arm-carried vertical descent
-                    # from the known hover pose. PhysX contact wrench stops the
-                    # unchanged move_down primitive; no compliance/search or
-                    # direct pose write is used.
-                    insert_ok, insert_out = run_move_down(mode='sim')
+                    # Re-observe the carried object after the long lateral
+                    # move. Friction grasp may slip within its per-motion bar;
+                    # recompute the physical arm hover from the new grasp
+                    # transform until the object itself is aligned.
+                    insert_ok, insert_out = False, ""
+                    for correction in range(3):
+                        transform = node.current_poses.get(args.object_name)
+                        if transform is None:
+                            success = False
+                            node.error_message = "sim insert hover lost the object ground-truth pose"
+                            break
+                        measured = node.transform_to_matrix(transform.transform)[:3, 3]
+                        target = node._sim_target_object_position_abs
+                        position_error = measured - target
+                        xy_error_m = float(np.linalg.norm(position_error[:2]))
+                        measured_rotation = node.transform_to_matrix(transform.transform)[:3, :3]
+                        orientation_error = R.from_matrix(
+                            node._sim_target_object_rotation @ measured_rotation.T
+                        )
+                        orientation_error_deg = float(np.degrees(orientation_error.magnitude()))
+                        clearance_consumed_m = insertion_clearance_consumed_m(
+                            xy_error_m, orientation_error_deg
+                        )
+                        rotation_error_deg = np.degrees(orientation_error.as_rotvec())
+                        node.get_logger().info(
+                            f"Post-hover object error: {xy_error_m * 1000:.3f}mm XY / "
+                            f"{orientation_error_deg:.3f}deg "
+                            f"(dxyz_mm={np.round(position_error * 1000.0, 3).tolist()}, "
+                            f"rotvec_deg={np.round(rotation_error_deg, 3).tolist()}) "
+                            f"clearance_consumed={clearance_consumed_m * 1000:.3f}mm "
+                            f"(observation {correction + 1}/3)"
+                        )
+                        # The U slot has 1.4 mm clearance per side.  Bound the
+                        # combined lateral translation and rotational sweep at
+                        # the part's farthest 50.60 mm CAD corner, rather than correcting an
+                        # already-admissible pose and making the friction-held
+                        # part slip.  1.1 mm leaves 0.3 mm geometric margin;
+                        # the final seat still has its independent 1 mm / 1 deg
+                        # ground-truth acceptance gate.
+                        if clearance_consumed_m <= SIM_INSERT_CLEARANCE_COMMIT_M:
+                            # Decompose the complete insertion chain at the exact
+                            # commit-to-descent boundary.  In the twin every term
+                            # is observable, so a high contact must be assigned to
+                            # base pose, held pose, or commanded TCP before tuning.
+                            base_transform = node.current_poses.get(args.base_name)
+                            if base_transform is None or node.current_ee_pose is None:
+                                success = False
+                                node.error_message = "sim insert commit lost base or TCP ground truth"
+                                break
+                            T_base_gt = node.transform_to_matrix(base_transform.transform)
+                            T_part_gt = node.transform_to_matrix(transform.transform)
+                            T_tcp_gt = node.pose_to_matrix(node.current_ee_pose.pose)
+                            T_held_gt = np.linalg.inv(T_tcp_gt) @ T_part_gt
+                            T_target_part = np.eye(4)
+                            T_target_part[:3, :3] = node._sim_target_object_rotation
+                            T_target_part[:3, 3] = node._sim_target_object_position_abs
+                            T_required_tcp_used = T_target_part @ np.linalg.inv(
+                                node._sim_used_held_in_flange
+                            )
+                            T_required_tcp_gt = T_target_part @ np.linalg.inv(T_held_gt)
+
+                            def transform_delta(reference, measured):
+                                return {
+                                    "dxyz_mm": np.round(
+                                        (measured[:3, 3] - reference[:3, 3]) * 1000.0, 3
+                                    ).tolist(),
+                                    "rotvec_deg": np.round(np.degrees(R.from_matrix(
+                                        measured[:3, :3] @ reference[:3, :3].T
+                                    ).as_rotvec()), 3).tolist(),
+                                }
+
+                            chain_evidence = {
+                                "base_gt_vs_used": transform_delta(
+                                    node._sim_used_base_pose, T_base_gt
+                                ),
+                                "held_gt_vs_used": transform_delta(
+                                    node._sim_used_held_in_flange, T_held_gt
+                                ),
+                                "commit_tcp_vs_required_from_used": transform_delta(
+                                    T_required_tcp_used, T_tcp_gt
+                                ),
+                                "commit_tcp_vs_required_from_gt": transform_delta(
+                                    T_required_tcp_gt, T_tcp_gt
+                                ),
+                                "required_tcp_used_xyz_m": np.round(
+                                    T_required_tcp_used[:3, 3], 6
+                                ).tolist(),
+                                "required_tcp_gt_xyz_m": np.round(
+                                    T_required_tcp_gt[:3, 3], 6
+                                ).tolist(),
+                                "commit_tcp_xyz_m": np.round(T_tcp_gt[:3, 3], 6).tolist(),
+                                "input_object_quat_xyzw": node._sim_used_object_orientation,
+                                "fold_target_quat_xyzw": R.from_matrix(
+                                    node._sim_used_fold_rotation
+                                ).as_quat().tolist(),
+                            }
+                            node.get_logger().info(
+                                "Insert-chain commit: "
+                                + json.dumps(chain_evidence, sort_keys=True)
+                            )
+                            # The regular insert descends to the physical table
+                            # floor and must stop earlier on base/part contact.
+                            insert_ok, insert_out = run_move_down(mode='sim', to_table=True)
+                            if insert_ok:
+                                # Score the physical contact pose while the
+                                # jaws still hold the part. A contact event is
+                                # not a seat: refuse before release if ground
+                                # truth is outside the R22 1 mm / 1 deg bar.
+                                settle_until = time.monotonic() + 0.5
+                                while time.monotonic() < settle_until:
+                                    rclpy.spin_once(node, timeout_sec=0.05)
+                                seated = node.current_poses.get(args.object_name)
+                                if seated is None:
+                                    insert_ok = False
+                                    node.error_message = "sim insert seat scorer lost the object pose"
+                                else:
+                                    T_seated = node.transform_to_matrix(seated.transform)
+                                    seat_mm = float(np.linalg.norm(
+                                        T_seated[:3, 3] - node._sim_target_object_position_abs
+                                    ) * 1000.0)
+                                    seat_deg = float(np.degrees(R.from_matrix(
+                                        node._sim_target_object_rotation @ T_seated[:3, :3].T
+                                    ).magnitude()))
+                                    node.get_logger().info(
+                                        f"Insert seat ground truth: {seat_mm:.3f}mm / {seat_deg:.3f}deg"
+                                    )
+                                    if seat_mm > 1.0 or seat_deg > 1.0:
+                                        insert_ok = False
+                                        node.error_message = (
+                                            f"sim insert contact is not seated: {seat_mm:.3f} mm / "
+                                            f"{seat_deg:.3f} deg exceeds 1 mm / 1 deg"
+                                        )
+                            break
+                        if correction == 2:
+                            success = False
+                            node.error_message = (
+                                "sim insert hover object did not converge within "
+                                "1.1 mm combined CAD clearance commit bar"
+                            )
+                            break
+                        success = node.translate_for_target_sim(
+                            args.object_name, args.base_name, hover=True,
+                            # The fresh part-in-flange transform already closes
+                            # the loop.  Unity is the measured geometric update;
+                            # an extra gain double-counted it and oscillated.
+                            # Preserve orientation: twisting the friction-held
+                            # U by 0.69 deg produced 1.33 mm lateral slip.
+                            object_orientation=None, correction_gain=1.0,
+                            correct_orientation=False,
+                        )
+                        if not success:
+                            break
+                        if not settle_sim_observation(node, args.object_name, 0.5):
+                            success = False
+                            break
                     if not insert_ok:
                         success = False
-                        insert_json = extract_json_from_output(insert_out)
-                        node.error_message = (insert_json or {}).get('error', 'sim move_down insert failed')
+                        if insert_out:
+                            insert_json = extract_json_from_output(insert_out)
+                            node.error_message = (insert_json or {}).get('error', 'sim move_down insert failed')
             else:
                 # Real mode: hover above base, then insertion subprocess
                 success = node.translate_for_target_real(

@@ -23,6 +23,7 @@ from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
 import re
+from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import json
@@ -30,6 +31,9 @@ import yaml
 
 from primitives.shared.ik import compute_cartesian_waypoints_ik, forward_kinematics, dh_params
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
 
 class MoveToSafeHeight(Node):
     def __init__(self, height=None, lift_by=None, translate_xy=None):
@@ -40,16 +44,13 @@ class MoveToSafeHeight(Node):
         # Relative lift (m): raise the flange this much above where it is now, on the same
         # straight vertical seam, instead of all the way to SAFE_HEIGHT (2026-10-07).
         self.lift_by = lift_by
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
+        self.joint_names = BARE_ARM_JOINTS
 
         # Action client for trajectory control
         self.action_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            ARM_ACTION
         )
 
         # Safe height target (default 0.3, can be overridden)
@@ -92,7 +93,7 @@ class MoveToSafeHeight(Node):
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
             JointState,
-            '/joint_states',
+            JOINT_STATES_TOPIC,
             self.joint_state_callback,
             10
         )
@@ -144,17 +145,15 @@ class MoveToSafeHeight(Node):
     def joint_state_callback(self, msg: JointState):
         """Callback for joint state data"""
         # Extract joint angles in the correct order
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            # Map joint names to positions in correct order
-            ordered_positions = []
-            for joint_name in self.joint_names:
-                if joint_name in joint_dict:
-                    ordered_positions.append(joint_dict[joint_name])
-            
-            if len(ordered_positions) == 6:
-                self.current_joint_angles = np.array(ordered_positions)
-                self.joint_angles_received = True
+        ordered_positions = arm_positions(msg)
+        if ordered_positions is not None:
+            self.current_joint_angles = np.array(ordered_positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, ordered_positions)
+                self.ee_position = transform[:3, 3].copy()
+                self.ee_quat = R.from_matrix(transform[:3, :3]).as_quat()
+                self.ee_pose_received = True
 
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees - same as other primitives"""
@@ -321,11 +320,12 @@ class MoveToSafeHeight(Node):
             # Create and send trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
-            traj.joint_names = self.joint_names
+            traj.joint_names = public_arm_joints()
             traj.points = traj_points
             
             goal.trajectory = traj
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
             
             self.get_logger().info("Trajectory sent and accepted")
             self.trajectory_sent = True

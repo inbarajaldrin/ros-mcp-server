@@ -35,11 +35,13 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from primitives.shared.config import SAFE_HEIGHT
 from primitives.shared.ik import compute_cartesian_waypoints_ik, dh_params, forward_kinematics
 from primitives.shared.velocity_profiles import compute_duration, s_curve_profile
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC, WRENCH_TOPIC,
+    arm_positions, public_arm_joints)
 WRIST3_ABS_MAX = 4.0             # rad: the wrist camera's cable (operator: a worn D415 cable/plug)
 
-ACTION = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
-JOINTS = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-          "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
+ACTION = ARM_ACTION
+JOINTS = BARE_ARM_JOINTS
 
 
 def result(d):
@@ -50,16 +52,16 @@ class Mover(Node):
     def __init__(self):
         super().__init__('move_cartesian')
         self.q = None
-        self.create_subscription(JointState, '/joint_states', self._cb, 10)
+        self.create_subscription(JointState, JOINT_STATES_TOPIC, self._cb, 10)
         self.F = deque(maxlen=51)
-        self.create_subscription(WrenchStamped, '/force_torque_sensor_broadcaster/wrench',
+        self.create_subscription(WrenchStamped, WRENCH_TOPIC,
                                  lambda m: self.F.append((m.wrench.force.x, m.wrench.force.y, m.wrench.force.z)), 50)
         self.ac = ActionClient(self, FollowJointTrajectory, ACTION)
 
     def _cb(self, m):
-        d = dict(zip(m.name, m.position))
-        if all(j in d for j in JOINTS):
-            self.q = np.array([d[j] for j in JOINTS])
+        positions = arm_positions(m)
+        if positions is not None:
+            self.q = np.array(positions)
 
 
 def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, min_z=SAFE_HEIGHT - 0.10,
@@ -161,11 +163,13 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
             prev = cur
         if F0 is None:
             out["error"] = "wrench not steady (or absent) for the force-guard baseline"; return out
-    traj = JointTrajectory(); traj.joint_names = JOINTS
+    traj = JointTrajectory(); traj.joint_names = public_arm_joints()
     for p, v, t in s_curve_profile([q0] + list(wps), dur):
         traj.points.append(JointTrajectoryPoint(positions=p, velocities=v,
                                                 time_from_start=Duration(sec=int(t), nanosec=int((t - int(t)) * 1e9))))
-    goal = FollowJointTrajectory.Goal(); goal.trajectory = traj; goal.goal_time_tolerance = Duration(sec=1)
+    goal = FollowJointTrajectory.Goal(); goal.trajectory = traj
+    if not DROIDSTACK_SIM:
+        goal.goal_time_tolerance = Duration(sec=1)
     fut = n.ac.send_goal_async(goal); rclpy.spin_until_future_complete(n, fut, timeout_sec=10.0)
     gh = fut.result()
     if gh is None or not gh.accepted:

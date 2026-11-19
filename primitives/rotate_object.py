@@ -46,6 +46,9 @@ ROTATE_SHORT = os.environ.get('ROTATE_SHORT', '1') == '1'
 ROTATE_SHORT_RAD, ROTATE_SHORT_RAD_S, ROTATE_SHORT_MIN_S = 0.10, 0.07, 1.0
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
 from primitives.shared.collision import (UR5E_LINK_RADII, compute_all_joint_positions,
     check_collision_with_table, segment_distance, check_self_collision,
     check_ee_below_base, check_compact_configuration)
@@ -296,7 +299,7 @@ class ReorientForAssembly(Node):
             depth=10
         )
         self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, qos_volatile)
-        self.joint_state_sub = self.create_subscription(JointState, '/joint_states', self.joint_state_callback, qos_volatile)
+        self.joint_state_sub = self.create_subscription(JointState, JOINT_STATES_TOPIC, self.joint_state_callback, qos_volatile)
         
         self.current_poses = {}
         self.current_ee_pose = None
@@ -305,10 +308,8 @@ class ReorientForAssembly(Node):
         self.trajectory_success = False
         self.trajectory_completed = False
         
-        self.joint_names = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-                           "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
-        self.action_client = ActionClient(self, FollowJointTrajectory, 
-                                         '/scaled_joint_trajectory_controller/follow_joint_trajectory')
+        self.joint_names = BARE_ARM_JOINTS
+        self.action_client = ActionClient(self, FollowJointTrajectory, ARM_ACTION)
         
         # Cardinal error threshold increment mechanism (similar to move_to_grasp)
         self.cardinal_error_threshold_initial = 45.0  # Initial threshold in degrees
@@ -384,12 +385,18 @@ class ReorientForAssembly(Node):
         self.current_ee_pose = msg
     
     def joint_state_callback(self, msg):
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = [joint_dict.get(name, 0) for name in self.joint_names]
-            if len(positions) == 6:
-                self.current_joint_angles = np.array(positions)
-                self.joint_angles_received = True
+        positions = arm_positions(msg)
+        if positions is not None:
+            self.current_joint_angles = np.array(positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, positions)
+                pose = PoseStamped()
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = transform[:3, 3]
+                quat = R.from_matrix(transform[:3, :3]).as_quat()
+                pose.pose.orientation.x, pose.pose.orientation.y = quat[:2]
+                pose.pose.orientation.z, pose.pose.orientation.w = quat[2:]
+                self.current_ee_pose = pose
     
     def get_rotation_from_transform(self, transform):
         q = np.array([transform.rotation.x, transform.rotation.y,
@@ -1699,7 +1706,7 @@ class ReorientForAssembly(Node):
             points = trajectory['traj1']
 
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = self.joint_names
+            traj_msg.joint_names = public_arm_joints()
 
             # Add all trajectory points
             for point in points:
@@ -1711,7 +1718,8 @@ class ReorientForAssembly(Node):
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             self.trajectory_completed = False
             self.trajectory_success = False

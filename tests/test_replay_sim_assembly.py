@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ablations.replay_sim_assembly import _command_for_step, _result_from_output, _staging_view_command
 
 
@@ -22,7 +24,7 @@ def test_non_sim_step_is_refused():
 
 def test_move_home_uses_sim_primitive():
     command, timeout = _command_for_step("ros-mcp-server__move_home(mode='sim')")
-    assert command[-3:] == ["primitives.move_home", "--mode", "sim"]
+    assert command[-4:] == ["primitives.move_home", "--mode", "sim", "--joint-space"]
     assert timeout == 120
 
 
@@ -38,3 +40,8 @@ def test_fov_view_uses_production_camera_aim():
     assert "--look-at-z" in cmd
     assert "--quat" in cmd
     assert timeout == 120
+
+
+def test_regular_sim_insert_descends_to_the_physical_contact_floor():
+    source = (Path(__file__).resolve().parents[1] / "primitives/translate_object.py").read_text()
+    assert "run_move_down(mode='sim', to_table=True)" in source

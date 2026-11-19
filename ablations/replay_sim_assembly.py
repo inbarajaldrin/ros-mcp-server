@@ -23,19 +23,25 @@ from ablations.replay_verify import _parse_tool_call
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _command_for_step(step: str) -> tuple[list[str], int]:
+def _command_for_step(step: str, object_name: str | None = None,
+                      grasp_id: int | None = None) -> tuple[list[str], int]:
     name, kwargs = _parse_tool_call(step)
     if kwargs.get("mode") != "sim":
         raise ValueError(f"standalone sim replay refuses non-sim step: {step}")
     short = name.removeprefix("ros_mcp_server__")
     py = [sys.executable, "-u", "-m"]
     if short == "move_home":
-        return py + ["primitives.move_home", "--mode", "sim"], 120
+        return py + ["primitives.move_home", "--mode", "sim", "--joint-space"], 120
     if short == "control_gripper":
-        return py + ["primitives.control_gripper", str(kwargs["command"]), "--mode", "sim"], 90
+        cmd = py + ["primitives.control_gripper", str(kwargs["command"]), "--mode", "sim"]
+        if str(kwargs["command"]).lower() == "close" and object_name and grasp_id is not None:
+            from primitives.shared.config import grip_width_mm
+            span_mm = grip_width_mm(object_name, grasp_id=grasp_id)
+            cmd += ["--expect", object_name, "--expect-span-mm", str(span_mm), "--force", "40"]
+        return cmd, 90
     if short == "move_to_grasp":
         return py + ["primitives.move_to_grasp", "--object-name", kwargs["object_name"],
-                     "--grasp-id", str(kwargs["grasp_id"]), "--mode", "sim"], 120
+                     "--grasp-id", str(kwargs["grasp_id"]), "--mode", "sim", "--pad-center"], 120
     if short == "move_to_safe_height":
         cmd = py + ["primitives.move_to_safe_height", "--mode", "sim"]
         if kwargs.get("object_name"):
@@ -48,7 +54,7 @@ def _command_for_step(step: str) -> tuple[list[str], int]:
         action = str(kwargs["action"]).replace("_", "-")
         return py + ["primitives.translate_object", "--mode", "sim",
                      "--object-name", kwargs["object_name"], "--base-name", kwargs["base_name"],
-                     f"--{action}"], 360 if action == "insert" else 120
+                     f"--{action}"], 360
     raise ValueError(f"unsupported replay tool: {name}")
 
 
@@ -88,7 +94,9 @@ def _run(cmd: list[str], timeout: int, env: dict[str, str]) -> tuple[int, str, d
                       "reported": result}
         return proc.returncode, output, result
     except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        raw_output = exc.stdout or ""
+        output = (raw_output.decode(errors="replace")
+                  if isinstance(raw_output, bytes) else raw_output)
         return 124, output, {"result": "failure", "error": f"primitive timed out after {timeout}s"}
 
 
@@ -137,8 +145,14 @@ def main(argv: list[str] | None = None) -> int:
 
     completed: list[str] = []
     with transcript_path.open("w", buffering=1) as transcript, receipt_path.open("w", buffering=1) as receipt:
+        active_grasp = {}
         for index, (obj, step) in enumerate(steps, 1):
-            cmd, timeout = _staging_view_command() if step == "__camera_staging_view__" else _command_for_step(step)
+            if "__move_to_grasp(" in step:
+                _name, parsed = _parse_tool_call(step)
+                active_grasp[obj] = int(parsed["grasp_id"])
+            cmd, timeout = (_staging_view_command() if step == "__camera_staging_view__" else
+                            _command_for_step(step, None if obj == "startup" else obj,
+                                              active_grasp.get(obj)))
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             transcript.write(f"\n{'=' * 72}\nSTEP {index}/{len(steps)} [{obj}] {step}\n{'=' * 72}\n")
             rc, output, result = _run(cmd, timeout, env)

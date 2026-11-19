@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import argparse
@@ -29,6 +30,9 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.ik import dh_params, forward_kinematics
+from primitives.shared.robot_contract import (
+    DROIDSTACK_SIM, GRIPPER_JOINT, JOINT_STATES_TOPIC, arm_positions, rg2_width_m)
 from utils.data_path_finder import get_aruco_data_dir
 from std_msgs.msg import Float32, Float64
 
@@ -177,19 +181,22 @@ class VerifyGrasp(Node):
             depth=10
         )
 
-        self.ee_sub = self.create_subscription(
-            PoseStamped,
-            EE_TOPIC,
-            self.ee_callback,
-            qos_profile
-        )
+        self.ee_sub = (None if DROIDSTACK_SIM else self.create_subscription(
+            PoseStamped, EE_TOPIC, self.ee_callback, qos_profile))
+        self.joint_state_sub = (self.create_subscription(
+            JointState, JOINT_STATES_TOPIC, self.joint_state_callback, qos_profile)
+            if DROIDSTACK_SIM else None)
 
         # Gripper width (both modes, different topics)
         self.gripper_width = None
         self.gripper_width_received = False
         self.gripper_asymmetry = 0.0
         self.gripper_asymmetry_received = False
-        if mode == 'real':
+        if DROIDSTACK_SIM:
+            self.width_sub = None
+            self.asymmetry_sub = None
+            self.gripper_asymmetry_received = True
+        elif mode == 'real':
             self.width_sub = self.create_subscription(
                 Float32, '/gripper_width_offset', self.width_callback, 10)
         else:
@@ -216,6 +223,23 @@ class VerifyGrasp(Node):
         """Callback for end-effector pose"""
         self.current_ee_pose = msg
         self.ee_pose_received = True
+
+    def joint_state_callback(self, msg):
+        """DroidStack simulation publishes the measured arm and gripper joints."""
+        positions = arm_positions(msg)
+        if positions is not None:
+            transform = forward_kinematics(dh_params, positions)
+            pose = PoseStamped()
+            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = transform[:3, 3]
+            quat = R.from_matrix(transform[:3, :3]).as_quat()
+            pose.pose.orientation.x, pose.pose.orientation.y = quat[:2]
+            pose.pose.orientation.z, pose.pose.orientation.w = quat[2:]
+            self.current_ee_pose = pose
+            self.ee_pose_received = True
+        values = dict(zip(msg.name, msg.position))
+        if GRIPPER_JOINT in values:
+            self.gripper_width = 1000.0 * rg2_width_m(values[GRIPPER_JOINT])
+            self.gripper_width_received = True
 
     def width_callback(self, msg):
         """Callback for gripper width (real mode, Float32 in mm)"""

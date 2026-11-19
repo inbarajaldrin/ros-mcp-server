@@ -20,6 +20,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
@@ -27,6 +28,10 @@ import argparse
 from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
+from primitives.shared.ik import dh_params, forward_kinematics
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
 
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
 
@@ -36,16 +41,13 @@ class MoveToClearArea(Node):
         self.mode = mode  # 'move' or 'fix_orientation'
         self.object_name = object_name  # If set, verify grasp before moving
         self.robot_mode = robot_mode  # 'sim' or 'real'
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
+        self.joint_names = BARE_ARM_JOINTS
 
         # Action client for trajectory control
         self.action_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            ARM_ACTION
         )
 
         # Target gripper center position — converted to flange for IK via: flange = gc - R @ offset
@@ -87,17 +89,13 @@ class MoveToClearArea(Node):
             depth=10
         )
 
-        self.ee_pose_sub = self.create_subscription(
-            PoseStamped,
-            '/tcp_pose_broadcaster/pose',
-            self.ee_pose_callback,
-            qos_profile
-        )
+        self.ee_pose_sub = (None if DROIDSTACK_SIM else self.create_subscription(
+            PoseStamped, '/tcp_pose_broadcaster/pose', self.ee_pose_callback, qos_profile))
 
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
             JointState,
-            '/joint_states',
+            JOINT_STATES_TOPIC,
             self.joint_state_callback,
             10
         )
@@ -163,18 +161,15 @@ class MoveToClearArea(Node):
     
     def joint_state_callback(self, msg: JointState):
         """Callback for joint state data"""
-        # Extract joint angles in the correct order
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            # Map joint names to positions in correct order
-            ordered_positions = []
-            for joint_name in self.joint_names:
-                if joint_name in joint_dict:
-                    ordered_positions.append(joint_dict[joint_name])
-            
-            if len(ordered_positions) == 6:
-                self.current_joint_angles = np.array(ordered_positions)
-                self.joint_angles_received = True
+        ordered_positions = arm_positions(msg)
+        if ordered_positions is not None:
+            self.current_joint_angles = np.array(ordered_positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, ordered_positions)
+                self.ee_position = transform[:3, 3].copy()
+                self.ee_quat = R.from_matrix(transform[:3, :3]).as_quat()
+                self.ee_pose_received = True
 
     def _object_pose_cb(self, msg):
         """Callback for sim object poses."""
@@ -473,11 +468,12 @@ class MoveToClearArea(Node):
             # Send single merged trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
-            traj.joint_names = self.joint_names
+            traj.joint_names = public_arm_joints()
             traj.points = trajectory_points
 
             goal.trajectory = traj
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             num_waypoints = len(trajectory_points)
             self.get_logger().info(f"Sending hover trajectory ({num_waypoints} waypoint{'s' if num_waypoints > 1 else ''})")
@@ -782,11 +778,12 @@ class MoveToClearArea(Node):
                 # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
                 traj = JointTrajectory()
-                traj.joint_names = self.joint_names
+                traj.joint_names = public_arm_joints()
                 traj.points = trajectory_points
 
                 goal.trajectory = traj
-                goal.goal_time_tolerance = Duration(sec=1)
+                if not DROIDSTACK_SIM:
+                    goal.goal_time_tolerance = Duration(sec=1)
 
                 self.get_logger().info("Trajectory sent and accepted")
                 self._send_goal_future = self.action_client.send_goal_async(
