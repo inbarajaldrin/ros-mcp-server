@@ -1039,6 +1039,8 @@ def main(args=None):
             rclpy.shutdown()
         except RuntimeError:
             pass  # Context already shut down
+    # the exit code says what the result says (review r4 P3-3: an interrupted descent exited 0)
+    sys.exit(1 if node.error_message else 0)
 
 if __name__ == '__main__':
     main()

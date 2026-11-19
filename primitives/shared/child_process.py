@@ -6,9 +6,16 @@ import signal
 import subprocess
 
 
-def stop_child(proc, grace_s):
-    """SIGINT, wait grace_s; SIGTERM, wait grace_s.  Returns the return code (None if it is still alive)."""
-    for sig in (signal.SIGINT, signal.SIGTERM):
+def stop_child(proc, grace_s, already_signalled=False):
+    """SIGINT (unless the child already has it), wait grace_s; SIGTERM, wait grace_s.  Returns the return code
+    (None if it is still alive).  A child in the caller's process group already got the group's SIGINT: a second
+    one would land inside its goal_guard cancel (review r4 P2-1), so it only gets its grace, then SIGTERM."""
+    for sig in ((signal.SIGTERM,) if already_signalled else (signal.SIGINT, signal.SIGTERM)):
+        if already_signalled and sig == signal.SIGTERM:
+            try:
+                return proc.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
+                pass
         if proc.poll() is not None:
             return proc.returncode
         proc.send_signal(sig)
@@ -34,5 +41,5 @@ def run_child(cmd, timeout_s, grace_s=None):
         out, err = proc.communicate() if rc is not None else ("", "")
         return rc, out, err, True
     except KeyboardInterrupt:
-        stop_child(proc, grace_s)
+        stop_child(proc, grace_s, already_signalled=True)   # the child is in our group: it has the signal too
         raise
