@@ -63,11 +63,26 @@ class TrackedGoal:
             self.status = None
 
     @property
-    def finished(self):
-        # the handle's own status (Humble updates it from the goal-status topic and the primitive's result) can know
-        # before goal_guard's second result request answers
+    def final_status(self):
+        """The goal's terminal status if known.  Read directly: rclpy runs a future's done-callbacks on the
+        executor's NEXT spin, so right after spin_until_future_complete returns, _on_result may not have run yet
+        (live, 2026-11-19: result future done and handle CANCELED while self.status was still None)."""
+        if self.status in _FINAL:
+            return self.status
+        if self.result_future is not None and self.result_future.done():
+            try:
+                status = self.result_future.result().status
+            except Exception:
+                status = None
+            if status in _FINAL:
+                self.status = status
+                return status
         handle_status = getattr(self.handle, "status", None) if self.handle is not None else None
-        return self.rejected or self.status in _FINAL or handle_status in _FINAL
+        return handle_status if handle_status in _FINAL else None
+
+    @property
+    def finished(self):
+        return self.rejected or self.final_status is not None
 
 
 def _spin_until(node, future, timeout_s):
@@ -90,9 +105,9 @@ def cancel_goal(goal: TrackedGoal, wait_s: float = CANCEL_CONFIRM_TIMEOUT_S, spi
         return None
     if not spin(goal.node, goal.handle.cancel_goal_async(), wait_s):
         return "CANCEL_UNCONFIRMED: no cancel response; the arm may be moving - stop it"
-    if goal.status is None and goal.result_future is not None:
+    if goal.final_status is None and goal.result_future is not None:
         spin(goal.node, goal.result_future, wait_s)
-    if goal.status in _FINAL:
+    if goal.final_status is not None:
         return None
     return f"CANCEL_UNCONFIRMED: goal status {goal.status} after the cancel; the arm may be moving - stop it"
 

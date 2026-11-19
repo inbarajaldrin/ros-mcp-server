@@ -271,3 +271,21 @@ def test_a_second_signal_during_the_cancel_still_destroys_the_node():
         print("LOG", log, flush=True)
     ''')
     assert "RE-RAISED" in out.stdout and "'destroy'" in out.stdout, out.stdout + out.stderr
+
+
+def test_a_completed_result_future_confirms_before_its_callback_runs():
+    """Live (twin, 2026-11-19): after the cancel the result future was done and the handle CANCELED, but rclpy had
+    not yet run the done-callback that sets the tracker's status.  The confirmation reads the future itself."""
+    class LazyFuture(FakeFuture):
+        def complete(self):                        # completes without running its callbacks (rclpy runs them later)
+            if self.completes:
+                self._done = True
+    handle = FakeHandle()
+    handle.result_future = LazyFuture(types.SimpleNamespace(status=gg.GOAL_STATUS_CANCELED))
+    goal = accepted_goal(handle)
+    assert gg.cancel_goal(goal, spin=spin) is None and goal.status == gg.GOAL_STATUS_CANCELED
+    handle2 = FakeHandle(status_after_cancel=2)
+    handle2.result_future = LazyFuture(types.SimpleNamespace(status=2))
+    handle2.status = gg.GOAL_STATUS_CANCELED              # the handle's own status, from the status topic
+    goal2 = accepted_goal(handle2)
+    assert gg.cancel_goal(goal2, spin=spin) is None
