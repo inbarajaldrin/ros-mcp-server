@@ -29,6 +29,14 @@ from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
 from primitives.shared.ik import dh_params, forward_kinematics
+
+# Watchdog (seconds).  Execution counts from goal acceptance, never from planning.
+PLANNING_TIMEOUT_S = 180.0
+GOAL_ACCEPT_TIMEOUT_S = 10.0
+EXECUTION_TIMEOUT_MIN_S = 30.0          # the former whole-run timeout, now execution only
+EXECUTION_TIMEOUT_MARGIN_S = 10.0
+CANCEL_CONFIRM_TIMEOUT_S = 5.0
+GOAL_STATUS_SUCCEEDED, GOAL_STATUS_CANCELED, GOAL_STATUS_ABORTED = 4, 5, 6   # action_msgs/GoalStatus
 from primitives.shared.robot_contract import (
     ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
     arm_positions, public_arm_joints)
@@ -80,6 +88,17 @@ class MoveToClearArea(Node):
         self.safety_mode = None  # Last received safety mode
         self.robot_program_running = None  # Last received program running state
         self.trajectory_sent = False  # Only check health after trajectory is dispatched
+        # Execution watchdog: the clock starts when the controller ACCEPTS the goal (planning is not
+        # execution); on timeout the goal is cancelled and the cancel confirmed, never left running.
+        self.trajectory_duration_s = None
+        self.goal_sent_at = None
+        self.goal_accepted_at = None
+        self._goal_handle = None
+        self._send_goal_future = None
+        self._get_result_future = None
+        self._cancel_on_accept = False
+        self._cancelling = False
+        self._cancel_result_status = None
 
         # Success/failure tracking
         self.operation_success = False
@@ -509,9 +528,7 @@ class MoveToClearArea(Node):
 
             num_waypoints = len(trajectory_points)
             self.get_logger().info(f"Sending hover trajectory ({num_waypoints} waypoint{'s' if num_waypoints > 1 else ''})")
-            self._send_goal_future = self.action_client.send_goal_async(goal)
-            self._send_goal_future.add_done_callback(self.goal_response)
-            self.trajectory_sent = True
+            self._dispatch(goal)
             return  # Exit early for hover mode
         else:
             # Move mode: Check EE face direction and fix if needed
@@ -872,13 +889,8 @@ class MoveToClearArea(Node):
                 if not DROIDSTACK_SIM:
                     goal.goal_time_tolerance = Duration(sec=1)
 
-                self.get_logger().info("Trajectory sent and accepted")
-                self._send_goal_future = self.action_client.send_goal_async(
-                    goal,
-                    feedback_callback=self.feedback_callback
-                )
-                self._send_goal_future.add_done_callback(self.goal_response)
-                self.trajectory_sent = True
+                self.get_logger().info("Sending trajectory")
+                self._dispatch(goal, feedback_callback=self.feedback_callback)
 
             except Exception as e:
                 self.error_message = f"Failed to compute IK: {e}"
@@ -922,6 +934,63 @@ class MoveToClearArea(Node):
                 if max_error > 0.1:  # More than 0.1 rad error
                     self.get_logger().warn(f"Large trajectory tracking error: {np.degrees(max_error):.1f}deg")
 
+    def _dispatch(self, goal, feedback_callback=None):
+        """Send the trajectory goal; the watchdog's execution clock starts at acceptance."""
+        last = goal.trajectory.points[-1].time_from_start
+        self.trajectory_duration_s = float(last.sec) + float(last.nanosec) * 1e-9
+        if feedback_callback is None:
+            self._send_goal_future = self.action_client.send_goal_async(goal)
+        else:
+            self._send_goal_future = self.action_client.send_goal_async(goal, feedback_callback=feedback_callback)
+        self._send_goal_future.add_done_callback(self.goal_response)
+        self.goal_sent_at = time.monotonic()
+        self.trajectory_sent = True
+
+    def watchdog_refusal(self, now, started_at):
+        """A typed timeout, or None.  Planning (no goal sent) is bounded by PLANNING_TIMEOUT_S and moves
+        nothing; a sent goal must be accepted within GOAL_ACCEPT_TIMEOUT_S; an accepted goal must finish
+        within its own duration plus EXECUTION_TIMEOUT_MARGIN_S, and at least EXECUTION_TIMEOUT_MIN_S."""
+        if self.goal_accepted_at is not None:
+            limit = max(EXECUTION_TIMEOUT_MIN_S, (self.trajectory_duration_s or 0.0) + EXECUTION_TIMEOUT_MARGIN_S)
+            if now - self.goal_accepted_at > limit:
+                return (f"EXECUTION_TIMEOUT: the trajectory ({self.trajectory_duration_s:.1f}s) did not finish "
+                        f"{limit:.0f}s after the controller accepted it")
+            return None
+        if self.goal_sent_at is not None:
+            if now - self.goal_sent_at > GOAL_ACCEPT_TIMEOUT_S:
+                return f"GOAL_ACCEPT_TIMEOUT: no goal response {GOAL_ACCEPT_TIMEOUT_S:.0f}s after sending"
+            return None
+        if now - started_at > PLANNING_TIMEOUT_S:
+            return f"PLANNING_TIMEOUT: no trajectory planned within {PLANNING_TIMEOUT_S:.0f}s (nothing was sent)"
+        return None
+
+    def _spin_until(self, future, timeout_s):
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        return future.done()
+
+    def cancel_active_goal(self, wait_s=CANCEL_CONFIRM_TIMEOUT_S):
+        """Cancel the accepted goal and wait for the controller to confirm it stopped.  Returns None when
+        the goal ended (canceled, or finished meanwhile), else a typed CANCEL_UNCONFIRMED.  A goal still
+        awaiting its response is cancelled as soon as it is accepted."""
+        if self._goal_handle is None:
+            if self.goal_sent_at is None:
+                return None
+            self._cancel_on_accept = True
+            if not self._spin_until(self._send_goal_future, wait_s):
+                return "CANCEL_UNCONFIRMED: the goal response never came; the arm may be moving - stop it"
+            if self._goal_handle is None:
+                return None                                   # rejected: nothing runs
+        self._cancelling = True
+        cancel_future = self._goal_handle.cancel_goal_async()
+        if not self._spin_until(cancel_future, wait_s):
+            return "CANCEL_UNCONFIRMED: no cancel response; the arm may be moving - stop it"
+        if self._cancel_result_status is None and self._get_result_future is not None:
+            self._spin_until(self._get_result_future, wait_s)
+        if self._cancel_result_status in (GOAL_STATUS_CANCELED, GOAL_STATUS_SUCCEEDED, GOAL_STATUS_ABORTED):
+            return None
+        return (f"CANCEL_UNCONFIRMED: goal status {self._cancel_result_status} after the cancel; "
+                "the arm may be moving - stop it")
+
     def goal_response(self, future):
         """Handle goal response"""
         goal_handle = future.result()
@@ -937,11 +1006,22 @@ class MoveToClearArea(Node):
             rclpy.shutdown()
             return
 
+        self._goal_handle = goal_handle
+        self.goal_accepted_at = time.monotonic()
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
+        if self._cancel_on_accept:
+            self.get_logger().error("Goal accepted after the watchdog fired: cancelling it")
 
     def goal_result(self, future):
         """Handle goal result"""
+        if self._cancelling:
+            # the watchdog cancelled this goal: record how it ended; main() reports and shuts down
+            try:
+                self._cancel_result_status = future.result().status
+            except Exception:
+                self._cancel_result_status = None
+            return
         try:
             result = future.result()
             if result.status == 4:  # SUCCEEDED
@@ -1042,8 +1122,7 @@ def main(args=None):
     try:
         # Spin until operation is complete with timeout
         import time
-        start_time = time.time()
-        timeout_sec = 30.0  # 30 second timeout for trajectory execution
+        start_time = time.monotonic()
 
         while rclpy.ok() and not node.operation_complete:
             rclpy.spin_once(node, timeout_sec=0.1)
@@ -1057,10 +1136,10 @@ def main(args=None):
                 node.operation_complete = True
                 break
 
-            # Check for timeout
-            elapsed = time.time() - start_time
-            if elapsed > timeout_sec:
-                node.error_message = f"Trajectory execution timed out after {timeout_sec:.0f}s - robot may have hit velocity limits or stalled"
+            timeout = node.watchdog_refusal(time.monotonic(), start_time)
+            if timeout:
+                unconfirmed = node.cancel_active_goal()
+                node.error_message = timeout + (f"; {unconfirmed}" if unconfirmed else "; goal cancelled")
                 node.get_logger().error(node.error_message)
                 node.operation_success = False
                 node.operation_complete = True
@@ -1068,11 +1147,20 @@ def main(args=None):
 
     except KeyboardInterrupt:
         node.error_message = "Operation cancelled by user (Ctrl+C)"
+        unconfirmed = node.cancel_active_goal() if node.trajectory_sent and not node.operation_complete else None
+        if unconfirmed:
+            node.error_message += f"; {unconfirmed}"
         node.get_logger().warn(node.error_message)
         node.operation_success = False
         node.operation_complete = True
     except Exception as e:
         node.error_message = f"Error during spin: {e}"
+        try:
+            unconfirmed = node.cancel_active_goal() if node.trajectory_sent and not node.operation_complete else None
+        except Exception as cancel_error:
+            unconfirmed = f"CANCEL_UNCONFIRMED: {cancel_error}; the arm may be moving - stop it"
+        if unconfirmed:
+            node.error_message += f"; {unconfirmed}"
         node.get_logger().error(node.error_message)
         node.operation_success = False
         node.operation_complete = True

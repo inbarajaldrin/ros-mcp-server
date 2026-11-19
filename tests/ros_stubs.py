@@ -30,6 +30,19 @@ class _Module(types.ModuleType):
         return type(name, (_Any,), {})
 
 
+class GoalStatus:
+    """action_msgs/msg/GoalStatus constants."""
+    STATUS_UNKNOWN, STATUS_ACCEPTED, STATUS_EXECUTING, STATUS_CANCELING = 0, 1, 2, 3
+    STATUS_SUCCEEDED, STATUS_CANCELED, STATUS_ABORTED = 4, 5, 6
+
+
+class FollowJointTrajectory(_Any):
+    """control_msgs/action/FollowJointTrajectory result codes."""
+    class Result:
+        SUCCESSFUL, INVALID_GOAL, INVALID_JOINTS = 0, -1, -2
+        OLD_HEADER_TIMESTAMP, PATH_TOLERANCE_VIOLATED, GOAL_TOLERANCE_VIOLATED = -3, -4, -5
+
+
 def install():
     """Stand in for every ROS module that is not importable here; a real install is left alone."""
     for name in ROS_MODULES:
@@ -39,3 +52,7 @@ def install():
             __import__(name)
         except ImportError:
             sys.modules[name] = _Module(name)
+    if isinstance(sys.modules["action_msgs.msg"], _Module):
+        sys.modules["action_msgs.msg"].GoalStatus = GoalStatus
+    if isinstance(sys.modules["control_msgs.action"], _Module):
+        sys.modules["control_msgs.action"].FollowJointTrajectory = FollowJointTrajectory
