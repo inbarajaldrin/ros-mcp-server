@@ -100,6 +100,8 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   slice 1 lands; phases A (route + realizer + fidelity, no ROS), B (planner road + ROS contract), C (wrench + FMB two-stage
   acceptance); grasp = FRICTION with a measured slip bar (weld never counts toward acceptance); tool_wrench extends robot-binding v2 in
   place. Four rounds of independent Opus review (lane .pa/REVIEW-r1..r4.md).
+- **R24 Hold live tests** (2026-11-19 ~02:50Z): "lets hold off on the live test let me see the assembnly video in mujoco first". No
+  real-cell runs (the u_orange retry, the cable test) until the operator has seen an FMB1 assembly video in MuJoCo.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
