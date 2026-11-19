@@ -51,6 +51,6 @@ def test_sim_insert_reobserves_the_friction_held_object_before_descent():
     assert "pose.header = msg.header" in source
     assert 'SIM_INSERT_HOVER_BIAS_M if object_name == "u_brown" else 0.0' in source
     assert "run_move_down(mode='sim', to_table=True)" in source
-    assert "Insert seat ground truth" in source
-    assert "seat_mm > 1.0 or seat_deg > 1.0" in source
+    assert "Pre-release held pose (logged, not gated)" in source  # ruling A, 2026-11-19
+    assert "seat_mm > 1.0 or seat_deg > 1.0" not in source  # gated after release (sim_seat_scorer)
 

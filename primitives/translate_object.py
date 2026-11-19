@@ -2084,17 +2084,19 @@ def main():
                             # floor and must stop earlier on base/part contact.
                             insert_ok, insert_out = run_move_down(mode='sim', to_table=True)
                             if insert_ok:
-                                # Score the physical contact pose while the
-                                # jaws still hold the part. A contact event is
-                                # not a seat: refuse before release if ground
-                                # truth is outside the R22 1 mm / 1 deg bar.
+                                # Ruling A (lead, 2026-11-19): the seat is judged on the
+                                # part's FINAL pose, after the gripper opens and the arm
+                                # retracts (ablations/sim_seat_scorer.py, run by the sim
+                                # replay).  The pose while the jaws still hold the part and
+                                # the contact-phase pad shift are measured here and
+                                # reported, never gated.
                                 settle_until = time.monotonic() + 0.5
                                 while time.monotonic() < settle_until:
                                     rclpy.spin_once(node, timeout_sec=0.05)
                                 seated = node.current_poses.get(args.object_name)
-                                if seated is None:
-                                    insert_ok = False
-                                    node.error_message = "sim insert seat scorer lost the object pose"
+                                if seated is None or node.current_ee_pose is None:
+                                    node.get_logger().warn(
+                                        "Pre-release held pose unavailable (object or TCP pose missing)")
                                 else:
                                     T_seated = node.transform_to_matrix(seated.transform)
                                     seat_mm = float(np.linalg.norm(
@@ -2103,15 +2105,21 @@ def main():
                                     seat_deg = float(np.degrees(R.from_matrix(
                                         node._sim_target_object_rotation @ T_seated[:3, :3].T
                                     ).magnitude()))
+                                    T_held_after = np.linalg.inv(
+                                        node.pose_to_matrix(node.current_ee_pose.pose)) @ T_seated
+                                    pad_shift = transform_delta(T_held_gt, T_held_after)
+                                    node._sim_pre_release = {
+                                        "held_seat_mm": round(seat_mm, 3),
+                                        "held_seat_deg": round(seat_deg, 3),
+                                        "contact_pad_shift": pad_shift,
+                                        "gated": False,
+                                        "ruling": "A, lead 2026-11-19: final pose after release is gated",
+                                    }
                                     node.get_logger().info(
-                                        f"Insert seat ground truth: {seat_mm:.3f}mm / {seat_deg:.3f}deg"
+                                        f"Pre-release held pose (logged, not gated): {seat_mm:.3f}mm / "
+                                        f"{seat_deg:.3f}deg; contact-phase pad shift "
+                                        f"{json.dumps(pad_shift, sort_keys=True)}"
                                     )
-                                    if seat_mm > 1.0 or seat_deg > 1.0:
-                                        insert_ok = False
-                                        node.error_message = (
-                                            f"sim insert contact is not seated: {seat_mm:.3f} mm / "
-                                            f"{seat_deg:.3f} deg exceeds 1 mm / 1 deg"
-                                        )
                             break
                         if correction == 2:
                             success = False
@@ -2186,6 +2194,8 @@ def main():
             result["base_name"] = args.base_name
         if not success:
             result["error"] = error or (node.error_message if node else "Unknown error")
+        if node is not None and getattr(node, "_sim_pre_release", None):
+            result["pre_release"] = node._sim_pre_release
 
         output_result(result)
 

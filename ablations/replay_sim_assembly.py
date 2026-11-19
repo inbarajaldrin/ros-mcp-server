@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Replay a recorded assembly through the cell's simulation primitives.
+"""Replay an assembly through the cell's simulation primitives.
+
+By default each part's passes are derived, as in replay_real_assembly's
+--derive-sequence: every part is observed after the startup and the cell's
+sequence planner chooses one or two passes.  Ruling A (lead, 2026-11-19): each
+part is scored on its final pose after release and retract
+(ablations/sim_seat_scorer.py) before the next part starts, and every seated
+part is re-scored at the end of the run.
 
 This is the standalone entrance for the same sim tool sequence that
 ``replay_verify.py`` invokes through unified_api.  It deliberately refuses
@@ -100,6 +107,39 @@ def _run(cmd: list[str], timeout: int, env: dict[str, str]) -> tuple[int, str, d
         return 124, output, {"result": "failure", "error": f"primitive timed out after {timeout}s"}
 
 
+def derive_sim_sequence(obj: str, recorded: list[str], base_name: str,
+                        quat_xyzw: list[float]) -> tuple[list[str], str]:
+    """The production replay's derive step (replay_real_assembly.derive_sequence_for)
+    fed by the simulator's observed part orientation: the same planner decides
+    one or two passes from the face the part lies on."""
+    from scipy.spatial.transform import Rotation as _R
+    from primitives.shared.config import DEFAULT_BASE_ORIENTATION
+    from primitives.shared.fold_symmetry import load_symmetry_data
+    from utils.data_path_finder import (find_assembly_json_by_base_name,
+                                        get_assembly_data_dir, get_symmetry_dir)
+    from compliant_insertion_studio.planning.sequence_planner import (
+        build_tool_sequence, plan_passes, quat_to_matrix)
+
+    R_start = quat_to_matrix(quat_xyzw)
+    jf = find_assembly_json_by_base_name(base_name or "base1", str(get_assembly_data_dir()))
+    components = json.load(open(jf))["components"]
+    target = next(c for c in components if c["name"] == obj)["rotation"]["quaternion"]
+    R_target = (quat_to_matrix(DEFAULT_BASE_ORIENTATION)
+                @ quat_to_matrix([target[k] for k in "xyzw"]))
+    passes = plan_passes(R_start, R_target, load_symmetry_data(obj, str(get_symmetry_dir())))
+    sequence = build_tool_sequence(recorded, passes)
+    rpy = _R.from_matrix(R_start).as_euler("xyz", degrees=True)
+    note = (f"observed rpy=({rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}) -> "
+            f"{passes} pass{'es' if passes > 1 else ''}, {len(sequence)} steps "
+            f"({'same as recorded' if sequence == recorded else 'RESHAPED from recorded'})")
+    return sequence, note
+
+
+def _scorer(kind: str, names: list[str], base: str) -> tuple[list[str], int]:
+    return ([sys.executable, "-u", "-m", "ablations.sim_seat_scorer", f"--{kind}", ",".join(names),
+             "--base", base], 60)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--assembly-json", required=True)
@@ -107,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-startup", action="store_true")
     ap.add_argument("--fov-gated", action="store_true",
                     help="fly the production camera-aimed staging view before each part's first pick")
+    ap.add_argument("--derive-sequence", action=argparse.BooleanOptionalAction, default=True,
+                    help="observe every part after the startup and let the cell's sequence planner "
+                         "choose one or two passes (default, as replay_real_assembly)")
+    ap.add_argument("--base-name", default="base1")
     ap.add_argument("--log-dir", default="ablations/logs/sim-replay")
     args = ap.parse_args(argv)
 
@@ -128,33 +172,35 @@ def main(argv: list[str] | None = None) -> int:
     env["ROS_MCP_MODE"] = "sim"
     env["PYTHONPATH"] = f"{ROOT}:{env.get('PYTHONPATH', '')}"
 
-    steps: list[tuple[str, str]] = []
-    if not args.no_startup:
-        steps.extend([
-            ("startup", "ros-mcp-server__move_home(mode='sim')"),
-            ("startup", "ros-mcp-server__control_gripper(command='open', mode='sim')"),
-        ])
-    for row in entries:
-        obj = row["object_name"]
-        first_grasp = True
-        for step in row.get("tool_sequence", []):
-            if args.fov_gated and first_grasp and "__move_to_grasp(" in step:
-                steps.append((obj, "__camera_staging_view__"))
-                first_grasp = False
-            steps.append((obj, step))
-
+    startup: list[tuple[str, str]] = [] if args.no_startup else [
+        ("startup", "ros-mcp-server__move_home(mode='sim')"),
+        ("startup", "ros-mcp-server__control_gripper(command='open', mode='sim')"),
+    ]
     completed: list[str] = []
+    scores: dict[str, dict] = {}
+    total = len(startup) + sum(len(row.get("tool_sequence", [])) for row in entries)
     with transcript_path.open("w", buffering=1) as transcript, receipt_path.open("w", buffering=1) as receipt:
-        active_grasp = {}
-        for index, (obj, step) in enumerate(steps, 1):
-            if "__move_to_grasp(" in step:
-                _name, parsed = _parse_tool_call(step)
-                active_grasp[obj] = int(parsed["grasp_id"])
-            cmd, timeout = (_staging_view_command() if step == "__camera_staging_view__" else
-                            _command_for_step(step, None if obj == "startup" else obj,
-                                              active_grasp.get(obj)))
+        counter = {"index": 0}
+        active_grasp: dict[str, int] = {}
+
+        def fail(row):
+            print(json.dumps({"replay": "failure", "failed": row, "scores": scores,
+                              "transcript": str(transcript_path),
+                              "receipt": str(receipt_path)}, indent=2))
+            return 1
+
+        def run_step(obj: str, step: str, cmd=None, timeout=None):
+            counter["index"] += 1
+            index = counter["index"]
+            if cmd is None:
+                if "__move_to_grasp(" in step:
+                    _name, parsed = _parse_tool_call(step)
+                    active_grasp[obj] = int(parsed["grasp_id"])
+                cmd, timeout = (_staging_view_command() if step == "__camera_staging_view__" else
+                                _command_for_step(step, None if obj == "startup" else obj,
+                                                  active_grasp.get(obj)))
             started = dt.datetime.now(dt.timezone.utc).isoformat()
-            transcript.write(f"\n{'=' * 72}\nSTEP {index}/{len(steps)} [{obj}] {step}\n{'=' * 72}\n")
+            transcript.write(f"\n{'=' * 72}\nSTEP {index} [{obj}] {step}\n{'=' * 72}\n")
             rc, output, result = _run(cmd, timeout, env)
             transcript.write(output)
             row = {"schema": "ros-mcp.sim-replay-step/1", "index": index, "object": obj,
@@ -162,16 +208,68 @@ def main(argv: list[str] | None = None) -> int:
                    "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
                    "returncode": rc, "result": result}
             receipt.write(json.dumps(row, sort_keys=True) + "\n")
-            print(f"[{index:02d}/{len(steps):02d}] {obj}: {result.get('result')}", flush=True)
-            if result.get("result") != "success":
-                print(json.dumps({"replay": "failure", "failed": row,
-                                  "transcript": str(transcript_path),
-                                  "receipt": str(receipt_path)}, indent=2))
-                return 1
-            if obj != "startup" and obj not in completed:
-                completed.append(obj)
+            print(f"[{index:02d}/{total:02d}] {obj}: {result.get('result')}"
+                  + (f" {json.dumps(result.get('pre_release'), sort_keys=True)}"
+                     if result.get("pre_release") else ""), flush=True)
+            return row
 
-    print(json.dumps({"replay": "success", "completed_objects": completed,
+        for obj, step in startup:
+            row = run_step(obj, step)
+            if row["result"].get("result") != "success":
+                return fail(row)
+
+        if args.derive_sequence:
+            names = [row["object_name"] for row in entries]
+            cmd, timeout = _scorer("observe", names, args.base_name)
+            row = run_step("derive", "__observe_parts__", cmd, timeout)
+            observed = row["result"].get("parts", {})
+            for entry in entries:
+                obj = entry["object_name"]
+                recorded = list(entry.get("tool_sequence", []))
+                if obj in observed:
+                    try:
+                        entry["tool_sequence"], note = derive_sim_sequence(
+                            obj, recorded, args.base_name, observed[obj]["quat_xyzw"])
+                    except Exception as exc:  # the production rule: never a new way to fail
+                        note = f"derive failed ({exc}) -> recorded sequence"
+                else:
+                    note = "observe failed -> recorded sequence"
+                derive_row = {"schema": "ros-mcp.sim-derive/1", "object": obj, "note": note,
+                              "observed": observed.get(obj), "tool_sequence": entry["tool_sequence"]}
+                receipt.write(json.dumps(derive_row, sort_keys=True) + "\n")
+                transcript.write(f"[derive-sequence] {obj}: {note}\n")
+                print(f"  [derive-sequence] {obj}: {note}", flush=True)
+            total = counter["index"] + sum(len(e["tool_sequence"]) + 1 for e in entries) + 1
+
+        for entry in entries:
+            obj = entry["object_name"]
+            first_grasp = True
+            for step in entry.get("tool_sequence", []):
+                if args.fov_gated and first_grasp and "__move_to_grasp(" in step:
+                    row = run_step(obj, "__camera_staging_view__")
+                    first_grasp = False
+                    if row["result"].get("result") != "success":
+                        return fail(row)
+                row = run_step(obj, step)
+                if row["result"].get("result") != "success":
+                    return fail(row)
+            # Ruling A (lead, 2026-11-19): the seat is the part's final pose after
+            # release and retract, scored before the next part starts.
+            cmd, timeout = _scorer("score", [obj], args.base_name)
+            row = run_step(obj, "__score_final_seat__", cmd, timeout)
+            scores[obj] = row["result"].get("parts", {}).get(obj, {"error": row["result"].get("error")})
+            if row["result"].get("result") != "success":
+                return fail(row)
+            completed.append(obj)
+
+        # Re-score every seated part at the end: a later insert must not have disturbed it.
+        cmd, timeout = _scorer("score", completed, args.base_name)
+        row = run_step("final", "__rescore_all_seats__", cmd, timeout)
+        scores["final_rescore"] = row["result"].get("parts", {})
+        if row["result"].get("result") != "success":
+            return fail(row)
+
+    print(json.dumps({"replay": "success", "completed_objects": completed, "scores": scores,
                       "transcript": str(transcript_path), "receipt": str(receipt_path)}, indent=2))
     return 0
 
