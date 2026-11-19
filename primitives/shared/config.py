@@ -394,7 +394,8 @@ PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
 # cancels its goal itself; move_to_clear_area refuses a route whose planning + accept + execution limit would not
 # fit inside it (review r2).  Callers stop it with SIGINT first, then SIGTERM, never SIGKILL.
 CLEAR_AREA_CALLER_TIMEOUT_S = 300.0
-CHILD_STOP_GRACE_S = 20.0           # SIGINT -> SIGTERM grace for a child the caller stops
+CHILD_STOP_GRACE_S = 60.0           # SIGINT -> SIGTERM grace for a step the caller stops: longer than any
+                                    # child's own settle (translate_object: 30 s cleanup + 10 s, review r4)
 
 HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 

@@ -166,7 +166,8 @@ JOINT_NAMES = [
 def switch_controllers(activate, deactivate):
     """Switch ROS2 controllers."""
     result = subprocess.run(['ros2', 'control', 'list_controllers'],
-                            capture_output=True, text=True, timeout=10)
+                            capture_output=True, text=True, timeout=10,
+                            start_new_session=True)
     if result.returncode != 0:
         print(f"ERROR: list_controllers failed: {result.stderr}")
         return False
@@ -192,7 +193,8 @@ def switch_controllers(activate, deactivate):
     if to_deactivate:
         cmd += ['--deactivate'] + to_deactivate
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                            start_new_session=True)   # the group's stop signals must not cut a switch
     if result.returncode != 0:
         print(f"ERROR: Controller switch failed: {result.stderr}")
     return result.returncode == 0
@@ -208,6 +210,32 @@ def restore_controllers():
         print("[CLEANUP] Controllers restored")
     else:
         print("[CLEANUP] ERROR restoring controllers (stop_run.sh restores them)")
+
+
+def safe_state_cleanup(node):
+    """The safe-state exit (CLAUDE.md, review r4 P1-1), in order, with stop signals deferred so a second SIGINT or the
+    caller's SIGTERM cannot cut it: cancel and confirm any running arm goal, stop force mode (a service call, so
+    while the ROS context is alive), restore the trajectory controller (CLI calls in their own session), then shut
+    ROS down."""
+    from primitives.shared.goal_guard import cancel_active_goals
+    from primitives.shared.signal_safety import deferred_signals
+    with deferred_signals() as deferred:
+        try:
+            if rclpy.ok():
+                cancel_active_goals()
+                if node is not None:
+                    print("[CLEANUP] Stopping force mode..."
+                          + (" stopped" if node.stop_force_mode() else " NOT CONFIRMED (stop_run.sh)"))
+        except Exception as error:
+            print(f"[CLEANUP] force-mode stop failed: {error!r} (stop_run.sh)")
+        restore_controllers()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+    if deferred:
+        print(f"[CLEANUP] finished with {len(deferred)} stop signal(s) deferred")
 
 
 def load_grasp_point_position(object_name, grasp_id):
@@ -1445,27 +1473,35 @@ def main():
 
     args, remaining = parser.parse_known_args()
 
-    # Controller setup: deactivate scaled, activate passthrough + force_mode
-    print("Deactivating scaled_joint_trajectory_controller...")
-    result = subprocess.run(
-        ['ros2', 'control', 'switch_controllers', '--deactivate', SCALED_CONTROLLER],
-        capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        print(f"ERROR: {result.stderr}")
-        return 1
-    time.sleep(0.5)
-
-    print("Activating passthrough + force_mode controllers...")
-    if not switch_controllers([PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER], []):
-        print("Controller activation failed")
-        return 1
-    # 2026-05-07: bumped 1.0 → 2.5s. force_mode_controller's start RPC was
-    # rejecting calls even after 4 retries (~1.8s of backoff) on the first
-    # attempt of the first iteration of a smoke loop. 2.5s plus the retry
-    # loop in start_force_mode covers the worst-case ready-time we've seen.
-    time.sleep(2.5)
-
+    # From here on a stop signal must reach the finally's safe-state cleanup (review r4): SIGTERM raises
+    # KeyboardInterrupt now, not only once init_ros runs, and the controller switch is inside the try - a stop
+    # during the switch or its 2.5 s settle used to skip the restore and leave force mode on.
+    import signal as _signal
+    from primitives.shared.goal_guard import _raise_interrupt
+    _signal.signal(_signal.SIGTERM, _raise_interrupt)
+    _signal.signal(_signal.SIGINT, _raise_interrupt)
+    node = None
     try:
+        # Controller setup: deactivate scaled, activate passthrough + force_mode
+        print("Deactivating scaled_joint_trajectory_controller...")
+        result = subprocess.run(
+            ['ros2', 'control', 'switch_controllers', '--deactivate', SCALED_CONTROLLER],
+            capture_output=True, text=True, timeout=10, start_new_session=True)
+        if result.returncode != 0:
+            print(f"ERROR: {result.stderr}")
+            return 1
+        time.sleep(0.5)
+
+        print("Activating passthrough + force_mode controllers...")
+        if not switch_controllers([PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER], []):
+            print("Controller activation failed")
+            return 1
+        # 2026-05-07: bumped 1.0 → 2.5s. force_mode_controller's start RPC was
+        # rejecting calls even after 4 retries (~1.8s of backoff) on the first
+        # attempt of the first iteration of a smoke loop. 2.5s plus the retry
+        # loop in start_force_mode covers the worst-case ready-time we've seen.
+        time.sleep(2.5)
+
         init_ros(args=remaining)
         node = PrismaticPegInsertion(
             force_z=args.force,
@@ -1488,11 +1524,7 @@ def main():
         return 0 if success else 1
 
     except KeyboardInterrupt:
-        print("\n[INTERRUPT] Ctrl+C - cleaning up...")
-        try:
-            rclpy.shutdown()
-        except Exception:
-            pass
+        print("\n[INTERRUPT] SIGINT/SIGTERM - cleaning up...")
         return 1
     except Exception as e:
         print(f"Error: {e}")
@@ -1500,7 +1532,7 @@ def main():
         traceback.print_exc()
         return 1
     finally:
-        restore_controllers()
+        safe_state_cleanup(node)
 
 
 if __name__ == '__main__':

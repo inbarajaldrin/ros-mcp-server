@@ -56,25 +56,29 @@ import signal
 PRISMATIC_ROUTE_OBJECTS = ('line_brown', 'line_red', 'fork_orange', 'fork_yellow')
 
 CHILD_CLEANUP_S = 30.0   # a force-mode child's own cleanup gets this long before SIGTERM; never SIGKILL (CLAUDE.md)
+CHILD_TERM_GRACE_S = 10.0  # after the SIGTERM, before giving up waiting (the caller's group escalation takes over)
+# The caller (cell_io) must wait longer than this whole sequence before it escalates: config.CHILD_STOP_GRACE_S.
+CHILD_SETTLE_TOTAL_S = CHILD_CLEANUP_S + CHILD_TERM_GRACE_S
 
 
-def _settle_child(proc, forward_sigint=True):
-    """Let an insert/motion child finish its own cleanup: SIGINT it (once more if it is still running 2 s on - its
-    handler is idempotent, it may not have got ours), wait CHILD_CLEANUP_S, then SIGTERM and wait. Never SIGKILL: a
-    force-mode child killed mid-search leaves the arm in force mode (10-22: subprocess.run SIGKILLed touch_insert 0.25 s
-    after drive-mate's cancel; the compliant route's timeout called proc.kill())."""
-    try:
-        proc.wait(timeout=2.0)
-        return proc.returncode
-    except subprocess.TimeoutExpired:
-        pass
-    if forward_sigint:
-        proc.send_signal(signal.SIGINT)
+def _settle_child(proc, forward_sigint=None):
+    """Let an insert/motion child finish its own safe-state cleanup after it has its stop signal (the group's SIGINT,
+    or the SIGINT the caller just sent): wait CHILD_CLEANUP_S, then SIGTERM, then CHILD_TERM_GRACE_S.  Never a
+    second SIGINT: under goal_guard every SIGINT raises wherever the child is and would cut its cleanup (review r4
+    P1-1: a forwarded SIGINT aborted prismatic's controller restore).  Never SIGKILL: a force-mode child killed
+    mid-search leaves the arm in force mode (10-22).  Returns the return code, or None if it is still alive (the
+    caller's group escalation - dashboard stop - takes over).  `forward_sigint` is accepted and ignored."""
     try:
         return proc.wait(timeout=CHILD_CLEANUP_S)
     except subprocess.TimeoutExpired:
-        proc.terminate()
-        return proc.wait()
+        pass
+    proc.terminate()
+    try:
+        return proc.wait(timeout=CHILD_TERM_GRACE_S)
+    except subprocess.TimeoutExpired:
+        print(f"[translate_object] child {proc.pid} still running {CHILD_SETTLE_TOTAL_S:.0f}s after its stop signal",
+              file=sys.stderr, flush=True)
+        return None
 
 
 def _run_child(argv, timeout=None, **kw):

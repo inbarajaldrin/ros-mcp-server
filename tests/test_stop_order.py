@@ -104,3 +104,26 @@ def test_run_child_stops_a_timed_out_child_with_sigint_first(tmp_path):
     script.write_text(CHILD)
     rc, out, err, timed_out = run_child([sys.executable, str(script), str(log), "obey"], timeout_s=1.0, grace_s=1.5)
     assert timed_out and rc == 0 and log.read_text().split() == ["SIGINT"]
+
+
+def test_a_stuck_step_returns_a_typed_failure_and_later_steps_are_refused(no_robot, monkeypatch, tmp_path):
+    """Review r4 P3-1/P3-2: an unconfirmed dashboard stop must not hang the replay on the stuck child's pipe, and
+    after any dashboard stop the program is down: no further step runs (and no automatic program re-send)."""
+    import subprocess
+    import time
+    monkeypatch.setattr(cell_io, "dashboard_stop", lambda *a, **k: False)
+    monkeypatch.setattr(config, "CHILD_STOP_GRACE_S", 1.0)
+    monkeypatch.setattr(cell_io, "_DASHBOARD_STOPPED", None)
+    script, log = tmp_path / "child.py", tmp_path / "signals.log"
+    script.write_text(CHILD)
+    t0 = time.monotonic()
+    result = cell_io._run_subprocess_once([sys.executable, str(script), str(log), "stuck"], "stuck step", timeout_s=1)
+    try:
+        assert time.monotonic() - t0 < 15
+        assert result["result"] == "failure" and "stuck, dashboard stop unconfirmed" in result["error"]
+        assert "DASHBOARD" not in result["error"] or "external-control program is down" in result["error"]
+        later = cell_io.run_subprocess([sys.executable, "-c", "print('must not run')"], "next step")
+        assert later["result"] == "failure" and later["error"].startswith("DASHBOARD_STOPPED")
+        assert "stop_run.sh" in later["error"]
+    finally:
+        subprocess.run(["pkill", "-9", "-f", str(script)])
