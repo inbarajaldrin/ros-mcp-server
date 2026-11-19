@@ -57,3 +57,19 @@ def test_every_gate_is_wired_and_fails_closed():
     assert "camera_stance_refusal(forward_kinematics(dh_params, np.asarray(waypoints[-1], float)))" in \
         (ROOT / "primitives/core/move_down.py").read_text()
     assert '"--base-name", "base1"' in (ROOT / "ablations/replay_sim_assembly.py").read_text()
+
+
+
+
+def test_mount_vs_arm_refuses_r48c_yellow_reorient_and_admits_flown_poses():
+    # r48c (MuJoCo) t=255.2 s: a camera-up yellow reorient that drove the v3.1 mount into the forearm/wrist_1.
+    q_bad = [2.0117, -1.5065, 1.7891, -0.8216, -3.1744, 0.0055]
+    from primitives.shared.camera_up import camera_mount_arm_refusal
+    from primitives.shared.camera_geometry import mount_points_tool
+    assert mount_points_tool().shape[1] == 3
+    home = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
+    assert camera_mount_arm_refusal(home) is None
+    assert camera_mount_arm_refusal(R48C_HIGH_CARRY) is None
+    reason = camera_mount_arm_refusal(q_bad)
+    assert reason is not None and reason.startswith("CAMERA_MOUNT_ARM_COLLISION")
+    assert cu.camera_route_refusal(home, q_bad) is not None

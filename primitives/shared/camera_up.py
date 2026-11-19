@@ -138,14 +138,43 @@ def camera_stance_refusal(T_flange, near_table=None):
     return None
 
 
+CAMERA_MOUNT_ARM_MARGIN_M = 0.010   # the self-collision check's 1 cm margin (collision.check_self_collision)
+MOUNT_ARM_LINKS = 4                 # base, upper arm, forearm, wrist_1 (wrist_2/3 carry the mount)
+
+
+def camera_mount_arm_refusal(joints):
+    """None, or a typed reason: the v3.1 mount/D415 (fitted CAD boxes) within the margin of an arm-link capsule
+    of collision.py's model (DH joint origins, UR5E_LINK_RADII).  r48c (MuJoCo, 2026-11-19): a camera-up yellow
+    reorient drove the mount 16.6 mm inside the wrist_1 capsule; the arm-only self-collision check could not see it."""
+    from primitives.shared.camera_geometry import mount_points_tool
+    from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
+    from primitives.shared.ik import dh_params, forward_kinematics
+    q = np.asarray(joints, float)
+    T = forward_kinematics(dh_params, q)
+    W = mount_points_tool() @ T[:3, :3].T + T[:3, 3]
+    J = [np.asarray(p) for p in compute_all_joint_positions(q)]
+    for link in range(MOUNT_ARM_LINKS):
+        a, b = J[link], J[link + 1]
+        ab = b - a
+        t = np.clip(((W - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+        clearance = float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - UR5E_LINK_RADII[link]
+        if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
+            return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from arm link {link} "
+                    f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
+    return None
+
+
 def camera_route_refusal(start_joints, target_joints, near_table_end=False, num_samples=40):
-    """The rule at every joint-linear sample of a route; the side rule at the end when it leads to the table."""
+    """The rule at every joint-linear sample of a route: table side and clearance, and the mount against the arm;
+    the side rule at the end when the route leads to the table."""
     from primitives.shared.ik import dh_params, forward_kinematics
     start, target = np.asarray(start_joints, float), np.asarray(target_joints, float)
     for i in range(num_samples + 1):
         alpha = i / num_samples
-        reason = camera_stance_refusal(forward_kinematics(dh_params, start + alpha * (target - start)),
-                                       near_table=(near_table_end if i == num_samples else None))
+        q = start + alpha * (target - start)
+        reason = (camera_stance_refusal(forward_kinematics(dh_params, q),
+                                        near_table=(True if (near_table_end and i == num_samples) else None))
+                  or camera_mount_arm_refusal(q))
         if reason:
             return f"{reason} (alpha={alpha:.3f})"
     return None
