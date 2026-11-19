@@ -40,23 +40,24 @@ def _r48_held():
 def test_r48_route_into_the_upper_arm_is_refused_and_via_home_is_admitted():
     held = _r48_held()
     reason = hpc.held_part_route_refusal(R48_START, R48_TARGET, held)
-    assert reason is not None and reason.startswith("HELD_PART_ARM_COLLISION") and "link 1" in reason
+    assert reason is not None and reason.startswith("HELD_PART_ARM_COLLISION")
+    deepest = min(hpc.held_part_min_clearances(R48_START, R48_TARGET, held)["physical"].items(), key=lambda kv: kv[1])
+    assert deepest[0].startswith("upper arm") and deepest[1] < -0.05        # deep into the upper arm, as in MuJoCo
     home = np.array(HOME_JOINTS, dtype=float)
     assert hpc.held_part_route_refusal(R48_START, home, held) is None
     assert hpc.held_part_route_refusal(home, R48_TARGET, held) is None
 
 
 def test_the_flown_real_near_miss_is_rerouted_not_flown_into_the_upper_arm_margin():
-    """With the conservative link radii the direct line passes 7.8 mm inside the upper-arm margin; the
-    planner's split route (wrist_1 first, then the rest) clears it under the arm and held-part rules."""
+    """Against the arm's enclosed real surface the direct line passes inside the 10 mm margin of the upper arm
+    (the chained held pose; the real arm flew it); the planner's split route (wrists first) clears it under the arm
+    and held-part rules."""
     from primitives.shared.collision import check_trajectory_collision
     from primitives.shared.config import TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
     from primitives.shared.route_split import admissible_route
     held = hpc.chained_held_part("u_orange", 1, [0.0006, 1.0, -0.0, 0.0], REAL_TCP_P, REAL_TCP_Q, 0.22038)
     reason = hpc.held_part_route_refusal(REAL_START, REAL_TARGET, held)
-    assert reason is not None and reason.startswith("HELD_PART_ARM_COLLISION") and "link 1" in reason
-    margins = hpc.held_part_min_clearances(REAL_START, REAL_TARGET, held)
-    assert -0.010 < margins["links"][1] < 0.0
+    assert reason is not None and reason.startswith("HELD_PART_ARM_COLLISION") and "upper arm" in reason
 
     def seg(a, b, last):
         if check_trajectory_collision(a, b, z_threshold=TABLE_HEIGHT - TABLE_COLLISION_MARGIN_SIDEWAYS, num_samples=20):
@@ -120,5 +121,5 @@ def test_the_physical_upper_arm_catches_what_the_dh_capsule_misses():
     dh_upper = float(np.min(hpc._point_segment_distance(P, J[1], J[2]))) - UR5E_LINK_RADII[1]
     assert dh_upper > 0.05                                       # the DH model alone: clear by more than 50 mm
     reason = hpc.held_part_route_refusal(q, q, held)
-    assert reason.startswith("HELD_PART_ARM_COLLISION") and "physical upper arm" in reason
-    assert hpc.held_part_min_clearances(q, q, held)["physical"]["upper arm"] < -0.050
+    assert reason.startswith("HELD_PART_ARM_COLLISION") and "upper arm" in reason
+    assert min(v for k, v in hpc.held_part_min_clearances(q, q, held)["physical"].items() if k.startswith("upper arm")) < -0.010

@@ -97,11 +97,12 @@ def test_mount_surface_sampling_bounds_the_true_box_distance():
 
 
 def test_mount_vs_arm_prefilter_matches_the_full_surface():
-    """The bounding-sphere prefilter only skips boxes that clear the margin: same verdict as every sample."""
+    """The bounding-sphere prefilter only skips boxes that clear the margin: same verdict as every sample, against
+    the arm's enclosed surface (collision.PHYSICAL_LINK_CAPSULES) and the base cylinder."""
     import numpy as np
     from primitives.shared.camera_geometry import mount_surface_tool
-    from primitives.shared.camera_up import CAMERA_MOUNT_ARM_MARGIN_M, MOUNT_ARM_LINKS, camera_mount_arm_refusal
-    from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions
+    from primitives.shared.camera_up import CAMERA_MOUNT_ARM_MARGIN_M, camera_mount_arm_refusal
+    from primitives.shared.collision import base_cylinder_distance, physical_link_capsules
     from primitives.shared.ik import dh_params, forward_kinematics
     surface, gap, _owner = mount_surface_tool()
     rng = np.random.default_rng(3)
@@ -110,13 +111,11 @@ def test_mount_vs_arm_prefilter_matches_the_full_surface():
         q = np.array([1.9, -1.4, 1.7, -0.8, -3.1, 0.0]) + rng.normal(0, 0.8, 6)
         T = forward_kinematics(dh_params, q)
         W = surface @ T[:3, :3].T + T[:3, 3]
-        J = [np.asarray(p) for p in compute_all_joint_positions(q)]
-        brute = False
-        for link in range(MOUNT_ARM_LINKS):
-            a, ab = J[link], J[link + 1] - J[link]
+        brute = float(np.min(base_cylinder_distance(W))) - gap < CAMERA_MOUNT_ARM_MARGIN_M
+        for a, b, r, _label in physical_link_capsules(q):
+            ab = b - a
             t = np.clip(((W - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
-            d = float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - gap - UR5E_LINK_RADII[link]
-            if d < CAMERA_MOUNT_ARM_MARGIN_M:
+            if float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - gap - r < CAMERA_MOUNT_ARM_MARGIN_M:
                 brute = True
                 break
         assert (camera_mount_arm_refusal(q) is not None) == brute

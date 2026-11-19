@@ -20,18 +20,28 @@ def rule(a, b, is_last):
     return camera_route_refusal(a, b, near_table_end=is_last)
 
 
-def test_direct_line_is_refused_and_a_detour_route_is_admitted():
-    """With the conservative link radii and the mount's faces sampled (no corner-only blind spot), every
-    joint-group split of r48e's reorient sweeps the mount within 10 mm of the forearm too; a +90 deg wrist_3
-    detour turns it away."""
-    assert camera_route_refusal(START, TARGET, near_table_end=True).startswith("CAMERA_MOUNT_ARM_COLLISION")
-    route, _ = admissible_route(START, TARGET, rule)
-    assert route is not None and len(route) == 4
+def test_r48e_reorient_has_no_admissible_route_against_the_real_surface():
+    """r48e's u_orange reorient (MuJoCo, flown there as a split) sweeps the v3.1 mount within 10 mm of the forearm's
+    enclosed real surface on the direct line and on every split and detour (w5-enclose): refused, typed."""
+    why = camera_route_refusal(START, TARGET, near_table_end=True)
+    assert why.startswith("CAMERA_MOUNT_ARM_COLLISION") and "forearm" in why
+    route, reasons = admissible_route(START, TARGET, rule)
+    assert route is None and reasons and all(r.startswith("CAMERA_MOUNT_ARM_COLLISION") for r in reasons)
+
+
+def test_a_wrist3_detour_is_chosen_when_only_detours_are_admitted():
+    """The route algorithm, with a stand-in rule: a segment may move joints 0-4 only while wrist_3 is turned away
+    from its start (the mount out of the way), so only the wrist_3 detours qualify; the cheapest one is chosen."""
+    def turned_away(a, b, last):
+        moves_arm = np.max(np.abs(b[:5] - a[:5])) > 1e-9
+        return "MOUNT_NOT_TURNED" if moves_arm and abs(a[5] - START[5]) < 1e-9 else None
+    route, _ = admissible_route(START, TARGET, turned_away)
+    assert route is not None and len(route) >= 3
     assert np.allclose(route[0], START) and np.allclose(route[-1], TARGET)
-    assert np.isclose(route[1][5] - START[5], np.pi / 2) and np.allclose(route[1][:5], START[:5])
+    assert np.allclose(route[1][:5], START[:5]) and abs(route[1][5] - START[5]) > 1.0     # wrist_3 turns first
     assert max(abs(w[5]) for w in route) <= 4.0
-    travel = sum(np.sum(np.abs(b - a)) for a, b in zip(route[:-1], route[1:]))
-    assert travel <= np.sum(np.abs(TARGET - START)) + np.pi + 1e-9      # the direct travel plus the detour out and back
+    travel = sum(float(np.sum(np.abs(b - a))) for a, b in zip(route[:-1], route[1:]))
+    assert abs(travel - float(np.sum(np.abs(TARGET - START)))) < 1e-9      # turning wrist_3 to its target first costs nothing extra
 
 
 def test_an_admissible_direct_line_is_kept_and_none_refuses():
@@ -72,7 +82,8 @@ def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeyp
     assert check_self_collision(SPLIT_MIDDLE)
     from primitives.shared.collision import dh_self_collision, physical_self_collision_refusal
     assert not dh_self_collision(SPLIT_MIDDLE)
-    assert "upper arm vs RG2 body" in physical_self_collision_refusal(SPLIT_MIDDLE)
+    why = physical_self_collision_refusal(SPLIT_MIDDLE)
+    assert "upper arm" in why and "RG2 body" in why
     # Offer the planner only that split, as if the camera rule had refused everything else.
     monkeypatch.setattr(route_split, "candidate_routes",
                         lambda start, target, vias=(): iter([[start, SPLIT_MIDDLE.copy(), target]]))
@@ -85,7 +96,7 @@ def test_rotate_object_routes_pass_the_arm_checks_on_every_segment_and_stance():
     from primitives.shared.collision import check_trajectory_collision
     from primitives.shared.config import TABLE_HEIGHT
     node = _reorient_node()
-    for start, target in ((START, TARGET), (SPLIT_START, SPLIT_TARGET)):
+    for start, target in ((SPLIT_START, SPLIT_TARGET),):
         route, reasons = node._plan_reorient_route(start, target, None)
         assert route is not None, reasons
         assert np.allclose(route[0], start) and np.allclose(route[-1], target)
@@ -133,9 +144,9 @@ def test_r48f_clear_area_carry_needs_a_wrist3_detour():
     assert max(abs(w[5]) for w in route) <= 4.0
 
 
-def test_r48g_carry_needs_home_plus_a_wrist3_detour_for_the_held_part():
-    """MuJoCo r48g: the detours alone swing the held u_orange into the upper arm, the via-home route sweeps the
-    mount through wrist_1; via home WITH a wrist_3 detour passes every rule."""
+def test_r48g_carry_has_no_admissible_route_against_the_real_surface():
+    """MuJoCo r48g's clear-area carry (flown there via home with a wrist_3 detour): against the arm's enclosed real
+    surface every route - direct, split, detour, via home, via home with a detour - is refused (w5-enclose)."""
     from scipy.spatial.transform import Rotation as Rot
     from primitives.shared.collision import check_trajectory_collision
     from primitives.shared.config import HOME_JOINTS, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
@@ -156,8 +167,8 @@ def test_r48g_carry_needs_home_plus_a_wrist3_detour_for_the_held_part():
 
     route, _ = admissible_route(start, target, seg)
     assert route is None
-    route, _ = admissible_route(start, target, seg, vias=(np.array(HOME_JOINTS, float),))
-    assert route is not None and len(route) == 5 and np.allclose(route[2][:5], np.array(HOME_JOINTS)[:5])
+    route, reasons = admissible_route(start, target, seg, vias=(np.array(HOME_JOINTS, float),))
+    assert route is None and reasons
 
 
 def test_clear_area_in_between_stances_get_the_stance_rules():
