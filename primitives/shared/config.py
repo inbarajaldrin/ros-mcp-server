@@ -26,10 +26,27 @@ GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above th
 # FMB_CAD_DATA overrides it (utils/data_path_finder.py applies the same rule).
 CAD_DATA_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')
 _GRASP_POINTS_DIR = str(CAD_DATA_DIR / 'grasp_points')
-# The camera localizer's config (hand-eye mount, intrinsics) in the ROS 2 workspace; FMB_ROS_WS names the workspace.
-LOCALIZER_CONFIG = os.environ.get('FMB_LOCALIZER_CONFIG') or str(
+# The camera localizer's config (hand-eye mount, intrinsics, depth correction) in the ROS 2 workspace; FMB_ROS_WS
+# names the workspace.  FMB_LOCALIZER_CONFIG pins a frozen copy for an isolated simulator and is honoured ONLY with
+# ROS_MCP_MODE=sim: a real run always reads the live calibration (a pin leaked from a sim shell is ignored, loudly).
+_LIVE_LOCALIZER_CONFIG = str(
     Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Desktop' / 'ros2_ws')
     / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
+
+
+def _localizer_config(env=os.environ):
+    pinned = env.get('FMB_LOCALIZER_CONFIG')
+    if not pinned:
+        return _LIVE_LOCALIZER_CONFIG
+    if env.get('ROS_MCP_MODE') == 'sim':
+        return pinned
+    import sys
+    print(f"WARNING: FMB_LOCALIZER_CONFIG={pinned} IGNORED (ROS_MCP_MODE is not sim); using the live localizer "
+          f"config {_LIVE_LOCALIZER_CONFIG}", file=sys.stderr)
+    return _LIVE_LOCALIZER_CONFIG
+
+
+LOCALIZER_CONFIG = _localizer_config()
 
 
 def _depth_correction():
