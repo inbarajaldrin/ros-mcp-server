@@ -17,3 +17,9 @@ def test_sim_endpoint_without_contact_is_a_failure():
     assert "if self.mode == 'sim'" in source
     assert "without a measured contact" in source
     assert "self.error_message" in source
+
+
+def test_sim_wrist_reaction_stop_matches_real_20n_delta():
+    source = MOVE_DOWN.read_text()
+    assert "SIM_Z_FORCE_THRESHOLD = 20.0" in source
+    assert "FORCE_THRESHOLD = 20.0" in source

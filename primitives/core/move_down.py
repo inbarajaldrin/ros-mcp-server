@@ -49,7 +49,7 @@ from primitives.shared.collision import compute_all_joint_positions, check_colli
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
 # Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
 SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
-SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from descent baseline = contact
+SIM_Z_FORCE_THRESHOLD = 20.0  # Match the real cell's 20 N wrist F/T delta stop
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
