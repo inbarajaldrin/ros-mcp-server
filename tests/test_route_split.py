@@ -36,7 +36,8 @@ def test_an_admissible_direct_line_is_kept_and_none_refuses():
     assert len(route) == 2
     route, reasons = admissible_route(START, TARGET, lambda a, b, last: "ALWAYS_REFUSED")
     assert route is None and reasons and all(r == "ALWAYS_REFUSED" for r in reasons)
-    assert sum(1 for _ in candidate_routes(START, TARGET)) == 75 + 6        # group splits + wrist_3 detours
+    # group splits + the wrist_3 detours that keep |wrist_3| <= 4 rad (+135 and +180 deg exceed it from 1.92 rad)
+    assert sum(1 for _ in candidate_routes(START, TARGET)) == 75 + 4
 
 
 def test_rotate_object_uses_the_split_route_with_the_full_rule_set():
