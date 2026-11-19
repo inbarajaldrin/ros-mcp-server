@@ -1026,6 +1026,8 @@ def main(args=None):
                 node.moving = False
                 break
     except KeyboardInterrupt:
+        # an interrupted descent is not a landing (live check 2026-11-19: it reported "success")
+        node.error_message = node.error_message or "INTERRUPTED: move_down stopped by SIGINT/SIGTERM before it finished"
         node.get_logger().info("Move down interrupted by user")
     except Exception as e:
         node.get_logger().error(f"Error in move down: {e}")
