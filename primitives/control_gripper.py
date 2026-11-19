@@ -21,6 +21,7 @@ import sys
 import json
 import threading
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from primitives.shared.robot_contract import DROIDSTACK_SIM, GRIP_ACTION
 
 # Gripper range: 0.0 - 100.0mm
 GRIPPER_MIN_WIDTH = 0.0
@@ -414,14 +415,101 @@ def output_result(result):
     print("__END_RESULT_JSON__")
 
 
+def _droidstack_grip(command, expect, expect_span_mm, force_n):
+    """Use the declared Grip action; legacy scalar topics are not a sim contract."""
+    from rclpy.action import ActionClient
+    from droidstack_gripper_msgs.action import Grip
+
+    if command.lower() == "open":
+        width_mm = GRIPPER_MAX_WIDTH
+    elif command.lower() == "close":
+        width_mm = GRIPPER_MIN_WIDTH
+    elif command.lower() == "half-open":
+        width_mm = GRIPPER_HALF_OPEN_WIDTH
+    else:
+        width_mm = float(command)
+    if not GRIPPER_MIN_WIDTH <= width_mm <= GRIPPER_MAX_WIDTH:
+        raise ValueError(f"Value {width_mm} out of range. Use 0-100.")
+
+    rclpy.init()
+    node = Node("gripper_controller")
+    client = ActionClient(node, Grip, GRIP_ACTION)
+    try:
+        if not client.wait_for_server(timeout_sec=10.0):
+            raise RuntimeError(f"Grip action unavailable: {GRIP_ACTION}")
+        goal = Grip.Goal()
+        goal.width_m = width_mm / 1000.0
+        goal.force = float(force_n)
+        goal.expect = expect
+        goal.expect_span_m = float(expect_span_mm) / 1000.0
+        sent = client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(node, sent, timeout_sec=10.0)
+        handle = sent.result()
+        if handle is None or not handle.accepted:
+            raise RuntimeError("Grip goal rejected")
+        finished = handle.get_result_async()
+        rclpy.spin_until_future_complete(node, finished, timeout_sec=30.0)
+        wrapped = finished.result()
+        if wrapped is None:
+            raise RuntimeError("Grip action produced no result")
+        measured = wrapped.result
+        width_error_m = measured.width_measured_m - goal.expect_span_m
+        width_in_band = (-0.00142 <= width_error_m <= 0.0005) if expect != "none" else None
+        success = (measured.reached if expect == "none" else
+                   measured.holding and bool(width_in_band))
+        result = {
+            "result": "success" if success else "failure",
+            "command": command,
+            "mode": "sim",
+            "expected_part": measured.expected_part,
+            "discovered_part": measured.discovered_part,
+            "identity_verified": measured.identity_verified,
+            "holding": measured.holding,
+            "reached": measured.reached,
+            "initial_width_mm": None,
+            "final_width_mm": round(1000.0 * measured.width_measured_m, 3),
+            "change_mm": None,
+            "verdict": measured.verdict,
+            "width_error_mm": (None if width_in_band is None else round(1000.0 * width_error_m, 3)),
+            "width_in_declared_hold_band": width_in_band,
+            "not_holding_reason": measured.not_holding_reason,
+            "not_holding_detail": measured.not_holding_detail,
+        }
+        if not success:
+            result["error"] = (measured.not_holding_detail or
+                (f"measured width is outside the declared part span band: "
+                 f"{1000.0 * measured.width_measured_m:.3f} mm vs "
+                 f"{1000.0 * goal.expect_span_m:.3f} mm, allowed -1.420/+0.500 mm"
+                 if width_in_band is False else measured.verdict))
+        output_result(result)
+        return 0 if success else 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def main(args=None):
     parser = argparse.ArgumentParser(description='Control gripper with verification')
     parser.add_argument('command', type=str, help='Gripper command: "open", "close", "half-open" (35mm), or 0-100 (width in mm)')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation (uses /gripper_width_sim), "real" for real robot (uses /gripper_width). Default: sim')
+    parser.add_argument('--expect', default='none',
+                        help='Declared part expected between both pads, or none for an open/pre-shape')
+    parser.add_argument('--expect-span-mm', type=float, default=0.0)
+    parser.add_argument('--force', type=float, default=40.0)
 
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
+
+    if known_args.mode == 'sim' and DROIDSTACK_SIM:
+        try:
+            return_code = _droidstack_grip(known_args.command, known_args.expect,
+                                           known_args.expect_span_mm, known_args.force)
+        except Exception as exc:
+            output_result({"result": "failure", "command": known_args.command,
+                           "mode": "sim", "error": str(exc)})
+            return_code = 1
+        raise SystemExit(return_code)
 
     # Initialize variables for result
     success = False
@@ -444,7 +532,11 @@ def main(args=None):
         controller.get_logger().info(f"Checking if topic {topic_name} is available...")
         
         # First check if topic exists and has publishers
-        if not controller.check_topic_available(topic_name, timeout=0.5):
+        # A fresh Humble subprocess can need more than 0.5 s to discover the
+        # long-lived sim sidecar publisher even on a host-local graph. Keep
+        # the real-cell fail-fast window unchanged.
+        discovery_timeout = 5.0 if known_args.mode == 'sim' else 0.5
+        if not controller.check_topic_available(topic_name, timeout=discovery_timeout):
             error_msg = f"Topic {topic_name} not found or has no publishers. Cannot proceed with gripper control."
             controller.get_logger().error(error_msg)
             error = error_msg

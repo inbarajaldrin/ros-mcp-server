@@ -21,6 +21,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseStamped
@@ -46,7 +47,12 @@ ROTATE_SHORT = os.environ.get('ROTATE_SHORT', '1') == '1'
 ROTATE_SHORT_RAD, ROTATE_SHORT_RAD_S, ROTATE_SHORT_MIN_S = 0.10, 0.07, 1.0
 from utils.data_path_finder import get_assembly_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 from primitives.shared.config import TABLE_HEIGHT, ROTATE_ABOUT_GRIPPER_CENTER, GRIPPER_CENTER_TOOL_OFFSET, DEFAULT_BASE_ORIENTATION
-from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_ee_below_base, check_compact_configuration
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
+from primitives.shared.collision import (UR5E_LINK_RADII, compute_all_joint_positions,
+    check_collision_with_table, check_trajectory_collision, segment_distance, check_self_collision,
+    check_ee_below_base, check_compact_configuration)
 
 
 def _json_dumps_decimal(obj, **kwargs):
@@ -294,7 +300,7 @@ class ReorientForAssembly(Node):
             depth=10
         )
         self.ee_sub = self.create_subscription(PoseStamped, ee_topic, self.ee_callback, qos_volatile)
-        self.joint_state_sub = self.create_subscription(JointState, '/joint_states', self.joint_state_callback, qos_volatile)
+        self.joint_state_sub = self.create_subscription(JointState, JOINT_STATES_TOPIC, self.joint_state_callback, qos_volatile)
         
         self.current_poses = {}
         self.current_ee_pose = None
@@ -303,10 +309,8 @@ class ReorientForAssembly(Node):
         self.trajectory_success = False
         self.trajectory_completed = False
         
-        self.joint_names = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-                           "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
-        self.action_client = ActionClient(self, FollowJointTrajectory, 
-                                         '/scaled_joint_trajectory_controller/follow_joint_trajectory')
+        self.joint_names = BARE_ARM_JOINTS
+        self.action_client = ActionClient(self, FollowJointTrajectory, ARM_ACTION)
         
         # Cardinal error threshold increment mechanism (similar to move_to_grasp)
         self.cardinal_error_threshold_initial = 45.0  # Initial threshold in degrees
@@ -382,12 +386,18 @@ class ReorientForAssembly(Node):
         self.current_ee_pose = msg
     
     def joint_state_callback(self, msg):
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = [joint_dict.get(name, 0) for name in self.joint_names]
-            if len(positions) == 6:
-                self.current_joint_angles = np.array(positions)
-                self.joint_angles_received = True
+        positions = arm_positions(msg)
+        if positions is not None:
+            self.current_joint_angles = np.array(positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, positions)
+                pose = PoseStamped()
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = transform[:3, 3]
+                quat = R.from_matrix(transform[:3, :3]).as_quat()
+                pose.pose.orientation.x, pose.pose.orientation.y = quat[:2]
+                pose.pose.orientation.z, pose.pose.orientation.w = quat[2:]
+                self.current_ee_pose = pose
     
     def get_rotation_from_transform(self, transform):
         q = np.array([transform.rotation.x, transform.rotation.y,
@@ -614,7 +624,7 @@ class ReorientForAssembly(Node):
         Returns the smallest (segment_distance - combined_radii).
         Higher values indicate more spread-out configurations.
         """
-        link_radii = [0.075, 0.065, 0.055, 0.045, 0.045, 0.040]
+        link_radii = UR5E_LINK_RADII
         joint_positions = compute_all_joint_positions(joint_angles)
         num_links = len(joint_positions) - 1
         min_clearance = float('inf')
@@ -679,6 +689,28 @@ class ReorientForAssembly(Node):
             return True
 
         return False
+
+    def _plan_reorient_route(self, start, target, held):
+        """The admissible joint route start -> target (direct line first, then route_split's splits and
+        detours), or (None, reasons).  Every segment passes the same full check set: the arm against the
+        table and itself along the joint line (check_trajectory_collision, 20 samples, both ends included),
+        every stance the segment ends at against this primitive's IK stance rules (_check_collision: table,
+        EE below base, compact, EE facing the robot, camera toward -X, extended gripper, self-collision),
+        the camera hard rule and the held-part rule."""
+        from primitives.shared.camera_up import camera_route_refusal
+        from primitives.shared.held_part_collision import held_part_route_refusal
+        from primitives.shared.route_split import admissible_route
+
+        def segment_refusal(a, b, is_last):
+            if check_trajectory_collision(np.asarray(a, float), np.asarray(b, float),
+                                          z_threshold=TABLE_HEIGHT, num_samples=20):
+                return "ARM_TABLE_OR_SELF_COLLISION along the joint line"
+            if self._check_collision(b):
+                return "ARM_STANCE_REFUSED: a route stance fails the reorient IK rules"
+            return (camera_route_refusal(a, b, near_table_end=is_last)
+                    or held_part_route_refusal(a, b, held))
+
+        return admissible_route(start, target, segment_refusal)
 
     def compute_ik_with_current_seed(self, target_position, target_quat, max_tries=5, dx=0.001, try_yaw_flip=True):
         from primitives.shared.ik import IKSolverConfig, IKSolver
@@ -1658,6 +1690,30 @@ class ReorientForAssembly(Node):
             self.error_message = f"Motion planning failed: {why_}"
             self.get_logger().error(self.error_message)
             return False
+        # Hard rules (lead, 2026-11-19): a reorient stance is carried to the table (insert, place-down), so the
+        # camera side may not face the table; the mount/D415 keeps its clearance from the table and the arm; the
+        # held part stays clear of the arm and the table; joint travel is bounded.  When the direct joint line breaks
+        # a rule, the joint groups move one after another (route_split), each segment checked the same way.
+        from primitives.shared.held_part_collision import held_part_model
+        T_flange_now = forward_kinematics(dh_params, self.current_joint_angles)
+        T_part_now = None
+        if self.mode == 'sim' and object_name in self.current_poses:
+            T_part_now = np.eye(4)
+            T_part_now[:3, :3] = self.get_rotation_from_transform(self.current_poses[object_name].transform)
+            tr = self.current_poses[object_name].transform.translation
+            T_part_now[:3, 3] = [tr.x, tr.y, tr.z]
+        held = held_part_model(object_name, T_flange_now, T_part=T_part_now,
+                               held_quat=current_object_orientation)
+
+        route, refusals = self._plan_reorient_route(self.current_joint_angles, joint_angles, held)
+        if route is None:
+            self.error_message = ("Reorient refused: no admissible route (direct or split by joint group): "
+                                  + "; ".join(sorted(set(refusals))[:3]))
+            self.get_logger().error(self.error_message)
+            return False
+        if len(route) > 2:
+            self.get_logger().info(
+                f"Reorient route split into {len(route) - 1} joint-linear segments (the direct line was refused)")
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))
@@ -1667,12 +1723,23 @@ class ReorientForAssembly(Node):
             # distance at ~4 deg/s, >= 1 s, not held to the 2.5 s floor - the speed the wrist turns run at (benched 10-23)
             duration = max(ROTATE_SHORT_MIN_S, joint_dist / ROTATE_SHORT_RAD_S)
         self.get_logger().info(f"Duration: {duration:.2f}s (joint={joint_dist:.2f}rad)")
-        positions, velocities, t = single_point(joint_angles, duration)[0]
-        trajectory = {"traj1": [{
-            "positions": positions,
-            "velocities": velocities,
-            "time_from_start": Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
-        }]}
+        if len(route) == 2:
+            positions, velocities, t = single_point(joint_angles, duration)[0]
+            trajectory = {"traj1": [{
+                "positions": positions,
+                "velocities": velocities,
+                "time_from_start": Duration(sec=int(t), nanosec=int((t % 1) * 1e9))
+            }]}
+        else:
+            # One point per segment end, at rest: each segment is its own straight joint-space move.
+            points, t_total = [], 0.0
+            for a, b in zip(route[:-1], route[1:]):
+                seg = float(np.max(np.abs(np.asarray(b) - np.asarray(a))))
+                t_total += max(ROTATE_SHORT_MIN_S, compute_duration(joint_distance=seg, profile='s_curve'))
+                points.append({"positions": [float(v) for v in b], "velocities": [0.0] * 6,
+                               "time_from_start": Duration(sec=int(t_total), nanosec=int((t_total % 1) * 1e9))})
+            trajectory = {"traj1": points}
+            self.get_logger().info(f"Split route: {len(points)} segments, {t_total:.2f}s")
         
         success = self.execute_trajectory(trajectory)
 
@@ -1697,7 +1764,7 @@ class ReorientForAssembly(Node):
             points = trajectory['traj1']
 
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = self.joint_names
+            traj_msg.joint_names = public_arm_joints()
 
             # Add all trajectory points
             for point in points:
@@ -1709,7 +1776,8 @@ class ReorientForAssembly(Node):
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             self.trajectory_completed = False
             self.trajectory_success = False
@@ -1915,8 +1983,8 @@ def main(args=None):
         if args.current_object_orientation is None:
             parser.error("--current-object-orientation is required in real mode")
     
-    # Ensure finally blocks run on SIGTERM (from timeout command) so output is always produced
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    # SIGTERM/SIGINT: init_ros (goal_guard) raises KeyboardInterrupt, so the finally blocks run, the output is produced
+    # and a running arm goal is cancelled before the node goes.
 
     # === Verify grasp before starting (unless caller already did it) ===
     if not args.skip_verify_grasp:
@@ -1938,7 +2006,7 @@ def main(args=None):
     node = None
     success = False
     try:
-        rclpy.init()
+        init_ros()
         node = ReorientForAssembly(mode=args.mode)
         if not node.action_client.wait_for_server(timeout_sec=15):
             raise RuntimeError("Action server not available after 15s")

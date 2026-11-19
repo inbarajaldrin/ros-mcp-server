@@ -15,16 +15,19 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
+from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 import re
 import json
 import yaml
@@ -35,9 +38,13 @@ import subprocess
 
 from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, TABLE_COLLISION_MARGIN_FACEDOWN, TABLE_COLLISION_MARGIN_SIDEWAYS, RG2_TIP_CLOSED_M
 PLACE_TIP_CLEARANCE_M = 0.001
-from primitives.shared.ik import compute_cartesian_waypoints_ik
+from primitives.shared.ik import compute_cartesian_waypoints_ik, dh_params, forward_kinematics
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    WRENCH_TOPIC, arm_positions, public_arm_joints)
 from primitives.shared.velocity_profiles import s_curve_profile, compute_duration
 from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision
+from primitives.core.force_filter import median_wrench_window
 
 # =============================================================================
 # CONFIGURABLE PARAMETERS
@@ -49,7 +56,6 @@ from primitives.shared.collision import compute_all_joint_positions, check_colli
 # Sim mode force thresholds (tuned for Isaac Sim get_measured_joint_forces()):
 # Sim baseline is ~-14 N (gravity), contact causes POSITIVE delta (+40 to +500 N)
 SIM_FORCE_THRESHOLD = 50.0  # Force change threshold for Fx, Fy, Tx, Ty, Tz (N/Nm)
-SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from descent baseline = contact
 
 # Real mode force thresholds:
 # Use DELTA-based detection - stop when force/torque changes by threshold from baseline
@@ -57,7 +63,20 @@ SIM_Z_FORCE_THRESHOLD = 0.0  # Z force threshold — any positive delta from des
 # Z force uses directional threshold (negative = upward resistance)
 FORCE_THRESHOLD = 20.0  # Stop when force/torque changes by this amount from baseline (Newtons)
 CONTACT_MEDIAN_N = 51      # wrench samples (~100 ms at 500 Hz) in the contact median
+BASELINE_MEDIAN_N = 150    # wrench samples (~0.3 s at 500 Hz) in the at-rest baseline median
+BASELINE_SETTLE_S = 0.35   # the at-rest wait before the baseline median
+REAL_WRENCH_HZ = 500.0     # the UR e-series F/T broadcaster rate the sample counts assume
 Z_FORCE_THRESHOLD = -5.0  # Z force threshold in N (negative = upward force/resistance)
+
+# Sim contact-axis stop = the real one (lead 2026-11-19).  A DroidStack sim run makes the real comparison: the same
+# threshold and sign (negative = upward resistance on the axis the tool's contact loads), an at-rest baseline over
+# the same span after the same settle, and a contact median over the same span.  The sim wrench topic is not at
+# 500 Hz, so the real sample counts are taken as time spans.  (An earlier SIM_Z_FORCE_THRESHOLD = 20 N, labelled
+# "the real 20 N", was the real OFF-axis threshold: the twin stopped 4x less sensitively than the arm, overtravelled
+# ~100 ms at ~67 mm/s, and slid u_brown 9 mm through the force-limited grip in r48i.)
+SIM_Z_FORCE_THRESHOLD = Z_FORCE_THRESHOLD
+SIM_CONTACT_MEDIAN_WINDOW_S = CONTACT_MEDIAN_N / REAL_WRENCH_HZ
+SIM_BASELINE_WINDOW_S = BASELINE_MEDIAN_N / REAL_WRENCH_HZ
 
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
 MOVE_DOWN_INCREMENT = 0.6  # Distance to move down per increment in meters
@@ -65,13 +84,15 @@ MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
 # =============================================================================
 
 class MoveDown(Node):
-    def __init__(self, target_height=None, mode='real', to_table=False):
+    def __init__(self, target_height=None, mode='real', to_table=False, require_contact=False):
         super().__init__('move_down')
         self.to_table = to_table
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
+        # Sim only: an INSERT descent must stop on the simulated wrench - its endpoint is never a seat.
+        # A place-down ends at its floor exactly as on the real arm (a sideways stance stops above the
+        # table and the release drops the part; replay_real_assembly._gentle_place_down).
+        self.require_contact = require_contact
+        self.finish_requested = False
+        self.joint_names = BARE_ARM_JOINTS
         
         # Mode: 'sim' or 'real'
         self.mode = mode
@@ -80,7 +101,7 @@ class MoveDown(Node):
         self.action_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            ARM_ACTION
         )
         
         # Target height (if None, will use current height - MOVE_DOWN_INCREMENT as default)
@@ -145,7 +166,7 @@ class MoveDown(Node):
             # Simulation mode: full 6-DOF WrenchStamped from Isaac Sim extension
             self.force_sub = self.create_subscription(
                 WrenchStamped,
-                '/force_torque_sensor_broadcaster/wrench_sim',
+                WRENCH_TOPIC,
                 self.force_callback,
                 10
             )
@@ -166,17 +187,13 @@ class MoveDown(Node):
             depth=10
         )
         
-        self.ee_pose_sub = self.create_subscription(
-            PoseStamped,
-            '/tcp_pose_broadcaster/pose',
-            self.ee_pose_callback,
-            qos_profile
-        )
+        self.ee_pose_sub = (None if DROIDSTACK_SIM else self.create_subscription(
+            PoseStamped, '/tcp_pose_broadcaster/pose', self.ee_pose_callback, qos_profile))
         
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
             JointState,
-            '/joint_states',
+            JOINT_STATES_TOPIC,
             self.joint_state_callback,
             10
         )
@@ -230,18 +247,15 @@ class MoveDown(Node):
     
     def joint_state_callback(self, msg: JointState):
         """Callback for joint state data"""
-        # Extract joint angles in the correct order
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            # Map joint names to positions in correct order
-            ordered_positions = []
-            for joint_name in self.joint_names:
-                if joint_name in joint_dict:
-                    ordered_positions.append(joint_dict[joint_name])
-            
-            if len(ordered_positions) == 6:
-                self.current_joint_angles = np.array(ordered_positions)
-                self.joint_angles_received = True
+        ordered_positions = arm_positions(msg)
+        if ordered_positions is not None:
+            self.current_joint_angles = np.array(ordered_positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, ordered_positions)
+                self.ee_position = transform[:3, 3].copy()
+                self.ee_quat = R.from_matrix(transform[:3, :3]).as_quat()
+                self.ee_pose_received = True
 
     def quaternion_to_rpy(self, x, y, z, w):
         """Convert quaternion to roll, pitch, yaw in degrees - same as other primitives"""
@@ -360,6 +374,13 @@ class MoveDown(Node):
             self._wbuf = __import__('collections').deque(maxlen=200)
         w = msg.wrench
         self._wbuf.append((w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z))
+        if self.mode == 'sim':
+            if not hasattr(self, '_sim_wbuf'):
+                self._sim_wbuf = __import__('collections').deque(maxlen=2000)
+            stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+            self._sim_wbuf.append((stamp_s, w.force.x, w.force.y, w.force.z,
+                                   w.torque.x, w.torque.y, w.torque.z))
+            self._last_wrench_stamp_s = stamp_s
 
     def _median_wrench(self, n):
         """Median of the last n wrench samples (a 2-3 sample glitch cannot move it)."""
@@ -377,20 +398,30 @@ class MoveDown(Node):
         self.movement_start_time = time.time()
 
         if self.mode == 'sim':
-            # Sim mode: take baseline AFTER grace period (during motion) so it captures
-            # descent forces, not stationary forces. Baseline is set in check_force_during_execution.
-            self.baseline_force_x = None
-            self.baseline_force_y = None
-            self.baseline_force_z = None
-            self.baseline_torque_x = None
-            self.baseline_torque_y = None
-            self.baseline_torque_z = None
-        else:
-            # Real mode: take baseline at start (stationary) — median over ~0.3 s
-            end = time.time() + 0.35
+            # The real baseline: wait at rest, then the median over the same span of samples.  A single
+            # in-motion baseline let distal pad/equality impulses look like seat contact.
+            end = time.time() + BASELINE_SETTLE_S
             while time.time() < end:
                 rclpy.spin_once(self, timeout_sec=0.01)
-            m = self._median_wrench(150)
+            m = median_wrench_window(
+                getattr(self, '_sim_wbuf', ()), SIM_BASELINE_WINDOW_S
+            )
+            if m is None:
+                m = (self.current_force_x, self.current_force_y, self.current_force_z,
+                     self.current_torque_x, self.current_torque_y, self.current_torque_z)
+            (self.baseline_force_x, self.baseline_force_y, self.baseline_force_z,
+             self.baseline_torque_x, self.baseline_torque_y, self.baseline_torque_z) = (float(v) for v in m)
+            self._sim_raw_transient_peak_n = 0.0
+            self.get_logger().info(
+                f"Sim baseline captured at rest over {SIM_BASELINE_WINDOW_S * 1000:.0f}ms: "
+                f"Fx={self.baseline_force_x:.2f}, Fy={self.baseline_force_y:.2f}, "
+                f"Fz={self.baseline_force_z:.2f}")
+        else:
+            # Real mode: take baseline at start (stationary) — median over ~0.3 s
+            end = time.time() + BASELINE_SETTLE_S
+            while time.time() < end:
+                rclpy.spin_once(self, timeout_sec=0.01)
+            m = self._median_wrench(BASELINE_MEDIAN_N)
             if m is None:
                 m = (self.current_force_x, self.current_force_y, self.current_force_z,
                      self.current_torque_x, self.current_torque_y, self.current_torque_z)
@@ -423,11 +454,9 @@ class MoveDown(Node):
     def check_force_during_execution(self):
         """Check force during trajectory execution and cancel if threshold exceeded.
 
-        Sim mode: force sensing disabled — hover offset prevents ground contact.
+        Sim mode: uses the Isaac PhysX contact-report wrench from the held part.
         Real mode: uses WrenchStamped delta-based detection with real thresholds.
         """
-        if self.mode == 'sim':
-            return
         if not self.moving:
             return
 
@@ -437,22 +466,6 @@ class MoveDown(Node):
             elapsed_since_start = time.time() - self.movement_start_time
             if elapsed_since_start < self.force_check_grace_period:
                 return  # Skip force check during grace period
-
-        # Sim mode: capture baseline at end of grace period (during descent)
-        if self.mode == 'sim' and self.baseline_force_z is None:
-            self.baseline_force_x = self.current_force_x
-            self.baseline_force_y = self.current_force_y
-            self.baseline_force_z = self.current_force_z
-            self.baseline_torque_x = self.current_torque_x
-            self.baseline_torque_y = self.current_torque_y
-            self.baseline_torque_z = self.current_torque_z
-            baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
-            self.get_logger().info(
-                f"Sim baseline captured during motion: {self.contact_axis_name}="
-                f"{baseline_values[self.contact_axis]:.2f}N "
-                f"(Fx={self.baseline_force_x:.2f}, Fy={self.baseline_force_y:.2f}, "
-                f"Fz={self.baseline_force_z:.2f})")
-            return  # Skip this check, start detecting from next sample
 
         # Check if we have baseline values set
         if (self.baseline_force_x is None or
@@ -473,7 +486,28 @@ class MoveDown(Node):
         # measured at rest 2026-10-14) — enough to drag a 15-sample median ~20 N.
         cur = (self.current_force_x, self.current_force_y, self.current_force_z,
                self.current_torque_x, self.current_torque_y, self.current_torque_z)
-        if self.mode != 'sim':
+        if self.mode == 'sim':
+            raw_force_deltas = [
+                cur[0] - self.baseline_force_x,
+                cur[1] - self.baseline_force_y,
+                cur[2] - self.baseline_force_z,
+            ]
+            raw_contact = raw_force_deltas[self.contact_axis] * self.contact_direction
+            if raw_contact > max(
+                    -z_threshold, getattr(self, '_sim_raw_transient_peak_n', 0.0) + 1.0):
+                self._sim_raw_transient_peak_n = raw_contact
+                self.get_logger().warn(
+                    f"Sim raw wrench transient: {raw_contact:.2f}N at "
+                    f"t={getattr(self, '_last_wrench_stamp_s', float('nan')):.6f}s; "
+                    f"contact decision uses the "
+                    f"{SIM_CONTACT_MEDIAN_WINDOW_S * 1000:.0f}ms median")
+            m = median_wrench_window(
+                getattr(self, '_sim_wbuf', ()), SIM_CONTACT_MEDIAN_WINDOW_S
+            )
+            if m is None:
+                return
+            cur = m
+        else:
             m = self._median_wrench(CONTACT_MEDIAN_N)
             if m is not None:
                 cur = tuple(float(v) for v in m)
@@ -489,15 +523,16 @@ class MoveDown(Node):
         # Real mode: uses Fz with negative delta (upward resistance from F/T sensor)
         if self.mode == 'sim':
             force_deltas = [f_x, f_y, f_z]
-            # Project onto contact axis with sign correction: positive = contact
+            # Project onto contact axis with sign correction: positive = contact; the real comparison is on the
+            # upward-resistance delta (negative = resistance), so compare -f_contact with the real threshold
             f_contact = force_deltas[self.contact_axis] * self.contact_direction
-            z_triggered = f_contact > z_threshold
+            z_triggered = -f_contact <= z_threshold
         else:
             z_triggered = f_z <= z_threshold  # Real: negative delta on contact
 
         if z_triggered:
             if self.mode == 'sim':
-                current_values = [self.current_force_x, self.current_force_y, self.current_force_z]
+                current_values = list(cur[:3])
                 baseline_values = [self.baseline_force_x, self.baseline_force_y, self.baseline_force_z]
                 self.get_logger().info(
                     f"Contact detected: {self.contact_axis_name} threshold reached. "
@@ -559,19 +594,9 @@ class MoveDown(Node):
         if self.ee_position is not None:
             self.current_z_position = self.ee_position[2]
 
-        # Graceful shutdown - use a timer to shutdown after brief delay to allow logging
-        def delayed_shutdown():
-            try:
-                rclpy.shutdown()
-            except:
-                pass
-            # Force exit if rclpy.shutdown() doesn't work
-            os._exit(0)
-
-        # Start shutdown in a separate thread after 100ms to allow log messages to flush
-        shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-        shutdown_timer.daemon = True
-        shutdown_timer.start()
+        # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a timer
+        # thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+        self.finish_requested = True
 
     def emergency_stop(self):
         """Emergency stop for actual failures (not contact detection).
@@ -594,19 +619,9 @@ class MoveDown(Node):
             except Exception as e:
                 self.get_logger().error(f"Failed to cancel trajectory: {e}")
 
-        # Force immediate exit - use a timer to shutdown after brief delay to allow logging
-        def delayed_shutdown():
-            try:
-                rclpy.shutdown()
-            except:
-                pass
-            # Force exit if rclpy.shutdown() doesn't work
-            os._exit(0)
-
-        # Start shutdown in a separate thread after 100ms to allow log messages to flush
-        shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-        shutdown_timer.daemon = True
-        shutdown_timer.start()
+        # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a timer
+        # thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+        self.finish_requested = True
 
     def move_down_continue(self):
         """Continue moving down using stored position (non-blocking, called from timer)"""
@@ -741,19 +756,18 @@ class MoveDown(Node):
         current_z = current_pos[2]
         distance_to_target = abs(current_z - target_position[2])
         if distance_to_target < 0.001:  # Already at target (within 1mm)
+            if self.mode == 'sim' and self.require_contact and not self.force_threshold_reached:
+                self.error_message = (
+                    "Sim descent is already at its endpoint without a measured contact. "
+                    "A regular insert must stop on the simulated physics wrench."
+                )
+                self.get_logger().error(self.error_message)
+                rclpy.shutdown()
+                return
             self.get_logger().info(f"Already at target Z position ({current_z:.3f}m). Exiting.")
-            # Use delayed shutdown with os._exit() to ensure clean exit
-            # (same pattern as contact_detected_stop)
-            def delayed_shutdown():
-                try:
-                    rclpy.shutdown()
-                except:
-                    pass
-                os._exit(0)
-
-            shutdown_timer = threading.Timer(0.1, delayed_shutdown)
-            shutdown_timer.daemon = True
-            shutdown_timer.start()
+            # End through the main loop (it exits on finish_requested): no rclpy.shutdown or os._exit from a
+            # timer thread, so goal_guard confirms any running goal on the main thread (review r3 P2-1).
+            self.finish_requested = True
             return
 
         # Check workspace limit (safety check)
@@ -792,6 +806,15 @@ class MoveDown(Node):
             )
             self.get_logger().info(f"Duration: {total_duration:.2f}s (cart={distance_to_target:.3f}m, joint={joint_dist:.2f}rad)")
 
+            # Hard rule (lead, 2026-11-19): the descent's end pose keeps the camera off the table side and the
+            # mount/D415 clear of the table (place-down and insert end near the table).
+            from primitives.shared.camera_up import camera_stance_refusal
+            camera_refusal = camera_stance_refusal(forward_kinematics(dh_params, np.asarray(waypoints[-1], float)))
+            if camera_refusal:
+                self.error_message = f"Descent refused: {camera_refusal}"
+                self.get_logger().error(self.error_message)
+                rclpy.shutdown()
+                return
             profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:
@@ -805,12 +828,13 @@ class MoveDown(Node):
             self.get_logger().info(f"Generated {len(traj_points)} dense waypoints with s-curve velocity profile")
 
             traj = JointTrajectory()
-            traj.joint_names = self.joint_names
+            traj.joint_names = public_arm_joints()
             traj.points = traj_points
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
             
             self.moving = True
             
@@ -880,19 +904,27 @@ class MoveDown(Node):
             self.moving = False
             self._current_goal_handle = None
             
-            # Handle different trajectory completion statuses
-            if result.status == 1:  # SUCCEEDED
-                pass  # Continue to check force threshold
-            elif result.status == 5:  # PREEMPTED
-                pass  # Continue to check force threshold
-            elif result.status == 4:  # ABORTED
-                pass  # Continue to check force threshold
+            # A force-triggered stop can finish as SUCCEEDED (the endpoint won
+            # the race) or CANCELED (the controller confirmed our stop).  Neither
+            # status is a place-down success by itself: the force threshold is
+            # still required below.  ABORTED is a controller/path/protective-stop
+            # failure on the real arm and must never be promoted by a force
+            # sample.  Use ROS 2 GoalStatus constants, not legacy action codes.
+            if result.status in (
+                GoalStatus.STATUS_SUCCEEDED,
+                GoalStatus.STATUS_CANCELED,
+            ):
+                pass  # Continue to the measured-contact check below.
             else:
                 result_msg = result.result
                 if result_msg.error_code == FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED:
                     self.error_message = "Velocity or acceleration limits exceeded. The required velocity to reach the target exceeds joint velocity limits. Enable robot in URcap to fix this."
                 else:
-                    self.error_message = f"Trajectory failed with status: {result.status}"
+                    self.error_message = (
+                        f"Trajectory failed with status: {result.status}, "
+                        f"error_code: {result_msg.error_code}, "
+                        f"error: {result_msg.error_string or 'none'}"
+                    )
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
                 return
@@ -911,6 +943,14 @@ class MoveDown(Node):
                     distance_to_target = abs(current_z - target_z)
                     
                     if distance_to_target < 0.001:  # Already at target (within 1mm)
+                        if self.mode == 'sim' and self.require_contact:
+                            self.error_message = (
+                                "Sim descent reached its endpoint without a measured contact. "
+                                "A regular insert must stop on the simulated physics wrench."
+                            )
+                            self.get_logger().error(self.error_message)
+                            rclpy.shutdown()
+                            return
                         self.get_logger().info("Movement completed successfully")
                         rclpy.shutdown()
                         return
@@ -960,6 +1000,8 @@ def main(args=None):
                        help='Target height in meters (optional, defaults to moving down in increments until force threshold)')
     parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation, "real" for real robot (default: real)')
+    parser.add_argument('--require-contact', action='store_true',
+                        help='sim insert: refuse an endpoint reached without a measured contact')
     parser.add_argument('--to-table', action='store_true',
                        help='placing a held part: go down until it touches the table (face-down floor = '
                             'closed fingertips 1 mm above the table instead of the 80 mm margin)')
@@ -967,11 +1009,12 @@ def main(args=None):
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
     
-    rclpy.init(args=args)
-    node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table)
+    init_ros(args=args)
+    node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table,
+                    require_contact=known_args.require_contact)
     
     try:
-        while rclpy.ok():
+        while rclpy.ok() and not node.finish_requested:
             rclpy.spin_once(node, timeout_sec=0.1)
 
             # Check for robot safety issues (protective stop, program stopped)
@@ -983,6 +1026,8 @@ def main(args=None):
                 node.moving = False
                 break
     except KeyboardInterrupt:
+        # an interrupted descent is not a landing (live check 2026-11-19: it reported "success")
+        node.error_message = node.error_message or "INTERRUPTED: move_down stopped by SIGINT/SIGTERM before it finished"
         node.get_logger().info("Move down interrupted by user")
     except Exception as e:
         node.get_logger().error(f"Error in move down: {e}")
@@ -994,6 +1039,8 @@ def main(args=None):
             rclpy.shutdown()
         except RuntimeError:
             pass  # Context already shut down
+    # the exit code says what the result says (review r4 P3-3: an interrupted descent exited 0)
+    sys.exit(1 if node.error_message else 0)
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,11 @@
+# Simulation copy of the calibrated v3.1 wrist-mounted D415 geometry (2026-11-18).
+# The authoritative live-cell file remains aruco_camera_localizer/config/robot_config.yaml.
+cam_offset_position: [-0.000801, 0.084790, 0.092719]
+cam_offset_quat: [0.25427, -0.00818, -0.00632, 0.96708]
+depth_scale: 1.0214
+depth_offset_m: -0.0048
+camera_width: 1280
+camera_height: 720
+camera_matrix: [910.13, 911.16, 619.57, 349.15]
+distortion_coeffs: [0.130074, -0.439479, -0.001453, -0.000549, 0.369498]
+table_z: -0.08

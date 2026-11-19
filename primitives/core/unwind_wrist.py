@@ -31,12 +31,13 @@ def main():
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
     import rclpy
+    from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
     from rclpy.action import ActionClient
     from sensor_msgs.msg import JointState
     from control_msgs.action import FollowJointTrajectory
     from trajectory_msgs.msg import JointTrajectoryPoint
     from builtin_interfaces.msg import Duration
-    rclpy.init(); n = rclpy.create_node('unwind_wrist'); st = {}
+    init_ros(); n = rclpy.create_node('unwind_wrist'); st = {}
     n.create_subscription(JointState, '/joint_states', lambda m: st.__setitem__('j', m), 10)
     t = time.time()
     while 'j' not in st and time.time() - t < 5:

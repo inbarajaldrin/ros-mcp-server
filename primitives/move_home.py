@@ -29,44 +29,44 @@ def check_holding_object_sim():
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-    from geometry_msgs.msg import PoseStamped
     from tf2_msgs.msg import TFMessage
-    from std_msgs.msg import Float64
+    from sensor_msgs.msg import JointState
     import numpy as np
-    from scipy.spatial.transform import Rotation as R
+    from primitives.shared.ik import dh_params, forward_kinematics
+    from primitives.shared.robot_contract import (
+        GRIPPER_JOINT, JOINT_STATES_TOPIC, arm_positions, rg2_width_m)
     import time
 
     rclpy.init()
     node = Node('move_home_grasp_check')
 
-    ee_data = {}
+    joint_data = {}
     object_poses = {}
     gripper_data = {}
 
     qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.VOLATILE, depth=10)
 
-    def ee_cb(msg):
-        ee_data['pos'] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
-        ee_data['quat'] = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
-                                     msg.pose.orientation.z, msg.pose.orientation.w])
-
     def obj_cb(msg):
         for tf in msg.transforms:
             object_poses[tf.child_frame_id] = tf
 
-    def width_cb(msg):
-        gripper_data['width'] = msg.data
+    def joints_cb(msg):
+        arm = arm_positions(msg)
+        values = dict(zip(msg.name, msg.position))
+        if arm is not None:
+            joint_data['arm'] = arm
+        if GRIPPER_JOINT in values:
+            gripper_data['width'] = 1000.0 * rg2_width_m(values[GRIPPER_JOINT])
 
-    node.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', ee_cb, qos)
+    node.create_subscription(JointState, JOINT_STATES_TOPIC, joints_cb, qos)
     node.create_subscription(TFMessage, '/objects_poses_sim', obj_cb, 10)
-    node.create_subscription(Float64, '/gripper_width_sim', width_cb, 10)
 
     # Spin briefly to collect data
     start = time.time()
     while time.time() - start < 2.0:
         rclpy.spin_once(node, timeout_sec=0.1)
-        if 'pos' in ee_data and object_poses and 'width' in gripper_data:
+        if 'arm' in joint_data and object_poses and 'width' in gripper_data:
             break
 
     holding = False
@@ -75,9 +75,9 @@ def check_holding_object_sim():
     if 'width' in gripper_data and gripper_data['width'] >= GRIPPER_HOLDING_MAX_WIDTH_MM:
         # Gripper is open — not holding anything regardless of proximity
         pass
-    elif 'pos' in ee_data and object_poses:
-        ee_rot = R.from_quat(ee_data['quat']).as_matrix()
-        gripper_center = ee_data['pos'] + ee_rot @ GRIPPER_CENTER_TOOL_OFFSET
+    elif 'arm' in joint_data and object_poses:
+        tool = forward_kinematics(dh_params, joint_data['arm'])
+        gripper_center = tool[:3, 3] + tool[:3, :3] @ GRIPPER_CENTER_TOOL_OFFSET
 
         for name, tf in object_poses.items():
             obj_pos = np.array([tf.transform.translation.x,
@@ -112,12 +112,14 @@ def _move_home_joint_space(duration_s: float = 5.0) -> tuple:
         "--positions", *(str(j) for j in HOME_JOINTS),
         "--duration", str(duration_s),
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=duration_s + 30)
-    except subprocess.TimeoutExpired:
-        return False, f"move_joints subprocess timeout (> {duration_s + 30}s)"
-    if proc.returncode != 0:
-        return False, f"move_joints failed: {proc.stderr.strip()[:300]}"
+    # SIGINT -> grace -> SIGTERM on a timeout or an interrupt, never SIGKILL: the child's goal_guard must get to
+    # cancel and confirm its arm goal (review r3 P3-3; subprocess.run SIGKILLs it 0.25 s after an interrupt).
+    from primitives.shared.child_process import run_child
+    returncode, _out, err, timed_out = run_child(cmd, timeout_s=duration_s + 30)
+    if timed_out:
+        return False, f"move_joints subprocess timeout (> {duration_s + 30}s); stopped with SIGINT"
+    if returncode != 0:
+        return False, f"move_joints failed: {(err or '').strip()[:300]}"
     return True, None
 
 

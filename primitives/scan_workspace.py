@@ -21,6 +21,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -621,7 +622,7 @@ class Survey(Node):
 
 def run_survey(target_name, out_path, target_xyz=None, image_dir=None, wide=False, close=False, aim_cam=False):
     from primitives.shared.ik import forward_kinematics, dh_params
-    rclpy.init()
+    init_ros()
     # realsense2_camera's colour topic (the stack's old /intel_camera_rgb_raw is gone); SURVEY_IMAGE_TOPIC overrides
     image_topic = os.environ.get('SURVEY_IMAGE_TOPIC', '/camera/camera/color/image_raw')
     node = Survey(target_name, image_topic if image_dir else None)
@@ -772,7 +773,7 @@ def main(args=None):
         output_result(result)
         sys.exit(1)
 
-    rclpy.init()
+    init_ros()
     node = ScanWorkspace(object_name=args.object_name)
 
     try:

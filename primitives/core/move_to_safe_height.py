@@ -8,6 +8,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -398,7 +399,7 @@ def main(args=None):
 
     known_args, remaining = parser.parse_known_args()
 
-    rclpy.init(args=remaining)
+    init_ros(args=remaining)
 
     # Pass custom height to constructor (None uses default 0.3)
     node = MoveToSafeHeight(height=known_args.height)

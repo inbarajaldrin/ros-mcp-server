@@ -10,6 +10,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
@@ -20,32 +21,64 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from primitives.shared.config import SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
 import argparse
 
 from primitives.shared.velocity_profiles import single_point, compute_duration
 from primitives.shared.config import TABLE_HEIGHT, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_COLLISION_MARGIN_FACEDOWN
-from primitives.shared.collision import compute_all_joint_positions, check_collision_with_table, segment_distance, check_self_collision, check_trajectory_collision
+from primitives.shared.collision import (compute_all_joint_positions, check_collision_with_table, segment_distance,
+    check_self_collision, check_trajectory_collision, check_ee_below_base, check_compact_configuration)
+from primitives.shared.ik import dh_params, forward_kinematics
+
+# Watchdog (seconds).  Execution counts from goal acceptance, never from planning.
+PLANNING_TIMEOUT_S = 180.0
+GOAL_ACCEPT_TIMEOUT_S = 10.0
+EXECUTION_TIMEOUT_MIN_S = 30.0          # the former whole-run timeout, now execution only
+EXECUTION_TIMEOUT_MARGIN_S = 10.0
+CANCEL_CONFIRM_TIMEOUT_S = 5.0
+GOAL_STATUS_SUCCEEDED, GOAL_STATUS_CANCELED, GOAL_STATUS_ABORTED = 4, 5, 6   # action_msgs/GoalStatus
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
+    arm_positions, public_arm_joints)
 
 GRASP_DISTANCE_THRESHOLD = 0.06  # 60mm — same as translate_object.py
 
+def clear_area_segment_refusal(a, b, is_last, table_margin, held_part):
+    """One joint-linear segment of a clear-area split / detour route: None, or a typed reason.  The arm against the
+    table and itself along the line (DH and physical models, both ends), an in-between stance against
+    rotate_object's stance rules (review r2 P2-3: EE below the base, compact; the extended-gripper rule is the
+    physical RG2 body inside check_self_collision), then the camera rule and the held-part rule.  The end stance
+    is the IK target, which passed its own rules."""
+    from primitives.shared.camera_up import camera_route_refusal
+    from primitives.shared.held_part_collision import held_part_route_refusal
+    if check_trajectory_collision(np.asarray(a, float), np.asarray(b, float),
+                                  z_threshold=TABLE_HEIGHT - table_margin, num_samples=20):
+        return "ARM_TABLE_OR_SELF_COLLISION"
+    if not is_last and (check_ee_below_base(b) or check_compact_configuration(b)):
+        return "ARM_STANCE_REFUSED: an in-between stance is below the base or compact"
+    return camera_route_refusal(a, b, near_table_end=is_last) or held_part_route_refusal(a, b, held_part)
+
+
 class MoveToClearArea(Node):
-    def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None):
+    def __init__(self, mode='move', object_name=None, robot_mode='real', target_xy=None,
+                 held_quat=None, grasp_id=None):
         super().__init__('move_to_clear_area')
         self.mode = mode  # 'move' or 'fix_orientation'
         self.object_name = object_name  # If set, verify grasp before moving
+        # Held-part route check (primitives/shared/held_part_collision.py): the chained held
+        # orientation (world xyzw) and grasp id place the part's CAD on the flange.
+        self.held_quat = held_quat
+        self.grasp_id = grasp_id
         self.robot_mode = robot_mode  # 'sim' or 'real'
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
+        self.joint_names = BARE_ARM_JOINTS
 
         # Action client for trajectory control
         self.action_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            ARM_ACTION
         )
 
         # Target gripper center position — converted to flange for IK via: flange = gc - R @ offset
@@ -73,6 +106,18 @@ class MoveToClearArea(Node):
         self.safety_mode = None  # Last received safety mode
         self.robot_program_running = None  # Last received program running state
         self.trajectory_sent = False  # Only check health after trajectory is dispatched
+        # Execution watchdog: the clock starts when the controller ACCEPTS the goal (planning is not
+        # execution); on timeout the goal is cancelled and the cancel confirmed, never left running.
+        self.trajectory_duration_s = None
+        self.started_at = time.monotonic()      # the caller's clock starts about here (process start + node init)
+        self.goal_sent_at = None
+        self.goal_accepted_at = None
+        self._goal_handle = None
+        self._send_goal_future = None
+        self._get_result_future = None
+        self._cancel_on_accept = False
+        self._cancelling = False
+        self._cancel_result_status = None
 
         # Success/failure tracking
         self.operation_success = False
@@ -87,17 +132,13 @@ class MoveToClearArea(Node):
             depth=10
         )
 
-        self.ee_pose_sub = self.create_subscription(
-            PoseStamped,
-            '/tcp_pose_broadcaster/pose',
-            self.ee_pose_callback,
-            qos_profile
-        )
+        self.ee_pose_sub = (None if DROIDSTACK_SIM else self.create_subscription(
+            PoseStamped, '/tcp_pose_broadcaster/pose', self.ee_pose_callback, qos_profile))
 
         # Subscriber for joint states to get current joint angles (use as IK seed)
         self.joint_state_sub = self.create_subscription(
             JointState,
-            '/joint_states',
+            JOINT_STATES_TOPIC,
             self.joint_state_callback,
             10
         )
@@ -163,18 +204,42 @@ class MoveToClearArea(Node):
     
     def joint_state_callback(self, msg: JointState):
         """Callback for joint state data"""
-        # Extract joint angles in the correct order
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            # Map joint names to positions in correct order
-            ordered_positions = []
-            for joint_name in self.joint_names:
-                if joint_name in joint_dict:
-                    ordered_positions.append(joint_dict[joint_name])
-            
-            if len(ordered_positions) == 6:
-                self.current_joint_angles = np.array(ordered_positions)
-                self.joint_angles_received = True
+        ordered_positions = arm_positions(msg)
+        if ordered_positions is not None:
+            self.current_joint_angles = np.array(ordered_positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, ordered_positions)
+                self.ee_position = transform[:3, 3].copy()
+                self.ee_quat = R.from_matrix(transform[:3, :3]).as_quat()
+                self.ee_pose_received = True
+
+    def _held_part_model(self, start_joints):
+        """The part this carry holds, for the route check; None for an empty gripper.
+
+        sim: measured from the simulator's ground-truth part pose and the measured joints.
+        real: the cell's chained held orientation + the CAD grasp point at the executed grasp
+        depth; with no orientation passed, the orientation-free CAD envelope (fail closed)."""
+        if not self.object_name:
+            return None
+        from primitives.shared import held_part_collision as hpc
+        from primitives.shared.config import held_tool_offset_for
+        T_f = forward_kinematics(dh_params, start_joints)
+        if self.robot_mode == 'sim' and self.object_name in self.object_poses:
+            tf = self.object_poses[self.object_name].transform
+            T_part = np.eye(4)
+            T_part[:3, :3] = R.from_quat([tf.rotation.x, tf.rotation.y, tf.rotation.z, tf.rotation.w]).as_matrix()
+            T_part[:3, 3] = [tf.translation.x, tf.translation.y, tf.translation.z]
+            return hpc.measured_held_part(self.object_name, np.linalg.inv(T_f) @ T_part)
+        grasp_id = self.grasp_id
+        if grasp_id is None:
+            from primitives.shared.config import default_grasp_id
+            grasp_id = default_grasp_id(self.object_name)
+        offset = float(held_tool_offset_for(self.object_name)[2])
+        if self.held_quat is not None:
+            return hpc.chained_held_part(self.object_name, grasp_id, self.held_quat, T_f[:3, 3],
+                                         R.from_matrix(T_f[:3, :3]).as_quat(), offset)
+        return hpc.envelope_held_part(self.object_name, grasp_id, offset)
 
     def _object_pose_cb(self, msg):
         """Callback for sim object poses."""
@@ -473,17 +538,16 @@ class MoveToClearArea(Node):
             # Send single merged trajectory
             goal = FollowJointTrajectory.Goal()
             traj = JointTrajectory()
-            traj.joint_names = self.joint_names
+            traj.joint_names = public_arm_joints()
             traj.points = trajectory_points
 
             goal.trajectory = traj
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             num_waypoints = len(trajectory_points)
             self.get_logger().info(f"Sending hover trajectory ({num_waypoints} waypoint{'s' if num_waypoints > 1 else ''})")
-            self._send_goal_future = self.action_client.send_goal_async(goal)
-            self._send_goal_future.add_done_callback(self.goal_response)
-            self.trajectory_sent = True
+            self._dispatch(goal)
             return  # Exit early for hover mode
         else:
             # Move mode: Check EE face direction and fix if needed
@@ -712,6 +776,13 @@ class MoveToClearArea(Node):
 
                 # Check each candidate for collision-free trajectory (no joint wrapping)
                 collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
+                from primitives.shared.held_part_collision import held_part_route_refusal
+                from primitives.shared.camera_up import camera_route_refusal
+                held_part = self._held_part_model(start_joints)
+                held_refusals = []
+                if held_part is not None:
+                    self.get_logger().info(
+                        f"Held-part route check: {held_part.name} ({held_part.source} model)")
 
                 for cost, candidate_joints, yaw in candidate_solutions:
                     target_joints = np.array(candidate_joints).copy()
@@ -725,8 +796,17 @@ class MoveToClearArea(Node):
 
                     traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
                     if not check_trajectory_collision(start_joints, target_joints, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
+                        # Hard rule (lead, 2026-11-19): the place-down stance is carried to the table, so its camera
+                        # side may not face the table; the mount/D415 keeps its clearance along the route.
+                        refusal = (camera_route_refusal(start_joints, target_joints, near_table_end=True)
+                                   or held_part_route_refusal(start_joints, target_joints, held_part))
+                        if refusal:
+                            held_refusals.append(refusal)
+                            self.get_logger().warn(f"Held-part route refused: {refusal}")
+                            continue
                         travel_distance = np.sum(np.abs(target_joints - start_joints))
-                        collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw))
+                        collision_free_trajectories.append((travel_distance, target_joints.copy(), cost, yaw,
+                                                            [target_joints.copy()]))
 
                 via = None
                 if not collision_free_trajectories:
@@ -742,12 +822,48 @@ class MoveToClearArea(Node):
                             continue
                         if (not check_trajectory_collision(start_joints, home, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())
                                 and not check_trajectory_collision(home, tj, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())):
-                            collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)), tj, cost, yaw))
+                            refusal = (camera_route_refusal(start_joints, home)
+                                       or camera_route_refusal(home, tj, near_table_end=True)
+                                       or held_part_route_refusal(start_joints, home, held_part)
+                                       or held_part_route_refusal(home, tj, held_part))
+                            if refusal:
+                                held_refusals.append(f"via home: {refusal}")
+                                self.get_logger().warn(f"Held-part route via home refused: {refusal}")
+                                continue
+                            collision_free_trajectories.append((np.sum(np.abs(home - start_joints)) + np.sum(np.abs(tj - home)),
+                                                                tj, cost, yaw, [home.copy(), tj.copy()]))
                     if collision_free_trajectories:
                         via = home
                         self.get_logger().info("Direct path collides - going through the home joints")
                 if not collision_free_trajectories:
+                    # Split by joint group (route_split; lead approval 2026-11-19): every segment a straight joint
+                    # line from where the last one ended, checked by the arm, camera and held-part rules alike.
+                    from primitives.shared.route_split import admissible_route
+                    from primitives.shared.config import HOME_JOINTS
+                    margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
+
+                    def segment_refusal(a, b, is_last):
+                        return clear_area_segment_refusal(a, b, is_last, margin, held_part)
+
+                    for cost, candidate_joints, yaw in candidate_solutions:
+                        tj = np.array(candidate_joints).copy()
+                        if check_collision_with_table(tj) or check_self_collision(tj):
+                            continue
+                        route, why = admissible_route(start_joints, tj, segment_refusal,
+                                                      vias=(np.array(HOME_JOINTS, dtype=float),))
+                        if route is None:
+                            held_refusals.append(f"split: {'; '.join(sorted(set(why))[:2])}")
+                            continue
+                        collision_free_trajectories.append(
+                            (float(sum(np.sum(np.abs(b - a)) for a, b in zip(route[:-1], route[1:]))),
+                             tj, cost, yaw, [np.asarray(w, float) for w in route[1:]]))
+                    if collision_free_trajectories:
+                        self.get_logger().info("Direct and via-home routes refused - joint-group split route")
+                if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
+                    if held_refusals:
+                        self.error_message = ("HELD_PART_ROUTE_REFUSED: every route to the clear area was refused for "
+                                              f"the held part or the camera ({'; '.join(held_refusals[:3])})")
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
@@ -757,11 +873,11 @@ class MoveToClearArea(Node):
                 # Sort by travel distance (shortest path first)
                 collision_free_trajectories.sort(key=lambda x: x[0])
 
-                shortest_travel, target_joints, best_cost, best_yaw = collision_free_trajectories[0]
+                shortest_travel, target_joints, best_cost, best_yaw, route_legs = collision_free_trajectories[0]
                 self.get_logger().info(f"Found {len(collision_free_trajectories)} collision-free trajectories")
                 self.get_logger().info(f"Using shortest path: travel={np.degrees(shortest_travel):.1f}deg, IK cost={best_cost:.4f}, yaw={best_yaw:.1f}°")
 
-                legs = [target_joints] if via is None else [via, target_joints]
+                legs = route_legs
                 trajectory_points = []
                 t, prev = 0.0, start_joints
                 for leg in legs:
@@ -782,19 +898,15 @@ class MoveToClearArea(Node):
                 # Create and send trajectory
                 goal = FollowJointTrajectory.Goal()
                 traj = JointTrajectory()
-                traj.joint_names = self.joint_names
+                traj.joint_names = public_arm_joints()
                 traj.points = trajectory_points
 
                 goal.trajectory = traj
-                goal.goal_time_tolerance = Duration(sec=1)
+                if not DROIDSTACK_SIM:
+                    goal.goal_time_tolerance = Duration(sec=1)
 
-                self.get_logger().info("Trajectory sent and accepted")
-                self._send_goal_future = self.action_client.send_goal_async(
-                    goal,
-                    feedback_callback=self.feedback_callback
-                )
-                self._send_goal_future.add_done_callback(self.goal_response)
-                self.trajectory_sent = True
+                self.get_logger().info("Sending trajectory")
+                self._dispatch(goal, feedback_callback=self.feedback_callback)
 
             except Exception as e:
                 self.error_message = f"Failed to compute IK: {e}"
@@ -838,6 +950,77 @@ class MoveToClearArea(Node):
                 if max_error > 0.1:  # More than 0.1 rad error
                     self.get_logger().warn(f"Large trajectory tracking error: {np.degrees(max_error):.1f}deg")
 
+    def _dispatch(self, goal, feedback_callback=None):
+        """Send the trajectory goal; the watchdog's execution clock starts at acceptance.  A route whose watchdog
+        limit would end after the caller's outer timeout is refused unsent: the caller's kill must never be what
+        stops a running goal."""
+        from primitives.shared.config import CLEAR_AREA_CALLER_TIMEOUT_S, CHILD_STOP_GRACE_S
+        last = goal.trajectory.points[-1].time_from_start
+        self.trajectory_duration_s = float(last.sec) + float(last.nanosec) * 1e-9
+        worst_end = (time.monotonic() - self.started_at + GOAL_ACCEPT_TIMEOUT_S
+                     + max(EXECUTION_TIMEOUT_MIN_S, self.trajectory_duration_s + EXECUTION_TIMEOUT_MARGIN_S)
+                     + CANCEL_CONFIRM_TIMEOUT_S)
+        if worst_end > CLEAR_AREA_CALLER_TIMEOUT_S - CHILD_STOP_GRACE_S:
+            self.error_message = (f"ROUTE_OUTLASTS_CALLER_TIMEOUT: a {self.trajectory_duration_s:.1f}s trajectory after "
+                                  f"{time.monotonic() - self.started_at:.0f}s of planning could run to {worst_end:.0f}s, past "
+                                  f"the caller's {CLEAR_AREA_CALLER_TIMEOUT_S:.0f}s timeout less its stop grace; not sent")
+            self.get_logger().error(self.error_message)
+            self.operation_success = False
+            self.operation_complete = True
+            return
+        if feedback_callback is None:
+            self._send_goal_future = self.action_client.send_goal_async(goal)
+        else:
+            self._send_goal_future = self.action_client.send_goal_async(goal, feedback_callback=feedback_callback)
+        self._send_goal_future.add_done_callback(self.goal_response)
+        self.goal_sent_at = time.monotonic()
+        self.trajectory_sent = True
+
+    def watchdog_refusal(self, now, started_at):
+        """A typed timeout, or None.  Planning (no goal sent) is bounded by PLANNING_TIMEOUT_S and moves
+        nothing; a sent goal must be accepted within GOAL_ACCEPT_TIMEOUT_S; an accepted goal must finish
+        within its own duration plus EXECUTION_TIMEOUT_MARGIN_S, and at least EXECUTION_TIMEOUT_MIN_S."""
+        if self.goal_accepted_at is not None:
+            limit = max(EXECUTION_TIMEOUT_MIN_S, (self.trajectory_duration_s or 0.0) + EXECUTION_TIMEOUT_MARGIN_S)
+            if now - self.goal_accepted_at > limit:
+                return (f"EXECUTION_TIMEOUT: the trajectory ({self.trajectory_duration_s:.1f}s) did not finish "
+                        f"{limit:.0f}s after the controller accepted it")
+            return None
+        if self.goal_sent_at is not None:
+            if now - self.goal_sent_at > GOAL_ACCEPT_TIMEOUT_S:
+                return f"GOAL_ACCEPT_TIMEOUT: no goal response {GOAL_ACCEPT_TIMEOUT_S:.0f}s after sending"
+            return None
+        if now - started_at > PLANNING_TIMEOUT_S:
+            return f"PLANNING_TIMEOUT: no trajectory planned within {PLANNING_TIMEOUT_S:.0f}s (nothing was sent)"
+        return None
+
+    def _spin_until(self, future, timeout_s):
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        return future.done()
+
+    def cancel_active_goal(self, wait_s=CANCEL_CONFIRM_TIMEOUT_S):
+        """Cancel the accepted goal and wait for the controller to confirm it stopped.  Returns None when
+        the goal ended (canceled, or finished meanwhile), else a typed CANCEL_UNCONFIRMED.  A goal still
+        awaiting its response is cancelled as soon as it is accepted."""
+        if self._goal_handle is None:
+            if self.goal_sent_at is None:
+                return None
+            self._cancel_on_accept = True
+            if not self._spin_until(self._send_goal_future, wait_s):
+                return "CANCEL_UNCONFIRMED: the goal response never came; the arm may be moving - stop it"
+            if self._goal_handle is None:
+                return None                                   # rejected: nothing runs
+        self._cancelling = True
+        cancel_future = self._goal_handle.cancel_goal_async()
+        if not self._spin_until(cancel_future, wait_s):
+            return "CANCEL_UNCONFIRMED: no cancel response; the arm may be moving - stop it"
+        if self._cancel_result_status is None and self._get_result_future is not None:
+            self._spin_until(self._get_result_future, wait_s)
+        if self._cancel_result_status in (GOAL_STATUS_CANCELED, GOAL_STATUS_SUCCEEDED, GOAL_STATUS_ABORTED):
+            return None
+        return (f"CANCEL_UNCONFIRMED: goal status {self._cancel_result_status} after the cancel; "
+                "the arm may be moving - stop it")
+
     def goal_response(self, future):
         """Handle goal response"""
         goal_handle = future.result()
@@ -853,11 +1036,22 @@ class MoveToClearArea(Node):
             rclpy.shutdown()
             return
 
+        self._goal_handle = goal_handle
+        self.goal_accepted_at = time.monotonic()
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.goal_result)
+        if self._cancel_on_accept:
+            self.get_logger().error("Goal accepted after the watchdog fired: cancelling it")
 
     def goal_result(self, future):
         """Handle goal result"""
+        if self._cancelling:
+            # the watchdog cancelled this goal: record how it ended; main() reports and shuts down
+            try:
+                self._cancel_result_status = future.result().status
+            except Exception:
+                self._cancel_result_status = None
+            return
         try:
             result = future.result()
             if result.status == 4:  # SUCCEEDED
@@ -938,6 +1132,10 @@ def main(args=None):
                        help='Object name for grasp verification (checks gripper is holding object)')
     parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'],
                        help='Robot mode: sim varies placement Y to avoid stacking (default: real)')
+    parser.add_argument('--held-quat', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'), default=None,
+                       help="Held part's chained world orientation (xyzw) for the held-part route check")
+    parser.add_argument('--grasp-id', type=int, default=None,
+                       help="Grasp id the part is held by (default: the assembly's grasp id for it)")
 
     args = parser.parse_args()
 
@@ -947,14 +1145,14 @@ def main(args=None):
     else:
         mode = 'move'  # Default mode
 
-    rclpy.init()
+    init_ros()
     node = MoveToClearArea(mode=mode, object_name=args.object_name,
-                           robot_mode=args.mode, target_xy=args.target_xy)
+                           robot_mode=args.mode, target_xy=args.target_xy,
+                           held_quat=args.held_quat, grasp_id=args.grasp_id)
     try:
         # Spin until operation is complete with timeout
         import time
-        start_time = time.time()
-        timeout_sec = 30.0  # 30 second timeout for trajectory execution
+        start_time = time.monotonic()
 
         while rclpy.ok() and not node.operation_complete:
             rclpy.spin_once(node, timeout_sec=0.1)
@@ -968,10 +1166,10 @@ def main(args=None):
                 node.operation_complete = True
                 break
 
-            # Check for timeout
-            elapsed = time.time() - start_time
-            if elapsed > timeout_sec:
-                node.error_message = f"Trajectory execution timed out after {timeout_sec:.0f}s - robot may have hit velocity limits or stalled"
+            timeout = node.watchdog_refusal(time.monotonic(), start_time)
+            if timeout:
+                unconfirmed = node.cancel_active_goal()
+                node.error_message = timeout + (f"; {unconfirmed}" if unconfirmed else "; goal cancelled")
                 node.get_logger().error(node.error_message)
                 node.operation_success = False
                 node.operation_complete = True
@@ -979,11 +1177,20 @@ def main(args=None):
 
     except KeyboardInterrupt:
         node.error_message = "Operation cancelled by user (Ctrl+C)"
+        unconfirmed = node.cancel_active_goal() if node.trajectory_sent and not node.operation_complete else None
+        if unconfirmed:
+            node.error_message += f"; {unconfirmed}"
         node.get_logger().warn(node.error_message)
         node.operation_success = False
         node.operation_complete = True
     except Exception as e:
         node.error_message = f"Error during spin: {e}"
+        try:
+            unconfirmed = node.cancel_active_goal() if node.trajectory_sent and not node.operation_complete else None
+        except Exception as cancel_error:
+            unconfirmed = f"CANCEL_UNCONFIRMED: {cancel_error}; the arm may be moving - stop it"
+        if unconfirmed:
+            node.error_message += f"; {unconfirmed}"
         node.get_logger().error(node.error_message)
         node.operation_success = False
         node.operation_complete = True

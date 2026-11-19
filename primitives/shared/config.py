@@ -26,9 +26,27 @@ GRASP_TIP_CLEARANCE_M = 0.002       # fingertips stay at least this far above th
 # FMB_CAD_DATA overrides it (utils/data_path_finder.py applies the same rule).
 CAD_DATA_DIR = Path(os.environ.get('FMB_CAD_DATA') or Path(__file__).resolve().parents[2] / 'assets' / 'cad_data')
 _GRASP_POINTS_DIR = str(CAD_DATA_DIR / 'grasp_points')
-# The camera localizer's config (hand-eye mount, intrinsics) in the ROS 2 workspace; FMB_ROS_WS names the workspace.
-LOCALIZER_CONFIG = str(Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Desktop' / 'ros2_ws')
-                       / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
+# The camera localizer's config (hand-eye mount, intrinsics, depth correction) in the ROS 2 workspace; FMB_ROS_WS
+# names the workspace.  FMB_LOCALIZER_CONFIG pins a frozen copy for an isolated simulator and is honoured ONLY with
+# ROS_MCP_MODE=sim: a real run always reads the live calibration (a pin leaked from a sim shell is ignored, loudly).
+_LIVE_LOCALIZER_CONFIG = str(
+    Path(os.environ.get('FMB_ROS_WS') or Path.home() / 'Desktop' / 'ros2_ws')
+    / 'src' / 'aruco_camera_localizer' / 'config' / 'robot_config.yaml')
+
+
+def _localizer_config(env=os.environ):
+    pinned = env.get('FMB_LOCALIZER_CONFIG')
+    if not pinned:
+        return _LIVE_LOCALIZER_CONFIG
+    if env.get('ROS_MCP_MODE') == 'sim':
+        return pinned
+    import sys
+    print(f"WARNING: FMB_LOCALIZER_CONFIG={pinned} IGNORED (ROS_MCP_MODE is not sim); using the live localizer "
+          f"config {_LIVE_LOCALIZER_CONFIG}", file=sys.stderr)
+    return _LIVE_LOCALIZER_CONFIG
+
+
+LOCALIZER_CONFIG = _localizer_config()
 
 
 def _depth_correction():
@@ -372,6 +390,13 @@ PICK_STATION_POSE = [-0.330, -0.385, 0.404, 0, 180, 0]  # EE tool frame
 #   wrist_1 = -90°        wrist neutral so gripper hangs aligned
 #   wrist_2 = -90°        gripper opening axis aligned with workspace
 #   wrist_3 = 0°          no final rotation
+# A caller's outer timeout for move_to_clear_area (s).  It must exceed the primitive's own watchdog so the primitive
+# cancels its goal itself; move_to_clear_area refuses a route whose planning + accept + execution limit would not
+# fit inside it (review r2).  Callers stop it with SIGINT first, then SIGTERM, never SIGKILL.
+CLEAR_AREA_CALLER_TIMEOUT_S = 300.0
+CHILD_STOP_GRACE_S = 60.0           # SIGINT -> SIGTERM grace for a step the caller stops: longer than any
+                                    # child's own settle (translate_object: 30 s cleanup + 10 s, review r4)
+
 HOME_JOINTS = [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
 
 # UR5e DH parameters: (theta_offset, d, a, alpha)
@@ -452,6 +477,19 @@ def get_gripper_width_mm(object_name: str, grasp_id: int,
     Returns default_mm (caller-supplied) if entry not found, or None if the
     caller didn't provide a default and the entry is missing."""
     return _load_grasp_width_table().get((object_name, int(grasp_id)), default_mm)
+
+
+def default_grasp_id(object_name: str) -> int:
+    """The grasp id an assembly JSON names for a part (fmb1/2/3_assembly.json), 1 when none does."""
+    for path in _ASSEMBLY_JSON_PATHS:
+        try:
+            d = _json.load(open(path))
+            for step in d.get("assembly_order", []):
+                if step.get("object_name") == object_name and step.get("grasp_id") is not None:
+                    return int(step["grasp_id"])
+        except Exception:
+            pass
+    return 1
 
 
 def get_base_for_part(object_name: str) -> str | None:

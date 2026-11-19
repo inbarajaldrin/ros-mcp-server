@@ -43,6 +43,81 @@ def robot_safety_status(host: str = '192.168.1.111', timeout: float = 1.5) -> Op
         return None
 
 
+def dashboard_stop(host: str = '192.168.1.111', timeout: float = 3.0) -> bool:
+    """Send the UR dashboard `stop` (halts the running program, so no trajectory can continue) and confirm the reply
+    (stop_run.sh step 0).  True only when the dashboard answered that it stopped."""
+    import socket
+    try:
+        with socket.create_connection((host, 29999), timeout=timeout) as s_:
+            s_.settimeout(timeout)
+            s_.recv(1024)                                      # banner
+            s_.sendall(b'stop\n')
+            reply = s_.recv(1024).decode(errors='replace').strip()
+            return reply.lower().startswith('stopped')
+    except Exception:
+        return False
+
+
+_DASHBOARD_STOPPED: Optional[str] = None     # set once cell_io sent the dashboard `stop` (the program is down)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _wait_group(proc, pgid: int, seconds: float) -> bool:
+    """Wait until EVERY process of the group is gone (reaping the leader), at most `seconds`.  True when gone."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        proc.poll()                                            # reap the leader, so it does not count as alive
+        if not _group_alive(pgid):
+            return True
+        time.sleep(0.1)
+    proc.poll()
+    return not _group_alive(pgid)
+
+
+def _stop_group(proc, grace_s: float, label: str = '') -> str:
+    """Stop a step's process group in the CLAUDE.md order, watching EVERY process of the group, not only the leader
+    (review r4: a grandchild such as prismatic may still be in its safe-state cleanup after the leader exits):
+    SIGINT (each primitive's goal_guard cancels and confirms its arm goal; cleanups run), SIGTERM after the grace;
+    and only if some process still lives after a second grace - stuck outside Python - the dashboard `stop`, and
+    SIGKILL only once the dashboard confirms the arm is stopped.  Any dashboard stop takes the external-control
+    program down, so later steps are refused until stop_run.sh (_DASHBOARD_STOPPED).  Returns how it ended; a
+    'stuck' outcome leaves the processes alive and must not block the caller."""
+    global _DASHBOARD_STOPPED
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        return 'gone'
+    for sig, name in ((signal.SIGINT, 'SIGINT'), (signal.SIGTERM, 'SIGTERM')):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return 'gone'
+        if _wait_group(proc, pgid, grace_s):
+            return name
+    confirmed = dashboard_stop()
+    _DASHBOARD_STOPPED = (f"cell_io sent the dashboard `stop` during '{label}' "
+                          f"({'confirmed' if confirmed else 'NOT confirmed'}); the external-control program is down")
+    if confirmed:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _wait_group(proc, pgid, 5.0)
+        return 'SIGKILL after a confirmed dashboard stop'
+    print(f"!!! {label}: the step is stuck after SIGINT and SIGTERM and the dashboard `stop` was NOT confirmed - "
+          f"not killing it; USE THE PENDANT / E-STOP if the arm is moving\n", end='', flush=True)
+    return 'stuck, dashboard stop unconfirmed'
+
+
 _RESULT_RE = re.compile(r'__RESULT_JSON__\s*(.*?)\s*__END_RESULT_JSON__', re.DOTALL)
 
 
@@ -146,8 +221,13 @@ PROGRAM_DROPPED = ('goal rejected', 'robot_program_running=False', 'External con
 def run_subprocess(argv: list[str], label: str, timeout_s: int = 600, log_fh=None) -> dict:
     """_run_subprocess_once, retried once after re-sending the external-control program when the failure was the
     program dropping (2026-10-20: "Connection to reverse interface dropped" after a good move, no safety event)."""
+    if _DASHBOARD_STOPPED:
+        return {"result": "failure", "label": label,
+                "error": f"DASHBOARD_STOPPED: {_DASHBOARD_STOPPED} - run compliant_insertion_studio/scripts/"
+                         f"stop_run.sh (re-sends the program, restores the controllers) before any further step"}
     r = _run_subprocess_once(argv, label, timeout_s, log_fh)
-    if r.get('result') == 'failure' and any(k in json.dumps(r) for k in PROGRAM_DROPPED) and not _SAFETY_STOP:
+    if (r.get('result') == 'failure' and any(k in json.dumps(r) for k in PROGRAM_DROPPED) and not _SAFETY_STOP
+            and not _DASHBOARD_STOPPED):
         rr = subprocess.run(['python3', '-m', 'primitives.core.ensure_program'], capture_output=True, text=True,
                             timeout=180, env=make_env(), cwd=str(REPO_ROOT))
         msg = f"  [program] dropped during '{label}' -> re-sent ({'ok' if rr.returncode == 0 else 'FAILED'}), retrying once"
@@ -187,12 +267,12 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
     import threading
     timed_out = threading.Event()
 
+    stop_outcome: list[str] = []
+
     def _expire():
+        from primitives.shared.config import CHILD_STOP_GRACE_S
         timed_out.set()
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            proc.kill()
+        stop_outcome.append(_stop_group(proc, CHILD_STOP_GRACE_S, label))
     watchdog = threading.Timer(timeout_s, _expire)
     watchdog.daemon = True
     watchdog.start()
@@ -219,29 +299,46 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
                 return
     threading.Thread(target=_watch_safety, daemon=True).start()
     try:
-        for line in iter(proc.stdout.readline, ''):
-            print(line, end='', flush=True)
-            captured.append(line)
-            if log_fh is not None:
-                log_fh.write(line)
-                log_fh.flush()
-            if _INTERRUPTED:
+        # Read with select, not a blocking readline: a step left 'stuck' (dashboard stop unconfirmed) must not hang
+        # the replay on a pipe its grandchildren keep open (review r4 P3-1).
+        import select
+        fd, pending = proc.stdout.fileno(), b''
+        while True:
+            if _INTERRUPTED or (stop_outcome and stop_outcome[0].startswith('stuck')):
                 break
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            *lines, pending = pending.split(b'\n')
+            for raw in lines:
+                line = raw.decode(errors='replace') + '\n'
+                print(line, end='', flush=True)
+                captured.append(line)
+                if log_fh is not None:
+                    log_fh.write(line)
+                    log_fh.flush()
+        if pending:
+            captured.append(pending.decode(errors='replace'))
         if timed_out.is_set():
+            watchdog.join()        # bounded: two graces + the dashboard stop; never return mid-escalation
             _ACTIVE_PROC = None
-            msg = f"!!! subprocess timeout after {timeout_s}s — killed pg\n"
+            how = stop_outcome[0] if stop_outcome else 'stopping'
+            msg = f"!!! subprocess timeout after {timeout_s}s — stopped ({how})\n"
             print(msg, end='', flush=True)
             if log_fh is not None:
                 log_fh.write(msg)
             return {"result": "failure",
-                    "error": f"subprocess timeout after {timeout_s}s",
+                    "error": f"subprocess timeout after {timeout_s}s; stop: {how}"
+                             + (f"; {_DASHBOARD_STOPPED}" if _DASHBOARD_STOPPED else ""),
                     "label": label}
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            proc.kill()
+        from primitives.shared.config import CHILD_STOP_GRACE_S
+        _stop_group(proc, CHILD_STOP_GRACE_S, label)
     finally:
         watchdog.cancel()
         done_ev.set()

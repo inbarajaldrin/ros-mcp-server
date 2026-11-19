@@ -35,6 +35,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -46,15 +47,10 @@ import argparse
 import math
 import json
 from primitives.shared.velocity_profiles import single_point, compute_duration
+from primitives.shared.robot_contract import (ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM,
+    JOINT_STATES_TOPIC, arm_positions, public_arm_joints)
 
-JOINT_NAMES = [
-    "shoulder_pan_joint",   # 0
-    "shoulder_lift_joint",  # 1
-    "elbow_joint",          # 2
-    "wrist_1_joint",        # 3
-    "wrist_2_joint",        # 4
-    "wrist_3_joint"         # 5
-]
+JOINT_NAMES = BARE_ARM_JOINTS
 
 JOINT_ALIASES = {
     "shoulder_pan": 0, "pan": 0, "sp": 0,
@@ -72,7 +68,7 @@ PRESETS = {
     "forward": [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0],
 }
 
-ACTION_SERVER = '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+ACTION_SERVER = ARM_ACTION
 DEFAULT_DURATION = 5.0
 
 
@@ -117,7 +113,7 @@ class MoveJoints(Node):
         self.joint_angles_received = False
 
         self.joint_sub = self.create_subscription(
-            JointState, '/joint_states', self.joint_state_callback, 10
+            JointState, JOINT_STATES_TOPIC, self.joint_state_callback, 10
         )
         self.client = ActionClient(self, FollowJointTrajectory, ACTION_SERVER)
 
@@ -141,13 +137,9 @@ class MoveJoints(Node):
 
     def joint_state_callback(self, msg):
         if len(msg.name) >= 6 and len(msg.position) >= 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = []
-            for name in JOINT_NAMES:
-                if name in joint_dict:
-                    positions.append(joint_dict[name])
-                else:
-                    return
+            positions = arm_positions(msg)
+            if positions is None:
+                return
             self.current_joint_angles = np.array(positions)
             self.joint_angles_received = True
 
@@ -198,10 +190,11 @@ class MoveJoints(Node):
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory(
-            joint_names=JOINT_NAMES,
+            joint_names=public_arm_joints(),
             points=trajectory_points
         )
-        goal.goal_time_tolerance = Duration(sec=1)
+        if not DROIDSTACK_SIM:
+            goal.goal_time_tolerance = Duration(sec=1)
 
         self.get_logger().info(
             f"Sending trajectory ({len(trajectory_points)} waypoints, {self.duration}s)")
@@ -276,7 +269,7 @@ class MoveJoints(Node):
 
 def run_move_joints(target_positions, duration=DEFAULT_DURATION):
     """Run joint movement. Returns (success, error, current_angles)."""
-    rclpy.init()
+    init_ros()
     node = MoveJoints(target_positions, duration)
     success = False
     error = None
@@ -284,7 +277,8 @@ def run_move_joints(target_positions, duration=DEFAULT_DURATION):
 
     try:
         if not node.shutdown_called:
-            rclpy.spin(node)
+            while rclpy.ok():                 # rclpy.spin, in 0.1 s waits: a SIGINT/SIGTERM is serviced
+                rclpy.spin_once(node, timeout_sec=0.1)   # within 0.1 s (goal_guard, review r2)
         success = node.success
         error = node.error
         current_angles = node.current_joint_angles
@@ -308,7 +302,7 @@ def run_move_joints(target_positions, duration=DEFAULT_DURATION):
 
 def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
     """Rotate a single joint by a relative angle. Returns (success, error)."""
-    rclpy.init()
+    init_ros()
 
     # We need to read current angles first, then compute target
     node = Node('rotate_joint_reader')
@@ -316,17 +310,13 @@ def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
 
     def cb(msg):
         if len(msg.name) >= 6 and len(msg.position) >= 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = []
-            for name in JOINT_NAMES:
-                if name in joint_dict:
-                    positions.append(joint_dict[name])
-                else:
-                    return
+            positions = arm_positions(msg)
+            if positions is None:
+                return
             joint_sub_data['angles'] = np.array(positions)
             joint_sub_data['received'] = True
 
-    node.create_subscription(JointState, '/joint_states', cb, 10)
+    node.create_subscription(JointState, JOINT_STATES_TOPIC, cb, 10)
 
     timeout = 0
     while rclpy.ok() and not joint_sub_data['received'] and timeout < 100:
@@ -350,7 +340,8 @@ def run_rotate_joint(joint_index, angle_degrees, duration=DEFAULT_DURATION):
 
     try:
         if not move_node.shutdown_called:
-            rclpy.spin(move_node)
+            while rclpy.ok():                 # rclpy.spin, in 0.1 s waits: a SIGINT/SIGTERM is serviced
+                rclpy.spin_once(move_node, timeout_sec=0.1)   # within 0.1 s (goal_guard, review r2)
         success = move_node.success
         error = move_node.error
     except KeyboardInterrupt:

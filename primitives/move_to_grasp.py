@@ -24,6 +24,7 @@ import re
 # Heavy imports follow — only loaded when run as __main__
 
 import rclpy
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r2)
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -48,6 +49,9 @@ from primitives.shared.velocity_profiles import s_curve_profile, single_point, c
 from primitives.shared.fold_symmetry import load_symmetry_data, find_closest_canonical_quaternion
 from utils.data_path_finder import get_symmetry_dir
 from primitives.shared.config import TABLE_HEIGHT, SAFE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET
+from primitives.shared.robot_contract import (
+    ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, GRIPPER_JOINT,
+    JOINT_STATES_TOPIC, arm_positions, public_arm_joints, rg2_width_m)
 BELOW_TABLE_REJECT_M = 0.010   # an object pose centre this far below the table is a misread
 STEP2_JUMP_MAX_M = 0.020       # step-2 target this far (xy) from the step-1 hover: re-hover, never descend
 MISREAD_WAIT_ATTEMPTS = 60     # detection attempts (0.5 s each) while only below-table misreads arrive (streaks: 8.4 s, ~15 s)
@@ -274,13 +278,11 @@ def fix_orientation_inprocess(node, target_xy, logger):
     # Send trajectory via existing action client
     goal = FollowJointTrajectory.Goal()
     traj = JointTrajectory()
-    traj.joint_names = [
-        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-    ]
+    traj.joint_names = public_arm_joints()
     traj.points = trajectory_points
     goal.trajectory = traj
-    goal.goal_time_tolerance = Duration(sec=1)
+    if not DROIDSTACK_SIM:
+        goal.goal_time_tolerance = Duration(sec=1)
 
     n_wp = len(trajectory_points)
     logger.info(f"fix-orient: sending trajectory ({n_wp} waypoint{'s' if n_wp > 1 else ''})")
@@ -473,10 +475,7 @@ class DirectObjectMove(Node):
         # Store current joint angles (for IK seeding)
         self.current_joint_angles = None
         self.joint_angles_received = False
-        self.joint_names = [
-            "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-            "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
-        ]
+        self.joint_names = BARE_ARM_JOINTS
 
         # Subscribe to object poses topic (TFMessage)
         self.pose_sub = self.create_subscription(
@@ -501,7 +500,7 @@ class DirectObjectMove(Node):
             qos_volatile
         )
         self.joint_state_sub = self.create_subscription(
-            JointState, '/joint_states', self.joint_state_callback, qos_volatile
+            JointState, JOINT_STATES_TOPIC, self.joint_state_callback, qos_volatile
         )
 
         # Force/torque monitoring for step 2 collision detection (soft stop)
@@ -552,11 +551,8 @@ class DirectObjectMove(Node):
         self._hover_xy = None   # step-1 target xy, to catch a step-2 target that jumped
         self._rehovers = 0
         self._gp_below_table = 0
-        gripper_topic = '/gripper_width_sim' if self.mode == 'sim' else '/gripper_width_offset'
-        gripper_msg_type = Float64 if self.mode == 'sim' else Float32
-        self.gripper_width_sub = self.create_subscription(
-            gripper_msg_type, gripper_topic, self._gripper_width_callback, 10
-        )
+        self.gripper_width_sub = (None if DROIDSTACK_SIM else self.create_subscription(
+            Float32, '/gripper_width_offset', self._gripper_width_callback, 10))
         # Subscribe to grasp points topic if grasp_id is provided
         if self.grasp_id is not None:
             self.grasp_points_sub = self.create_subscription(
@@ -645,7 +641,7 @@ class DirectObjectMove(Node):
         self.action_client = ActionClient(
             self,
             FollowJointTrajectory,
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            ARM_ACTION
         )
         
         mode_str = self.mode.upper()
@@ -840,12 +836,24 @@ class DirectObjectMove(Node):
 
     def joint_state_callback(self, msg):
         """Store current joint angles in standard order for IK seeding"""
-        if len(msg.name) == 6 and len(msg.position) == 6:
-            joint_dict = dict(zip(msg.name, msg.position))
-            positions = [joint_dict.get(name, 0) for name in self.joint_names]
-            if len(positions) == 6:
-                self.current_joint_angles = np.array(positions)
-                self.joint_angles_received = True
+        positions = arm_positions(msg)
+        if positions is not None:
+            self.current_joint_angles = np.array(positions)
+            self.joint_angles_received = True
+            if DROIDSTACK_SIM:
+                transform = forward_kinematics(dh_params, positions)
+                pose = PoseStamped()
+                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = transform[:3, 3]
+                quat = R.from_matrix(transform[:3, :3]).as_quat()
+                pose.pose.orientation.x, pose.pose.orientation.y = quat[:2]
+                pose.pose.orientation.z, pose.pose.orientation.w = quat[2:]
+                self.current_ee_pose = pose
+                self.ee_pose_received = True
+        if DROIDSTACK_SIM:
+            values = dict(zip(msg.name, msg.position))
+            if GRIPPER_JOINT in values:
+                self._gripper_width_callback(type('Width', (), {
+                    'data': 1000.0 * rg2_width_m(values[GRIPPER_JOINT])})())
 
     def _force_callback(self, msg: WrenchStamped):
         """Force/torque callback (WrenchStamped for both sim and real)"""
@@ -1780,15 +1788,13 @@ class DirectObjectMove(Node):
 
             # Send trajectory directly (bypass execute_trajectory dict format)
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = [
-                'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-                'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
-            ]
+            traj_msg.joint_names = public_arm_joints()
             traj_msg.points = traj_points
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             # 2026-10-07: a visibility open followed by a retreat that COMPLETES (no
             # re-detection mid-retreat) never restored the pre-grasp width, so step 2
@@ -1814,6 +1820,12 @@ class DirectObjectMove(Node):
             # axis, which flips the camera side of the reorient that follows. Choose it
             # here — rotate_object can only pick among reorients this grasp allows.
             cam_pref = self._camera_up_wrist(target_rot, target_rot_alt)
+            if cam_pref == 'refuse':
+                self.error_message = ("CAMERA_TOWARD_TABLE: neither grasp wrist allows a reorient with the camera "
+                                      "away from the table (camera_up hard rule)")
+                self.get_logger().error(self.error_message)
+                self.should_exit = True
+                return
 
             # Skip sol_b if sol_a is good enough (close to current joints)
             sol_b = None
@@ -1837,9 +1849,12 @@ class DirectObjectMove(Node):
                     candidates.append(sol_b)
                 preferred = {'a': sol_a, 'b': sol_b}.get(cam_pref)
                 if cam_pref is not None and preferred is None:
-                    self.get_logger().warn(
-                        "Camera-up wrist has no IK solution — falling back to the other wrist. "
-                        "The reorient after this grasp will face the camera toward the table.")
+                    # Hard rule (lead, 2026-11-19): never take the wrist whose reorient faces the camera to the table.
+                    self.error_message = ("CAMERA_TOWARD_TABLE: the camera-up grasp wrist has no IK solution; the "
+                                          "other wrist would reorient with the camera toward the table")
+                    self.get_logger().error(self.error_message)
+                    self.should_exit = True
+                    return
                 if preferred is not None:
                     joint_angles = preferred
                     chosen_yaw = yaw_degrees if cam_pref == 'a' else yaw_alt
@@ -1934,6 +1949,9 @@ class DirectObjectMove(Node):
         self.get_logger().info(
             f"Camera-up check (base {self.base_name}): reorient camera_z yaw {rpy_a[2]:.1f}° "
             f"-> {cz[0]:+.2f}, yaw {rpy_b[2]:.1f}° -> {cz[1]:+.2f}")
+        from primitives.shared.camera_up import SIDE_RULE_CAMERA_Z_MIN
+        if max(cz) < SIDE_RULE_CAMERA_Z_MIN:
+            return 'refuse'      # every wrist leads to a camera-toward-table reorient (hard rule, 2026-11-19)
         if abs(cz[0] - cz[1]) < 0.2:
             return None
         return 'a' if cz[0] > cz[1] else 'b'
@@ -2126,15 +2144,13 @@ class DirectObjectMove(Node):
 
             # Send trajectory directly (bypass execute_trajectory which only uses first point)
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = [
-                'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-                'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
-            ]
+            traj_msg.joint_names = public_arm_joints()
             traj_msg.points = traj_points
 
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
 
             self.trajectory_in_progress = True
             self.is_y_movement_trajectory = True
@@ -2174,10 +2190,7 @@ class DirectObjectMove(Node):
             
             # Create trajectory message
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = [
-                'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-                'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
-            ]
+            traj_msg.joint_names = public_arm_joints()
             
             traj_point = JointTrajectoryPoint()
             traj_point.positions = positions
@@ -2188,10 +2201,11 @@ class DirectObjectMove(Node):
             # Create and send goal
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = traj_msg
-            goal.goal_time_tolerance = Duration(sec=1)
+            if not DROIDSTACK_SIM:
+                goal.goal_time_tolerance = Duration(sec=1)
             
             # Send trajectory using callbacks to track completion (same for both modes)
-            self.get_logger().info("Trajectory sent and accepted")
+            self.get_logger().info("Submitting trajectory goal")
             self._send_goal_future = self.action_client.send_goal_async(goal)
             self._send_goal_future.add_done_callback(self.goal_response)
             
@@ -2239,6 +2253,7 @@ class DirectObjectMove(Node):
             return
 
         self.current_goal_handle = goal_handle  # Store goal handle for potential cancellation
+        self.get_logger().info("Trajectory goal accepted")
 
         # Start force monitoring during step 2 descent (real mode only, not for Y movements)
         if self.mode == 'real' and self.step1_completed and not self.is_y_movement_trajectory:
@@ -2552,6 +2567,8 @@ class DirectObjectMove(Node):
                 error_msg = "Trajectory ABORTED: likely protective stop or velocity/acceleration limits exceeded. Click 'Continue' in URSim/URcap to clear the error, then retry."
             else:
                 error_msg = f"Trajectory failed with status code {result.status}"
+        if result_msg.error_string:
+            error_msg = f"{error_msg}: {result_msg.error_string}"
         self.error_message = error_msg
         self.get_logger().error(self.error_message)
 
@@ -2598,13 +2615,25 @@ def main(args=None):
     else:
         args = parser.parse_args(args)
     
-    rclpy.init(args=None)
+    init_ros(args=None)
     node = DirectObjectMove(topic_name=args.topic, object_name=args.object_name,
                       height=args.height,
                       target_xyz=args.target_xyz, target_xyzw=args.target_xyzw,
                       grasp_points_topic=args.grasp_points_topic, grasp_id=args.grasp_id,
                       offset=args.offset, mode=args.mode, base_name=args.base_name,
                       pre_grasp_width=args.pre_grasp_width, pad_center=args.pad_center)
+
+    # A new primitive process owns a new action client.  Sending before DDS has
+    # discovered the server can leave the admission future pending forever;
+    # the outer replay timeout then sees no command and no typed controller
+    # result.  Every motion starts only after bounded discovery, on real and
+    # simulated deployments alike.
+    if not node.action_client.wait_for_server(timeout_sec=15.0):
+        node.error_message = (
+            f"Trajectory action server {ARM_ACTION} was not discovered within 15 seconds"
+        )
+        node.get_logger().error(node.error_message)
+        node.should_exit = True
 
     # Wait for essential data before starting (like other primitives)
     # This eliminates the 10-second startup delay from timer-based polling
