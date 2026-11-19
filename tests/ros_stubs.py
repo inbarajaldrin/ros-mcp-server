@@ -47,14 +47,10 @@ class FollowJointTrajectory(_Any):
 
 
 def install():
-    """Stand in for every ROS module that is not importable here; a real install is left alone."""
+    """Stand in for every ROS module, installed or not (a real rclpy would let a test shut down or join a graph);
+    a module this process already imported is left alone."""
     for name in ROS_MODULES:
-        if name in sys.modules:
-            continue
-        try:
-            __import__(name)
-        except ImportError:
-            sys.modules[name] = _Module(name)
+        sys.modules.setdefault(name, _Module(name))
     if isinstance(sys.modules["action_msgs.msg"], _Module):
         sys.modules["action_msgs.msg"].GoalStatus = GoalStatus
     if isinstance(sys.modules["control_msgs.action"], _Module):

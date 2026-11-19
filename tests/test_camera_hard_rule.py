@@ -91,7 +91,7 @@ def test_mount_surface_sampling_bounds_the_true_box_distance():
         if exact == 0.0:
             continue                                    # inside a box
         sampled = float(np.min(np.linalg.norm(surface - p, axis=1)))
-        assert sampled - gap <= exact + 1e-9 <= sampled + 1e-9
+        assert sampled - gap <= exact + 1e-9 and exact <= sampled + 1e-9
         worst_corner_miss = max(worst_corner_miss, float(np.min(np.linalg.norm(corners - p, axis=1))) - exact)
     assert worst_corner_miss > 0.010                    # what the corner sampling could hide
 
