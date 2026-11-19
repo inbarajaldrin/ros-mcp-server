@@ -1,5 +1,7 @@
 #!/bin/bash
-# record_demo_bag.sh OUT_DIR — record what a demo video needs as a rosbag (mcap), lightly (2026-10-17).
+# record_demo_bag.sh OUT_DIR — record a run as a rosbag (mcap), lightly.
+# Operator ruling 2026-11-19: NO camera images unless asked. Default = poses, joints, wrench, gripper (a few MB per run).
+# CAMERA=1 adds the compressed colour stream (for a demo video; ~2.4 MB/s); DIAG=1 + CAMERA=1 also adds aligned depth.
 #   compressed RGB (~15 Hz, JPEG from the RealSense node), part poses, grasp points, TCP pose, camera pose
 # ~2.4 MB/s (~1 GB per 7-min assembly), ~12% of one core. Video + localizer overlay are made afterwards
 # by render_bag.py on another machine — never live-encode on the OptiPlex: two live H.264 recorders
@@ -8,14 +10,15 @@
 OUT=$1
 [ -n "$OUT" ] || { echo "usage: $0 OUT_DIR"; exit 2; }
 FREE_GB=$(df --output=avail -BG "$(dirname "$OUT")" | tail -1 | tr -dc 0-9)
-[ "$FREE_GB" -ge 10 ] || { echo "refusing: only ${FREE_GB} GB free"; exit 1; }
+[ "$FREE_GB" -ge 5 ] || { echo "refusing: only ${FREE_GB} GB free"; exit 1; }
 source /opt/ros/humble/setup.bash
 # DIAG=1 (per-part diagnosis, 2026-10-20): + aligned depth (compressed) and both camera_infos, the raw pre-snap
 # poses, gripper width, wrench, joint states - enough to replay a pick from the images and refit markers offline.
-EXTRA=()
-[ -n "$DIAG" ] && EXTRA=(/camera/camera/aligned_depth_to_color/image_raw/compressed
-  /camera/camera/aligned_depth_to_color/camera_info /camera/camera/color/camera_info
-  /objects_poses_real_raw /gripper_width /gripper_width_offset /force_torque_sensor_broadcaster/wrench /joint_states)
-exec nice -n 19 ros2 bag record -s mcap -o "$OUT" \
-  /camera/camera/color/image_raw/compressed /objects_poses_real /grasp_points_real \
-  /tcp_pose_broadcaster/pose /camera_pose "${EXTRA[@]}"
+TOPICS=(/objects_poses_real /grasp_points_real /tcp_pose_broadcaster/pose /camera_pose
+  /objects_poses_real_raw /gripper_width /gripper_width_offset /force_torque_sensor_broadcaster/wrench /joint_states
+  /camera/camera/color/camera_info)
+if [ -n "$CAMERA" ]; then
+  TOPICS+=(/camera/camera/color/image_raw/compressed)
+  [ -n "$DIAG" ] && TOPICS+=(/camera/camera/aligned_depth_to_color/image_raw/compressed /camera/camera/aligned_depth_to_color/camera_info)
+fi
+exec nice -n 19 ros2 bag record -s mcap -o "$OUT" "${TOPICS[@]}"

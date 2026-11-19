@@ -127,6 +127,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   sequence; primitives become thin executors of planned joint targets (goal_guard kept). Perception, gripper, compliant insert unchanged.
   Old per-step planning stays until the new one beats it in sim, then is retired. Design note -> review -> u_orange in sim -> FMB1 on the
   staging layout -> review before any real motion.
+- **R30 Record without the camera unless asked** (2026-11-19 evening): "yes record without camera unless I ask". record_demo_bag.sh
+  now records poses, joints, wrench and gripper only; CAMERA=1 adds the colour stream (and DIAG=1 + CAMERA=1 the aligned depth).
+  The 150 GB of October bags were stripped of image topics on his word ("clear the fmb1 video and image stuff"); the mp4 renders
+  were deleted. Receipts: ~/Documents/fmb-cell-lead/out/cleanup-20261119-*.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
