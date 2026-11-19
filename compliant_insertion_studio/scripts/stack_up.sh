@@ -108,13 +108,16 @@ step 3/5 "Camera (RealSense node + aruco localizer)"
 # check and the disassembly's free-spot map need depth); the localizer reads its colour topic
 # instead of opening the device itself (2026-10-14).
 RS=realsense2; IMG=/camera/camera/color/image_raw
+# Pin the WRIST D415 by its RealSense serial: a second RealSense (a D455) is now on this PC (2026-11-19), and an unpinned launch
+# may open it instead - the localizer's hand-eye calibration is for the D415 on the wrist. Override with FMB_D415_SERIAL.
+D415_SERIAL=${FMB_D415_SERIAL:-747612060118}
 if timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$"; then
     ok "RealSense node already publishing"
 else
     nohup bash -c "source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash; \
         exec ros2 launch ${RS}_camera rs_launch.py rgb_camera.color_profile:=1280,720,15 \
         depth_module.depth_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=false \
-        enable_infra2:=false rgb_camera.auto_exposure_priority:=false" >/tmp/realsense.log 2>&1 &
+        enable_infra2:=false rgb_camera.auto_exposure_priority:=false serial_no:=_${D415_SERIAL}" >/tmp/realsense.log 2>&1 &
     for _ in $(seq 1 30); do
         sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" && break
     done
