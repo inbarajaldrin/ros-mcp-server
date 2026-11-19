@@ -1667,6 +1667,14 @@ class ReorientForAssembly(Node):
             self.error_message = f"Motion planning failed: {why_}"
             self.get_logger().error(self.error_message)
             return False
+        # Hard rule (lead, 2026-11-19): a reorient stance is carried to the table (insert, place-down), so the
+        # camera side may not face the table, and the mount/D415 keeps its clearance on the way.
+        from primitives.shared.camera_up import camera_route_refusal
+        camera_refusal = camera_route_refusal(self.current_joint_angles, joint_angles, near_table_end=True)
+        if camera_refusal:
+            self.error_message = f"Reorient refused: {camera_refusal}"
+            self.get_logger().error(self.error_message)
+            return False
 
         # === Execute with single target point (no joint wrapping — let controller choose path) ===
         joint_dist = float(np.max(np.abs(np.array(joint_angles) - np.array(self.current_joint_angles))))

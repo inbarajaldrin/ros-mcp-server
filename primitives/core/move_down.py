@@ -819,6 +819,15 @@ class MoveDown(Node):
             )
             self.get_logger().info(f"Duration: {total_duration:.2f}s (cart={distance_to_target:.3f}m, joint={joint_dist:.2f}rad)")
 
+            # Hard rule (lead, 2026-11-19): the descent's end pose keeps the camera off the table side and the
+            # mount/D415 clear of the table (place-down and insert end near the table).
+            from primitives.shared.camera_up import camera_stance_refusal
+            camera_refusal = camera_stance_refusal(forward_kinematics(dh_params, np.asarray(waypoints[-1], float)))
+            if camera_refusal:
+                self.error_message = f"Descent refused: {camera_refusal}"
+                self.get_logger().error(self.error_message)
+                rclpy.shutdown()
+                return
             profile = s_curve_profile(all_joint_angles, total_duration)
             traj_points = []
             for positions, velocities, t_i in profile:

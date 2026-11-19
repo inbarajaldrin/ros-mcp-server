@@ -741,6 +741,7 @@ class MoveToClearArea(Node):
                 # Check each candidate for collision-free trajectory (no joint wrapping)
                 collision_free_trajectories = []  # List of (travel_distance, target_joints, ik_cost, yaw)
                 from primitives.shared.held_part_collision import held_part_route_refusal
+                from primitives.shared.camera_up import camera_route_refusal
                 held_part = self._held_part_model(start_joints)
                 held_refusals = []
                 if held_part is not None:
@@ -759,7 +760,10 @@ class MoveToClearArea(Node):
 
                     traj_margin = TABLE_COLLISION_MARGIN_FACEDOWN if is_face_down else TABLE_COLLISION_MARGIN_SIDEWAYS
                     if not check_trajectory_collision(start_joints, target_joints, z_threshold=TABLE_HEIGHT - traj_margin, num_samples=20, logger=self.get_logger()):
-                        refusal = held_part_route_refusal(start_joints, target_joints, held_part)
+                        # Hard rule (lead, 2026-11-19): the place-down stance is carried to the table, so its camera
+                        # side may not face the table; the mount/D415 keeps its clearance along the route.
+                        refusal = (camera_route_refusal(start_joints, target_joints, near_table_end=True)
+                                   or held_part_route_refusal(start_joints, target_joints, held_part))
                         if refusal:
                             held_refusals.append(refusal)
                             self.get_logger().warn(f"Held-part route refused: {refusal}")
@@ -781,7 +785,9 @@ class MoveToClearArea(Node):
                             continue
                         if (not check_trajectory_collision(start_joints, home, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())
                                 and not check_trajectory_collision(home, tj, z_threshold=TABLE_HEIGHT - margin, num_samples=20, logger=self.get_logger())):
-                            refusal = (held_part_route_refusal(start_joints, home, held_part)
+                            refusal = (camera_route_refusal(start_joints, home)
+                                       or camera_route_refusal(home, tj, near_table_end=True)
+                                       or held_part_route_refusal(start_joints, home, held_part)
                                        or held_part_route_refusal(home, tj, held_part))
                             if refusal:
                                 held_refusals.append(f"via home: {refusal}")
@@ -795,7 +801,7 @@ class MoveToClearArea(Node):
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
                     if held_refusals:
                         self.error_message = ("HELD_PART_ROUTE_REFUSED: every route to the clear area was refused for "
-                                              f"the held part ({'; '.join(held_refusals[:3])})")
+                                              f"the held part or the camera ({'; '.join(held_refusals[:3])})")
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True

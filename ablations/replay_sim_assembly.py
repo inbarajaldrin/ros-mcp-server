@@ -47,8 +47,11 @@ def _command_for_step(step: str, object_name: str | None = None,
             cmd += ["--expect", object_name, "--expect-span-mm", str(span_mm), "--force", "40"]
         return cmd, 90
     if short == "move_to_grasp":
+        # --base-name lets move_to_grasp pick the wrist whose reorient keeps the camera away from the
+        # table, exactly as the real replay does (CLAUDE.md "Camera away from the table").
         return py + ["primitives.move_to_grasp", "--object-name", kwargs["object_name"],
-                     "--grasp-id", str(kwargs["grasp_id"]), "--mode", "sim", "--pad-center"], 120
+                     "--grasp-id", str(kwargs["grasp_id"]), "--mode", "sim", "--pad-center",
+                     "--base-name", "base1"], 120
     if short == "move_to_safe_height":
         cmd = py + ["primitives.move_to_safe_height", "--mode", "sim"]
         if kwargs.get("object_name"):

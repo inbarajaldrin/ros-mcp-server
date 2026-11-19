@@ -1819,6 +1819,12 @@ class DirectObjectMove(Node):
             # axis, which flips the camera side of the reorient that follows. Choose it
             # here — rotate_object can only pick among reorients this grasp allows.
             cam_pref = self._camera_up_wrist(target_rot, target_rot_alt)
+            if cam_pref == 'refuse':
+                self.error_message = ("CAMERA_TOWARD_TABLE: neither grasp wrist allows a reorient with the camera "
+                                      "away from the table (camera_up hard rule)")
+                self.get_logger().error(self.error_message)
+                self.should_exit = True
+                return
 
             # Skip sol_b if sol_a is good enough (close to current joints)
             sol_b = None
@@ -1842,9 +1848,12 @@ class DirectObjectMove(Node):
                     candidates.append(sol_b)
                 preferred = {'a': sol_a, 'b': sol_b}.get(cam_pref)
                 if cam_pref is not None and preferred is None:
-                    self.get_logger().warn(
-                        "Camera-up wrist has no IK solution — falling back to the other wrist. "
-                        "The reorient after this grasp will face the camera toward the table.")
+                    # Hard rule (lead, 2026-11-19): never take the wrist whose reorient faces the camera to the table.
+                    self.error_message = ("CAMERA_TOWARD_TABLE: the camera-up grasp wrist has no IK solution; the "
+                                          "other wrist would reorient with the camera toward the table")
+                    self.get_logger().error(self.error_message)
+                    self.should_exit = True
+                    return
                 if preferred is not None:
                     joint_angles = preferred
                     chosen_yaw = yaw_degrees if cam_pref == 'a' else yaw_alt
@@ -1939,6 +1948,9 @@ class DirectObjectMove(Node):
         self.get_logger().info(
             f"Camera-up check (base {self.base_name}): reorient camera_z yaw {rpy_a[2]:.1f}° "
             f"-> {cz[0]:+.2f}, yaw {rpy_b[2]:.1f}° -> {cz[1]:+.2f}")
+        from primitives.shared.camera_up import SIDE_RULE_CAMERA_Z_MIN
+        if max(cz) < SIDE_RULE_CAMERA_Z_MIN:
+            return 'refuse'      # every wrist leads to a camera-toward-table reorient (hard rule, 2026-11-19)
         if abs(cz[0] - cz[1]) < 0.2:
             return None
         return 'a' if cz[0] > cz[1] else 'b'
