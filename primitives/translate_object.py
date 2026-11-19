@@ -1035,14 +1035,17 @@ class TranslateObject(Node):
         ee_target_rot_matrix = T_EE_target[:3, :3]
 
         if hover:
-            # Hover: same XY as target, Z = base + HOVER_HEIGHT
-            hover_gripper_center = ee_target_position.copy()
-            hover_gripper_center[2] = base_current_position[2] + HOVER_HEIGHT
-            tool_offset_world = ee_target_rot_matrix @ held_tool_offset()
-            target_flange = hover_gripper_center - tool_offset_world
+            # T_EE_target already includes the complete measured grasp
+            # transform (including the flange-to-tool offset). Move that
+            # rigid object/flange pair vertically until the target object's
+            # origin is HOVER_HEIGHT above the base. Subtracting a tool offset
+            # here again displaced sideways grasps by ~0.23 m a second time.
+            hover_object_z = base_current_position[2] + HOVER_HEIGHT
+            hover_lift = hover_object_z - target_object_position_abs[2]
+            target_flange = ee_target_position + np.array([0.0, 0.0, hover_lift])
             self.get_logger().info(
-                f"Hover gripper center Z: {hover_gripper_center[2]:.4f}, "
-                f"hover flange Z: {target_flange[2]:.4f} (offset: {tool_offset_world[2]:.4f})"
+                f"Hover object Z: {hover_object_z:.4f}, hover lift: {hover_lift:.4f}, "
+                f"hover flange Z: {target_flange[2]:.4f}"
             )
             self.get_logger().info(
                 "Hover flange target: [" + ", ".join(f"{v:.6f}" for v in target_flange) + "]"
