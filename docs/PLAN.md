@@ -96,6 +96,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **Cable** (2026-11-19): the D415's cable runs over the links to the PC. Operator wants it modelled and guarded: a cable test (PC end
   unplugged, operator watching, slow joint sweeps) -> per-joint limits enforced in one place + the UR safety config; awaiting his
   photos and a time. Today only move_cartesian caps |wrist_3| at 4.0 rad.
+- **plan47 ruling, MuJoCo slice 2** (2026-11-19 ~02:20Z, lane .pa/RULING-plan47-r4.md): design r4 APPROVED to build after ds-mujoco
+  slice 1 lands; phases A (route + realizer + fidelity, no ROS), B (planner road + ROS contract), C (wrench + FMB two-stage
+  acceptance); grasp = FRICTION with a measured slip bar (weld never counts toward acceptance); tool_wrench extends robot-binding v2 in
+  place. Four rounds of independent Opus review (lane .pa/REVIEW-r1..r4.md).
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
