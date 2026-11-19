@@ -72,9 +72,13 @@ MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
 # =============================================================================
 
 class MoveDown(Node):
-    def __init__(self, target_height=None, mode='real', to_table=False):
+    def __init__(self, target_height=None, mode='real', to_table=False, require_contact=False):
         super().__init__('move_down')
         self.to_table = to_table
+        # Sim only: an INSERT descent must stop on the simulated wrench - its endpoint is never a seat.
+        # A place-down ends at its floor exactly as on the real arm (a sideways stance stops above the
+        # table and the release drops the part; replay_real_assembly._gentle_place_down).
+        self.require_contact = require_contact
         self.joint_names = BARE_ARM_JOINTS
         
         # Mode: 'sim' or 'real'
@@ -756,10 +760,10 @@ class MoveDown(Node):
         current_z = current_pos[2]
         distance_to_target = abs(current_z - target_position[2])
         if distance_to_target < 0.001:  # Already at target (within 1mm)
-            if self.mode == 'sim' and not self.force_threshold_reached:
+            if self.mode == 'sim' and self.require_contact and not self.force_threshold_reached:
                 self.error_message = (
                     "Sim descent is already at its endpoint without a measured contact. "
-                    "A regular insert/place-down must stop on the simulated physics wrench."
+                    "A regular insert must stop on the simulated physics wrench."
                 )
                 self.get_logger().error(self.error_message)
                 rclpy.shutdown()
@@ -943,10 +947,10 @@ class MoveDown(Node):
                     distance_to_target = abs(current_z - target_z)
                     
                     if distance_to_target < 0.001:  # Already at target (within 1mm)
-                        if self.mode == 'sim':
+                        if self.mode == 'sim' and self.require_contact:
                             self.error_message = (
                                 "Sim descent reached its endpoint without a measured contact. "
-                                "A regular insert/place-down must stop on the simulated physics wrench."
+                                "A regular insert must stop on the simulated physics wrench."
                             )
                             self.get_logger().error(self.error_message)
                             rclpy.shutdown()
@@ -1000,6 +1004,8 @@ def main(args=None):
                        help='Target height in meters (optional, defaults to moving down in increments until force threshold)')
     parser.add_argument('--mode', type=str, default='real', choices=['sim', 'real'],
                        help='Mode: "sim" for simulation, "real" for real robot (default: real)')
+    parser.add_argument('--require-contact', action='store_true',
+                        help='sim insert: refuse an endpoint reached without a measured contact')
     parser.add_argument('--to-table', action='store_true',
                        help='placing a held part: go down until it touches the table (face-down floor = '
                             'closed fingertips 1 mm above the table instead of the 80 mm margin)')
@@ -1008,7 +1014,8 @@ def main(args=None):
     known_args, unknown_args = parser.parse_known_args()
     
     rclpy.init(args=args)
-    node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table)
+    node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table,
+                    require_contact=known_args.require_contact)
     
     try:
         while rclpy.ok():

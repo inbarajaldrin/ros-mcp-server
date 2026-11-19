@@ -18,6 +18,15 @@ The replay scores each part before the next one starts and re-scores every
 seated part at the end of the run, so a later insert that disturbs an earlier
 part is caught.
 
+--drop <part> (place-down, lead approval 2026-11-19): the held part's lowest CAD
+point above the table from ground truth, at the end of a place-down descent.  A
+place-down ends at move_down's floor exactly as on the real arm; for a sideways
+stance that floor puts the gripper centre (the grasp point)
+TABLE_COLLISION_MARGIN_SIDEWAYS above the table (replay_real_assembly.
+_move_down_floor_z), so no part can legitimately be held higher than that at the
+floor - a larger drop means the descent did not end where the real one would, and
+is refused.
+
 "Settled" means: at least --settle-min-s of simulator time has passed since the
 call started, and over the trailing --steady-s window every scored part moved
 less than 0.05 mm and 0.05 deg.
@@ -123,6 +132,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--score", default="")
     ap.add_argument("--observe", default="")
+    ap.add_argument("--drop", default="")
     ap.add_argument("--base", default="base1")
     ap.add_argument("--settle-min-s", type=float, default=0.5)
     ap.add_argument("--steady-s", type=float, default=0.3)
@@ -133,15 +143,35 @@ def main(argv=None):
               "error": "sim_seat_scorer reads simulator ground truth; it refuses outside ROS_MCP_MODE=sim"})
               + "\n__END_RESULT_JSON__")
         return 2
-    names = [n for n in (args.score or args.observe).split(",") if n]
-    if not names or bool(args.score) == bool(args.observe):
-        ap.error("give exactly one of --score or --observe with part names")
+    names = [n for n in (args.score or args.observe or args.drop).split(",") if n]
+    if not names or sum(map(bool, (args.score, args.observe, args.drop))) != 1:
+        ap.error("give exactly one of --score, --observe or --drop with part names")
     poses, span, steady = _sample(names + ([args.base] if args.score else []),
                                   args.settle_min_s if args.score else 0.0,
                                   args.steady_s if args.score else 0.0, args.timeout_s)
     result = {"result": "failure", "mode": "sim", "base": args.base}
     if poses is None:
         result["error"] = f"no {TOPIC} sample within {args.timeout_s} s"
+    elif args.drop:
+        from primitives.shared.config import TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
+        from primitives.shared.held_part_collision import part_surface_points
+        parts = {}
+        for name in names:
+            if name not in poses:
+                parts[name] = {"error": "pose missing"}
+                continue
+            P = part_surface_points(name) @ poses[name][:3, :3].T + poses[name][:3, 3]
+            drop = float(np.min(P[:, 2]) - TABLE_HEIGHT)
+            parts[name] = {"drop_mm": round(1000.0 * drop, 2),
+                           "within_floor_bound": drop <= TABLE_COLLISION_MARGIN_SIDEWAYS}
+        ok = all(p.get("within_floor_bound") for p in parts.values())
+        result.update({"result": "success" if ok else "failure", "parts": parts,
+                       "bound_mm": 1000.0 * TABLE_COLLISION_MARGIN_SIDEWAYS,
+                       "bound_source": "real place-down floor: grasp point TABLE_COLLISION_MARGIN_SIDEWAYS above "
+                                       "the table for a sideways stance (replay_real_assembly._move_down_floor_z)"})
+        if not ok:
+            result["error"] = "SIM_PLACE_DOWN_DROP_EXCEEDS_FLOOR: " + "; ".join(
+                f"{n} {p.get('drop_mm')} mm above the table" for n, p in parts.items() if not p.get("within_floor_bound"))
     elif args.observe:
         missing = [n for n in names if n not in poses]
         result.update({"result": "failure" if missing else "success", "missing": missing,

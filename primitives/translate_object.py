@@ -223,11 +223,34 @@ def _subprocess_fast_path():
             sys.exit(1)
         log.info("Placing object on clear area")
         ca = ['--move', '--mode', args.mode, '--object-name', args.object_name]
+        # The chained held orientation and grasp id let move_to_clear_area check the route for the HELD
+        # part (held_part_collision; r48 MuJoCo, 2026-11-19).
+        if args.current_object_orientation is not None:
+            ca += ['--held-quat', *[f"{float(v):.6f}" for v in args.current_object_orientation]]
+        if args.grasp_id is not None:
+            ca += ['--grasp-id', str(int(args.grasp_id))]
         ok, out = _run(os.path.join(pdir, 'core', 'move_to_clear_area.py'), ca, timeout=45)
         if not ok:
             _finish(ok, out, "place_down")
         log.info("Lowering object onto table")
         ok, out = _run(os.path.join(pdir, 'core', 'move_down.py'), ['--mode', args.mode, '--to-table'], timeout=310)
+        if ok and args.mode == 'sim':
+            # The place-down accepts its floor endpoint as the real one does; ground truth says how far
+            # above the table the part is released, refused beyond the real floor's bound.
+            root_dir = os.path.dirname(pdir)
+            dok, dout = _run(os.path.join(root_dir, 'ablations', 'sim_seat_scorer.py'),
+                             ['--drop', args.object_name], timeout=60)
+            dj = _extract_json(dout) or {"result": "failure", "error": "no drop measurement"}
+            log.info(f"Sim place-down release height (ground truth): {json.dumps(dj, sort_keys=True)}")
+            if dj.get("result") != "success":
+                _output({"result": "failure", "mode": args.mode, "movement_type": "place_down",
+                         "error": dj.get("error", "sim place-down drop not measured"), "drop": dj})
+                sys.exit(1)
+            rj = _extract_json(out) or {"result": "success"}
+            rj.update({"movement_type": "place_down", "mode": args.mode,
+                       "release_drop_mm": dj["parts"][args.object_name]["drop_mm"]})
+            _output(rj)
+            sys.exit(0)
         _finish(ok, out, "place_down")
 
     if is_compliant_insert:
@@ -1817,13 +1840,15 @@ def run_move_to_clear_area(object_name=None, mode=None, held_quat=None, grasp_id
     return run_subprocess(script_path, cmd_args)
 
 
-def run_move_down(mode=None, *, to_table=False):
+def run_move_down(mode=None, *, to_table=False, require_contact=False):
     """Run move_down subprocess."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_down.py')
     logger.info("Lowering object onto table")
     cmd_args = ['--mode', mode] if mode else []
     if to_table:
         cmd_args.append('--to-table')
+    if require_contact:
+        cmd_args.append('--require-contact')
     return run_subprocess(script_path, cmd_args, timeout=310)
 
 
@@ -2089,7 +2114,7 @@ def main():
                             )
                             # The regular insert descends to the physical table
                             # floor and must stop earlier on base/part contact.
-                            insert_ok, insert_out = run_move_down(mode='sim', to_table=True)
+                            insert_ok, insert_out = run_move_down(mode='sim', to_table=True, require_contact=True)
                             if insert_ok:
                                 # Ruling A (lead, 2026-11-19): the seat is judged on the
                                 # part's FINAL pose, after the gripper opens and the arm

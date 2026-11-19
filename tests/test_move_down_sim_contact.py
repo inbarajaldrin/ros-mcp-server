@@ -85,3 +85,20 @@ def test_real_force_baseline_and_contact_median_contract_is_unchanged():
     assert "m = self._median_wrench(150)" in source
     assert "CONTACT_MEDIAN_N = 51" in source
     assert "m = self._median_wrench(CONTACT_MEDIAN_N)" in source
+
+
+def test_only_the_insert_requires_contact_and_the_place_down_drop_is_bounded():
+    """Lead approval 2026-11-19: a sim place-down accepts its floor endpoint like the real arm; the
+    insert keeps the no-contact refusal; the GT release height is refused above the real floor bound."""
+    source = MOVE_DOWN.read_text()
+    assert source.count("if self.mode == 'sim' and self.require_contact") == 2   # both endpoint refusals
+    assert source.count("self.mode == 'sim' and self.require_contact and not self.force_threshold_reached") == 1
+    assert "'--require-contact'" in source
+    root = MOVE_DOWN.parents[2]
+    translate = (root / "primitives/translate_object.py").read_text()
+    assert "run_move_down(mode='sim', to_table=True, require_contact=True)" in translate
+    assert "['--drop', args.object_name]" in translate
+    assert "'--held-quat', *[f\"{float(v):.6f}\" for v in args.current_object_orientation]" in translate
+    scorer = (root / "ablations/sim_seat_scorer.py").read_text()
+    assert "drop <= TABLE_COLLISION_MARGIN_SIDEWAYS" in scorer
+    assert "SIM_PLACE_DOWN_DROP_EXCEEDS_FLOOR" in scorer

@@ -44,4 +44,4 @@ def test_fov_view_uses_production_camera_aim():
 
 def test_regular_sim_insert_descends_to_the_physical_contact_floor():
     source = (Path(__file__).resolve().parents[1] / "primitives/translate_object.py").read_text()
-    assert "run_move_down(mode='sim', to_table=True)" in source
+    assert "run_move_down(mode='sim', to_table=True, require_contact=True)" in source
