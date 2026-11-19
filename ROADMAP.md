@@ -17,10 +17,12 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 - [x] 1.1 Lab decided: private `~/Documents/fmb-cell-lab` on the cell PC, Isaac on dual-a4500, delivery vs adapters (PLAN.md D1, D2)
 - [x] 1.0 `droidstack init` the lab (lab commit 74888ca, `~/Documents/fmb-cell-lab`); machine paths: owed with the dual dispatch setup
 - [ ] 1.2 Robot: `robots/ur5e_rg2` copied from prompt-to-assembly (P47-1) with its NOTICE; `droidstack cell check` passes
-  (copied + local `cell check` valid for all four tasks, lab b4ef879, re-run by the lead 11-18; LIVE check on dual owed: L3/L4)
+  (copied + local `cell check` valid for all four tasks under the certified engine 989cff8d9172, lab ddda149; LIVE check owed:
+  dual's admission is closed by a DroidStack supervisor bug (L7) until plan47's fix + re-prepare; a4500 re-prepare waits on its card)
 - [ ] 1.3 The v3.1 mount + D415 body added to the robot copy's collision and visual geometry (R14), and the D415 declared as a
   camera stream on tool0 at the CAD transform, so the sim renders what the real camera sees and planning keeps the mount off the table
-  (sim USD: saddles + D415 box + camera at the CAD transform, done; the planner's collision model is still the paper's, regeneration owed)
+  (sim USD: saddles + the fitted D415 body + the calibrated camera, done; `collision model` ran on dual 11-19 but its model has no
+  rg2_base_link, so the mount/D415 are absent - exporter gap or declaration, asked plan47)
 - [ ] 1.4 Environment: robot base 0.080 m above the table top (R15), base1 placement and the cell's staging / clear regions
   (`realcell_env/MEASURED_CELL.yaml`, `primitives/shared/cell_layout.yaml`) (declared, base at 0.080 m checked by the lead; table size is
   the paper's, a typed gap)
