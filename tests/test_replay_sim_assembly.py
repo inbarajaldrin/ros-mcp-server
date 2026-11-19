@@ -6,9 +6,9 @@ def test_commands_preserve_recorded_sim_calls():
         "ros-mcp-server__translate_object(action='insert', object_name='u_brown', "
         "base_name='base1', mode='sim')"
     )
-    assert cmd[-7:] == ["--mode", "sim", "--object-name", "u_brown",
-                        "--base-name", "base1", "--insert"]
-    assert timeout == 360
+    assert cmd[-5:] == ["ablations.sim_regular_insert", "--object-name", "u_brown",
+                        "--base-name", "base1"]
+    assert timeout == 30
 
 
 def test_non_sim_step_is_refused():
