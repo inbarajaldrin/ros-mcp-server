@@ -26,3 +26,8 @@ the evidence, and what DroidStack would need.
   ROS probes and measured the cardless sizes (1024 / 256 MiB) within two days. Nothing told us: `doctor`, `status` and the refusal
   text all read as a platform gap. Needed: a refusal or doctor row that says when the engine is behind the fleet/dev ("probe built in
   a52865ca; this engine is 2648fe53"), so a lab doesn't chase a gap that's already closed.
+- **L7** (2026-11-19) A lab that pointed Kit's private kit-state/caches inside a request's published output root (to keep them out of
+  the shared Isaac install) made Kit write a symlink into published outputs; the supervisor refused the link but then retried forever
+  instead of settling the request, which closed DroidStack admission on dual for every user (request 6511771…). plan47's fix lane:
+  settle as invalid with the reason at finish, and move Kit's kit-state out of published outputs. Lesson for labs: where Kit's state
+  may live should be the platform's decision, stated in the docs, not each lab's.
