@@ -119,6 +119,14 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R28 Claude worker for MuJoCo** (2026-11-19 ~14:50Z, WhatsApp "B"): the workspace hit its Codex spend cap at 13:14Z, stopping every
   Codex worker. The operator chose to continue the MuJoCo work on a Claude worker (w5-mujoco, session 8e48c8b3) rather than raise the
   cap or wait. Same goal, bars and binding rules as w4; it checkpoints w4's uncommitted work first.
+- **R29 Fresh sequence planner instead of more patches** (2026-11-19 ~evening, WhatsApp): "if it's easier to assemble it with fresh
+  code with the rules we can do that ... I feel like we are bolting fixes on top of fixes ... maybe even cleanup ... unnecessary math or
+  calculation dragging down with multiple rotations". Lead recommendation taken: one new module plans a part's whole
+  pick -> reorient -> place-down -> regrasp -> reorient -> insert, checks every candidate against ALL rules in one place (camera side,
+  mount/D415 vs table and arm, held part, physical self-collision, wrist_3/cable limits) and minimises total wrist travel over the
+  sequence; primitives become thin executors of planned joint targets (goal_guard kept). Perception, gripper, compliant insert unchanged.
+  Old per-step planning stays until the new one beats it in sim, then is retired. Design note -> review -> u_orange in sim -> FMB1 on the
+  staging layout -> review before any real motion.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
