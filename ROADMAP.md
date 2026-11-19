@@ -34,10 +34,13 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   (home: calibrated sim vs real 0.42 px, lab b0e161e; camera-aimed base / part / depth / staging views all in frame, lab 594fbb5;
   open: the clear area and the insert-path views - audit running)
   view poses re-derived for the 30 degree tilt
-- [ ] 2.2 The localizer + depth CAD fits on rendered frames find the parts within the cell's bars (pick seed, base read)
-  (11-19, lab 91effa2, attempt-6: base read 0.62 mm / held same-frame 0.9-3.4 mm pass on raw PnP; raw single-marker pick seeds fail
-  for upright u_brown/u_orange and a 72 deg planar flip on yellow at 0.52 m. Open: the cell's own path - snapped published pose,
-  stationary median, depth pick - per stage vs physics GT, and the sim-to-real anchor on the real 11-18 u_orange pick)
+- [x] 2.2 The localizer + depth CAD fits on rendered frames find the parts within the cell's bars (pick seed, base read)
+  DONE 11-19, lab 58a30ab (lab-notes/2026-11-19-isaac-perception/attempt-7-verdict.md + consumed-perception-table.md): what the cell
+  consumes - published snapped pose, 5-frame still median, depth pick / base ICP - vs PhysX frame-time GT, all 7 targets pass the
+  code's bars: <= 0.32 mm XY, depth-pick z +0.17..+0.20 mm, <= 0.28 deg; base ICP 0.41 mm. The 72 deg yellow flip is a raw-PnP branch
+  the localizer's IPPE table alignment removes before publishing. Real anchor: the 11-18 upright u_orange pick. Raw PnP reads parts
+  7-9 mm LOW in z (removed by the table-rest snap). LIMIT: hand-eye error is zero by construction in the twin and markers are
+  noise-free, so this proves the pipeline's logic, not the real cell's accuracy.
 - [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
 - [ ] 2.4 R22: FMB1 assembled end to end in the twin by the cell's code (regular insert), rendered for the operator; then with
   FOV-gated poses (paper2). w3-sim-assembly, Codex 01a1f10e-baa8-7ea3-8a39-07fec69100a7, on a4500 (2026-11-19)
