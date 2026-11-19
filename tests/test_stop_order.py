@@ -14,7 +14,7 @@ CHILD = textwrap.dedent('''
     log = open(sys.argv[1], "a")
     def on(sig, frame):
         log.write(signal.Signals(sig).name + "\\n"); log.flush()
-        if sys.argv[2] == "obey" or sig == signal.SIGTERM:
+        if sys.argv[2] == "obey" or (sig == signal.SIGTERM and sys.argv[2] != "stuck"):
             sys.exit(0)
     signal.signal(signal.SIGINT, on)
     signal.signal(signal.SIGTERM, on)
@@ -28,6 +28,8 @@ CHILD = textwrap.dedent('''
 def no_robot(monkeypatch):
     """The safety watcher polls the real robot's dashboard; the test must never reach the network."""
     monkeypatch.setattr(cell_io, "robot_safety_status", lambda *a, **k: "NORMAL")
+    monkeypatch.setattr(cell_io, "dashboard_stop", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("dashboard stop sent for a child that obeyed")))
     monkeypatch.setattr(config, "CHILD_STOP_GRACE_S", 1.5)
 
 
@@ -70,3 +72,35 @@ def test_clear_area_refuses_a_route_its_caller_could_cut():
     except AttributeError:
         pass                                                       # the stand-in future has no callbacks
     assert node.error_message is None and sent
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_a_stuck_child_is_killed_only_after_a_confirmed_dashboard_stop(no_robot, monkeypatch, tmp_path, confirmed):
+    """Review r3 P3-2: bounded last resort for a child stuck outside Python.  The dashboard is replaced: no network."""
+    import subprocess
+    stops = []
+    monkeypatch.setattr(cell_io, "dashboard_stop", lambda *a, **k: stops.append(True) or confirmed)
+    script, log = tmp_path / "child.py", tmp_path / "signals.log"
+    script.write_text(CHILD)
+    proc = subprocess.Popen([sys.executable, str(script), str(log), "stuck"], stdout=subprocess.PIPE,
+                            start_new_session=True)
+    proc.stdout.readline()                                         # started
+    how = cell_io._stop_group(proc, 1.0, "stuck test")
+    try:
+        assert stops == [True] and log.read_text().split() == ["SIGINT", "SIGTERM"]
+        if confirmed:
+            assert how.startswith("SIGKILL") and proc.wait(timeout=5) == -9
+        else:
+            assert how.startswith("stuck") and proc.poll() is None   # never killed without a confirmed stop
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_run_child_stops_a_timed_out_child_with_sigint_first(tmp_path):
+    from primitives.shared.child_process import run_child
+    script, log = tmp_path / "child.py", tmp_path / "signals.log"
+    script.write_text(CHILD)
+    rc, out, err, timed_out = run_child([sys.executable, str(script), str(log), "obey"], timeout_s=1.0, grace_s=1.5)
+    assert timed_out and rc == 0 and log.read_text().split() == ["SIGINT"]

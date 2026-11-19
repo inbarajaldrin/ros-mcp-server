@@ -43,6 +43,51 @@ def robot_safety_status(host: str = '192.168.1.111', timeout: float = 1.5) -> Op
         return None
 
 
+def dashboard_stop(host: str = '192.168.1.111', timeout: float = 3.0) -> bool:
+    """Send the UR dashboard `stop` (halts the running program, so no trajectory can continue) and confirm the reply
+    (stop_run.sh step 0).  True only when the dashboard answered that it stopped."""
+    import socket
+    try:
+        with socket.create_connection((host, 29999), timeout=timeout) as s_:
+            s_.settimeout(timeout)
+            s_.recv(1024)                                      # banner
+            s_.sendall(b'stop\n')
+            reply = s_.recv(1024).decode(errors='replace').strip()
+            return reply.lower().startswith('stopped')
+    except Exception:
+        return False
+
+
+def _stop_group(proc, grace_s: float, label: str = '') -> str:
+    """Stop a step's process group in the CLAUDE.md order: SIGINT (each primitive's goal_guard cancels and confirms
+    its arm goal), SIGTERM after the grace; and only if the group is still alive after a second grace - stuck
+    outside Python - the dashboard `stop`, and SIGKILL only once the dashboard confirms the arm is stopped (review
+    r3).  Returns how it ended."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        return 'gone'
+    for sig, name in ((signal.SIGINT, 'SIGINT'), (signal.SIGTERM, 'SIGTERM')):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return 'gone'
+        try:
+            proc.wait(timeout=grace_s)
+            return name
+        except subprocess.TimeoutExpired:
+            continue
+    if dashboard_stop():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return 'SIGKILL after a confirmed dashboard stop'
+    print(f"!!! {label}: the step is stuck after SIGINT and SIGTERM and the dashboard `stop` was NOT confirmed - "
+          f"not killing it; USE THE PENDANT / E-STOP if the arm is moving\n", end='', flush=True)
+    return 'stuck, dashboard stop unconfirmed'
+
+
 _RESULT_RE = re.compile(r'__RESULT_JSON__\s*(.*?)\s*__END_RESULT_JSON__', re.DOTALL)
 
 
@@ -188,22 +233,9 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
     timed_out = threading.Event()
 
     def _expire():
-        # SIGINT first (each primitive's goal_guard cancels its running arm goal and confirms the stop), SIGTERM
-        # after the grace if the group is still alive; never SIGKILL (CLAUDE.md stop order, review r2).
         from primitives.shared.config import CHILD_STOP_GRACE_S
         timed_out.set()
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGINT)
-        except Exception:
-            return
-        try:
-            proc.wait(timeout=CHILD_STOP_GRACE_S)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except Exception:
-                pass
+        _stop_group(proc, CHILD_STOP_GRACE_S, label)
     watchdog = threading.Timer(timeout_s, _expire)
     watchdog.daemon = True
     watchdog.start()
@@ -250,15 +282,7 @@ def _run_subprocess_once(argv: list[str], label: str, timeout_s: int = 600,
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         from primitives.shared.config import CHILD_STOP_GRACE_S
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGINT)
-            try:
-                proc.wait(timeout=CHILD_STOP_GRACE_S)
-            except subprocess.TimeoutExpired:
-                os.killpg(pgid, signal.SIGTERM)
-        except Exception:
-            pass
+        _stop_group(proc, CHILD_STOP_GRACE_S, label)
     finally:
         watchdog.cancel()
         done_ev.set()

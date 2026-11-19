@@ -34,6 +34,7 @@ from scipy.spatial.transform import Rotation as R
 _project_root = str(Path(__file__).parent.parent.parent)  # primitives/_real_mode_stash/<file> → repo root
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+from primitives.shared.goal_guard import init_ros  # arm goals cancelled on exit (review r3)
 
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset, held_tool_offset_for
 BAR_ALONG_MAX_M = 0.030   # a bar may slide this far along its free axis while the compliance finds the slot
@@ -755,7 +756,8 @@ class PrismaticPegInsertion(Node):
         self.get_logger().info(f"Sending trajectory ({duration:.1f}s)...")
         goal = FollowJointTrajectory.Goal(trajectory=traj, goal_time_tolerance=Duration(sec=2))
         future = self.traj_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future)
+        while rclpy.ok() and not future.done():   # 0.1 s waits: a signal is serviced (goal_guard)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=0.1)
         goal_handle = future.result()
 
         if not goal_handle.accepted:
@@ -1464,7 +1466,7 @@ def main():
     time.sleep(2.5)
 
     try:
-        rclpy.init(args=remaining)
+        init_ros(args=remaining)
         node = PrismaticPegInsertion(
             force_z=args.force,
             timeout=args.timeout,

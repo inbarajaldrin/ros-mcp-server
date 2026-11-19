@@ -112,12 +112,14 @@ def _move_home_joint_space(duration_s: float = 5.0) -> tuple:
         "--positions", *(str(j) for j in HOME_JOINTS),
         "--duration", str(duration_s),
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=duration_s + 30)
-    except subprocess.TimeoutExpired:
-        return False, f"move_joints subprocess timeout (> {duration_s + 30}s)"
-    if proc.returncode != 0:
-        return False, f"move_joints failed: {proc.stderr.strip()[:300]}"
+    # SIGINT -> grace -> SIGTERM on a timeout or an interrupt, never SIGKILL: the child's goal_guard must get to
+    # cancel and confirm its arm goal (review r3 P3-3; subprocess.run SIGKILLs it 0.25 s after an interrupt).
+    from primitives.shared.child_process import run_child
+    returncode, _out, err, timed_out = run_child(cmd, timeout_s=duration_s + 30)
+    if timed_out:
+        return False, f"move_joints subprocess timeout (> {duration_s + 30}s); stopped with SIGINT"
+    if returncode != 0:
+        return False, f"move_joints failed: {(err or '').strip()[:300]}"
     return True, None
 
 
