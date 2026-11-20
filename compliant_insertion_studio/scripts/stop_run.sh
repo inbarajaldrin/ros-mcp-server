@@ -187,12 +187,19 @@ POSE="$(timeout 5 ros2 topic echo --once /tcp_pose_broadcaster/pose 2>/dev/null)
 echo "$POSE" | awk '/position:/{p=1} p&&/[xyz]:/{printf "%s%.1f mm ", $1, $2*1000} /orientation:/{exit}' | sed 's/^/  TCP /'; echo
 W_MM="$(timeout 5 ros2 topic echo --once /gripper_width 2>/dev/null | awk '/data:/{print $2; exit}')"
 [ -n "$W_MM" ] && echo "  gripper width ${W_MM} mm (a part is likely held if it is well below the open width)"
-# a drive-mate latched by its post-insert gate is cleared only now (safety NORMAL/REDUCED, controllers restored, the
-# program running: the server checks all three); not running / not latched: nothing to do
-if timeout 5 ros2 service list 2>/dev/null | grep -q '^/ur5e/drive_mate/reset_latch$'; then
-  RL="$(timeout 20 ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {} 2>/dev/null \
-        | grep -o "message='[^']*'" | head -1)"
-  echo "  drive-mate latch: ${RL:-no answer}"
+# drive-mate's latch is REPORTED here, never cleared: clearing it is a deliberate operator step (review r2 P2-C)
+if timeout 5 ros2 service list 2>/dev/null | grep -q '^/ur5e/drive_mate/latch_status$'; then
+  LS="$(timeout 15 ros2 service call /ur5e/drive_mate/latch_status std_srvs/srv/Trigger {} 2>/dev/null)"
+  if echo "$LS" | grep -q "success=False"; then
+    warn "drive-mate is LATCHED: $(echo "$LS" | sed -n "s/.*message='\(.*\)')\$/\1/p" | head -1)"
+    echo "  after the part is released and lifted, clear it deliberately:"
+    echo "    ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}"
+  fi
+fi
+# the program may have been stopped since step 2 (a drive-mate gate racing this script, review r2 P2-A)
+if ! prog_running; then
+  warn "the external-control program is NOT running (stopped after step 2): re-run stop_run.sh"
+  exit 1
 fi
 echo
 echo "  Arm is stopped and commandable. Nothing was moved. If a part is held:"

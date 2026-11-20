@@ -246,7 +246,7 @@ def test_an_exception_judging_the_insert_fails_closed(rig, monkeypatch):
     world.text = _result_text({"result": "success"})
     monkeypatch.setattr(dms, "outcome_of", lambda *a, **k: (_ for _ in ()).throw(ValueError("truncated CSV")))
     res, gh = _run(srv)
-    assert res.refusal.startswith("INSERT_GATE: gate crashed: judging the insert") and srv.latch.reason
+    assert res.refusal.startswith("INSERT_GATE: gate crashed: trace unreadable") and "arm checked commandable" in res.refusal and srv.latch.reason
     assert gh.ended == "aborted" and world.stops == []                  # the controllers read restored: no stop
     world.controllers = LEFT_SWITCHED                                    # unrestored: the stop goes out too
     srv.latch.reason = None
@@ -327,3 +327,68 @@ def test_the_replay_maps_a_seated_gate_refusal_to_a_failure_and_latches(monkeypa
 def test_result_of_reads_the_last_result_block():
     text = _result_text({"result": "failure", "error": "a"}) + _result_text({"result": "success"})
     assert dms.result_of(text) == {"result": "success"} and dms.result_of("nothing") == {}
+
+
+# ---- review r2 (before the merge) -----------------------------------------------------------------------------------
+def test_a_cancel_during_the_insert_latches_without_a_stop(rig, monkeypatch):
+    """r2 P2-A: the canceller (stop_run.sh) owns the stop; the server latches, sends none, and reports CANCELLED."""
+    srv, world = rig
+    world.controllers = LEFT_SWITCHED                # what stop_run's force-mode cycle looks like mid-way
+    polls = []
+
+    class _Slow:
+        def __init__(self, argv, cwd=None, env=None, stdout=None, stderr=None, start_new_session=False):
+            world.starts.append(argv); self.pid = 0; self.returncode = None
+
+        def poll(self):
+            polls.append(1)
+            if len(polls) >= 3:
+                self.returncode = -2                 # the child ended on the SIGINT
+            return self.returncode
+    monkeypatch.setattr(dms.subprocess, "Popen", _Slow)
+    monkeypatch.setattr(dms.time, "sleep", lambda s: None)
+    gh = _GH()
+
+    def feedback(fb):
+        gh.is_cancel_requested = True                # the cancel arrives while the insert runs
+    gh.publish_feedback = feedback
+    res = srv._execute(gh)
+    assert res.refusal.startswith("DRIVE_MATE_CANCELLED") and gh.ended == "canceled" and srv.latch.reason
+    assert world.stops == []                         # no dashboard stop from the server
+
+
+def test_a_stopped_program_after_any_motion_child_latches(rig):
+    """r2 P3-A: a child that sent its own stop (no typed result) is caught by the program state."""
+    srv, world = rig
+    srv.program_running = False
+    world.rc, world.text = 1, "Traceback ... (no result block)\n"
+    res, gh = _run(srv)
+    assert res.refusal == "INSERT_GATE: the external-control program was stopped during the insert"
+    assert srv.latch.reason and gh.ended == "aborted"
+
+
+def test_the_latch_status_is_read_only(rig):
+    srv, world = rig
+    r = srv.on_latch_status(None, NS(success=None, message=None))
+    assert r.success is True and r.message == "not latched"
+    srv.latch.trip("CONTROLLERS_NOT_RESTORED (x)")
+    r = srv.on_latch_status(None, NS(success=None, message=None))
+    assert r.success is False and r.message == "CONTROLLERS_NOT_RESTORED (x)" and srv.latch.reason
+
+
+def test_a_seams_run_refuses_at_startup_on_a_latched_or_absent_drive_mate():
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ablations"))
+    import replay_real_assembly as rra
+    assert rra.drive_mate_startup_refusal({"latched": True, "reason": "x"}) == "DRIVE_MATE_LATCHED: x"
+    assert rra.drive_mate_startup_refusal({"error": "no server"}).startswith("DRIVE_MATE_UNAVAILABLE")
+    assert rra.drive_mate_startup_refusal({"latched": False, "reason": ""}) is None
+    assert "Do NOT open" in rra.DRIVE_MATE_LATCH_RECOVERY and "ABOVE the base" in rra.DRIVE_MATE_LATCH_RECOVERY
+
+
+def test_stop_run_reports_the_latch_and_never_clears_it():
+    text = (Path(__file__).resolve().parents[1] / "compliant_insertion_studio/scripts/stop_run.sh").read_text()
+    assert "/ur5e/drive_mate/latch_status" in text
+    calls = [l for l in text.splitlines() if "ros2 service call /ur5e/drive_mate/reset_latch" in l]
+    assert calls and all(l.strip().startswith("echo") for l in calls)      # printed, never called
+    assert text.index("if ! prog_running; then") < text.index('"  Arm is stopped and commandable.')

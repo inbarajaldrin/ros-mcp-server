@@ -88,6 +88,7 @@ def main():
     g = sp.add_parser('grip'); g.add_argument('--width', type=float, required=True); g.add_argument('--force', type=float, default=0.0)
     g.add_argument('--expect', default=''); g.add_argument('--span', type=float, default=0.0)
     m = sp.add_parser('mate-for'); m.add_argument('--part', required=True); m.add_argument('--base', required=True)
+    sp.add_parser('latch')                 # drive-mate's latch (read-only): {"latched": bool, "reason": str} or error
     a = ap.parse_args()
     if a.op == 'mate-for':
         print('__SEAM__ ' + json.dumps({'mate': mate_for(a.part, a.base)})); return 0
@@ -135,6 +136,16 @@ def main():
                     out = {'ok': r.ok, 'error': r.error, 'xyz': [pp.position.x, pp.position.y, pp.position.z],
                            'quat_xyzw': [pp.orientation.x, pp.orientation.y, pp.orientation.z, pp.orientation.w],
                            'sigma': [_nan(float(v)) for v in r.pose.sigma], 'source': r.pose.source}
+        elif a.op == 'latch':
+            from std_srvs.srv import Trigger
+            c = node.create_client(Trigger, '/ur5e/drive_mate/latch_status')
+            if not c.wait_for_service(timeout_sec=5.0):
+                out = {'error': '/ur5e/drive_mate/latch_status: no server'}
+            else:
+                f = c.call_async(Trigger.Request()); rclpy.spin_until_future_complete(node, f, timeout_sec=10.0)
+                r = f.result()
+                out = {'error': 'no answer'} if r is None else {'latched': not r.success,
+                                                                'reason': '' if r.success else r.message}
         elif a.op == 'grip':
             from pa_gripper_msgs.action import Grip
             goal = Grip.Goal(); goal.width_m = a.width; goal.force = a.force; goal.expect = a.expect

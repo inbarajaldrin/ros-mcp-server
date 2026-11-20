@@ -1460,7 +1460,7 @@ def map_drive_mate_result(out):
     uncommandable, the server stopped it and latched) is a failure with that error WHATEVER `seated` says, so the
     replay's post_insert_gate latches too (review r1 P1-1)."""
     refusal = str(out.get('refusal') or '')
-    gated = 'INSERT_GATE:' in refusal or 'DRIVE_MATE_LATCHED' in refusal
+    gated = any(k in refusal for k in ('INSERT_GATE:', 'DRIVE_MATE_LATCHED', 'DRIVE_MATE_CANCELLED'))
     ok = bool(out.get('seated')) and not gated
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
                 error='' if ok else (refusal if gated else (out.get('error') or refusal
@@ -1826,8 +1826,30 @@ LATCH_RECOVERY = ("  The part is still gripped in the base. Recover in this orde
                   "       (if the external-control program is down, compliant_insertion_studio/scripts/stop_run.sh first:\n"
                   "        it re-sends the program and restores the controllers without moving the arm)\n"
                   "    3. never move_home first - its straight line ignores seated parts\n"
-                  "  A latched drive-mate (DRIVE_MATE_LATCHED) is cleared by stop_run.sh's last step, or by hand after it:\n"
+                  "  drive-mate stays latched until you clear it deliberately, after the part is released and lifted:\n"
                   "    ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
+
+
+# A latched drive-mate (DRIVE_MATE_LATCHED): nothing was started by that goal - the part is still held ABOVE the base,
+# wherever the arm stands (review r2 P2-B; never assume where the part is)
+DRIVE_MATE_LATCH_RECOVERY = (
+    "  drive-mate is latched: nothing ran for this goal. The part (if any) is still held ABOVE the base, where the arm\n"
+    "  stands. Do NOT open the gripper. Recover in this order:\n"
+    "    1. compliant_insertion_studio/scripts/stop_run.sh   (prints the latch reason)\n"
+    "    2. lift straight up:   python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real\n"
+    "    3. to the clear area:  python3 -u -m primitives.core.move_to_clear_area --mode real\n"
+    "    4. read why it latched, then clear it deliberately:\n"
+    "       ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
+
+
+def drive_mate_startup_refusal(status):
+    """A SEAMS_DRIVE=1 run's startup check of drive-mate's latch (seams.client latch): None, or why the run must not
+    start.  No answer (server down) refuses too: the run would only fail at its first insert, a part in the hand."""
+    if status.get('error'):
+        return f"DRIVE_MATE_UNAVAILABLE: {status['error']}"
+    if status.get('latched'):
+        return f"DRIVE_MATE_LATCHED: {status.get('reason')}"
+    return None
 
 
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
@@ -2318,7 +2340,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
             gate = cell_io.post_insert_gate(result)
             if gate:
-                say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs.\n{LATCH_RECOVERY}")
+                say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs.\n"
+                    f"{DRIVE_MATE_LATCH_RECOVERY if 'DRIVE_MATE_LATCHED' in gate else LATCH_RECOVERY}")
                 result = {'result': 'failure', 'error': f"INSERT_GATE: {gate}", 'label': label,
                           'insert_result': result}
         _hq_before = state.held_quat
@@ -2810,6 +2833,11 @@ def main() -> int:
         os.nice(5 - os.nice(0))
     if not args.dry_run:
         ensure_exposure(lambda m: print(m, flush=True))   # the room's light may have changed since the last run
+    if not args.dry_run and os.environ.get('SEAMS_DRIVE') == '1':
+        why = drive_mate_startup_refusal(_seam_call(['latch'], 30))
+        if why:                                # review r2 P2-C: refuse BEFORE any motion, not at the first insert
+            print(f"\n!!! {why}\n{DRIVE_MATE_LATCH_RECOVERY}", flush=True)
+            return 1
 
     # Install SIGINT handler so Ctrl-C kills the active subprocess tree
     # immediately instead of letting it run to completion (which previously

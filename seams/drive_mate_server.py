@@ -29,17 +29,22 @@ driver plugs in behind the same action later (M3b).
                                                         dashboard stop sent, the server latched
                           | insert_rc: <rc> (<error>)   translate_object exited non-zero; the arm is commandable
                           | align_failed: <why>         the align step failed on a commandable arm; no insert
-  cancel  SIGINT to the insert (its force-mode cleanup runs), SIGTERM after 30 s - never SIGKILL in force mode.
+  cancel  SIGINT to the insert (its force-mode cleanup runs), SIGTERM after CHILD_STOP_GRACE_S (60 s) - never SIGKILL
+          in force mode.  A cancelled goal LATCHES the server but sends no dashboard stop: the canceller
+          (stop_run.sh) owns the stop and the restore (review r2 P2-A).
 
 The post-insert gate and the latch (lead 2026-11-20, w8-drivemate-gate).  After EVERY motion subprocess this server
 starts (the align step and the insert), whatever the client: ablations.cell_io.post_insert_gate on translate_object's
 own result (its __RESULT_JSON__, so a prismatic INSERT_RESTORE_FAILED is typed) and the robot's safety status.  The
 gate sends the dashboard stop when the controllers are left switched (scaled inactive / passthrough or force_mode
 active, or unreadable: fail closed) and the server LATCHES: every later goal is refused DRIVE_MATE_LATCHED, before
-anything starts, until the server restarts or the latch is reset.  The reset is a std_srvs/Trigger at
-/ur5e/drive_mate/reset_latch, to be called only after compliant_insertion_studio/scripts/stop_run.sh (which halts,
-re-sends the program and re-activates the trajectory controller); it clears the latch only when the dashboard says
-NORMAL and the controllers read restored, and refuses otherwise.  A non-zero exit with the arm commandable is not a
+anything starts, until the server restarts or the latch is reset.  The reset is a DELIBERATE operator step (review r2
+P2-C): std_srvs/Trigger /ur5e/drive_mate/reset_latch, after stop_run.sh and after the part is released and lifted; it
+clears only when the safety is NORMAL / REDUCED, the controllers read restored and the external-control program runs.
+/ur5e/drive_mate/latch_status (Trigger: success = not latched, message = the reason) is the read-only status that
+stop_run.sh prints and that a SEAMS_DRIVE=1 replay and RealIO check at startup, refusing before any motion.
+After EVERY motion child the server also latches when the program is not running (whatever the child reported: a
+child that sent its own stop, review r2 P3-A).  A non-zero exit with the arm commandable is not a
 latch: it is carried in `refusal` (insert_rc) and `seated` stays the trace's verdict, as before (the replay treats a
 seated insert_rc as a success; the arm-commandable gate, the certifier and the per-seat check follow it).
 Round 2 (review r1): the gate runs FIRST, the moment the child exits (before the resting-pose wait and the trace),
@@ -47,10 +52,8 @@ so a stop is never late; ANY exception in or after a motion child fails closed (
 dashboard stop unless the controllers read restored); the align's own dashboard stop (drive_align: __ALIGN__
 dashboard_stopped, non-zero exit) latches; a failed align (non-zero exit, no / malformed __ALIGN__, an error or a
 safety stop in it) refuses align_failed and the insert does not start; an unreadable safety status fails closed;
-the safety rule is cell_io's (NORMAL / REDUCED ok).  reset_latch answers at once when not latched, runs on its own
-callback group, and clears only when the safety is NORMAL / REDUCED, the controllers read restored AND the
-external-control program runs (/io_and_status_controller/robot_program_running), i.e. after stop_run.sh, which calls
-it as its last step.
+the safety rule is cell_io's (NORMAL / REDUCED ok).  reset_latch answers at once when not latched and runs on its own
+callback group.
 
 Known debt, recorded here rather than hidden: the insert routes by part name (translate_object: lines -> prismatic,
 U parts -> compliant spiral) and adds a per-part seat-z offset (PER_OBJECT_BASE_OFFSET_M) - the seam rule says
@@ -252,8 +255,9 @@ class DriveMateServer(Node):
                                  callback_group=reads)
         ActionServer(self, DriveMate, ACTION, self.execute, goal_callback=self.on_goal,
                      cancel_callback=self.on_cancel, callback_group=ReentrantCallbackGroup())
-        self.create_service(Trigger, ACTION + '/reset_latch', self.on_reset_latch,
-                            callback_group=MutuallyExclusiveCallbackGroup())
+        status = MutuallyExclusiveCallbackGroup()
+        self.create_service(Trigger, ACTION + '/reset_latch', self.on_reset_latch, callback_group=status)
+        self.create_service(Trigger, ACTION + '/latch_status', self.on_latch_status, callback_group=status)
         self.get_logger().info(f'drive-mate served at {ACTION}')
 
     def on_reset_latch(self, request, response):
@@ -272,6 +276,24 @@ class DriveMateServer(Node):
         response.message = why or f'latch cleared (was: {was})'
         self.get_logger().warn(f'reset_latch: {response.message}')
         return response
+
+    def on_latch_status(self, request, response):
+        """Read-only: success = not latched; message = the latch reason (stop_run.sh prints it; startups check it)."""
+        response.success = self.latch.reason is None
+        response.message = self.latch.reason or 'not latched'
+        return response
+
+    def _after_motion(self, gh, rc, text, kind):
+        """The checks after a motion child, in order: a cancel (latch, no stop: the canceller owns it), the gate, then
+        the program state (latched when not running, whatever the child reported).  (refusal, latch_reason)."""
+        if gh.is_cancel_requested:
+            why = f'cancelled during the {kind}: the canceller (stop_run.sh) stops and restores the arm'
+            return f'DRIVE_MATE_CANCELLED: {why}', why
+        refusal, latch_why = gate_after(rc, text, kind)
+        if not latch_why and self.program_running is False:
+            latch_why = f'the external-control program was stopped during the {kind}'
+            refusal = f'INSERT_GATE: {latch_why}'
+        return refusal, latch_why
 
     def _fail_closed(self, why):
         """Any exception in or after a motion child: latch, and send the dashboard stop unless the controllers read
@@ -460,16 +482,17 @@ class DriveMateServer(Node):
                 gh.canceled(); return res
             try:
                 rc_a, text_a, log_a = self._align(gh, g, obj, base, gid, measured, held_world, env)
-                refusal, latch_why = gate_after(rc_a, text_a, 'align')      # FIRST: the align moves the arm too
+                refusal, latch_why = self._after_motion(gh, rc_a, text_a, 'align')   # FIRST: the align moves the arm
             except StartFailed as e:
                 return refuse('insert_failed_to_start', f'align: {e}')
             except Exception as e:
                 return refuse('INSERT_GATE: ' + self._fail_closed(f'align: {e!r}'))
             if latch_why:
                 self.latch.trip(latch_why)
+                if refusal.startswith('DRIVE_MATE_CANCELLED'):
+                    res.refusal = refusal
+                    gh.canceled(); return res
                 return refuse(refusal)
-            if gh.is_cancel_requested:
-                gh.canceled(); return res
             align = align_result(text_a)
             if refusal or align is None or align.get('error') or align.get('safety'):
                 why = (refusal or ('no __ALIGN__ result' if align is None else '')
@@ -526,7 +549,7 @@ class DriveMateServer(Node):
         log_path = LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
         try:
             rc, text = self._run_motion(gh, argv, env, log_path, 'inserting')
-            refusal, latch_why = gate_after(rc, text, 'insert')          # FIRST, the moment the child exits
+            refusal, latch_why = self._after_motion(gh, rc, text, 'insert')   # FIRST, the moment the child exits
         except StartFailed as e:
             return refuse('insert_failed_to_start', str(e))
         except Exception as e:
@@ -552,14 +575,22 @@ class DriveMateServer(Node):
                 except Exception as e_:
                     self.get_logger().warn(f'{g.mate_id}: seat record not written ({e_})')
         except Exception as e:
-            if not latch_why:
-                res.refusal = 'INSERT_GATE: ' + self._fail_closed(f'judging the insert: {e!r}')
-            gh.abort(); return res
+            if not latch_why:                    # r2 P3-B: the gate passed; say so, so nobody hunts for a crash
+                res.refusal = 'INSERT_GATE: ' + self._fail_closed(
+                    f'trace unreadable ({e!r}); arm checked commandable by the gate')
+            if res.refusal.startswith('DRIVE_MATE_CANCELLED'):
+                gh.canceled()
+            else:
+                gh.abort()
+            return res
         self.get_logger().info(f'{g.mate_id}: rc={rc} stage={res.stage_reached} seated={res.seated} '
                                f'fsm={out.get("fsm_outcome")} correction={out.get("measured_correction")}'
                                + (f' refusal={refusal}' if refusal else ''))
         if latch_why:
-            gh.abort()
+            if refusal.startswith('DRIVE_MATE_CANCELLED'):
+                gh.canceled()
+            else:
+                gh.abort()
             return res
         if gh.is_cancel_requested:
             gh.canceled()
