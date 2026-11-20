@@ -392,14 +392,20 @@ def _subprocess_fast_path():
             print(f"[line_green route] prismatic: {' '.join(prism_argv)}", flush=True)
             r = _run_child(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             success = (r.returncode == 0)
-            _output({
+            out = {
                 "result": "success" if success else "failure",
                 "mode": args.mode,
                 "movement_type": "insert",
                 "object_name": args.object_name,
                 "base_name": args.base_name,
                 "router": "line_green→prismatic_peg_insertion",
-            })
+            }
+            if r.returncode == 3:      # prismatic EXIT_RESTORE_FAILED: controllers not restored, dashboard stop sent
+                out["error"] = ("INSERT_RESTORE_FAILED: prismatic could not restore the trajectory controller (dashboard "
+                                "stop sent); stop the run, stop_run.sh restores the controllers")
+            elif not success:
+                out["error"] = f"prismatic_peg_insertion exited {r.returncode}"
+            _output(out)
             sys.exit(0 if success else 1)
 
         # Free base (2026-10-21, operator): no compliance - guarded touches that retract on first contact and correct

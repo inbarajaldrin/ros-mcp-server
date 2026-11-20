@@ -201,23 +201,46 @@ def switch_controllers(activate, deactivate):
     return result.returncode == 0
 
 
-def restore_controllers():
-    """Restore scaled_joint_trajectory_controller; a call that times out is retried once (review r5 P3-3)."""
+RESTORE_BACKOFF_S = (0.0, 0.5, 1.0, 2.0)   # the restore's attempts: a refused or timed-out switch is retried after these
+
+
+def restore_controllers(backoff_s=RESTORE_BACKOFF_S):
+    """Restore scaled_joint_trajectory_controller (passthrough + force_mode off); a refused or timed-out switch is
+    retried with backoff (lead 2026-11-20, w5b-insert-restore; was one retry on timeout only).  True when restored."""
     print("[CLEANUP] Restoring controllers...")
     # One switch: the driver refuses scaled_joint_trajectory_controller while passthrough is
     # still active ("Starting position together with trajectory_passthrough is not allowed"),
     # and the old two-call version left the arm uncommandable when the second call was rejected.
-    for attempt in (1, 2):
+    for attempt, wait_s in enumerate(backoff_s, start=1):
+        if wait_s:
+            time.sleep(wait_s)
         try:
             if switch_controllers([SCALED_CONTROLLER], [PASSTHROUGH_CONTROLLER, FORCE_MODE_CONTROLLER]):
-                print("[CLEANUP] Controllers restored")
+                print(f"[CLEANUP] Controllers restored (attempt {attempt}/{len(backoff_s)})")
                 return True
-            print("[CLEANUP] ERROR restoring controllers (stop_run.sh restores them)")
-            return False
+            print(f"[CLEANUP] controller restore refused (attempt {attempt}/{len(backoff_s)})")
         except subprocess.TimeoutExpired:
-            print(f"[CLEANUP] controller switch timed out (attempt {attempt}/2)"
-                  + (", retrying" if attempt == 1 else " - stop_run.sh restores them"))
+            print(f"[CLEANUP] controller switch timed out (attempt {attempt}/{len(backoff_s)})")
     return False
+
+
+EXIT_RESTORE_FAILED = 3      # the controllers could not be restored: motion halted by the dashboard stop, run must stop
+
+
+def halt_motion_dashboard(host=None, timeout=3.0):
+    """The UR dashboard `stop` (stop_run.sh step 0): the controller stops the running program, so no trajectory and no
+    force mode can continue.  True only when the dashboard answered that it stopped.  ROBOT_IP as stop_run.sh."""
+    import socket
+    host = host or os.environ.get("ROBOT_IP", "192.168.1.111")
+    try:
+        with socket.create_connection((host, 29999), timeout=timeout) as s_:
+            s_.settimeout(timeout)
+            s_.recv(1024)                                      # banner
+            s_.sendall(b"stop\n")
+            return s_.recv(1024).decode(errors="replace").strip().lower().startswith("stopped")
+    except Exception as error:
+        print(f"[CLEANUP] dashboard {host}:29999 unreachable: {error!r}")
+        return False
 
 
 def safe_state_cleanup(node):
@@ -227,16 +250,35 @@ def safe_state_cleanup(node):
     ROS down."""
     from primitives.shared.goal_guard import cancel_active_goals
     from primitives.shared.signal_safety import deferred_signals
+    restored = False
     with deferred_signals() as deferred:
         try:
             if rclpy.ok():
                 cancel_active_goals()
-                if node is not None:
-                    print("[CLEANUP] Stopping force mode..."
-                          + (" stopped" if node.stop_force_mode() else " NOT CONFIRMED (stop_run.sh)"))
         except Exception as error:
-            print(f"[CLEANUP] force-mode stop failed: {error!r} (stop_run.sh)")
-        restore_controllers()
+            print(f"[CLEANUP] goal cancel failed: {error!r}")
+        # force mode off FIRST, on its own, before and whatever the controller switch does (lead 2026-11-20): a
+        # failed restore must not leave the last commanded wrench applied.  No node: force mode was never started
+        # (start_force_mode needs it).
+        if node is None:
+            print("[CLEANUP] Stopping force mode... not started (no node)")
+        else:
+            stopped = False
+            for attempt in (1, 2, 3):
+                try:
+                    stopped = rclpy.ok() and node.stop_force_mode()
+                except Exception as error:
+                    print(f"[CLEANUP] force-mode stop attempt {attempt} failed: {error!r}")
+                if stopped:
+                    break
+                time.sleep(0.3)
+            print("[CLEANUP] Stopping force mode..." + (" stopped (acknowledged)" if stopped else " NOT CONFIRMED"))
+        restored = restore_controllers()
+        if not restored:
+            halted = halt_motion_dashboard()
+            print(f"INSERT_RESTORE_FAILED: the trajectory controller could not be restored after "
+                  f"{len(RESTORE_BACKOFF_S)} attempts; dashboard stop {'sent and confirmed' if halted else 'NOT CONFIRMED - USE THE PENDANT'}"
+                  f"; the run must stop (stop_run.sh restores the controllers)", flush=True)
         try:
             if rclpy.ok():
                 rclpy.shutdown()
@@ -244,6 +286,7 @@ def safe_state_cleanup(node):
             pass
     if deferred:
         print(f"[CLEANUP] finished with {len(deferred)} stop signal(s) deferred")
+    return restored
 
 
 def load_grasp_point_position(object_name, grasp_id):
@@ -1528,7 +1571,7 @@ def main():
         time.sleep(0.5)
 
         print(f"\nRESULT: {'SUCCESS' if success else 'FAILED'}")
-        rclpy.shutdown()
+        # ROS stays up for the cleanup (finally): it stops force mode through its service and then shuts ROS down
         return 0 if success else 1
 
     except KeyboardInterrupt:
@@ -1540,7 +1583,8 @@ def main():
         traceback.print_exc()
         return 1
     finally:
-        safe_state_cleanup(node)
+        if not safe_state_cleanup(node):
+            return EXIT_RESTORE_FAILED      # overrides success too: the arm is not left commandable
 
 
 if __name__ == '__main__':

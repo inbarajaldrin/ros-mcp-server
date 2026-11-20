@@ -58,6 +58,48 @@ def dashboard_stop(host: str = '192.168.1.111', timeout: float = 3.0) -> bool:
         return False
 
 
+TRAJECTORY_CONTROLLER = 'scaled_joint_trajectory_controller'
+INSERT_CONTROLLERS = ('passthrough_trajectory_controller', 'force_mode_controller')
+
+
+def parse_controller_states(text: str) -> dict:
+    """{controller: state} from `ros2 control list_controllers` output (the state is the LAST column; colours off)."""
+    states = {}
+    for line in text.splitlines():
+        parts = re.sub(r'\x1b\[[0-9;]*m', '', line).split()
+        if len(parts) >= 2 and parts[-1] in ('active', 'inactive', 'unconfigured', 'finalized'):
+            states[parts[0]] = parts[-1]
+    return states
+
+
+def controllers_restored(attempts: int = 2, list_text: Optional[str] = None) -> Tuple[bool, str]:
+    """After an insert (lead 2026-11-20, w5b-insert-restore): the trajectory controller active and the insert's
+    passthrough / force_mode controllers inactive, else (False, why).  Fail closed: an unreadable state is False.
+    `list_text` replaces the CLI call (tests)."""
+    why = ''
+    for attempt in range(attempts):
+        text = list_text
+        if text is None:
+            try:
+                r = subprocess.run(['ros2', 'control', 'list_controllers'], capture_output=True, text=True,
+                                   timeout=15, env=make_env())
+                text = r.stdout if r.returncode == 0 else ''
+                why = f"list_controllers rc={r.returncode}: {(r.stderr or '').strip()[-200:]}"
+            except Exception as error:
+                text, why = '', f"list_controllers failed: {error!r}"
+        states = parse_controller_states(text)
+        if states:
+            bad = ([f"{TRAJECTORY_CONTROLLER} {states.get(TRAJECTORY_CONTROLLER, 'missing')}"]
+                   if states.get(TRAJECTORY_CONTROLLER) != 'active' else [])
+            bad += [f"{c} active" for c in INSERT_CONTROLLERS if states.get(c) == 'active']
+            return (not bad), ('; '.join(bad) if bad else 'restored')
+        why = why or 'list_controllers returned no controllers'
+        if list_text is not None:
+            break
+        time.sleep(1.0)
+    return False, f"controller state unreadable ({why})"
+
+
 _DASHBOARD_STOPPED: Optional[str] = None     # set once cell_io sent the dashboard `stop` (the program is down)
 
 

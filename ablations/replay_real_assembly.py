@@ -2412,6 +2412,17 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
+        # After every insert, success or not (lead 2026-11-20, w5b-insert-restore): the trajectory controller must be
+        # back and the insert's passthrough / force_mode off.  If not, halt motion (dashboard stop) and stop the run:
+        # the next primitive would find no trajectory controller, and force mode may still be applying a wrench.
+        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
+            ok_ctrl, why_ctrl = cell_io.controllers_restored()
+            if not ok_ctrl:
+                halted = cell_io.dashboard_stop(os.environ.get('ROBOT_IP', '192.168.1.111'))
+                say(f"  [{step_idx}] CONTROLLERS_NOT_RESTORED after the insert ({why_ctrl}); dashboard stop "
+                    f"{'confirmed' if halted else 'NOT CONFIRMED - use the pendant'}; stopping the run "
+                    f"(stop_run.sh restores the controllers)")
+                return False
         # Grip-width guard: a close that ends far from the grasp's own width took the wrong thing
         # (2026-10-19 20:53: flat u_brown, fingers closed across both legs at 69.9 mm instead of
         # 21 on a leg; the part slipped out in the reorient and the release command failed).
