@@ -32,7 +32,7 @@ def test_lights_on_scales_exposure_down_then_returns_to_auto():
     state, exposure, out = run('manual', K.EXP_MAX, [254] * 12)
     assert state == 'auto'
     assert {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': K.GAIN_LIT} in [p for _, p in out]
-    assert exposure == K.EXP_MIN
+    assert exposure <= K.EXP_LIT          # back to auto once a short exposure suffices (lit room)
 
 
 def test_manual_in_band_is_left_alone():
@@ -43,3 +43,15 @@ def test_manual_in_band_is_left_alone():
 def test_dim_but_not_black_raises_exposure_within_cap():
     state, exposure, _ = run('manual', 2000, [30])
     assert state == 'manual' and exposure == 6000
+
+
+def test_lit_room_at_short_manual_exposure_returns_to_auto():
+    """2026-11-20: lights on, the keeper scaled to exposure 156 with mean 154 (in band) and stayed manual with gain 128."""
+    state, exposure, out = run('manual', 156, [154, 154, 154])
+    assert state == 'auto'
+    assert {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': K.GAIN_LIT} in [p for _, p in out]
+
+
+def test_dark_room_long_exposure_stays_manual():
+    state, exposure, out = run('manual', K.EXP_MAX, [60, 60, 60])
+    assert state == 'manual' and all(not p for _, p in out)

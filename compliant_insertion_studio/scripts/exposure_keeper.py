@@ -7,7 +7,10 @@ and the colour image goes black (brightness 5-8/255; markers lost). What worked 
 
   AUTO   -> MANUAL  when the frame mean stays below DARK for HOLD samples: gain 128, auto exposure off, exposure 8000.
   MANUAL            each sample outside [LOW, HIGH]: scale the exposure toward TARGET, clamped to [EXP_MIN, EXP_MAX].
-  MANUAL -> AUTO    when the exposure is at EXP_MIN and the frame still stays above HIGH for HOLD samples: auto on, gain 64.
+  MANUAL -> AUTO    when the room is lit again: the manual exposure has come down to EXP_LIT or less with the frame at LOW or
+                    above (or it is at EXP_MIN and still above HIGH) for HOLD samples: auto on, gain 64.  Staying in manual at a
+                    short exposure with the dark gain (128) left the markers undetected (2026-11-20 10:11-12:22: the frame read
+                    mean 154, inside the band, so the old rule never switched back, and the localizer published nothing).
 
 It takes ONE frame every PERIOD_S and subscribes to the image only for that frame, so between samples it costs nothing (a
 standing subscription made the camera node copy every 15 Hz frame to it: ~3% of a core on the cell PC). Depth is unaffected: the D415 uses its IR projector.
@@ -20,6 +23,7 @@ import time
 
 DARK, LOW, HIGH, TARGET = 20.0, 50.0, 170.0, 90.0
 EXP_MIN, EXP_MAX = 156, 8000
+EXP_LIT = 1000   # manual exposure at or below this means the room is lit: auto exposure (gain 64) reads markers better
 GAIN_DARK, GAIN_LIT = 128, 64
 HOLD = 3
 PERIOD_S = 10.0   # lights change rarely; a 30 s reaction (HOLD samples) is enough
@@ -36,7 +40,7 @@ def decide(state, mean, exposure, streak):
                               'rgb_camera.exposure': EXP_MAX}, 0
         return 'auto', {}, streak
     # manual
-    if exposure <= EXP_MIN and mean > HIGH:
+    if (exposure <= EXP_LIT and mean >= LOW) or (exposure <= EXP_MIN and mean > HIGH):
         streak += 1
         if streak >= HOLD:
             return 'auto', {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': GAIN_LIT}, 0
