@@ -30,8 +30,9 @@ driver plugs in behind the same action later (M3b).
                           | insert_rc: <rc> (<error>)   translate_object exited non-zero; the arm is commandable
                           | align_failed: <why>         the align step failed on a commandable arm; no insert
   cancel  SIGINT to the insert (its force-mode cleanup runs), SIGTERM after CHILD_STOP_GRACE_S (60 s) - never SIGKILL
-          in force mode.  A cancelled goal LATCHES the server but sends no dashboard stop: the canceller
-          (stop_run.sh) owns the stop and the restore (review r2 P2-A).
+          in force mode.  A cancelled goal LATCHES the server.  With the program already stopped (stop_run.sh's step 0)
+          the server sends no stop - the canceller owns the restore (review r2 P2-A); with the program running or
+          unknown (a Ctrl-C'd replay, a client timeout) it runs the full gate, stop included (review r3 P1).
 
 The post-insert gate and the latch (lead 2026-11-20, w8-drivemate-gate).  After EVERY motion subprocess this server
 starts (the align step and the insert), whatever the client: ablations.cell_io.post_insert_gate on translate_object's
@@ -94,14 +95,35 @@ REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert:
 SAFETY_OK = ('NORMAL', 'REDUCED')      # cell_io._watch_safety's rule; an unreadable status (None) fails closed
 
 
-class InsertLatch:
-    """The server's latch: tripped by a failed gate, cleared only by restart or a checked reset."""
+LATCH_FILE = REPO / 'ablations' / 'logs' / 'drive_mate_latch.json'
 
-    def __init__(self):
+
+class InsertLatch:
+    """The server's latch: tripped by a failed gate, cleared ONLY by a checked, deliberate reset.  Persisted in
+    LATCH_FILE (written atomically, removed only by a successful reset), so a server crash, an OOM kill, a re-login or a
+    restart cannot clear it silently (review r3, lead ruling 2026-11-20): a new server starts latched from the file."""
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path is not None else LATCH_FILE
         self.reason = None
+        try:
+            self.reason = json.load(open(self.path)).get('reason') or None
+        except FileNotFoundError:
+            pass
+        except Exception as e:                   # unreadable: fail closed
+            self.reason = f'latch file {self.path} unreadable ({e!r})'
 
     def trip(self, reason):
         self.reason = self.reason or reason
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix('.tmp')
+            with open(tmp, 'w') as fh:
+                json.dump({'reason': self.reason, 'since': time.time()}, fh)
+                fh.flush(); os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+        except Exception:
+            pass                                  # the in-memory latch holds regardless
 
     def refusal(self):
         return f'DRIVE_MATE_LATCHED: {self.reason}' if self.reason else ''
@@ -118,6 +140,12 @@ class InsertLatch:
         if program_running is not True:
             return ('not reset: the external-control program is not running '
                     f'({"unknown" if program_running is None else "stopped"}; run stop_run.sh first)')
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            return f'not reset: the latch file {self.path} could not be removed ({e!r})'
         self.reason = None
         return ''
 
@@ -286,10 +314,16 @@ class DriveMateServer(Node):
     def _after_motion(self, gh, rc, text, kind):
         """The checks after a motion child, in order: a cancel (latch, no stop: the canceller owns it), the gate, then
         the program state (latched when not running, whatever the child reported).  (refusal, latch_reason)."""
-        if gh.is_cancel_requested:
-            why = f'cancelled during the {kind}: the canceller (stop_run.sh) stops and restores the arm'
+        if gh.is_cancel_requested and self.program_running is False:
+            # the program is already down: stop_run.sh's step 0 stopped it; it owns the restore (review r2 P2-A)
+            why = f'cancelled during the {kind} with the program already stopped (stop_run.sh)'
             return f'DRIVE_MATE_CANCELLED: {why}', why
         refusal, latch_why = gate_after(rc, text, kind)
+        if gh.is_cancel_requested:
+            # a cancel with the program running or unknown (a Ctrl-C'd replay, a client timeout): the full gate above,
+            # stop included; latched either way (review r3 P1)
+            why = latch_why or f'cancelled during the {kind} (program running: gate passed)'
+            return f'DRIVE_MATE_CANCELLED: {why}', why
         if not latch_why and self.program_running is False:
             latch_why = f'the external-control program was stopped during the {kind}'
             refusal = f'INSERT_GATE: {latch_why}'

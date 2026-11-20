@@ -61,7 +61,7 @@ def rig(monkeypatch, tmp_path):
     srv = object.__new__(dms.DriveMateServer)
     srv.program_running = True
     srv.tcp = NS(position=NS(x=0.03, y=-0.45, z=0.2), orientation=NS(x=1.0, y=0.0, z=0.0, w=0.0))
-    srv.proc, srv.busy, srv.latch = None, threading.Lock(), dms.InsertLatch()
+    srv.proc, srv.busy, srv.latch = None, threading.Lock(), dms.InsertLatch(tmp_path / "latch.json")
     log = NS(info=lambda *a: None, warn=lambda *a: None, error=lambda *a: None)
     srv.get_logger = lambda: log
     srv.resting_tcp = lambda *a, **k: (np.zeros(3), True)
@@ -330,10 +330,7 @@ def test_result_of_reads_the_last_result_block():
 
 
 # ---- review r2 (before the merge) -----------------------------------------------------------------------------------
-def test_a_cancel_during_the_insert_latches_without_a_stop(rig, monkeypatch):
-    """r2 P2-A: the canceller (stop_run.sh) owns the stop; the server latches, sends none, and reports CANCELLED."""
-    srv, world = rig
-    world.controllers = LEFT_SWITCHED                # what stop_run's force-mode cycle looks like mid-way
+def _cancelled_mid_insert(srv, world, monkeypatch):
     polls = []
 
     class _Slow:
@@ -343,18 +340,58 @@ def test_a_cancel_during_the_insert_latches_without_a_stop(rig, monkeypatch):
         def poll(self):
             polls.append(1)
             if len(polls) >= 3:
-                self.returncode = -2                 # the child ended on the SIGINT
+                self.returncode = -2
             return self.returncode
     monkeypatch.setattr(dms.subprocess, "Popen", _Slow)
     monkeypatch.setattr(dms.time, "sleep", lambda s: None)
     gh = _GH()
 
     def feedback(fb):
-        gh.is_cancel_requested = True                # the cancel arrives while the insert runs
+        gh.is_cancel_requested = True
     gh.publish_feedback = feedback
-    res = srv._execute(gh)
-    assert res.refusal.startswith("DRIVE_MATE_CANCELLED") and gh.ended == "canceled" and srv.latch.reason
-    assert world.stops == []                         # no dashboard stop from the server
+    return srv._execute(gh), gh
+
+
+def test_a_cancel_with_the_program_running_runs_the_full_gate(rig, monkeypatch):
+    """r3 P1: a Ctrl-C'd replay or a client timeout cancels with the program RUNNING; force mode may be left on, so
+    the full gate runs, stop included, and the server latches."""
+    srv, world = rig
+    srv.program_running, world.controllers = True, LEFT_SWITCHED
+    res, gh = _cancelled_mid_insert(srv, world, monkeypatch)
+    assert res.refusal.startswith("DRIVE_MATE_CANCELLED: CONTROLLERS_NOT_RESTORED") and world.stops
+    assert srv.latch.reason and gh.ended == "canceled"
+
+
+def test_a_cancel_with_the_program_already_stopped_latches_without_a_stop(rig, monkeypatch):
+    """r2 P2-A: stop_run.sh's step 0 stopped the program; it owns the restore, so the server sends no stop."""
+    srv, world = rig
+    srv.program_running, world.controllers = False, LEFT_SWITCHED
+    res, gh = _cancelled_mid_insert(srv, world, monkeypatch)
+    assert res.refusal.startswith("DRIVE_MATE_CANCELLED") and "already stopped" in res.refusal
+    assert world.stops == [] and srv.latch.reason and gh.ended == "canceled"
+
+
+def test_the_latch_persists_across_a_restart_and_only_a_reset_removes_it(tmp_path):
+    f = tmp_path / "latch.json"
+    a = dms.InsertLatch(f)
+    a.trip("CONTROLLERS_NOT_RESTORED (x)")
+    assert f.exists() and dms.InsertLatch(f).reason == "CONTROLLERS_NOT_RESTORED (x)"     # a new server: latched
+    assert a.reset("NORMAL", (False, "x"), True).startswith("not reset") and f.exists()
+    assert a.reset("NORMAL", (True, "restored"), True) == "" and not f.exists()
+    assert dms.InsertLatch(f).reason is None
+    f.write_text("{not json")
+    assert dms.InsertLatch(f).reason.startswith("latch file")                              # unreadable: latched
+
+
+def test_the_startup_check_reads_the_latch_file_even_with_the_server_down(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ablations"))
+    import replay_real_assembly as rra
+    f = tmp_path / "latch.json"
+    f.write_text(json.dumps({"reason": "INSERT_RESTORE_FAILED (x)"}))
+    assert rra.drive_mate_startup_refusal({"latched": False}, f).startswith("DRIVE_MATE_LATCHED (file")
+    assert rra.drive_mate_startup_refusal({"error": "no server"}, f).startswith("DRIVE_MATE_LATCHED (file")
+    assert rra.drive_mate_startup_refusal({"latched": False}, tmp_path / "none.json") is None
 
 
 def test_a_stopped_program_after_any_motion_child_latches(rig):
@@ -380,9 +417,10 @@ def test_a_seams_run_refuses_at_startup_on_a_latched_or_absent_drive_mate():
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ablations"))
     import replay_real_assembly as rra
-    assert rra.drive_mate_startup_refusal({"latched": True, "reason": "x"}) == "DRIVE_MATE_LATCHED: x"
-    assert rra.drive_mate_startup_refusal({"error": "no server"}).startswith("DRIVE_MATE_UNAVAILABLE")
-    assert rra.drive_mate_startup_refusal({"latched": False, "reason": ""}) is None
+    none = Path("/nonexistent/drive_mate_latch.json")
+    assert rra.drive_mate_startup_refusal({"latched": True, "reason": "x"}, none) == "DRIVE_MATE_LATCHED: x"
+    assert rra.drive_mate_startup_refusal({"error": "no server"}, none).startswith("DRIVE_MATE_UNAVAILABLE")
+    assert rra.drive_mate_startup_refusal({"latched": False, "reason": ""}, none) is None
     assert "Do NOT open" in rra.DRIVE_MATE_LATCH_RECOVERY and "ABOVE the base" in rra.DRIVE_MATE_LATCH_RECOVERY
 
 

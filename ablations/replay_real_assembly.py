@@ -146,6 +146,10 @@ def _sigint_handler(signum, frame):
         if _group_alive():
             print("!!! primitive process group still alive after SIGINT+SIGTERM — "
                   "run compliant_insertion_studio/scripts/stop_run.sh", flush=True)
+    # a Ctrl-C does not stop the arm by itself (an accepted trajectory or a drive-mate insert may run on; drive-mate
+    # latches a cancelled goal): the operator's next step is stop_run.sh (review w8-drivemate-gate r3)
+    print("!!! replay interrupted: run compliant_insertion_studio/scripts/stop_run.sh now - it halts the arm, restores "
+          "it and reports drive-mate's latch", flush=True)
     sys.exit(130)  # 128 + SIGINT
 
 
@@ -1842,9 +1846,20 @@ DRIVE_MATE_LATCH_RECOVERY = (
     "       ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
 
 
-def drive_mate_startup_refusal(status):
-    """A SEAMS_DRIVE=1 run's startup check of drive-mate's latch (seams.client latch): None, or why the run must not
-    start.  No answer (server down) refuses too: the run would only fail at its first insert, a part in the hand."""
+DRIVE_MATE_LATCH_FILE = REPO_ROOT / 'ablations' / 'logs' / 'drive_mate_latch.json'   # seams.drive_mate_server's
+
+
+def drive_mate_startup_refusal(status, latch_file=None):
+    """A SEAMS_DRIVE=1 run's startup check of drive-mate's latch (seams.client latch) AND its persisted latch file
+    (present = latched, whatever the server says: a restarted server reloads it, review r3): None, or why the run must
+    not start.  No answer (server down) refuses too: the run would only fail at its first insert, a part in the hand."""
+    lf = Path(latch_file) if latch_file is not None else DRIVE_MATE_LATCH_FILE
+    if lf.exists():
+        try:
+            reason = json.load(open(lf)).get('reason')
+        except Exception as e:
+            reason = f'unreadable ({e!r})'
+        return f"DRIVE_MATE_LATCHED (file {lf}): {reason}"
     if status.get('error'):
         return f"DRIVE_MATE_UNAVAILABLE: {status['error']}"
     if status.get('latched'):
