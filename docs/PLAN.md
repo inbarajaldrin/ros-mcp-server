@@ -148,6 +148,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   hover and use it only if it agrees with the chained pose within 3 mm / 3 deg; otherwise it refuses and stops (no harmful fallbacks).
   The read must pass the cell's still-read rule (>= 0.8 s still, >= 3 fresh detections, median). RGB-only at ~0.12 m on the v3.1
   mount is untested: first-real-run checklist.
+- **R35 (2026-11-20 ~19:25Z, operator on WhatsApp)**: "A". The first real FMB1 run is driven by the board-video program (R34's port) on
+  road (c): RealIO over the cell's proven seams (drive-mate inserts with the post-insert gate and persistent latch, the Grip contract
+  with witnessed holds, move_plan/move_down behind the one checker), one part at a time, u_brown first, with the operator present.
+  Before the first move: rebuild pa_gripper_msgs in the live workspace (operator's go), a read-only start capture, then his go.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
