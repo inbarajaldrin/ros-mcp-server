@@ -131,6 +131,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   now records poses, joints, wrench and gripper only; CAMERA=1 adds the colour stream (and DIAG=1 + CAMERA=1 the aligned depth).
   The 150 GB of October bags were stripped of image topics on his word ("clear the fmb1 video and image stuff"); the mp4 renders
   were deleted. Receipts: ~/Documents/fmb-cell-lead/out/cleanup-20261119-*.
+- **R31-R33 (2026-11-20 ~04:20Z, operator in the terminal)**: R31 "the objects don't slip on grasp or whatever motion you are doing":
+  the twin holds a verified grasp rigidly (weld from the verified close to the open; semantics matched to DroidStack/prompt-to-assembly via
+  plan47); the no-slip measurement stays as a regression check. R32 "there was no problem with the range after our cable check": no
+  per-part wrist_3 budget; hardware limits and the existing |wrist_3| cap only, wrist travel stays in the planner's cost. R33 "drop the
+  object straight down ... has worked well for us in the past": place-downs release at move_down's floor as the real cell does.
+  RG2 "40 N" per finger vs total: not stated in OnRobot's public datasheets/manuals (searched 11-20); moot for the twin under R31.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
