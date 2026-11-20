@@ -49,7 +49,8 @@ def test_the_pad_gap_follows_the_arc_model():
         assert abs(F.alpha_of_raw(raw_mm / 1000.0) - arc.alpha(arc.theta_of_raw_width(raw_mm))) < 1e-9
 
 
-@pytest.mark.parametrize("openings", [None, (21.0,), (56.7,), (100.0,), (35.0, 84.0)])
+@pytest.mark.parametrize("openings", [None, (21.0,), (56.7,), (100.0,), (35.0, 84.0), (("held", 43.4),),
+                                      (("held", 21.0), 100.8)])
 def test_rg2_finger_boxes_enclose(openings):
     """Every pinned finger-link vertex, posed by the 4-bar at random openings BETWEEN the samples and at the
     samples, lies inside its box (finger_link_boxes over the opening set; None = the whole stroke)."""
@@ -86,3 +87,11 @@ def test_the_shared_api():
     assert F.worst_finger_points_tool(None).shape == (16, 3)
     assert F.tip_z_tool(0.0092) > F.tip_z_tool(0.110)            # closed fingers reach deeper
     assert F.tip_z_tool(None) >= F.tip_z_tool(0.0092) - 1e-12
+
+
+def test_to_link_frame_inverts_the_pose():
+    links, alpha0, _ = F.model()
+    for name, T in links.items():
+        for a in (F.ALPHA_MIN, alpha0 + 0.1, F.ALPHA_MAX):
+            P = F._pose_points({name: T}, a, alpha0)[name]
+            assert np.abs(F.to_link_frame(name, P, a, alpha0) - T).max() < 1e-12, (name, a)

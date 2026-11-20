@@ -63,3 +63,16 @@ def no_robot_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "create_connection", create_connection)
     yield calls
+
+
+@pytest.fixture(autouse=True)
+def gripper_openings_unknown():
+    """Every test starts with the gripper opening unknown (collision's process-wide setting), and leaves it so."""
+    try:
+        from primitives.shared import collision
+    except Exception:
+        yield
+        return
+    collision.set_gripper_openings(None)
+    yield
+    collision.set_gripper_openings(None)

@@ -349,6 +349,11 @@ class MoveToClearArea(Node):
 
     def move_to_clear_space(self):
         """Move to clear space position while maintaining current end-effector orientation"""
+        # the RG2's opening for the physical checks: the held grip's measured width (--gripper-width-mm), down to fully
+        # closed (a slip closes the jaws); else unknown, the whole stroke (fail safe)
+        from primitives.shared.collision import set_gripper_openings
+        w = getattr(self, "gripper_width_mm", None)
+        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None, held=True)
         pose_data = self.read_current_ee_pose()
         
         if pose_data is None:
@@ -1149,6 +1154,9 @@ def output_result(result):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     parser = argparse.ArgumentParser(description='Move to clear space position')
     parser.add_argument('--move', action='store_true',
                        help='Move to target position keeping current EE orientation (default)')
@@ -1162,6 +1170,9 @@ def main(args=None):
                        help='Robot mode: sim varies placement Y to avoid stacking (default: real)')
     parser.add_argument('--held-quat', type=float, nargs=4, metavar=('X', 'Y', 'Z', 'W'), default=None,
                        help="Held part's chained world orientation (xyzw) for the held-part route check")
+    parser.add_argument('--gripper-width-mm', type=float, default=None,
+                        help="the RG2's measured width (control_gripper's final_width_mm); the physical checks model the "
+                             "fingers there. Omitted: the whole stroke (fail safe)")
     parser.add_argument('--grasp-id', type=int, default=None,
                        help="Grasp id the part is held by (default: the assembly's grasp id for it)")
 
@@ -1177,6 +1188,7 @@ def main(args=None):
     node = MoveToClearArea(mode=mode, object_name=args.object_name,
                            robot_mode=args.mode, target_xy=args.target_xy,
                            held_quat=args.held_quat, grasp_id=args.grasp_id)
+    node.gripper_width_mm = args.gripper_width_mm
     try:
         # Spin until operation is complete with timeout
         import time

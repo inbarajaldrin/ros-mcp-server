@@ -13,7 +13,15 @@ Openings are a set of raw widths (mm) or None (unknown: the whole stroke, fail s
 range [w - 1, w + 2 x 4.6 + 1] mm: the width a primitive knows may be the raw or the rubber gap (they differ by
 2 x 4.6 mm, CLAUDE.md), and the real width is within ~1 mm of the command.  Every range is sampled uniformly in alpha
 (<= ALPHA_STEP_RAD apart) and each link's travel between samples is added as padding, so the boxes and bounds hold
-between samples too.
+between samples too.  held(w): a held grip's measured width, [fully closed, w + 2 x 4.6 + 1] (a slip closes the jaws).
+
+Two width conventions use this module side by side, deliberately (review w5b-tier2 r2, R2-3) - do not "fix" one into
+the other:
+- collision.set_gripper_openings takes the MEASURED rubber gap in mm (control_gripper's final_width_mm =
+  /gripper_width_offset), set once per process for its physical self checks; a process that never sets it checks the
+  fingers over the whole stroke.
+- the *_tool API (finger_boxes_tool, tip_z_tool, ...; gripper_rules, move_down) takes RAW widths in metres, per call.
+Both are conservative for either reading: [w - 1, w + 10.2] mm covers raw = gap + 9.2.
 """
 from __future__ import annotations
 
@@ -163,6 +171,19 @@ def _pose_points(arrays, alpha, alpha0):
     return out
 
 
+def to_link_frame(name, P, alpha, alpha0):
+    """Flange-frame points P (..., 3) -> link `name`'s modelled pose (rg2_base_link at alpha0), the inverse of
+    _pose_points at alpha.  A rigid motion, so a distance to the link posed at alpha is the distance to its modelled
+    triangles from the mapped points: one fixed search tree per link serves every opening."""
+    B = np.asarray(P, float) @ np.diag([-1.0, -1.0, 1.0])
+    d = alpha - alpha0
+    if "knuckle" in name:
+        return _rot_xz(B, np.asarray(LINK_ORIGIN[name][0]), d if name.startswith("l") else -d)
+    side = -1.0 if name.startswith("l") else 1.0
+    r = _STATE.get("link_r", ARC_R_M)
+    return B - r * np.array([side * (math.sin(alpha) - math.sin(alpha0)), 0.0, math.cos(alpha) - math.cos(alpha0)])
+
+
 def posed(alpha):
     """{link: triangles (m, 3, 3) in the FLANGE frame} at moment-arm angle alpha."""
     m = model()
@@ -172,17 +193,37 @@ def posed(alpha):
     return _pose_points(links, alpha, alpha0)
 
 
+HELD = "held"
+
+
+def held(width_mm):
+    """An opening item for a held grip measured at width_mm: the fingers may close from there to fully closed (a slip
+    closes the jaws under the grip command), never open past it - [closed, w + 2 offset + 1] (lead ruling 2026-11-20,
+    review w5b-tier2 r1 P2-1)."""
+    return (HELD, float(width_mm))
+
+
 def alpha_ranges(openings):
-    """The alpha intervals an opening set stands for: None -> the whole stroke; known widths w (mm) ->
-    [w - 1, w + 2 offset + 1] each (see the module note)."""
+    """The alpha intervals an opening set stands for: None -> the whole stroke; a known width w (mm) ->
+    [w - 1, w + 2 offset + 1]; held(w) -> [closed, w + 2 offset + 1] (see the module note)."""
     if openings is None:
         return [(ALPHA_MIN, ALPHA_MAX)]
     out = []
-    for w in openings:
-        lo = alpha_of_raw(w / 1000.0 - KNOWN_WIDTH_BELOW_M)
-        hi = alpha_of_raw(w / 1000.0 + KNOWN_WIDTH_ABOVE_M)
+    for item in openings:
+        if isinstance(item, tuple) and item and item[0] == HELD:
+            out.append((ALPHA_MIN, alpha_of_raw(float(item[1]) / 1000.0 + KNOWN_WIDTH_ABOVE_M)))
+            continue
+        lo = alpha_of_raw(float(item) / 1000.0 - KNOWN_WIDTH_BELOW_M)
+        hi = alpha_of_raw(float(item) / 1000.0 + KNOWN_WIDTH_ABOVE_M)
         out.append((min(lo, hi), max(lo, hi)))
     return out
+
+
+def _openings_key(openings):
+    if openings is None:
+        return None
+    return tuple(sorted((it[0], round(float(it[1]), 3)) if isinstance(it, tuple) else ("w", round(float(it), 3))
+                        for it in openings))
 
 
 def alpha_samples(openings):
@@ -203,7 +244,7 @@ def padding(name):
 def boxes(openings):
     """{label: (centre, half)} axis-aligned boxes (flange frame) enclosing each finger link over the opening set,
     padded for the sampling; None when the meshes are unavailable (callers fail closed)."""
-    key = ("boxes", None if openings is None else tuple(sorted(round(float(w), 3) for w in openings)))
+    key = ("boxes", _openings_key(openings))
     with _LOCK:
         if key in _STATE:
             return _STATE[key]

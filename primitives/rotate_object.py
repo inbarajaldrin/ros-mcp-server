@@ -1206,6 +1206,13 @@ class ReorientForAssembly(Node):
     def reorient_for_target(self, object_name, base_name,
                             current_object_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
+        # the RG2's opening for every physical check below (rg2_geometry): the width the gripper measured when it closed
+        # on this part (--gripper-width-mm), down to fully closed (a slip closes the jaws: rg2_geometry.held); not
+        # given: unknown, the whole stroke (fail safe - a CAD width is not a measurement: flown rotates ran at 0.6 mm
+        # and 69.9 mm on missed grasps)
+        from primitives.shared.collision import set_gripper_openings
+        w = getattr(self, "gripper_width_mm", None)
+        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None, held=True)
 
         # Store for JSON output
         self.object_name = object_name
@@ -2001,6 +2008,9 @@ def run_verify_grasp(object_name, mode):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     parser = argparse.ArgumentParser(description='Reorient for Assembly (Fold Symmetry + 24-Cardinal with Intermediary)')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
                        help='Mode: sim (reads from topic) or real (requires orientations)')
@@ -2014,6 +2024,9 @@ def main(args=None):
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--skip-verify-grasp', action='store_true',
                        help='Skip internal grasp verification (caller already verified)')
+    parser.add_argument('--gripper-width-mm', type=float, default=None,
+                        help="the RG2's measured width holding the part (control_gripper's final_width_mm); the physical "
+                             "checks model the fingers there. Omitted: the whole stroke (fail safe)")
     parser.add_argument('--budget-s', type=float, default=None,
                        help="The caller's timeout for this process (s): refuse before any motion that would outlast it "
                             "(planning so far + motion + 10 s margin)")
@@ -2050,6 +2063,7 @@ def main(args=None):
         init_ros()
         node = ReorientForAssembly(mode=args.mode)
         node.budget_s = args.budget_s
+        node.gripper_width_mm = args.gripper_width_mm
         if not node.action_client.wait_for_server(timeout_sec=15):
             raise RuntimeError("Action server not available after 15s")
         _t0 = time.time()

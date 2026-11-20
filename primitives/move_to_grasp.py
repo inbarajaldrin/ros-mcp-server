@@ -17,6 +17,7 @@ if _project_root not in sys.path:
 import argparse
 import subprocess
 import json
+import time
 import logging
 import re
 
@@ -147,6 +148,9 @@ def compute_ik_wrist3_extended(position, rpy, current_joints=None, max_tries=2, 
     )
 
 
+FIX_ORIENT_WIDTH_WAIT_S = 1.0     # the measured RG2 width for the fix-orient swing's finger check (10 Hz topic)
+
+
 def fix_orientation_inprocess(node, target_xy, logger):
     """Fix EE orientation to face-down using the node's existing action client.
 
@@ -171,6 +175,12 @@ def fix_orientation_inprocess(node, target_xy, logger):
         return False
 
     from primitives.shared.ik import IKSolverConfig, IKSolver
+    # the RG2's opening for the physical checks: the MEASURED width only (review w5b-tier2 r1 P1-1: the pre-grasp
+    # width is a command applied after this swing - the fingers are still at the last release's width, often fully
+    # open); no measurement: unknown, the whole stroke (fail safe)
+    from primitives.shared.collision import set_gripper_openings
+    measured = getattr(node, "current_gripper_width", None)
+    set_gripper_openings((float(measured),) if isinstance(measured, (int, float)) else None)
 
     current_joints = node.current_joint_angles
     if current_joints is None:
@@ -2588,6 +2598,9 @@ class DirectObjectMove(Node):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Direct Object Movement Node')
     parser.add_argument('--topic', type=str, default=None, 
@@ -2682,6 +2695,12 @@ def main(args=None):
 
             # Pause the movement timer so it doesn't send step-1 trajectory during fix-orient
             node.update_timer.cancel()
+            # the swing's finger check uses the measured width: give /gripper_width_offset (10 Hz) up to
+            # FIX_ORIENT_WIDTH_WAIT_S to arrive; without it the whole stroke is checked (fail safe)
+            if getattr(node, "gripper_width_sub", None) is not None:
+                waited_until = time.monotonic() + FIX_ORIENT_WIDTH_WAIT_S
+                while node.current_gripper_width is None and time.monotonic() < waited_until:
+                    rclpy.spin_once(node, timeout_sec=0.05)
 
             if not fix_orientation_inprocess(node, (gx, gy), node.get_logger()):
                 node.error_message = ("Auto fix-orientation failed before move_to_object: "
