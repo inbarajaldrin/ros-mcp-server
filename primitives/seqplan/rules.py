@@ -1,24 +1,37 @@
-"""The one checker (R29): every rule, one geometry, for every route the planner may fly.
+"""The one checker (R29): every rule, one geometry, for every route a planner may fly.
 
-route_refusal(waypoints, ...) is the only place the planner applies the rules.  It calls the cell's rule modules
-unchanged:
-- collision.check_trajectory_collision: the arm against the table and itself along each joint line (DH capsules,
-  the physical arm + gripper, the camera mount vs the arm), 20 samples per segment, both ends included;
-- rotate_object's stance rules on a reorient stance (EE below the base, compact, extended gripper is in the physical
-  check) where the caller asks for them;
-- camera_up.camera_route_refusal: the camera side near the table, the mount/D415 clearance, mount vs arm;
-- held_part_collision.held_part_route_refusal: the held part against the arm and the table, and joint travel;
-- every joint inside its hardware limit (JOINT_LIMITS_RAD) and |wrist_3| <= WRIST3_LIMIT_RAD at every waypoint (a joint line is monotonic per joint, so the ends bound it);
-- the camera cable (lead 2026-11-19, the operator's real sweeps, lab-notes/2026-11-19-cable-scan): wrist_3 inside
-  CABLE_WINDOW_DEG (absolute joint value, never wrapped) at every waypoint.  With the strap on the wrist housing the
-  D415's USB 3 link held from -361 to +320 deg; UR's hardware limit is +-360.  dev's |wrist_3| <= WRIST3_LIMIT_RAD
-  (4 rad, 229 deg) is tighter and still applies.  The per-part cumulative wrist_3 budget is the planner's (a path sum).
-The table threshold of each leg mirrors the primitive that flies it on dev (z_threshold): move_to_clear_area and the
+route_refusal(waypoints, leg=..., ...) is the only place a planner applies the rules.  It calls the cell's rule
+modules unchanged, at every sample of every segment, the route's LAST stance included:
+
+- per waypoint: every joint inside its hardware limit (JOINT_LIMITS_RAD), |wrist_3| <= WRIST3_LIMIT_RAD, and wrist_3
+  inside the camera cable's CABLE_WINDOW_DEG (absolute joint value, never wrapped);
+- per segment, the travel caps: no joint more than one turn (held_part_collision.joint_travel_refusal), and
+  translate_object's insert-hover caps on EVERY leg: an arm joint (pan, shoulder, elbow) at most pi, wrist_3 at most
+  3.2 rad (TRAVEL_CAP_ARM_RAD / TRAVEL_CAP_WRIST3_RAD);
+- along each segment, sampled at most SAMPLE_STEP_RAD apart on any joint (both ends included):
+  * collision.check_trajectory_collision: the arm against the table and itself (DH capsules, the two-tier physical
+    arm + RG2 body, the camera mount vs the arm);
+  * gripper_rules.gripper_table_refusal: the gripper centre and both finger boxes 2 mm above the table, at the leg's
+    opening (unknown: closed and widest both);
+  * gripper_rules.extended_gripper_refusal and orientation_refusal: rotate_object's extended-gripper checks (base
+    column, upper arm) and its EE-facing-robot / camera-toward--X rules;
+  * camera_up.camera_route_refusal: the camera side near the table, the mount/D415 clearance, the mount vs the arm;
+  * held_part_collision.held_part_route_refusal: the held part against the arm and the table;
+- per stance, by leg (`leg` is required, no default: a caller states what it flies):
+  * "transit" (a joint route between hovers) and "insert" (the seat approach and descent): collision.
+    check_ee_below_base and check_compact_configuration at EVERY sample, the last included (rotate_object checks
+    every route-segment end, translate_object every insert waypoint);
+  * "approach" (a pick, place-down or lift leg near the table): not those two - a pick's flange is below the base's
+    height by design, as move_to_grasp and move_down fly it.
+The table threshold of each leg mirrors the primitive that flies it (z_threshold): move_to_clear_area and the
 place-down descent TABLE_HEIGHT - TABLE_COLLISION_MARGIN_*, every other primitive TABLE_HEIGHT.
-The camera's table floor is the real 30 mm (camera_up.CAMERA_CLEARANCE_M); camera_floor_flags() still lists any
-planned stance under it (none should remain).
+The camera's table floor is the real 30 mm (camera_up.CAMERA_CLEARANCE_M).
+A descent toward a part or the table also needs a contact stop: move_plan refuses to fly one (it has none); fly it
+with move_down.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -26,45 +39,98 @@ from primitives.shared.camera_up import camera_route_refusal
 from primitives.shared.collision import (check_compact_configuration, check_ee_below_base,
                                          check_trajectory_collision)
 from primitives.shared.config import TABLE_HEIGHT
-from primitives.shared.held_part_collision import held_part_route_refusal
-from primitives.shared.ik import WRIST3_LIMIT_RAD
+from primitives.shared.gripper_rules import extended_gripper_refusal, gripper_table_refusal, orientation_refusal
+from primitives.shared.held_part_collision import held_part_route_refusal, joint_travel_refusal
+from primitives.shared.ik import WRIST3_LIMIT_RAD, dh_params, forward_kinematics
 
-TRAJECTORY_SAMPLES = 20
-# The camera's table floor is the real 30 mm everywhere (operator ruling R33, 2026-11-19: place-downs release at
-# move_down's floor, which keeps the camera well above it; the derived 12 mm sim floor is withdrawn).
+SAMPLE_STEP_RAD = 0.02                   # review r1 P2-4: sampled per distance, not per segment
+# The camera's table floor is the real 30 mm everywhere (operator ruling R33, 2026-11-19).
 REAL_CAMERA_FLOOR_M = 0.030             # camera_up.CAMERA_CLEARANCE_M: stances under it are flagged in the plan
 CABLE_WINDOW_DEG = (-340.0, 320.0)       # wrist_3 absolute joint value (lead 2026-11-19, after the strap)
-
-
-# The UR5e's joint limits (rad): +-2pi, the elbow +-pi (the arm's hardware and the sim's arm binding agree).  r49
-# (MuJoCo, 2026-11-19): a planned face-right descent took wrist_1 from -358 to -393 deg and the controller refused it.
+# The UR5e's joint limits (rad): +-2pi, the elbow +-pi (the arm's hardware and the sim's arm binding agree).
 JOINT_LIMITS_RAD = (2 * np.pi, 2 * np.pi, np.pi, 2 * np.pi, 2 * np.pi, 2 * np.pi)
+TRAVEL_CAP_ARM_RAD = np.pi               # translate_object.py's insert-hover caps (review r1 P1-4)
+TRAVEL_CAP_WRIST3_RAD = 3.2
+LEGS = ("transit", "insert", "approach")
 
 
-def route_refusal(waypoints, held=None, near_table_end=False, stance_rules=False, samples=TRAJECTORY_SAMPLES,
-                  z_threshold=TABLE_HEIGHT):
-    """None when every segment of the joint route passes every rule, else the first typed refusal.  `samples`: per
-    joint-linear segment (both ends included); a dense Cartesian leg (waypoints ~5 mm apart) uses 1, its
-    waypoints being the samples."""
+def waypoint_refusal(w):
+    """The per-waypoint hard limits (joint limits, |wrist_3|, the cable window), or None."""
+    w = np.asarray(w, float)
+    if w.shape != (6,) or not np.all(np.isfinite(w)):
+        return f"WAYPOINT_INVALID: {w.tolist()}"
+    over = np.abs(w) > np.asarray(JOINT_LIMITS_RAD) + 1e-9
+    if over.any():
+        j = int(np.argmax(over))
+        return f"JOINT_LIMIT: joint {j} at {np.degrees(w[j]):+.1f} deg outside +-{np.degrees(JOINT_LIMITS_RAD[j]):.0f}"
+    if abs(float(w[5])) > WRIST3_LIMIT_RAD:
+        return f"WRIST3_LIMIT: wrist_3 {float(w[5]):+.2f} rad outside +-{WRIST3_LIMIT_RAD} rad"
+    w3 = float(np.degrees(w[5]))
+    if not CABLE_WINDOW_DEG[0] <= w3 <= CABLE_WINDOW_DEG[1]:
+        return f"CABLE_WINDOW: wrist_3 {w3:+.0f} deg outside [{CABLE_WINDOW_DEG[0]:+.0f}, {CABLE_WINDOW_DEG[1]:+.0f}]"
+    return None
+
+
+def travel_cap_refusal(a, b):
+    """translate_object's insert-hover caps, on every segment."""
+    d = np.abs(np.asarray(b, float) - np.asarray(a, float))
+    for j in range(3):
+        if d[j] > TRAVEL_CAP_ARM_RAD + 1e-9:
+            return f"TRAVEL_CAP: joint {j} moves {np.degrees(d[j]):.0f} deg in one segment (cap 180)"
+    if d[5] > TRAVEL_CAP_WRIST3_RAD + 1e-9:
+        return f"TRAVEL_CAP: wrist_3 moves {d[5]:.2f} rad in one segment (cap {TRAVEL_CAP_WRIST3_RAD})"
+    return None
+
+
+def stance_refusal(q, leg, opening_m=None):
+    """The rules every stance keeps (gripper vs table, extended gripper, orientation), plus EE-below-base and
+    compact for transit and insert legs."""
+    T = forward_kinematics(dh_params, np.asarray(q, float))
+    why = gripper_table_refusal(T, opening_m) or extended_gripper_refusal(q) or orientation_refusal(T)
+    if why:
+        return why
+    if leg in ("transit", "insert"):
+        if check_ee_below_base(q):
+            return "EE_BELOW_BASE: the flange is below the base's height on a transit / insert leg"
+        if check_compact_configuration(q):
+            return "COMPACT_CONFIGURATION: the wrist is within 0.20 m of the shoulder"
+    return None
+
+
+def _samples(a, b):
+    return max(1, int(math.ceil(float(np.max(np.abs(np.asarray(b, float) - np.asarray(a, float)))) / SAMPLE_STEP_RAD - 1e-9)))
+
+
+def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshold=TABLE_HEIGHT, opening_m=None):
+    """None when every segment of the joint route passes every rule, else the first typed refusal (with the segment).
+    `leg`: "transit" | "insert" | "approach" (see the module).  `opening_m`: the gripper's opening along the route,
+    None when unknown (both extremes are judged)."""
+    if leg not in LEGS:
+        raise ValueError(f"route_refusal: leg must be one of {LEGS}, not {leg!r}")
     W = [np.asarray(w, float) for w in waypoints]
+    if not W:
+        return "ROUTE_EMPTY"
     for w in W:
-        over = np.abs(w) > np.asarray(JOINT_LIMITS_RAD) + 1e-9         # a joint line is monotonic: ends bound it
-        if over.any():
-            j = int(np.argmax(over))
-            return f"JOINT_LIMIT: joint {j} at {np.degrees(w[j]):+.1f} deg outside +-{np.degrees(JOINT_LIMITS_RAD[j]):.0f}"
-        if abs(float(w[5])) > WRIST3_LIMIT_RAD:
-            return f"WRIST3_LIMIT: wrist_3 {float(w[5]):+.2f} rad outside +-{WRIST3_LIMIT_RAD} rad"
-        w3 = float(np.degrees(w[5]))
-        if not CABLE_WINDOW_DEG[0] <= w3 <= CABLE_WINDOW_DEG[1]:
-            return f"CABLE_WINDOW: wrist_3 {w3:+.0f} deg outside [{CABLE_WINDOW_DEG[0]:+.0f}, {CABLE_WINDOW_DEG[1]:+.0f}] (provisional)"
+        why = waypoint_refusal(w)
+        if why:
+            return why
+    if len(W) == 1:
+        W = [W[0], W[0]]
     for i, (a, b) in enumerate(zip(W[:-1], W[1:])):
         last = i == len(W) - 2
-        if check_trajectory_collision(a, b, z_threshold=z_threshold, num_samples=samples):
-            return f"ARM_TABLE_OR_SELF_COLLISION (segment {i + 1}/{len(W) - 1})"
-        if stance_rules and not last and (check_ee_below_base(b) or check_compact_configuration(b)):
-            return f"ARM_STANCE_REFUSED: in-between stance {i + 1} is below the base or compact"
-        why = (camera_route_refusal(a, b, near_table_end=near_table_end and last, num_samples=max(1, 2 * samples))
-               or held_part_route_refusal(a, b, held, num_samples=max(1, 2 * samples)))
+        n = _samples(a, b)
+        why = travel_cap_refusal(a, b) or joint_travel_refusal(a, b, prefix="ROUTE" if held is None else "HELD_ROUTE")
+        if not why and check_trajectory_collision(a, b, z_threshold=z_threshold, num_samples=n):
+            why = "ARM_TABLE_OR_SELF_COLLISION"
+        if not why:
+            for k in range(n + 1):
+                why = stance_refusal(a + (k / n) * (b - a), leg, opening_m)
+                if why:
+                    why = f"{why} (alpha={k / n:.3f})"
+                    break
+        if not why:
+            why = (camera_route_refusal(a, b, near_table_end=near_table_end and last, num_samples=n)
+                   or held_part_route_refusal(a, b, held, num_samples=n))
         if why:
             return f"{why} (segment {i + 1}/{len(W) - 1})"
     return None
@@ -72,14 +138,12 @@ def route_refusal(waypoints, held=None, near_table_end=False, stance_rules=False
 
 def camera_floor_flags(waypoints):
     """[(waypoint index, camera clearance m)] for the waypoints whose mount/D415 comes closer to the table than the
-    real path's floor (REAL_CAMERA_FLOOR_M): admissible in the sim plan, NOT on the real arm until delta_real is
-    bounded."""
+    real path's floor (REAL_CAMERA_FLOOR_M)."""
     from primitives.shared.camera_up import mount_lowest_above_table
-    from primitives.shared.ik import dh_params, forward_kinematics
     out = []
     for i, w in enumerate(waypoints):
         T = forward_kinematics(dh_params, np.asarray(w, float))
-        c = mount_lowest_above_table(T[:3, :3], T[:3, 3], TABLE_HEIGHT, REAL_CAMERA_FLOOR_M)   # exact under 30 mm
+        c = mount_lowest_above_table(T[:3, :3], T[:3, 3], TABLE_HEIGHT, REAL_CAMERA_FLOOR_M)
         if c < REAL_CAMERA_FLOOR_M:
             out.append((i, c))
     return out

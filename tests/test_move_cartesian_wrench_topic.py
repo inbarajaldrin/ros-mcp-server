@@ -77,7 +77,7 @@ def test_the_final_stance_is_checked_with_the_camera_rule():
     why = _plan(CAMERA_DOWN, [p[0], p[1], 0.15], ("keep", None), min_z=-1.0)
     assert why.startswith("CAMERA_TOWARD_TABLE") and why.endswith("(at the end of the Cartesian move)")
     # the clearance is measured on the mount/D415's enclosing geometry (padded fitted boxes, then the exact CAD): at
-    # z 0.10 the real mount is 37.9 mm up (the old coarse envelopes read lower), at 0.08 it is 23 mm
+    # z 0.10 the real mount is 43.0 mm up by the exact CAD (37.9 by the padded boxes; the old envelopes read 29.0), at 0.08 it is 23.0 mm
     why = _plan(CAMERA_DOWN, [p[0], p[1], 0.08], ("keep", None), min_z=-1.0)
     assert why.startswith("CAMERA_CLEARANCE")
 

@@ -76,10 +76,11 @@ def test_mount_surface_sampling_bounds_the_true_box_distance():
     """Review P2-1: corners and centres miss mid-face/mid-edge points (up to ~16 mm on the 32 mm boxes).  The face
     grid (<= 5 mm) with its gap subtracted never overstates the clearance."""
     import numpy as np
-    from primitives.shared.camera_geometry import CAMERA_MOUNT_BOXES_TOOL, mount_surface_tool
+    from primitives.shared.camera_geometry import CAMERA_MOUNT_BOX_PAD_M, _all_boxes, mount_surface_tool
     surface, gap, _owner = mount_surface_tool()
     assert gap <= 0.0036
-    boxes = [(np.asarray(lo), np.asarray(hi)) for bs in CAMERA_MOUNT_BOXES_TOOL.values() for lo, hi in bs]
+    # the sampled boxes are the PADDED ones (review r1 P3-7: their union encloses the CAD)
+    boxes = [(np.asarray(lo), np.asarray(hi)) for lo, hi in _all_boxes(CAMERA_MOUNT_BOX_PAD_M)]
     corners = np.array([[x, y, z] for lo, hi in boxes for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
                         for z in (lo[2], hi[2])] + [(lo + hi) / 2 for lo, hi in boxes])
     rng = np.random.default_rng(0)

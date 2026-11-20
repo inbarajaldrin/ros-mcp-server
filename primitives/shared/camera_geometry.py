@@ -128,13 +128,14 @@ def _axis_samples(lo, hi, spacing):
 
 
 @functools.lru_cache(maxsize=None)
-def mount_surface_tool(spacing=MOUNT_SURFACE_SPACING_M):
+def mount_surface_tool(spacing=MOUNT_SURFACE_SPACING_M, pad=CAMERA_MOUNT_BOX_PAD_M):
     """Every box face sampled on a grid of at most `spacing` (corners and edges included), tool frame (N, 3),
     and the sampling gap: every surface point lies within `gap` of a sample, so for any convex obstacle the true
     distance is at least (the nearest sample's distance - gap).  A box's closest point to a capsule axis is on
-    its surface (mid-face or mid-edge, not only a corner)."""
+    its surface (mid-face or mid-edge, not only a corner).  The boxes are padded by `pad` (default
+    CAMERA_MOUNT_BOX_PAD_M: their union then encloses the CAD; review r1 P3-7)."""
     pts, owner, gap = [], [], 0.0
-    for b, (lo, hi) in enumerate(_all_boxes()):
+    for b, (lo, hi) in enumerate(_all_boxes(pad)):
         lo, hi = np.asarray(lo, float), np.asarray(hi, float)
         grids, steps = zip(*(_axis_samples(lo[k], hi[k], spacing) for k in range(3)))
         for k in range(3):                              # the two faces normal to axis k
@@ -152,15 +153,16 @@ def mount_surface_tool(spacing=MOUNT_SURFACE_SPACING_M):
     return pts, gap, owner
 
 
-def _all_boxes():
-    return [box for boxes in CAMERA_MOUNT_BOXES_TOOL.values() for box in boxes]
+def _all_boxes(pad=0.0):
+    return [(tuple(np.asarray(lo, float) - pad), tuple(np.asarray(hi, float) + pad))
+            for boxes in CAMERA_MOUNT_BOXES_TOOL.values() for lo, hi in boxes]
 
 
 @functools.lru_cache(maxsize=None)
-def mount_box_spheres_tool():
-    """Centre (B, 3) and half-diagonal (B,) of every box, tool frame: a box whose sphere clears an obstacle by a
-    margin clears it by at least that margin."""
-    boxes = np.array(_all_boxes(), float)               # (B, 2, 3)
+def mount_box_spheres_tool(pad=CAMERA_MOUNT_BOX_PAD_M):
+    """Centre (B, 3) and half-diagonal (B,) of every (padded) box, tool frame: a box whose sphere clears an obstacle
+    by a margin clears it by at least that margin."""
+    boxes = np.array(_all_boxes(pad), float)            # (B, 2, 3)
     centres = boxes.mean(axis=1)
     radii = 0.5 * np.linalg.norm(boxes[:, 1] - boxes[:, 0], axis=1)
     centres.setflags(write=False)
