@@ -81,6 +81,9 @@ def main():
     d = sp.add_parser('drive'); d.add_argument('--mate', required=True)
     d.add_argument('--target', type=float, nargs=7, required=True); d.add_argument('--held', type=float, nargs=7, required=True)
     d.add_argument('--corrections', default='', help="the planner's aim corrections (seams.aim.corrections_json)")
+    d.add_argument('--target-sigma', type=float, nargs=4, default=None, metavar=('X', 'Y', 'Z', 'YAW'),
+                   help="the target read's stated sigma (m, m, m, rad); omitted: zeros = not stated (drive-mate then "
+                        "takes the base fit's repeatability from bindings.yaml)")
     d.add_argument('--timeout', type=float, default=1800.0)   # a full touch lattice ~11 min (10-22) + drive-mate's align
     e = sp.add_parser('execute'); e.add_argument('--mate', required=True); e.add_argument('--timeout', type=float, default=400.0)
     p = sp.add_parser('pose'); p.add_argument('--name', required=True); p.add_argument('--kind', default='base')
@@ -99,6 +102,8 @@ def main():
             from fmb_seam_msgs.msg import VisionPose
             goal = DriveMate.Goal(); goal.mate_id = a.mate
             goal.target = _vp(VisionPose, 'base', a.target[:3], a.target[3:])
+            if a.target_sigma is not None:
+                goal.target.sigma = [float(v) for v in a.target_sigma]
             goal.held = _vp(VisionPose, 'tool0', a.held[:3], a.held[3:])
             goal.corrections_json = a.corrections
             r, err = _action(node, DriveMate, '/ur5e/drive_mate', goal, a.timeout)

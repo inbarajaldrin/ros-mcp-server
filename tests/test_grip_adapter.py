@@ -62,3 +62,20 @@ def test_holding_and_its_reason_are_exclusive():
     for c in cases:
         j = judge(*c)
         assert j["holding"] == (j["not_holding_reason"] == ""), c
+
+
+def test_a_failed_close_is_never_a_hold():
+    """Review w8-realio r1 P2-1: control_gripper exits 1 on 'fingers asymmetric' (one pad on the part); even at a
+    width in the band and stalled, that is not a hold."""
+    j = judge("64.0", 0.064, 0.086, 0.0701, True, "u_brown", 0.070, 1)
+    assert not j["holding"] and j["not_holding_reason"] == "unknown" and "exited 1" in j["not_holding_detail"]
+
+
+def test_stop_run_stops_the_board_port_runner():
+    text = (ROOT / "compliant_insertion_studio/scripts/stop_run.sh").read_text()
+    import re
+    for pat_name in ("REPLAY_PAT", "ASSEMBLY_PAT"):
+        line = next(l for l in text.splitlines() if l.startswith(pat_name + "="))
+        pat = line.split("=", 1)[1].strip().strip('"').replace("${A}", "ablations").replace("${S}", "seams") \
+            .replace("${M}", "primitives").replace("${B}", "boardport")
+        assert re.search(pat, "/usr/bin/python3 -u /home/x/fmb-cell-lab/planners/boardport/run_board.py --real")

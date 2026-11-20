@@ -78,6 +78,9 @@ def judge(cmd, width_m, w_before, w, grasped, expect, span_m, rc):
     w_txt = 'unread' if w is None else f'{1000 * w:.1f} mm'
     if rc and not closing:
         reason, detail = 'not_a_close', f'the goal was refused (control_gripper rc {rc})'
+    elif rc:                     # review w8-realio r1 P2-1: e.g. 'fingers asymmetric' (one pad on the part) is never a hold
+        reason, detail = 'unknown', (f'control_gripper exited {rc} on the close (e.g. fingers asymmetric: one pad on '
+                                     f'the part), measured {w_txt}')
     elif not closing:
         reason, detail = 'not_a_close', f'an opening / no-op move to {1000 * width_m:.1f} mm (measured {w_txt})'
     elif w is None:
@@ -93,7 +96,7 @@ def judge(cmd, width_m, w_before, w, grasped, expect, span_m, rc):
                                             f'span {1000 * span_m:.1f} mm (band +-{1000 * SPAN_TOL_M:.0f})')
     else:
         reason, detail = '', ''
-    holding = closing and stalled and identity
+    holding = closing and stalled and identity and not rc
     out.update(holding=bool(holding), not_holding_reason=reason, not_holding_detail=detail, closing=closing)
     out['verdict'] = ('holding' if holding else 'not_holding' if (closing and w is not None and stalled)
                       else 'reached' if reached else 'refused' if rc else 'not_holding' if closing else 'unreachable')

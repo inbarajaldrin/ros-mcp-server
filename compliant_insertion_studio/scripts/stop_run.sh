@@ -42,11 +42,14 @@ set -u
 # ...) and any shell running one. 2026-10-21: only the replay was stopped; disassemble.py carried on after the motion
 # halt and, with a restarted run, two processes commanded the arm for ~2 min (their goals preempting each other).
 R=replay_real_assembly; M=primitives; W=wrapper.compliant_insert; A=ablations; S=seams
+# the board port's runner (fmb-cell-lab planners/boardport/run_board.py, RealIO): an orchestrator like the replay
+# (review w8-realio r1 P1-2) - stopped with it, or it would command the restored arm
+B=boardport
 # drive-mate's children: its align step (seams.drive_align, which moves the arm) and the seam clients. 2026-10-22 18:08:
 # stop_run stopped the replay and every primitive, but drive-mate's align child ran on and moved the arm to its base
 # view; the touch insert (compliant_insertion_studio.wrapper.touch_insert) was not matched either.
-REPLAY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${S}\.(drive_align|client))"
-ASSEMBLY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${M}\.|${M}/[a-z_/]+\.py|compliant_insertion_studio\.wrapper\.(compliant_insert|touch_insert)|-m ${S}\.(drive_align|client))"
+REPLAY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${S}\.(drive_align|client)|${B}/run_board\.py)"
+ASSEMBLY_PAT="(${A}/[a-z_0-9]+\.(py|sh)|-m ${M}\.|${M}/[a-z_/]+\.py|compliant_insertion_studio\.wrapper\.(compliant_insert|touch_insert)|-m ${S}\.(drive_align|client)|${B}/run_board\.py)"
 
 # passive helpers (never command the arm) keep running: the part tracker and the motion recorder
 T1=part_tracker; T2=motion_recorder; PASSIVE="${A}/(${T1}|${T2})\.py"
