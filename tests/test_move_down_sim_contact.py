@@ -191,3 +191,32 @@ def test_goal_result_short_of_the_endpoint_continues_the_descent():
     n, _md = _move_down_node(mode="sim", require_contact=True, at_endpoint=False)
     n.goal_result(_result(4))
     assert n.error_message is None and n.scheduled == [True]
+
+
+def test_the_to_table_floor_follows_the_given_opening():
+    """--opening-mm: the face-down floor puts the fingertips AT that opening 1 mm above the table (rg2_geometry); an
+    open RG2 reaches lower than the closed-tip floor, which stands without the option (every existing caller)."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared import rg2_geometry as g
+    from primitives.shared.config import RG2_TIP_CLOSED_M, TABLE_HEIGHT
+    down = np.diag([1.0, -1.0, -1.0])
+    closed = md.to_table_floor_z(down)
+    assert abs(closed - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M)) < 1e-12
+    open95 = md.to_table_floor_z(down, 95.2)
+    assert abs(open95 - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + g.tip_z_tool(0.0952))) < 1e-12
+    assert open95 < closed - 0.010                                    # the open fingers sit > 10 mm higher
+    assert md.to_table_floor_z(down, 0.0) > closed                    # closed by the mesh: 234.2 mm, deeper
+
+
+def test_the_to_table_floor_falls_back_to_the_closed_tips_without_the_model(monkeypatch):
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared import rg2_geometry as g
+    monkeypatch.setattr(g, "tip_z_tool", lambda opening_m=None: None)
+    down = np.diag([1.0, -1.0, -1.0])
+    assert md.to_table_floor_z(down, 95.2) == md.to_table_floor_z(down)
