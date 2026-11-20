@@ -23,8 +23,23 @@ driver plugs in behind the same action later (M3b).
           measured_correction  [dx, dy, dz] of the end TCP vs the prediction
           trace_path      the insert's raw CSV
           refusal         mate_unknown | assembly_unbound | assembly_ambiguous | target_frame | held_frame |
-                          held_unmatched | insert_failed_to_start
+                          held_unmatched | insert_failed_to_start | robot_stopped | corrections
+                          | DRIVE_MATE_LATCHED: <why>   the server is latched (below); nothing was started
+                          | INSERT_GATE: <why>          this goal's insert (or align) left the arm uncommandable:
+                                                        dashboard stop sent, the server latched
+                          | insert_rc: <rc> (<error>)   translate_object exited non-zero; the arm is commandable
   cancel  SIGINT to the insert (its force-mode cleanup runs), SIGTERM after 30 s - never SIGKILL in force mode.
+
+The post-insert gate and the latch (lead 2026-11-20, w8-drivemate-gate).  After EVERY motion subprocess this server
+starts (the align step and the insert), whatever the client: ablations.cell_io.post_insert_gate on translate_object's
+own result (its __RESULT_JSON__, so a prismatic INSERT_RESTORE_FAILED is typed) and the robot's safety status.  The
+gate sends the dashboard stop when the controllers are left switched (scaled inactive / passthrough or force_mode
+active, or unreadable: fail closed) and the server LATCHES: every later goal is refused DRIVE_MATE_LATCHED, before
+anything starts, until the server restarts or the latch is reset.  The reset is a std_srvs/Trigger at
+/ur5e/drive_mate/reset_latch, to be called only after compliant_insertion_studio/scripts/stop_run.sh (which halts,
+re-sends the program and re-activates the trajectory controller); it clears the latch only when the dashboard says
+NORMAL and the controllers read restored, and refuses otherwise.  A non-zero exit with the arm commandable is not a
+latch: it is carried in `refusal` (insert_rc) and `seated` stays the trace's verdict, as before.
 
 Known debt, recorded here rather than hidden: the insert routes by part name (translate_object: lines -> prismatic,
 U parts -> compliant spiral) and adds a per-part seat-z offset (PER_OBJECT_BASE_OFFSET_M) - the seam rule says
@@ -60,6 +75,61 @@ B = yaml.safe_load(open(REPO / 'seams' / 'bindings.yaml'))
 LOGS = REPO / 'compliant_insertion_studio' / 'logs'
 HELD_AXIS_TOL_M = 0.006          # a CAD grasp point this close to the tool axis is the grasp
 REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert: < 0.5 mm over 0.5 s
+
+
+class InsertLatch:
+    """The server's latch: tripped by a failed gate, cleared only by restart or a checked reset."""
+
+    def __init__(self):
+        self.reason = None
+
+    def trip(self, reason):
+        self.reason = self.reason or reason
+
+    def refusal(self):
+        return f'DRIVE_MATE_LATCHED: {self.reason}' if self.reason else ''
+
+    def reset(self, safety, restored):
+        """Clear when the robot is NORMAL and the controllers are restored (after stop_run.sh); else why not."""
+        if self.reason is None:
+            return ''
+        if safety != 'NORMAL':
+            return f'not reset: robot safety {safety or "unreadable"} (run stop_run.sh, clear the stop)'
+        if not restored[0]:
+            return f'not reset: controllers {restored[1]} (run stop_run.sh first)'
+        self.reason = None
+        return ''
+
+
+def result_of(text):
+    """translate_object's own result, the last __RESULT_JSON__ block of its output; {} when none."""
+    i = text.rfind('__RESULT_JSON__')
+    if i < 0:
+        return {}
+    body = text[i + len('__RESULT_JSON__'):]
+    j = body.find('__END_RESULT_JSON__')
+    try:
+        return json.loads(body[:j] if j >= 0 else body)
+    except Exception:
+        return {}
+
+
+def gate_after(rc, text, host=None):
+    """After a motion subprocess: (refusal, latch_reason).  latch_reason set when the arm was left uncommandable
+    (cell_io.post_insert_gate: the dashboard stop is sent there); refusal '' when the arm is commandable and rc is 0."""
+    from ablations import cell_io
+    host = host or os.environ.get('ROBOT_IP', '192.168.1.111')
+    result = dict(result_of(text))
+    if rc and not result.get('error'):
+        result['error'] = f'translate_object exited {rc}'
+    safety = cell_io.robot_safety_status(host)
+    cell_io._SAFETY_STOP = safety if safety and safety != 'NORMAL' else None
+    why = cell_io.post_insert_gate(result, host)
+    if why:
+        return f'INSERT_GATE: {why}', why
+    if rc:
+        return f"insert_rc: {rc} ({result.get('error', '')})", None
+    return '', None
 
 
 def vision_pose(pose, source=''):
@@ -117,11 +187,24 @@ def grasp_from_held(obj, p_fo, q_fo):
 class DriveMateServer(Node):
     def __init__(self):
         super().__init__('ur5e_drive_mate')
-        self.tcp = None; self.proc = None; self.busy = threading.Lock()
+        self.tcp = None; self.proc = None; self.busy = threading.Lock(); self.latch = InsertLatch()
         self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: setattr(self, 'tcp', m.pose), 10)
         ActionServer(self, DriveMate, ACTION, self.execute, goal_callback=self.on_goal,
                      cancel_callback=self.on_cancel, callback_group=ReentrantCallbackGroup())
+        from std_srvs.srv import Trigger
+        self.create_service(Trigger, ACTION + '/reset_latch', self.on_reset_latch)
         self.get_logger().info(f'drive-mate served at {ACTION}')
+
+    def on_reset_latch(self, request, response):
+        """Clear the latch after stop_run.sh: only when the robot is NORMAL and the controllers read restored."""
+        from ablations import cell_io
+        was = self.latch.reason
+        why = self.latch.reset(cell_io.robot_safety_status(os.environ.get('ROBOT_IP', '192.168.1.111')),
+                               cell_io.controllers_restored())
+        response.success = not why
+        response.message = why or (f'latch cleared (was: {was})' if was else 'not latched')
+        self.get_logger().warn(f'reset_latch: {response.message}')
+        return response
 
     def resting_tcp(self, window_s=REST_WINDOW_S, timeout_s=5.0):
         """The TCP once the arm has stopped after the insert: (xyz, still) from a window of samples. The insert's
@@ -200,11 +283,12 @@ class DriveMateServer(Node):
                 fb.z_above_seat = float('nan')
                 gh.publish_feedback(fb)
                 time.sleep(0.5)
-            self.proc = None
+            rc = self.proc.returncode; self.proc = None
         text = open(log_path).read()
         line = next((l for l in reversed(text.splitlines()) if l.startswith('__ALIGN__ ')), None)
         out = json.loads(line[len('__ALIGN__ '):]) if line else dict(error='no __ALIGN__ result')
         out['log'] = str(log_path)
+        out['_rc'] = rc
         self.get_logger().info(f"{g.mate_id}: aligned ({out.get('route')}, measured={out.get('measured')}) "
                                f"{out.get('error', '')} - {log_path.name}")
         return out
@@ -223,6 +307,8 @@ class DriveMateServer(Node):
             self.get_logger().warn(f'{g.mate_id}: refused {code} {detail}')
             gh.abort(); return res
 
+        if self.latch.reason:                                # nothing starts on a latched server
+            return refuse(self.latch.refusal())
         ok, code = resolve(g.mate_id)
         if not ok:
             return refuse(code)
@@ -271,6 +357,10 @@ class DriveMateServer(Node):
             align = {'route': 'none (sigma gate: ' + gate_note + ')'}
         elif not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1':
             align = self._align(gh, g, obj, base, gid, measured, held_world, env)
+            refusal, latch_why = gate_after(align.pop('_rc', 0), '')       # the align moves the arm too
+            if latch_why:
+                self.latch.trip(latch_why)
+                return refuse(refusal)
             if gh.is_cancel_requested:
                 gh.canceled(); return res
             if align.get('safety'):
@@ -348,9 +438,18 @@ class DriveMateServer(Node):
                 _sl.record_insert(obj, dz, float(out['measured_correction'][2]), res.seated)   # ok set by the certifier
             except Exception as e_:
                 self.get_logger().warn(f'{g.mate_id}: seat record not written ({e_})')
-        res.refusal = ''
+        # the gate, after EVERY insert, before anything else is reported: the arm must be commandable
+        refusal, latch_why = gate_after(rc, text)
+        if latch_why:
+            self.latch.trip(latch_why)
+            self.get_logger().error(f'{g.mate_id}: {refusal} - the server is latched until stop_run.sh + reset_latch')
+        res.refusal = refusal
         self.get_logger().info(f'{g.mate_id}: rc={rc} stage={res.stage_reached} seated={res.seated} '
-                               f'fsm={out.get("fsm_outcome")} correction={out.get("measured_correction")}')
+                               f'fsm={out.get("fsm_outcome")} correction={out.get("measured_correction")}'
+                               + (f' refusal={refusal}' if refusal else ''))
+        if latch_why:
+            gh.abort()
+            return res
         if gh.is_cancel_requested:
             gh.canceled()
         else:

@@ -114,6 +114,8 @@ def post_insert_gate(result: Optional[dict], host: Optional[str] = None) -> Opti
     later step - the end-of-run cleanup included - and no program re-send happens until stop_run.sh.
       * a protective / safety stop is reported as itself (_SAFETY_STOP; the run already halts on it);
       * an insert that reports INSERT_RESTORE_FAILED (prismatic sent the dashboard stop itself) is latched as such;
+      * a drive-mate result that reports its own gate (INSERT_GATE) or its latch (DRIVE_MATE_LATCHED) is latched as
+        such (drive-mate sent the stop);
       * otherwise the controllers are checked (controllers_restored, fail closed): scaled active, passthrough and
         force_mode inactive - if not, the dashboard stop (halts any force mode / trajectory) and the latch."""
     global _DASHBOARD_STOPPED
@@ -121,6 +123,11 @@ def post_insert_gate(result: Optional[dict], host: Optional[str] = None) -> Opti
         return f"robot {_SAFETY_STOP} during the insert"
     host = host or os.environ.get('ROBOT_IP', '192.168.1.111')
     error = str((result or {}).get('error') or '')
+    if 'INSERT_GATE:' in error or 'DRIVE_MATE_LATCHED' in error:
+        # drive-mate ran this gate itself (seams/drive_mate_server: the dashboard stop is sent there) or is latched
+        # from an earlier insert: the run latches too, without a second stop
+        _DASHBOARD_STOPPED = f"drive-mate: {error}"
+        return _DASHBOARD_STOPPED
     if 'INSERT_RESTORE_FAILED' in error:
         halted = dashboard_stop(host)
         _DASHBOARD_STOPPED = (f"INSERT_RESTORE_FAILED: the insert could not restore the trajectory controller "
