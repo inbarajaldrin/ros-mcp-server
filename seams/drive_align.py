@@ -61,9 +61,11 @@ def main():
     out = dict(aim_base=pose(al['aim_base']), measured_base=pose(al['measured_base']),
                held_quat=None if al['held_quat'] is None else list(map(float, al['held_quat'])),
                route=al['route'], measured=bool(al_.SERVO_MEASURED.get(a.obj)), safety=cell_io._SAFETY_STOP or '',
-               grasp_depth_fix_m=al_.GRASP_DEPTH_FIX.get(a.obj))   # the servo's touchdown measured the grasp depth
+               grasp_depth_fix_m=al_.GRASP_DEPTH_FIX.get(a.obj),   # the servo's touchdown measured the grasp depth
+               # a stuck step's dashboard stop (cell_io._stop_group) - drive-mate's gate latches on it (review r1 P2-3)
+               dashboard_stopped=cell_io._DASHBOARD_STOPPED or '')
     print('__ALIGN__ ' + json.dumps(out), flush=True)
-    return 0 if not cell_io._SAFETY_STOP else 2
+    return 2 if cell_io._SAFETY_STOP else (3 if cell_io._DASHBOARD_STOPPED else 0)
 
 
 if __name__ == '__main__':
