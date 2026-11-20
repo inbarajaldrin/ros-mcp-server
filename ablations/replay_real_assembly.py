@@ -1821,17 +1821,34 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
 from primitives.shared.budgets import ROTATE_TIMEOUT_S  # noqa: E402
 
 
-# After a latched insert (post_insert_gate): the part is still gripped IN THE BASE.  The operator's order (lead
-# 2026-11-20, review r2): open, lift straight up, never move_home first (it plans a straight line that ignores seated
-# parts); restore the program/controllers as stop_run.sh does when the lift needs them.
-LATCH_RECOVERY = ("  The part is still gripped in the base. Recover in this order:\n"
-                  "    1. open the gripper:   python3 -u -m primitives.control_gripper open --mode real\n"
-                  "    2. lift straight up:   python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real\n"
-                  "       (if the external-control program is down, compliant_insertion_studio/scripts/stop_run.sh first:\n"
-                  "        it re-sends the program and restores the controllers without moving the arm)\n"
-                  "    3. never move_home first - its straight line ignores seated parts\n"
-                  "  drive-mate stays latched until you clear it deliberately, after the part is released and lifted:\n"
-                  "    ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
+# After a latched insert (post_insert_gate) the gripper still holds the part (lead 2026-11-20, review r3 P2-R1/P3-R1).
+# Where it is follows from the insert's own result: success -> it rests in the seat; anything else -> unknown (it may
+# hang at or above the hover: prismatic's exhausted path retracts).  stop_run.sh always comes first: after a latch
+# the program is down, and stop_run.sh ends force mode with its still-check before anything moves.
+LATCH_PART_WHERE = {'where': None}      # the last latched insert's part position, for the end-of-run message
+
+
+def latch_recovery(where=None):
+    """The operator's recovery order after a latch; `where` is 'seat' (the insert reported success) or None."""
+    head = ("  The part rests IN THE SEAT, gripped (the insert reported success)." if where == 'seat' else
+            "  The part's position is UNKNOWN - it may hang at or above the hover, gripped. Never assume where it is.")
+    steps = ["    1. compliant_insertion_studio/scripts/stop_run.sh - always first: re-sends the program, ends force mode,"
+             " restores the controllers, checks the arm is still"]
+    if where == 'seat':
+        steps += ["    2. open the gripper:   python3 -u -m primitives.control_gripper open --mode real",
+                  "    3. lift clear:         python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real"]
+    else:
+        steps += ["    2. do NOT open (it would drop the part on the base or a seated part); lift it straight up:",
+                  "                           python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real",
+                  "    3. carry it over the clear area and open there:",
+                  "                           python3 -u -m primitives.core.move_to_clear_area --mode real --object-name <part>",
+                  "                           python3 -u -m primitives.control_gripper open --mode real"]
+    steps += ["    4. then a full lift:   python3 -u -m primitives.move_to_safe_height --mode real",
+              "    5. only then move_home - never before a full move_to_safe_height (its straight line ignores seated parts)",
+              "  drive-mate stays latched until you clear it deliberately, after the part is released and lifted:",
+              "    ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}",
+              "  (Unverified: whether the RG2 opens while the external-control program is stopped - so stop_run.sh first.)"]
+    return head + "\n" + "\n".join(steps)
 
 
 # A latched drive-mate (DRIVE_MATE_LATCHED): nothing was started by that goal - the part is still held ABOVE the base,
@@ -2355,8 +2372,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
             gate = cell_io.post_insert_gate(result)
             if gate:
+                LATCH_PART_WHERE['where'] = 'seat' if (result or {}).get('result') == 'success' else None
                 say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs.\n"
-                    f"{DRIVE_MATE_LATCH_RECOVERY if 'DRIVE_MATE_LATCHED' in gate else LATCH_RECOVERY}")
+                    f"{DRIVE_MATE_LATCH_RECOVERY if 'DRIVE_MATE_LATCHED' in gate else latch_recovery(LATCH_PART_WHERE['where'])}")
                 result = {'result': 'failure', 'error': f"INSERT_GATE: {gate}", 'label': label,
                           'insert_result': result}
         _hq_before = state.held_quat
@@ -3401,7 +3419,7 @@ def main() -> int:
             if log_fh: log_fh.write(msg)
         elif cell_io._DASHBOARD_STOPPED:
             # latched after an insert (post_insert_gate) or a dashboard stop: no cleanup motion, no header (review r2)
-            msg = (f"\n  CLEANUP SKIPPED: {cell_io._DASHBOARD_STOPPED}.\n{LATCH_RECOVERY}\n")
+            msg = (f"\n  CLEANUP SKIPPED: {cell_io._DASHBOARD_STOPPED}.\n{latch_recovery(LATCH_PART_WHERE['where'])}\n")
             print(msg, end='')
             if log_fh: log_fh.write(msg)
         elif not args.dry_run and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED:

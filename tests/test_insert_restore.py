@@ -300,3 +300,17 @@ def test_an_unreadable_controller_list_fails_closed(cio, monkeypatch, failure):
     # and the gate latches on it, with the dashboard stop
     why_gate = cio.post_insert_gate({"result": "success"})
     assert why_gate.startswith("CONTROLLERS_NOT_RESTORED") and "unreadable" in why_gate and cio._test_stops
+
+
+def test_latch_recovery_order_depends_on_where_the_part_is():
+    """review r3 P2-R1 / P3-R1: stop_run.sh always first; open only when the part rests in the seat; otherwise lift,
+    carry to the clear area, open there; a full move_to_safe_height before any move_home."""
+    import replay_real_assembly as rra
+    seat, unknown = rra.latch_recovery("seat"), rra.latch_recovery(None)
+    for text in (seat, unknown):
+        assert text.index("stop_run.sh") < text.index("control_gripper open")
+        full = text.index("primitives.move_to_safe_height --mode real")
+        assert full < text.index("only then move_home") and "Unverified" in text
+    assert seat.index("control_gripper open") < seat.index("--lift-by")
+    assert "do NOT open" in unknown and unknown.index("--lift-by") < unknown.index("move_to_clear_area") \
+        < unknown.index("control_gripper open")
