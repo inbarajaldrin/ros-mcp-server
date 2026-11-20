@@ -101,6 +101,38 @@ def _measured_base_yaw(base_name, max_age_s=900.0):
     except Exception:
         return None
 
+# A declared budget (--budget-s, the caller's subprocess timeout; lead 2026-11-20): the caller kills this process when
+# its timeout expires, and a trajectory the controller has accepted keeps running after its client exits (CLAUDE.md).
+# So before any motion is sent, planning so far + the planned motion + OUTLAST_MARGIN_S must fit the budget; otherwise
+# the reorient refuses (ROTATE_OUTLASTS_CALLER) and sends nothing.  An overrun is then a clean refusal before motion,
+# never a kill mid-motion.  No budget given: no check.
+OUTLAST_MARGIN_S = 10.0
+
+
+def process_elapsed_s():
+    """Seconds since this process started (the caller's timeout runs from the spawn, interpreter start included):
+    /proc/self/stat's start time against /proc/uptime; elsewhere, since this module was imported."""
+    try:
+        start_ticks = float(open("/proc/self/stat").read().rsplit(")", 1)[1].split()[19])
+        return float(open("/proc/uptime").read().split()[0]) - start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return time.monotonic() - _MODULE_T0
+
+
+_MODULE_T0 = time.monotonic()
+
+
+def outlasts_caller_refusal(elapsed_s, motion_s, budget_s, margin_s=OUTLAST_MARGIN_S):
+    """None when the motion fits the caller's budget (or there is no budget), else the typed reason."""
+    if budget_s is None:
+        return None
+    need = float(elapsed_s) + float(motion_s) + float(margin_s)
+    if need > float(budget_s):
+        return (f"ROTATE_OUTLASTS_CALLER: planning {elapsed_s:.1f} s + motion {motion_s:.1f} s + margin {margin_s:.0f} s "
+                f"= {need:.1f} s > budget {float(budget_s):.0f} s; nothing sent")
+    return None
+
+
 class ExtendedCardinalOrientations:
     """24 extended cardinal orientations with intermediary angles"""
     
@@ -1740,7 +1772,13 @@ class ReorientForAssembly(Node):
                                "time_from_start": Duration(sec=int(t_total), nanosec=int((t_total % 1) * 1e9))})
             trajectory = {"traj1": points}
             self.get_logger().info(f"Split route: {len(points)} segments, {t_total:.2f}s")
-        
+        motion_s = float(t) if len(route) == 2 else float(t_total)
+        outlasts = outlasts_caller_refusal(process_elapsed_s(), motion_s, getattr(self, "budget_s", None))
+        if outlasts:
+            self.error_message = outlasts
+            self.get_logger().error(outlasts)
+            return False
+
         success = self.execute_trajectory(trajectory)
 
         # Store final orientations and alignment error for JSON output
@@ -1976,6 +2014,9 @@ def main(args=None):
                        help='Current object orientation quaternion [x, y, z, w] (required in real mode)')
     parser.add_argument('--skip-verify-grasp', action='store_true',
                        help='Skip internal grasp verification (caller already verified)')
+    parser.add_argument('--budget-s', type=float, default=None,
+                       help="The caller's timeout for this process (s): refuse before any motion that would outlast it "
+                            "(planning so far + motion + 10 s margin)")
     args = parser.parse_args()
 
     # Validate arguments based on mode
@@ -2008,6 +2049,7 @@ def main(args=None):
     try:
         init_ros()
         node = ReorientForAssembly(mode=args.mode)
+        node.budget_s = args.budget_s
         if not node.action_client.wait_for_server(timeout_sec=15):
             raise RuntimeError("Action server not available after 15s")
         _t0 = time.time()

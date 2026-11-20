@@ -22,7 +22,8 @@ samples of start -> target:
   * a held-part point below the table plus HELD_TABLE_MARGIN_M;
 and before sampling, joint travel: any joint moving more than
 MAX_JOINT_TRAVEL_RAD, or wrist_3 outside +-WRIST3_LIMIT_RAD (camera cable).
-An empty gripper (held=None) keeps today's behaviour: nothing is added.
+An empty gripper (held=None) gets the joint-travel and wrist_3 caps (they guard the cables, not the part) and no
+held-part clearance check.
 """
 from __future__ import annotations
 
@@ -113,25 +114,28 @@ def _point_segment_distance(P, a, b):
     return np.linalg.norm(P - (a + t[:, None] * d), axis=1)
 
 
-def joint_travel_refusal(start, target):
+def joint_travel_refusal(start, target, prefix="HELD_ROUTE"):
+    """A route that winds a joint through more than one full turn, or takes wrist_3 outside its cable limit."""
     start, target = np.asarray(start, float), np.asarray(target, float)
     delta = np.abs(target - start)
     if float(np.max(delta)) > MAX_JOINT_TRAVEL_RAD:
         j = int(np.argmax(delta))
-        return f"HELD_ROUTE_JOINT_TRAVEL: joint {j} would move {np.degrees(delta[j]):.1f} deg (> 360)"
+        return f"{prefix}_JOINT_TRAVEL: joint {j} would move {np.degrees(delta[j]):.1f} deg (> 360)"
     if abs(float(target[5])) > WRIST3_LIMIT_RAD or abs(float(start[5])) > WRIST3_LIMIT_RAD:
-        return f"HELD_ROUTE_WRIST3_LIMIT: wrist_3 outside +-{WRIST3_LIMIT_RAD} rad"
+        return f"{prefix}_WRIST3_LIMIT: wrist_3 outside +-{WRIST3_LIMIT_RAD} rad"
     return None
 
 
 def held_part_route_refusal(start, target, held: HeldPart | None, num_samples: int = 40):
-    """None when the carry is admissible, else a typed reason.  held=None: empty gripper, no added check."""
-    if held is None:
-        return None
+    """None when the carry is admissible, else a typed reason.  The joint-travel and wrist_3 cable caps apply to every
+    route, held part or not (review r5 P2-3, w5-realpath-gaps: the cables wind the same with an empty gripper; an
+    empty-gripper refusal reads ROUTE_*).  held=None: no held-part clearance check (there is no part to check)."""
     start, target = np.asarray(start, float), np.asarray(target, float)
-    travel = joint_travel_refusal(start, target)
+    travel = joint_travel_refusal(start, target, prefix="HELD_ROUTE" if held is not None else "ROUTE")
     if travel:
         return travel
+    if held is None:
+        return None
     for i in range(num_samples + 1):
         alpha = i / num_samples
         q = start + alpha * (target - start)

@@ -9,7 +9,8 @@ ROS_MODULES = ["rclpy", "rclpy.node", "rclpy.action", "rclpy.qos", "rclpy.durati
                "rclpy.executors", "rclpy.callback_groups", "tf2_msgs", "tf2_msgs.msg", "geometry_msgs",
                "geometry_msgs.msg", "sensor_msgs", "sensor_msgs.msg", "control_msgs", "control_msgs.action",
                "control_msgs.msg", "trajectory_msgs", "trajectory_msgs.msg", "builtin_interfaces",
-               "builtin_interfaces.msg", "std_msgs", "std_msgs.msg", "action_msgs", "action_msgs.msg"]
+               "builtin_interfaces.msg", "std_msgs", "std_msgs.msg", "action_msgs", "action_msgs.msg",
+               "controller_manager_msgs", "controller_manager_msgs.srv", "visualization_msgs", "visualization_msgs.msg"]
 
 
 class _Any:

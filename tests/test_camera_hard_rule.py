@@ -122,3 +122,35 @@ def test_mount_vs_arm_prefilter_matches_the_full_surface():
         assert (camera_mount_arm_refusal(q) is not None) == brute
         refused += brute
     assert 0 < refused < 300
+
+
+# fix-orientation's face-down hover over the clear area at SAFE_HEIGHT, from its fixed IK seeds (computed 2026-11-20)
+FIX_ORIENT_HOVER_CLEAR_AREA = [0.7748, -1.2917, 1.6872, -1.9656, -1.566, -0.7949]
+
+
+def test_fix_orientation_hover_route_gets_the_camera_rule_and_the_cable_caps():
+    """Lead 2026-11-20 (review r5 P2-3): the fixed-seed hover and the swing to it, fail closed."""
+    assert cu.hover_route_refusal(R48C_HIGH_CARRY, [FIX_ORIENT_HOVER_CLEAR_AREA]) is None
+    # from a stance that already has the mount in the table: refused, nothing is sent
+    reason = cu.hover_route_refusal(R48C_PLACE_DOWN, [FIX_ORIENT_HOVER_CLEAR_AREA])
+    assert reason.startswith("CAMERA_CLEARANCE") and reason.endswith("[fix-orientation hover]")
+    # a lift waypoint is a leg of its own: one that brings the camera down to the table is refused on that leg (the
+    # side rule trips at alpha 0.75, before the mount reaches the table)
+    reason = cu.hover_route_refusal(R48C_HIGH_CARRY, [R48C_PLACE_DOWN, FIX_ORIENT_HOVER_CLEAR_AREA])
+    assert reason.startswith("CAMERA_") and reason.endswith("[fix-orientation leg 1]")
+    # cable caps with the gripper empty: wrist_3 beyond its limit, a joint through more than a turn
+    wound = list(FIX_ORIENT_HOVER_CLEAR_AREA)
+    wound[5] = -4.2                     # the start has wrist_3 at -3.09: 1.1 rad of travel, past the limit
+    assert cu.hover_route_refusal(R48C_HIGH_CARRY, [wound]).startswith("ROUTE_WRIST3_LIMIT")
+    swung = list(R48C_HIGH_CARRY)
+    swung[0] -= np.radians(370.0)
+    assert cu.hover_route_refusal(swung, [FIX_ORIENT_HOVER_CLEAR_AREA]).startswith("ROUTE_JOINT_TRAVEL")
+
+
+def test_both_fix_orientation_paths_check_the_hover_route_before_sending():
+    grasp = (ROOT / "primitives/move_to_grasp.py").read_text()
+    body = grasp[grasp.index("def fix_orientation_inprocess"):]
+    assert body.index("hover_route_refusal(current_joints,") < body.index("node.action_client.send_goal_async(goal)")
+    clear = (ROOT / "primitives/core/move_to_clear_area.py").read_text()
+    body = clear[clear.index("if self.mode == 'fix_orientation':"):]
+    assert body.index("hover_route_refusal(self.current_joint_angles,") < body.index("self._dispatch(goal)")

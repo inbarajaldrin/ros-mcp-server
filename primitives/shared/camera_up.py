@@ -203,3 +203,23 @@ def camera_route_refusal(start_joints, target_joints, near_table_end=False, num_
         if reason:
             return f"{reason} (alpha={alpha:.3f})"
     return None
+
+
+def hover_route_refusal(start_joints, waypoints):
+    """None, or a typed reason to refuse a fix-orientation move: the recovery from a non-top-down stance to a face-down
+    hover at safe height (move_to_grasp.fix_orientation_inprocess, move_to_clear_area --fix-orientation), sent as
+    joint-linear legs start -> waypoints[0] (the lift, if any) -> ... -> waypoints[-1] (the hover).
+
+    Every leg gets the camera rule at every sample (table side, mount/D415 clearance, mount against the arm) and the
+    cable caps (joint travel <= one turn, |wrist_3| <= WRIST3_LIMIT_RAD; an empty-gripper refusal reads ROUTE_*).  The
+    last leg's final sample is the hover stance itself.  The hover is fixed-seed IK, so nothing chose it for the camera:
+    with the camera on tool +Y a recovery swing is where the October stances put the mount into the table (lead,
+    2026-11-20, review r5 P2-3).  Fail closed: a start stance that already breaks the rule refuses the move."""
+    from primitives.shared.held_part_collision import joint_travel_refusal
+    legs = [np.asarray(start_joints, float)] + [np.asarray(w, float) for w in waypoints]
+    for i, (a, b) in enumerate(zip(legs[:-1], legs[1:])):
+        name = "hover" if i == len(legs) - 2 else f"leg {i + 1}"
+        reason = joint_travel_refusal(a, b, prefix="ROUTE") or camera_route_refusal(a, b)
+        if reason:
+            return f"{reason} [fix-orientation {name}]"
+    return None

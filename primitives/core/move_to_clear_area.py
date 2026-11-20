@@ -528,6 +528,30 @@ class MoveToClearArea(Node):
                 return
 
             self.get_logger().info(f"Hover IK solved: cost={hover_solver._best_result.cost:.6f}")
+            # the turn to face-down for table and self collision before sending, the same check as move_to_grasp's
+            # fix_orientation_inprocess (lead 2026-11-20): fail closed
+            swing_from = (np.array(trajectory_points[-1].positions) if trajectory_points
+                          else np.array(self.current_joint_angles))
+            if check_trajectory_collision(swing_from, np.array(hover_joints), logger=self.get_logger()):
+                self.error_message = (f"Fix-orientation refused: the turn to face-down collides (joint step "
+                                      f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad)")
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
+            # the camera rule and the cable caps on the lift, the swing and the hover stance (lead 2026-11-20): fail
+            # closed
+            from primitives.shared.camera_up import hover_route_refusal
+            refusal = hover_route_refusal(self.current_joint_angles,
+                                          [p.positions for p in trajectory_points] + [hover_joints])
+            if refusal:
+                self.error_message = f"Fix-orientation refused: {refusal}"
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
             lift_duration = 3 if trajectory_points else 0
             trajectory_points.append(JointTrajectoryPoint(
                 positions=[float(x) for x in hover_joints],
@@ -861,9 +885,13 @@ class MoveToClearArea(Node):
                         self.get_logger().info("Direct and via-home routes refused - joint-group split route")
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
-                    if held_refusals:
+                    if held_refusals and held_part is not None:
                         self.error_message = ("HELD_PART_ROUTE_REFUSED: every route to the clear area was refused for "
                                               f"the held part or the camera ({'; '.join(held_refusals[:3])})")
+                    elif held_refusals:
+                        # empty gripper: the camera rule or the cable caps, no part (review r1 P3-3)
+                        self.error_message = ("ROUTE_REFUSED: every route to the clear area was refused for the camera "
+                                              f"or the cable caps, gripper empty ({'; '.join(held_refusals[:3])})")
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
