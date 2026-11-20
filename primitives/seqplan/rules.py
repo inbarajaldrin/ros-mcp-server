@@ -23,10 +23,14 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
   * "transit" (a joint route between hovers) and "insert" (the seat approach and descent): collision.
     check_ee_below_base and check_compact_configuration at EVERY sample, the last included (rotate_object checks
     every route-segment end, translate_object every insert waypoint);
-  * "approach" (a pick, place-down or lift leg near the table): not those two, but only on a dense segment
-    (APPROACH_DENSE_STEP_RAD) with the gripper centre within APPROACH_NEAR_TABLE_M of the table (review r2 P2-B): a
-    pick's flange is below the base's height by design, as move_to_grasp and move_down fly it; anything else in a
-    leg labelled "approach" (a carry) is held to them as a transit is.
+  * "approach" (a pick, place-down or lift leg near the table): not those two, but only on a STRAIGHT DENSE segment
+    near the table (review r2 P2-B, r3): at most APPROACH_DENSE_STEP_RAD on any joint, the tool's orientation kept
+    (<= 1 deg), the gripper centre moving vertically or along the tool's own axis (<= 2 deg), and within
+    APPROACH_NEAR_TABLE_M of the table.  That is move_down's and move_to_safe_height's motion (vertical, orientation
+    kept); a carry labelled "approach" is held to both rules as a transit is.
+- starts_at_contact (a lift from a stance move_down reached, its force stop the authority there; lead ruling
+  2026-11-20): while the gripper is under its 2 mm floor at the route's start, the floor is replaced by: its lowest
+  point rises monotonically and clears the floor within LIFT_FROM_CONTACT_M of gripper-centre travel.
 The table threshold of each leg mirrors the primitive that flies it (z_threshold): move_to_clear_area and the
 place-down descent TABLE_HEIGHT - TABLE_COLLISION_MARGIN_*, every other primitive TABLE_HEIGHT.
 The camera's table floor is the real 30 mm (camera_up.CAMERA_CLEARANCE_M).
@@ -57,6 +61,8 @@ TRAVEL_CAP_ARM_RAD = np.pi               # translate_object.py's insert-hover ca
 TRAVEL_CAP_WRIST3_RAD = 3.2
 LEGS = ("transit", "insert", "approach")
 APPROACH_DENSE_STEP_RAD = 0.05
+APPROACH_STRAIGHT_DEG = 2.0
+LIFT_FROM_CONTACT_M = 0.010
 APPROACH_NEAR_TABLE_M = 0.250   # a pre-place hover: 0.15 m above a horizontal stand-up, gripper centre ~0.22 m up
 
 
@@ -98,13 +104,29 @@ def insert_cap_refusal(start, w):
     return None
 
 
-def stance_refusal(q, leg, opening_m=None, dense_segment=False):
+def straight_segment(a, b):
+    """The segment keeps the tool's orientation and moves the gripper centre vertically or along the tool axis."""
+    from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
+    Ta, Tb = forward_kinematics(dh_params, np.asarray(a, float)), forward_kinematics(dh_params, np.asarray(b, float))
+    Rd = Ta[:3, :3].T @ Tb[:3, :3]
+    if math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(Rd) - 1) / 2)))) > 1.0:
+        return False
+    off = np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float)
+    d = (Tb[:3, :3] @ off + Tb[:3, 3]) - (Ta[:3, :3] @ off + Ta[:3, 3])
+    n = float(np.linalg.norm(d))
+    if n < 1e-4:
+        return True
+    cos_tol = math.cos(math.radians(APPROACH_STRAIGHT_DEG))
+    return abs(d[2]) / n >= cos_tol or abs(float(d @ Ta[:3, 2])) / n >= cos_tol
+
+
+def stance_refusal(q, leg, opening_m=None, dense_segment=False, skip_gripper_table=False):
     """The rules every stance keeps (gripper vs table, extended gripper, orientation), plus EE-below-base and
     compact for transit and insert legs, and for approach legs away from the table or off a dense segment."""
     from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
     T = forward_kinematics(dh_params, np.asarray(q, float))
-    why = (gripper_table_refusal(T, opening_m) or extended_gripper_refusal(q, table_check=False)
-           or orientation_refusal(T))
+    why = ((None if skip_gripper_table else gripper_table_refusal(T, opening_m))
+           or extended_gripper_refusal(q, table_check=False) or orientation_refusal(T))
     if why:
         return why
     near = float((T[:3, :3] @ np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float) + T[:3, 3])[2]) - TABLE_HEIGHT \
@@ -121,7 +143,8 @@ def _samples(a, b):
     return max(1, int(math.ceil(float(np.max(np.abs(np.asarray(b, float) - np.asarray(a, float)))) / SAMPLE_STEP_RAD - 1e-9)))
 
 
-def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshold=TABLE_HEIGHT, opening_m=None):
+def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshold=TABLE_HEIGHT, opening_m=None,
+                  starts_at_contact=False):
     """None when every segment of the joint route passes every rule, else the first typed refusal (with the segment).
     `leg`: "transit" | "insert" | "approach" (see the module).  `opening_m`: the gripper's opening along the route,
     None when unknown (both extremes are judged)."""
@@ -136,18 +159,43 @@ def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshol
             return why
     if len(W) == 1:
         W = [W[0], W[0]]
+    from primitives.shared.config import GRASP_TIP_CLEARANCE_M, GRIPPER_CENTER_TOOL_OFFSET
+    from primitives.shared.gripper_rules import gripper_low_z
+    off = np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float)
+    floor = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M
+    rising = bool(starts_at_contact)
+    T0 = forward_kinematics(dh_params, W[0])
+    gc0, prev_low = T0[:3, :3] @ off + T0[:3, 3], -np.inf
     for i, (a, b) in enumerate(zip(W[:-1], W[1:])):
         last = i == len(W) - 2
         n = _samples(a, b)
         why = travel_cap_refusal(a, b) or joint_travel_refusal(a, b, prefix="ROUTE" if held is None else "HELD_ROUTE")
         if not why and leg == "insert":
             why = insert_cap_refusal(W[0], b)
-        dense = float(np.max(np.abs(b - a))) <= APPROACH_DENSE_STEP_RAD + 1e-12
+        dense = (float(np.max(np.abs(b - a))) <= APPROACH_DENSE_STEP_RAD + 1e-12) and straight_segment(a, b)
         if not why and check_trajectory_collision(a, b, z_threshold=z_threshold, num_samples=n):
             why = "ARM_TABLE_OR_SELF_COLLISION"
         if not why:
             for k in range(n + 1):
-                why = stance_refusal(a + (k / n) * (b - a), leg, opening_m, dense)
+                q = a + (k / n) * (b - a)
+                skip = False
+                if rising:
+                    Tq = forward_kinematics(dh_params, q)
+                    low = gripper_low_z(Tq, opening_m)
+                    if low is not None and low < floor:
+                        rise = float((Tq[:3, :3] @ off + Tq[:3, 3])[2] - gc0[2])
+                        if low < prev_low - 1e-6:
+                            why = f"LIFT_FROM_CONTACT: the gripper descends ({1000 * (low - prev_low):+.2f} mm) under its floor"
+                        elif rise > LIFT_FROM_CONTACT_M:
+                            why = (f"LIFT_FROM_CONTACT: still under the 2 mm floor after {1000 * rise:.1f} mm of rise "
+                                   f"(allowed {1000 * LIFT_FROM_CONTACT_M:.0f})")
+                        if why:
+                            why = f"{why} (alpha={k / n:.3f})"
+                            break
+                        prev_low, skip = low, True
+                    else:
+                        rising = False
+                why = stance_refusal(q, leg, opening_m, dense, skip_gripper_table=skip)
                 if why:
                     why = f"{why} (alpha={k / n:.3f})"
                     break

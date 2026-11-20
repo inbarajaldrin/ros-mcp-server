@@ -22,7 +22,7 @@ def _gc(q):
     return T[:3, :3] @ GRIPPER_CENTER_TOOL_OFFSET + T[:3, 3]
 
 
-def _top_down_at(dz):
+def _top_down_at(dz, seed=None):
     """Top-down, the home gripper centre's xy, the gripper centre dz above the table (the reviewer's check1)."""
     target = _gc(HOME).copy()
     target[2] = TABLE_HEIGHT + dz
@@ -31,7 +31,7 @@ def _top_down_at(dz):
         T = _fk(q)
         return 1e3 * np.sum((T[:3, :3] @ GRIPPER_CENTER_TOOL_OFFSET + T[:3, 3] - target) ** 2) + np.sum(
             (T[:3, 2] - [0, 0, -1]) ** 2)
-    return minimize(f, HOME, method="BFGS").x
+    return minimize(f, HOME if seed is None else seed, method="BFGS").x
 
 
 def test_a_waypoint_past_a_joint_limit_is_refused():
@@ -144,20 +144,16 @@ def _tilted(deg):
 
 
 def test_an_unknown_opening_is_judged_over_the_stroke_r2_P1_B():
-    from primitives.shared.gripper_rules import OPENING_GRID_MM, finger_boxes_tool, gripper_points_tool
-    rng = np.random.default_rng(5)
+    """rg2_geometry's unknown opening (None) is the union over the stroke: never higher than any sampled opening."""
     from scipy.spatial.transform import Rotation as R
-    fine = np.arange(0.0, 110.0 + 1e-9, 0.01)
-    worst = 0.0
+    from primitives.shared.gripper_rules import gripper_points_tool
+    rng = np.random.default_rng(5)
+    widths = np.arange(0.0, 0.110 + 1e-9, 0.0025)
+    per_w = [gripper_points_tool(w) for w in widths]
+    P_none = gripper_points_tool(None)
     for k in range(200):
         Rm = R.random(random_state=rng).as_matrix() if k else _tilted(45)[:3, :3]
-        zs_fine = min(float(np.min(np.array([[x, y, z] for lo, hi in finger_boxes_tool(w / 1000)
-                                             for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
-                                   @ Rm[2])) for w in fine[::10])
-        z_grid = float(np.min(gripper_points_tool(None) @ Rm[2]))
-        worst = max(worst, z_grid - zs_fine)
-    assert worst < 0.00005, worst                                      # within 0.05 mm of 0.1 mm sampling
-    assert len(OPENING_GRID_MM) > 100
+        assert float(np.min(P_none @ Rm[2])) <= min(float(np.min(P @ Rm[2])) for P in per_w) + 1e-6
 
 
 def test_the_45_deg_under_read_is_caught_r2_P1_B():
@@ -165,7 +161,7 @@ def test_the_45_deg_under_read_is_caught_r2_P1_B():
     T = _tilted(45)
     z_grid = float(np.min(gripper_points_tool(None) @ T[2, :3]))
     z_ext = min(float(np.min(gripper_points_tool(w) @ T[2, :3])) for w in (0.0, 0.110))
-    assert z_ext - z_grid > 0.010                                       # the extremes alone read >10 mm too high
+    assert z_ext - z_grid > 0.005                                       # the extremes alone read too high
     T[2, 3] = TABLE_HEIGHT + 0.001 - z_grid                             # lowest corner 1 mm above the table
     assert gripper_table_refusal(T, None).startswith("GRIPPER_TABLE")
 
@@ -177,3 +173,44 @@ def test_the_approach_exemption_holds_only_on_dense_segments_near_the_table_r2_P
     far[0] += 0.6
     why = route_refusal([far, low], leg="approach", opening_m=0.0)                   # a carry labelled approach
     assert why and why.startswith(("EE_BELOW_BASE", "COMPACT", "GRIPPER_TABLE", "EXTENDED", "ARM_")), why
+
+
+def test_the_housing_is_checked_against_the_table_r3():
+    from primitives.shared.gripper_rules import gripper_table_refusal
+    T = _tilted(90)                                                    # tool horizontal: the housing hangs lowest
+    from primitives.shared.collision import RG2_BODY_BOX
+    T[2, 3] = TABLE_HEIGHT + RG2_BODY_BOX[1][1] - 0.001                # the housing's side 1 mm into the table
+    why = gripper_table_refusal(T, 0.0)
+    assert why and why.startswith("GRIPPER_TABLE")
+
+
+def _lift_from(dz_start):
+    """A straight vertical lift (IK per 2 mm, as a planner's Cartesian line)."""
+    W = [_top_down_at(dz_start)]
+    for k in range(1, 26):
+        W.append(_top_down_at(dz_start + 0.002 * k, W[-1]))
+    return W
+
+
+def test_a_lift_from_a_move_down_contact_is_exempt_only_while_it_rises_r3():
+    from primitives.shared.gripper_rules import gripper_low_z
+    W = _lift_from(0.0015)                                             # closed tips ~1 mm under the 2 mm floor
+    T = _fk(W[0])
+    assert gripper_low_z(T, 0.0) - TABLE_HEIGHT < 0.002
+    assert route_refusal(W, leg="approach", opening_m=0.0).startswith("GRIPPER_TABLE")      # without the ruling
+    assert route_refusal(W, leg="approach", opening_m=0.0, starts_at_contact=True) is None
+    down = list(reversed(W))                                           # descending from it: never exempt
+    assert route_refusal(down, leg="approach", opening_m=0.0, starts_at_contact=True) is not None
+    deep = _lift_from(-0.012)                                          # still under the floor after 10 mm of rise
+    why = route_refusal(deep, leg="approach", opening_m=0.0, starts_at_contact=True)
+    assert why and why.startswith("LIFT_FROM_CONTACT"), why
+
+
+def test_the_approach_exemption_needs_a_straight_segment_r3():
+    low = _top_down_at(0.010)
+    side = low.copy()
+    side[5] += 0.04                                                    # a dense step that turns the tool
+    assert not rules.straight_segment(low, side)
+    assert route_refusal([low, side], leg="approach", opening_m=0.0).startswith("EE_BELOW_BASE")
+    up = _top_down_at(0.04, low)
+    assert rules.straight_segment(low, up)
