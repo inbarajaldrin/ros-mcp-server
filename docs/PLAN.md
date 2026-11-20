@@ -144,6 +144,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (camera side, mount/D415 clearance, held-part, cable window with wrist_3 not the cheapest joint, calibrated DH); the insert stays ours.
   Its code is private: it lives in the lab (no remote), never in this public repo. The lead checks every video frame by frame before it
   reaches the operator ("you should be seeing this and asking agents to fix it").
+- (lead, 2026-11-20 ~19:00Z, under the operator's 10-19 "read once, then chain"): the board port may read a held part ONCE at the insert
+  hover and use it only if it agrees with the chained pose within 3 mm / 3 deg; otherwise it refuses and stops (no harmful fallbacks).
+  The read must pass the cell's still-read rule (>= 0.8 s still, >= 3 fresh detections, median). RGB-only at ~0.12 m on the v3.1
+  mount is untested: first-real-run checklist.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
