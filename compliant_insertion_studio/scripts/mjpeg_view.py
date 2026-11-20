@@ -122,6 +122,8 @@ def _relayed(text):
     reply instructions stripped); messages from other agents show as an event naming the agent, never as the operator."""
     import re
     t = text.strip()
+    if t.startswith('FMB cell heartbeat'):             # the lead's own scheduled check, not something the operator typed
+        return {'k': 'event', 'x': 'hourly heartbeat check'}
     if not t.startswith('Another Claude session sent a message'):
         return None
     t = t.split(_RELAY_TAIL)[0]
