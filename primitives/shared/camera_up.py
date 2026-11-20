@@ -95,7 +95,8 @@ TOP_DOWN_COS = 0.966          # tool z within 15 deg of straight down: the camer
                               # only the clearance floor applies
 CAMERA_CLEARANCE_M = 0.030    # mount / D415 envelope stays at least this far above the table at every route sample
 # Axis-aligned envelopes of the v3.1 mount and D415 CAD meshes in the tool0 frame (min, max; m), from the lab
-# model's visual meshes mount_lower / mount_upper / d415 on rg2_base_link (fmb-cell-lab, 2026-11-19).
+# model's visual meshes mount_lower / mount_upper / d415 on rg2_base_link (fmb-cell-lab, 2026-11-19).  Not used for
+# the clearance any more (their empty corners overstate how low the camera reaches): mount_lowest_above_table.
 CAMERA_GEOMETRY_TOOL = {
     "mount_lower": ((-0.044, -0.024, 0.0721), (0.044, -0.0007, 0.1041)),
     "mount_upper": ((-0.044, 0.0008, 0.0583), (0.087, 0.1141, 0.1041)),
@@ -103,20 +104,24 @@ CAMERA_GEOMETRY_TOOL = {
 }
 
 
-def _camera_corners_tool():
-    corners = []
-    for lo, hi in CAMERA_GEOMETRY_TOOL.values():
-        for x in (lo[0], hi[0]):
-            for y in (lo[1], hi[1]):
-                for z in (lo[2], hi[2]):
-                    corners.append((x, y, z))
-    return np.array(corners)
 
 
-_CORNERS = _camera_corners_tool()
+def mount_lowest_above_table(Rf, pf, table_z, clearance_m=None):
+    """The mount/D415's lowest point above the table (m), two tiers (lead 2026-11-19: not the coarse envelopes):
+    the corners of the fitted boxes padded to enclose the CAD (camera_geometry.padded_box_corners_tool, proven by
+    tests/test_camera_mount_boxes_enclose.py); when that is under the clearance, the exact lowest CAD vertex (a
+    mesh's lowest point is a vertex).  CAD meshes unavailable or not the pinned ones: the boxes' value stands."""
+    from primitives.shared.camera_geometry import mount_mesh_vertices_tool, padded_box_corners_tool
+    lowest = float(np.min((padded_box_corners_tool() @ Rf.T + pf)[:, 2]) - table_z)
+    if lowest >= (CAMERA_CLEARANCE_M if clearance_m is None else clearance_m):
+        return lowest
+    V = mount_mesh_vertices_tool()
+    if V is None:
+        return lowest
+    return max(lowest, float(np.min(V @ Rf[2] + pf[2]) - table_z))
 
 
-def camera_stance_refusal(T_flange, near_table=None):
+def camera_stance_refusal(T_flange, near_table=None, clearance_m=None):
     """None, or a typed reason why this flange pose puts the camera toward / near the table.
 
     T_flange: 4x4 flange pose in the robot base frame.  near_table: force the side rule (a reorient or
@@ -124,10 +129,11 @@ def camera_stance_refusal(T_flange, near_table=None):
     from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, TABLE_HEIGHT
     T_flange = np.asarray(T_flange, dtype=float)
     Rf, pf = T_flange[:3, :3], T_flange[:3, 3]
-    lowest = float(np.min((_CORNERS @ Rf.T + pf)[:, 2]) - TABLE_HEIGHT)
-    if lowest < CAMERA_CLEARANCE_M:
+    floor = CAMERA_CLEARANCE_M if clearance_m is None else float(clearance_m)
+    lowest = mount_lowest_above_table(Rf, pf, TABLE_HEIGHT, floor)
+    if lowest < floor:
         return (f"CAMERA_CLEARANCE: mount/D415 {1000 * lowest:.0f} mm above the table "
-                f"(needs {1000 * CAMERA_CLEARANCE_M:.0f})")
+                f"(needs {1000 * floor:.0f})")
     if near_table is None:
         near_table = float((Rf @ GRIPPER_CENTER_TOOL_OFFSET + pf)[2] - TABLE_HEIGHT) < NEAR_TABLE_M
     top_down = float(-Rf[2, 2]) > TOP_DOWN_COS
@@ -180,16 +186,18 @@ def camera_mount_arm_refusal(joints):
     return None
 
 
-def camera_route_refusal(start_joints, target_joints, near_table_end=False, num_samples=40):
+def camera_route_refusal(start_joints, target_joints, near_table_end=False, num_samples=40, clearance_m=None):
     """The rule at every joint-linear sample of a route: table side and clearance, and the mount against the arm;
-    the side rule at the end when the route leads to the table."""
+    the side rule at the end when the route leads to the table.  clearance_m: the table floor if not
+    CAMERA_CLEARANCE_M (a caller's derived floor, declared where it is passed)."""
     from primitives.shared.ik import dh_params, forward_kinematics
     start, target = np.asarray(start_joints, float), np.asarray(target_joints, float)
     for i in range(num_samples + 1):
         alpha = i / num_samples
         q = start + alpha * (target - start)
         reason = (camera_stance_refusal(forward_kinematics(dh_params, q),
-                                        near_table=(True if (near_table_end and i == num_samples) else None))
+                                        near_table=(True if (near_table_end and i == num_samples) else None),
+                                        clearance_m=clearance_m)
                   or camera_mount_arm_refusal(q))
         if reason:
             return f"{reason} (alpha={alpha:.3f})"
