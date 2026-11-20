@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from primitives.shared.camera_up import camera_route_refusal
 from primitives.shared.route_split import admissible_route, candidate_routes
@@ -14,6 +15,16 @@ TARGET = np.array([1.963492, -1.267425, 1.652992, -0.238788, -4.553826, -0.18014
 # MuJoCo r48g: the held u_orange's ground-truth pose (base_link) at the refused clear-area carry.
 R48G_PART_P = [0.279324, -0.725317, 0.298128]
 R48G_PART_XYZW = [0.70435737, -0.00378221, 0.0045327, -0.70982099]
+
+
+@pytest.fixture(autouse=True)
+def held_u_orange_width():
+    """Every case here holds u_orange in the twin: the RG2 measured 20.37 mm on it (fmb-cell-lab
+    mujoco/evidence/w5b-tier2-timings, replay-sim logs), and the replay passes that width to the checks."""
+    from primitives.shared.collision import set_gripper_openings
+    set_gripper_openings((20.4,))
+    yield
+    set_gripper_openings(None)
 
 
 def rule(a, b, is_last):
@@ -94,7 +105,7 @@ def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeyp
     from primitives.shared.collision import dh_self_collision, physical_self_collision_refusal
     assert not dh_self_collision(SPLIT_MIDDLE)
     why = physical_self_collision_refusal(SPLIT_MIDDLE)
-    assert "upper arm" in why and "RG2 body" in why
+    assert "upper arm" in why and "RG2" in why          # the RG2 body or, at u_orange's width, its left fingertip
     # Offer the planner only that split, as if the camera rule had refused everything else.
     monkeypatch.setattr(route_split, "candidate_routes",
                         lambda start, target, vias=(): iter([[start, SPLIT_MIDDLE.copy(), target]]))
@@ -134,7 +145,9 @@ def test_rotate_object_refuses_a_stance_the_reorient_ik_rules_refuse(monkeypatch
 
 def test_r48f_clear_area_carry_needs_a_wrist3_detour():
     """MuJoCo r48f: camera up, the clear-area carry's wrist_2 sweep passes the mount through the forearm /
-    wrist_1 zone on every direct or group-split route; a wrist_3 detour turns the mount away."""
+    wrist_1 zone on every direct or group-split route; a wrist_3 detour turns the mount away - but that detour (the
+    arm-only route admitted before the fingers were modelled) drives the left fingertip into the upper arm at
+    u_orange's measured width (upper arm 6/8 vs RG2 finger L tip, segment 2 at 0.75: the surfaces intersect).  No arm-only route is admitted; the held-part carry goes via home (r48g)."""
     from primitives.shared.collision import check_trajectory_collision
     from primitives.shared.config import HOME_JOINTS, TABLE_COLLISION_MARGIN_SIDEWAYS, TABLE_HEIGHT
     start = np.array([1.9577104621800272, -1.2703251056487066, 1.6572930970066544,
@@ -149,10 +162,13 @@ def test_r48f_clear_area_carry_needs_a_wrist3_detour():
     assert seg(start, target, True) is not None
     home = np.array(HOME_JOINTS, float)
     assert seg(start, home, False) or seg(home, target, True)
-    route, _ = admissible_route(start, target, seg)
-    assert route is not None and len(route) == 4
-    assert abs(route[1][5] - start[5]) > 1.0 and np.allclose(route[-1], target)
-    assert max(abs(w[5]) for w in route) <= 4.0
+    route, reasons = admissible_route(start, target, seg)
+    assert route is None and reasons
+    # the arm-only detour's stance (segment 2 at 0.75): the upper arm's surface runs through the fingertips on the
+    # gripper axis (exact distance 0 at 20.4 mm and at 95 mm); the old RG2 box ended at z 0.144 m, short of the tips
+    from primitives.shared.collision import physical_self_collision_refusal
+    why = physical_self_collision_refusal([0.008852, -1.643281, 2.053286, -0.409528, -1.553453, -1.56722])
+    assert why and "upper arm" in why and "RG2 finger" in why and "tip" in why
 
 
 def test_r48g_carry_needs_home_plus_a_wrist3_detour_for_the_held_part():

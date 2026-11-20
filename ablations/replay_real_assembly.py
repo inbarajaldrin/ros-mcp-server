@@ -1317,10 +1317,15 @@ class AssemblyState:
         self.held_yaw_offset: float = 0.0         # measured in-hand yaw of the held part (held read), deg; 0 = square
         self.held_tcp_quat = None                 # TCP orientation when held_quat was last set (the chain's flange)
         self.aim = None                           # seams.aim.Aim of the last insert argv built (drive-mate sends it)
+        self.grip_width_mm: Optional[float] = None  # the RG2's last measured width (control_gripper); None = unknown
 
     def update_from_result(self, tool_name: str, result: dict) -> None:
         if tool_name == 'move_to_grasp':
             self.held_yaw_offset = 0.0           # a new grasp: its in-hand yaw is unknown until read
+            self.grip_width_mm = None            # it sets its own pre-grasp opening; known again at the close
+        if tool_name == 'control_gripper':
+            w = result.get('final_width_mm') if isinstance(result, dict) and result.get('result') != 'failure' else None
+            self.grip_width_mm = float(w) if w is not None else None
         if not isinstance(result, dict):
             return
         # rotate_object emits final_object_orientation.quat (preferred when present)
@@ -1350,6 +1355,10 @@ class AssemblyState:
                 self.held_quat = (
                     float(q['x']), float(q['y']), float(q['z']), float(q['w'])
                 )
+
+    def grip_argv(self) -> list[str]:
+        """The measured RG2 width for the physical finger checks; none known: no flag (the primitive takes the stroke)."""
+        return [] if self.grip_width_mm is None else ['--gripper-width-mm', f"{self.grip_width_mm:.1f}"]
 
     def quat_argv(self) -> list[str]:
         if self.held_quat is None:
@@ -1914,6 +1923,7 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                      '--object-name', kw['object_name'],
                      '--base-name', kw['base_name']]
         argv += state.quat_argv()
+        argv += state.grip_argv()
         # rotate_object refuses before motion if it would outlast this timeout (ROTATE_OUTLASTS_CALLER)
         argv += ['--budget-s', str(ROTATE_TIMEOUT_S)]
         return argv, ROTATE_TIMEOUT_S
@@ -2208,7 +2218,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # part, not only the arm (r48 MuJoCo, 2026-11-19: the clear-area carry swung u_orange into the upper arm).
         r = run_subprocess(py3 + ['primitives.core.move_to_clear_area', '--move', '--mode', 'real',
                                   '--object-name', obj, '--grasp-id', str(int(gid)),
-                                  '--held-quat', *[f"{float(v):.6f}" for v in state.held_quat]],
+                                  '--held-quat', *[f"{float(v):.6f}" for v in state.held_quat],
+                                  *state.grip_argv()],
                            label=f"{label} (clear area)", timeout_s=CLEAR_AREA_CALLER_TIMEOUT_S, log_fh=log_fh)
         if r.get('result') == 'failure':
             return dict(r, movement_type='place_down')

@@ -114,8 +114,11 @@ PHYSICAL_WRIST_CAPSULES = (
 # The RG2 body: a box in the flange frame (centre, half sizes along the flange x, y, z), measured exactly.
 # Grown (lead ruling 2026-11-20, tier 1 strictly conservative) from the twin's ((0, 0.0003, 0.0786), (0.035, 0.035,
 # 0.065)) to enclose the cell's pinned RG2 mesh (arm_surface.RG2_MESH) over the box's z range, 0.5 mm spare: the
-# mesh spans x -42.4..42.4 (finger knuckles at its modelled opening), y -35.9..38.7 mm there.
-RG2_BODY_BOX = ((0.0, 0.0014, 0.0786), (0.0430, 0.0378, 0.065))
+# mesh spans x -42.4..42.4 (finger knuckles at its modelled opening), y -35.9..38.7 mm there.  Its top is raised to
+# the housing's own top, 148.05 mm (+0.5 spare): the housing's front face between the fingers (x +-21.7, y -18.4..17.6,
+# z 143.6..148.05 mm) was outside the box and outside every finger box.  Bottom unchanged (13.6 mm; the quick-changer
+# capsule below).
+RG2_BODY_BOX = ((0.0, 0.0014, 0.081075), (0.0430, 0.0378, 0.067475))
 # The UR5e base: a cylinder about the base z axis, (radius m, top z m) - the bounds of ur_description's
 # meshes/ur5e/collision/base.stl (r 75.6 mm, z 0..99.1 mm).  The DH base capsule (J0-J1, r 75 mm) reaches z 237 mm
 # with its cap, above any physical base; it stays in the DH check only.
@@ -149,7 +152,9 @@ _SELF_ORDER = {"shoulder (pan housing)": 0.5, "shoulder (lift housing)": 1.5,
                "upper arm (shoulder end)": 1.5, "upper arm": 2, "upper arm (elbow end)": 2.5,
                "forearm (elbow end)": 2.5, "forearm": 3, "forearm (wrist_1 end)": 3.5,
                "wrist_1": 4, "wrist_1 (housing)": 4.5, "wrist_2": 5, "wrist_2 (housing)": 5.5,
-               "wrist_3": 6, "quick changer": 6, "RG2 body": 6}
+               "wrist_3": 6, "quick changer": 6, "RG2 body": 6, "RG2 finger L outer": 6, "RG2 finger L inner": 6,
+               "RG2 finger L tip": 6, "RG2 finger R outer": 6, "RG2 finger R inner": 6, "RG2 finger R tip": 6,
+               "RG2 fingers (meshes unavailable)": 6}
 
 
 def _order(label):
@@ -229,6 +234,25 @@ def _physical_bodies(joint_angles):
     return frames, caps
 
 
+# The RG2's opening for the physical checks (lead ruling 2026-11-20): raw widths in mm, or None = unknown, which
+# checks the fingers over the whole stroke (fail safe).  A move uses its start and end widths; set by the primitives
+# that know them (a held part's closed width, a commanded opening) - see set_gripper_openings.
+_GRIPPER_OPENINGS = None
+
+
+def set_gripper_openings(widths_mm):
+    """Widths (mm) the RG2 may have during the next checks (e.g. a move's start and end), or None (unknown: whole
+    stroke).  Returns the previous setting."""
+    global _GRIPPER_OPENINGS
+    prev = _GRIPPER_OPENINGS
+    _GRIPPER_OPENINGS = None if widths_mm is None else tuple(float(w) for w in widths_mm if w is not None) or None
+    return prev
+
+
+def gripper_openings():
+    return _GRIPPER_OPENINGS
+
+
 _PAIRS_CACHE = {}
 
 
@@ -253,6 +277,16 @@ def physical_self_clearances(joint_angles):
     db = _segment_box_distance((A[far] - p6) @ R6, (B[far] - p6) @ R6,
                                np.asarray(RG2_BODY_BOX[0]), np.asarray(RG2_BODY_BOX[1])) - R[far]
     out += [(float(x), labels[i], "RG2 body") for x, i in zip(db, far)]
+    # the RG2's finger links at the current opening(s) (rg2_geometry: boxes over the opening set; unknown = whole
+    # stroke) against the same bodies; finger meshes unavailable -> a refusal (fail closed)
+    from primitives.shared import rg2_geometry
+    fboxes = rg2_geometry.boxes(_GRIPPER_OPENINGS)
+    if fboxes is None:
+        out += [(-1.0, labels[i], "RG2 fingers (meshes unavailable)") for i in far[:1]]
+    else:
+        for flabel, (fc, fh) in fboxes.items():
+            df = _segment_box_distance((A[far] - p6) @ R6, (B[far] - p6) @ R6, fc, fh) - R[far]
+            out += [(float(x), labels[i], flabel) for x, i in zip(df, far)]
     # the base cylinder against everything two or more links above it (the upper arm cannot reach it: its tube
     # runs 138 mm out along the shoulder axis, outside the 75.6 mm base)
     above = np.array([i for i, l in enumerate(labels) if _order(l) >= 2.5])
@@ -271,12 +305,19 @@ def physical_self_clearances(joint_angles):
 _PHYS_CACHE = {}
 
 
+def rg2_geometry_unavailable():
+    """Why the RG2 finger meshes are unavailable, or None."""
+    from primitives.shared import rg2_geometry
+    return rg2_geometry.why_unavailable()
+
+
 def physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
     """Memoized per joint vector and margin (N-1, w5b-tier2); the key includes the tier-2 settings and the mount
     check (tests swap them)."""
     from primitives.shared import arm_surface
     from primitives.shared import camera_up
-    key = (tuple(float(x) for x in np.asarray(joint_angles, float)), float(margin), id(arm_surface.pair_lower_bound),
+    key = (tuple(float(x) for x in np.asarray(joint_angles, float)), float(margin), _GRIPPER_OPENINGS,
+           id(arm_surface.pair_lower_bound),
            id(arm_surface.rg2_housing), id(arm_surface.mount_lower_bound), id(camera_up.camera_mount_arm_refusal),
            id(arm_surface.body), arm_surface.state_token())
     if key not in _PHYS_CACHE:
@@ -302,8 +343,15 @@ def _physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M
         for d1, la, lb in tier1:
             d2 = arm_surface.pair_lower_bound(la, lb, frames, capsule_of, margin)
             if d2 is None:
+                finger = "RG2 finger" in la or "RG2 finger" in lb
+                if finger and _GRIPPER_OPENINGS is None:
+                    why = "the gripper opening is unknown, so the fingers' whole stroke is checked"
+                elif finger and rg2_geometry_unavailable():
+                    why = rg2_geometry_unavailable()
+                else:
+                    why = arm_surface.why_unavailable()
                 return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb} {1000 * d1:.1f} mm apart (needs {1000 * margin:.0f}; "
-                        f"real-surface check unavailable: {arm_surface.why_unavailable()})")
+                        f"real-surface check unavailable: {why})")
             if d2 < margin:
                 if getattr(d2, "early", False):                   # decided before the exact pass (N-1)
                     return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb}: real surfaces < {1000 * margin:.0f} mm apart "

@@ -103,6 +103,7 @@ needs_rg2 = pytest.mark.skipif(A.rg2_housing() is None, reason="the cell's RG2 m
 def test_routes_75_78_stances_are_admitted_on_the_real_housing(route, alpha):
     """The box refused these (forearm vs RG2 body, capsules ~-17.6 mm, box bound 8.2-8.3 mm); the real housing is
     18.7-21.3 mm away (exact mesh): admitted, allowances included."""
+    C.set_gripper_openings((20.4,))              # the twin's measured close on u_orange (20.37 mm), as the replay passes
     q = _at(*ROUTES_75_78[route], alpha)
     assert [c for c in C.physical_self_clearances(q) if c[0] < 0.010 and "RG2 body" in c[1:]], "tier 1 must refuse"
     assert _rg2_pair(q) >= 0.010 and C.physical_self_collision_refusal(q) is None
@@ -147,8 +148,9 @@ def test_the_disk_cache_round_trips_and_a_bad_file_is_recomputed(tmp_path, monke
 
 def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
     """Lead ruling 2026-11-20: tier 1 must be strictly conservative (tier 2 only reconsiders tier-1 refusals).  Every
-    vertex of the cell's pinned RG2 mesh up to the box's top lies inside RG2_BODY_BOX or the quick-changer capsule
-    (flange frame, mounted rpy 0 0 pi).  Above the box are the fingertips, which tier 1 does not model."""
+    vertex of the cell's pinned RG2 mesh, at every height, lies inside RG2_BODY_BOX, the quick-changer capsule or a
+    finger link's box over the whole stroke (flange frame, mounted rpy 0 0 pi; the mesh's fingers are at one opening
+    of the stroke).  The housing's top (148.05 mm) is above the fingers' knuckles: the box reaches it."""
     import hashlib
     raw = A.RG2_MESH.read_bytes()
     if hashlib.sha256(raw).hexdigest() != A.RG2_MESH_SHA256:
@@ -156,8 +158,12 @@ def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
     V = np.array([[float(x) for x in l.split()[1:4]] for l in raw.decode().splitlines() if l.startswith("v ")])
     V = np.unique((V @ np.diag([-1.0, -1.0, 1.0])).round(7), axis=0)
     c, h = np.asarray(C.RG2_BODY_BOX[0]), np.asarray(C.RG2_BODY_BOX[1])
-    V = V[V[:, 2] <= c[2] + h[2]]
     in_box = np.all(np.abs(V - c) <= h, axis=1)
+    from primitives.shared import rg2_geometry as F
+    fingers = F.boxes(None)
+    assert fingers is not None
+    for fc, fh in fingers.values():
+        in_box |= np.all(np.abs(V - fc) <= fh, axis=1)
     _f, a, b, r, _l = next(cap for cap in C.PHYSICAL_WRIST_CAPSULES if cap[4] == "quick changer")
     a, b = np.asarray(a), np.asarray(b)
     t = np.clip(((V - a) @ (b - a)) / float((b - a) @ (b - a)), 0.0, 1.0)

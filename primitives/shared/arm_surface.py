@@ -326,7 +326,10 @@ def body(label):
 def state_token():
     """What a memoized verdict depends on besides the joints (N-1 caches in collision / camera_up): the load state,
     the mesh locations and the early-exit switch.  A test that resets or redirects any of them gets fresh answers."""
-    return (id(_STATE), str(VISUAL_DIR), id(_RG2), str(RG2_MESH), EARLY_EXIT)
+    from primitives.shared import collision as C
+    from primitives.shared import rg2_geometry as RF
+    return (id(_STATE), str(VISUAL_DIR), id(_RG2), str(RG2_MESH), EARLY_EXIT, C.gripper_openings(), id(RF._STATE),
+            str(RF.MESH_DIR))
 
 
 def preload_async():
@@ -468,6 +471,78 @@ def _rg2_lower_bound(L, gap, margin):
     return float(np.minimum(d_h, d_box).min()) - gap - allow
 
 
+_FINGER = {}
+
+
+def _finger_link(name):
+    """(triangles subdivided to EXACT_EDGE_M, centres, covering radius, centre tree) of finger link `name` in its
+    modelled pose, or None when the meshes are unavailable."""
+    from primitives.shared import rg2_geometry as RF
+    key = (name, id(RF._STATE), str(RF.MESH_DIR))
+    with _LOCK:
+        hit = _FINGER.get(key)
+    if hit is None:
+        m = RF.model()
+        if m is None:
+            return None
+        T = subdivide(m[0][name], EXACT_EDGE_M)                     # the STLs have triangles up to 48 mm across
+        c = T.mean(axis=1)
+        hit = (T, c, float(np.linalg.norm(T - c[:, None, :], axis=2).max()), cKDTree(c))
+        with _LOCK:
+            _FINGER[key] = hit
+    return hit
+
+
+def _finger_lower_bound(ur, finger, frames, margin):
+    """Tier 2 for a UR body vs an RG2 finger link (lead ruling 2026-11-20): the UR mesh's samples against the finger
+    link's exact triangles at every sampled opening of the current opening set (rg2_geometry), less the sampling
+    travel; allowances UR 1.5 + RG2 1.5 mm.  None (fail closed) when a mesh is missing or the opening is unknown
+    (the whole stroke is not re-checked exactly: the tier-1 sweep stands).
+
+    Samples farther than the margin from the link's swept box (it encloses the link over the whole opening set,
+    padded) keep the box distance; the rest are mapped into the link's modelled pose at each sampled opening
+    (rg2_geometry.to_link_frame, rigid) and measured against its fixed triangles in one batch."""
+    from primitives.shared import collision as C
+    from primitives.shared import rg2_geometry as RF
+    openings = C.gripper_openings()
+    surf = body(ur)
+    if openings is None or surf is None or RF.model() is None:
+        return None
+    name = RF.link_of_label(finger)
+    fl = _finger_link(name)
+    box = (RF.boxes(openings) or {}).get(finger)
+    if fl is None or box is None:
+        return None
+    T, cent, rho, tree = fl
+    S, _ = _world(surf, frames)
+    R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
+    L = (S - p6) @ R6
+    slack = surf.gap + ALLOWANCE_PER_BODY_M + RG2_ALLOWANCE_M
+    pad = RF.padding(name)
+    bc, bh = np.asarray(box[0], float), np.asarray(box[1], float)
+    d_box = np.linalg.norm(np.maximum(np.abs(L - bc) - bh, 0.0), axis=1)
+    near = d_box - slack < margin
+    far = float(d_box[~near].min()) - slack if (~near).any() else np.inf
+    if not near.any():
+        return far
+    alpha0 = RF.model()[1]
+    angles = RF.alpha_samples(openings)
+    Q = np.stack([RF.to_link_frame(name, L[near], a, alpha0) for a in angles])          # (openings, samples, 3)
+    dc, _ = tree.query(Q.reshape(-1, 3), k=1)
+    dc = dc.reshape(len(angles), -1)
+    # a centre lies on its triangle and every sampled angle is a real opening of the set: an upper estimate
+    upper = float(dc.min()) - slack
+    if EARLY_EXIT and upper < margin:
+        return EarlyRefusal(min(upper, far))
+    lower = dc - rho
+    need = lower - slack - pad < margin
+    d = lower.copy()
+    if need.any():
+        # the nearest triangle's centre is within d + rho <= dc + rho of the point
+        d[need] = _exact_min(Q[need], T, cent, dc[need] + rho)
+    return min(float(d.min()) - slack - pad, far)
+
+
 def pair_lower_bound(la, lb, frames, capsule_of, margin):
     """A lower bound (m) on the distance between the real surfaces of bodies la and lb, allowances included, or None
     when tier 2 is unavailable.  A bound >= margin admits the pair; below it, it is exact for the samples.
@@ -476,6 +551,9 @@ def pair_lower_bound(la, lb, frames, capsule_of, margin):
     non_ur = ("RG2 body", "quick changer")
     if la in non_ur and lb in non_ur:
         return None
+    if la.startswith("RG2 finger") or lb.startswith("RG2 finger"):
+        return _finger_lower_bound(lb if la.startswith("RG2 finger") else la,
+                                   la if la.startswith("RG2 finger") else lb, frames, margin)
     if la in non_ur or lb in non_ur:                          # a UR body against the RG2 box or the quick changer
         ur, other = (lb, la) if la in non_ur else (la, lb)
         surf = body(ur)

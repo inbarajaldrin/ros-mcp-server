@@ -171,6 +171,12 @@ def fix_orientation_inprocess(node, target_xy, logger):
         return False
 
     from primitives.shared.ik import IKSolverConfig, IKSolver
+    # the RG2's opening for the physical checks: the measured width and the commanded pre-grasp width; neither known:
+    # unknown (whole stroke, fail safe)
+    from primitives.shared.collision import set_gripper_openings
+    widths = [w for w in (getattr(node, "current_gripper_width", None), getattr(node, "pre_grasp_width", None))
+              if w is not None]
+    set_gripper_openings(tuple(float(w) for w in widths) if widths else None)
 
     current_joints = node.current_joint_angles
     if current_joints is None:
