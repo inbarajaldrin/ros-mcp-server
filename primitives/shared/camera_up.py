@@ -193,30 +193,30 @@ def _camera_mount_arm_refusal(joints):
         # the nearest surface sample, less the sampling gap: a lower bound on the true box-to-capsule clearance
         clearance = float(np.min(axis_distance(W, a, ab))) - gap - r
         if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-            why = _mount_tier2(q, label, W, gap, clearance)
+            why = _mount_tier2(q, label, clearance)
             if why:
                 return why
     Wall = surface @ T[:3, :3].T + T[:3, 3]
     clearance = float(np.min(base_cylinder_distance(Wall))) - gap
     if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-        why = _mount_tier2(q, "base", Wall, gap, clearance)
+        why = _mount_tier2(q, "base", clearance)
         if why:
             return why
     return None
 
 
-def _mount_tier2(q, label, W, gap, tier1_m):
+def _mount_tier2(q, label, tier1_m):
     """Tier 2 for one capsule the mount rule refused (lead 2026-11-20): None admits it (the mount's real faces clear
     the UR5e's real surface in that capsule by the margin, allowances included); otherwise the typed refusal.  It is
     only ever asked about what tier 1 refused, and it fails closed: no pinned meshes -> the tier-1 refusal stands."""
     from primitives.shared import arm_surface
     from primitives.shared.collision import dh_link_frames
     m = CAMERA_MOUNT_ARM_MARGIN_M
-    d2 = arm_surface.mount_lower_bound(label, dh_link_frames(q), W, gap, m)
+    d2 = arm_surface.mount_lower_bound(label, dh_link_frames(q), m)
     where = "the base" if label == "base" else f"the {label}"
     if d2 is None:
         return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * tier1_m:.1f} mm from {where} (needs {1000 * m:.0f}; "
-                f"real-surface check unavailable: {arm_surface.why_unavailable()})")
+                f"real-surface check unavailable: {arm_surface.why_unavailable() or arm_surface.mount_unavailable()})")
     if getattr(d2, "early", False):
         return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 vs {where}: real surfaces < {1000 * m:.0f} mm apart (a surface "
                 f"sample pair at {1000 * d2:.1f} mm after allowances; capsule {1000 * tier1_m:.1f})")

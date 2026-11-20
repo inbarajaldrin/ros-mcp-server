@@ -13,7 +13,15 @@ Openings are a set of raw widths (mm) or None (unknown: the whole stroke, fail s
 range [w - 1, w + 2 x 4.6 + 1] mm: the width a primitive knows may be the raw or the rubber gap (they differ by
 2 x 4.6 mm, CLAUDE.md), and the real width is within ~1 mm of the command.  Every range is sampled uniformly in alpha
 (<= ALPHA_STEP_RAD apart) and each link's travel between samples is added as padding, so the boxes and bounds hold
-between samples too.
+between samples too.  held(w): a held grip's measured width, [fully closed, w + 2 x 4.6 + 1] (a slip closes the jaws).
+
+Two width conventions use this module side by side, deliberately (review w5b-tier2 r2, R2-3) - do not "fix" one into
+the other:
+- collision.set_gripper_openings takes the MEASURED rubber gap in mm (control_gripper's final_width_mm =
+  /gripper_width_offset), set once per process for its physical self checks; a process that never sets it checks the
+  fingers over the whole stroke.
+- the *_tool API (finger_boxes_tool, tip_z_tool, ...; gripper_rules, move_down) takes RAW widths in metres, per call.
+Both are conservative for either reading: [w - 1, w + 10.2] mm covers raw = gap + 9.2.
 """
 from __future__ import annotations
 

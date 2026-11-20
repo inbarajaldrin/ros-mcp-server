@@ -19,7 +19,8 @@ def _at(start, target, alpha):
 
 # 10-24 10:19 u_orange#5 as flown: the capsule says 7.8 mm at alpha 0.575; the real forearm mesh is >= 21 mm away
 L1019 = ([2.04036, -0.98078, 1.22732, -1.81671, -1.56601, 0.43071], [2.05205, -0.97607, 1.2199, -0.24438, -4.62251, 3.14295])
-# 10-24 09:28 u_orange#5 as flown: capsule -1.0 mm at alpha 0.30; real mesh 8.8 mm (under the 10 mm margin)
+# 10-24 09:28 u_orange#5 as flown: capsule -1.0 mm at alpha 0.30; UR mesh vs the mount's boxes 8.8 mm, vs the exact
+# mount meshes 10.08 mm (admitted: it was flown on the real cell); the route stays refused (camera toward the table)
 L0928 = ([2.04006, -1.05613, 1.34713, -1.86118, -1.56601, -0.1588], [2.06132, -1.04722, 1.33347, -0.28673, -4.55958, -3.14026])
 # the twin's seed-48 direct line: a real near collision (mesh <= ~1.5 mm) at alpha 0.625
 TWIN = ([1.8915394, -1.3049388, 1.7048768, -1.9697987, -1.5659160, 2.1062887], [1.9573, -1.27193, 1.66131, -0.38907, -4.31629, 0.00206])
@@ -37,9 +38,46 @@ def test_tier2_admits_a_capsule_refusal_the_real_mesh_clears(monkeypatch):
     assert _tier1_only(q, monkeypatch).startswith("CAMERA_MOUNT_ARM_COLLISION")   # tier 1 alone refused it
 
 
-def test_tier2_keeps_a_real_shortfall_refused():
-    why = cu.camera_mount_arm_refusal(_at(*L0928, 0.30))
-    assert why.startswith("CAMERA_MOUNT_ARM_COLLISION") and "real surfaces" in why
+def test_tier2_keeps_a_real_shortfall_refused(monkeypatch):
+    """The twin's direct u_orange line at 0.525: the exact meshes overlap (-0.6 mm after allowances)."""
+    monkeypatch.setattr(A, "EARLY_EXIT", False)
+    why = cu.camera_mount_arm_refusal(_at(*TWIN, 0.525))
+    assert why.startswith("CAMERA_MOUNT_ARM_COLLISION") and "real surfaces >=" in why
+
+
+def test_the_flown_0928_stance_is_admitted_on_the_exact_mount_mesh_and_its_route_stays_refused():
+    """Tier 2's mount side is the exact pinned mount/D415 meshes (lead 2026-11-20): the flown 10-24 09:28 stance clears
+    at 10.08 mm (the mount boxes' faces said 8.8); the route is still refused at its end (camera toward the table)."""
+    from primitives.shared.camera_up import camera_route_refusal
+    assert cu.camera_mount_arm_refusal(_at(*L0928, 0.30)) is None
+    why = camera_route_refusal(np.asarray(L0928[0]), np.asarray(L0928[1]), near_table_end=True)
+    assert why and why.startswith("CAMERA_TOWARD_TABLE")
+
+
+def test_mount_tier2_fails_closed_without_the_pinned_mount_meshes(monkeypatch, tmp_path):
+    from primitives.shared import camera_geometry as CG
+    CG.mount_mesh_triangles_tool.cache_clear()                 # camera_geometry caches the meshes per name
+    try:
+        monkeypatch.setattr(CG, "MOUNT_MESH_DIR", tmp_path)
+        assert A.mount_mesh() is None
+        why = cu.camera_mount_arm_refusal(_at(*L0928, 0.30))
+        assert why and "real-surface check unavailable" in why
+    finally:
+        CG.mount_mesh_triangles_tool.cache_clear()
+
+
+def test_extra_mount_solids_are_always_in_tier2(monkeypatch):
+    """The hook for parts the pinned meshes lack (the D415 USB plug, w8 P3-6): a box placed on the arm's surface makes
+    tier 2 refuse a stance it otherwise admits."""
+    from primitives.shared.collision import dh_link_frames
+    q = _at(*L0928, 0.30)
+    assert cu.camera_mount_arm_refusal(q) is None
+    frames = dh_link_frames(q)
+    S, _ = A._world(A.body("forearm (wrist_1 end) 1/2"), frames)
+    R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
+    centre = ((S - p6) @ R6)[0]                                 # a UR surface sample, in tool0
+    monkeypatch.setattr(A, "MOUNT_EXTRA_SOLIDS_TOOL", [(centre, np.array([0.005, 0.005, 0.005]))])
+    assert A.mount_lower_bound("forearm (wrist_1 end) 1/2", frames, 0.010) < 0.010
 
 
 def test_tier2_keeps_a_near_collision_refused():

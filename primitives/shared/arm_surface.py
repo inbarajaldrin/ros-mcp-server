@@ -336,8 +336,9 @@ def state_token():
     the mesh locations and the early-exit switch.  A test that resets or redirects any of them gets fresh answers."""
     from primitives.shared import collision as C
     from primitives.shared import rg2_geometry as RF
+    from primitives.shared import camera_geometry as CG
     return (id(_STATE), str(VISUAL_DIR), id(_RG2), str(RG2_MESH), EARLY_EXIT, C.gripper_openings(), id(RF._STATE),
-            str(RF.MESH_DIR))
+            str(RF.MESH_DIR), id(_MOUNT), str(CG.MOUNT_MESH_DIR), tuple(map(repr, MOUNT_EXTRA_SOLIDS_TOOL)))
 
 
 def preload_async():
@@ -640,34 +641,78 @@ def pair_lower_bound(la, lb, frames, capsule_of, margin):
 
 
 
-def mount_lower_bound(label, frames, W, w_gap, margin):
+# Extra solids the mount side of tier 2 always includes, as (centre, half) axis-aligned boxes in tool0 (m): parts of
+# the camera assembly the pinned mount/D415 meshes do not contain.  TODO (lead 2026-11-20): the D415's USB plug and
+# strain relief, which w8 adds to tier 1 as a conservative box (P3-6) - add the same box here when it lands, or tier 2
+# would admit through the plug.
+MOUNT_EXTRA_SOLIDS_TOOL = []
+_MOUNT = {}
+
+
+def mount_mesh():
+    """(triangles subdivided to EXACT_EDGE_M, centres, covering radius, centre tree) of the pinned v3.1 mount and D415
+    meshes in tool0, or None when one is missing or not the pinned one (fail closed: the padded-box refusal stands)."""
+    from primitives.shared import camera_geometry as CG
+    key = (str(CG.MOUNT_MESH_DIR), tuple(sorted(CG.MOUNT_MESH_SHA256)))
+    with _LOCK:
+        if key in _MOUNT:
+            return _MOUNT[key]
+    try:
+        T = np.vstack([CG.mount_mesh_triangles_tool(n) for n in CG.MOUNT_MESH_SHA256])
+        T = subdivide(T, EXACT_EDGE_M)
+        c = T.mean(axis=1)
+        out = (T, c, float(np.linalg.norm(T - c[:, None, :], axis=2).max()), cKDTree(c))
+    except Exception as e:                                               # noqa: BLE001 - fail closed
+        out = None
+        with _LOCK:
+            _MOUNT["error"] = f"mount meshes: {type(e).__name__}: {e}"
+    with _LOCK:
+        _MOUNT[key] = out
+    return out
+
+
+def mount_unavailable():
+    """Why the pinned mount meshes are unavailable, or None."""
+    mount_mesh()
+    return _MOUNT.get("error")
+
+
+def mount_lower_bound(label, frames, margin):
     """Tier 2 of the camera-mount rule (lead 2026-11-20, w5b-tier2): a lower bound (m) on the distance between the
     v3.1 mount / D415 and the UR5e's real surface inside the enclosing capsule `label`, allowances included; None when
     tier 2 is unavailable (fail closed); an EarlyRefusal when the refusal is certain before the exact pass.
-    W: the mount boxes' face samples in the base frame (camera_geometry.mount_surface_tool, transformed), w_gap their
-    sampling gap.  Same method as pair_lower_bound: the UR side is the pinned mesh (samples, then exact pieces), the
-    mount side its sampled box faces (gap subtracted); allowances 2 x ALLOWANCE_PER_BODY_M, as for two UR bodies."""
+    The finger method: the UR side is the pinned mesh's samples (their covering gap subtracted), the mount side the
+    EXACT pinned mount/D415 triangles (camera_geometry.mount_mesh_triangles_tool; tier 1 keeps the padded boxes, which
+    enclose them), plus MOUNT_EXTRA_SOLIDS_TOOL as sampled boxes; allowances 2 x ALLOWANCE_PER_BODY_M."""
+    from primitives.shared.collision import _box_surface
     surf = body(label)
-    if surf is None:
+    mesh = mount_mesh()
+    if surf is None or mesh is None:
         return None
+    T, cent, rho, tree = mesh
     allow = 2 * ALLOWANCE_PER_BODY_M
-    S, P = _world(surf, frames)
-    W = np.asarray(W, float)
-    if not len(S) or not len(W):
+    S, _ = _world(surf, frames)
+    if not len(S):
         return None
-    dv, _ = cKDTree(S).query(W, k=1)
-    cheap = float(dv.min()) - surf.gap - w_gap - allow
-    if cheap >= margin:
-        return cheap
-    upper = float(dv.min()) - w_gap - allow          # the UR samples lie on its surface: the exact bound is <= this
+    R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
+    L = (S - p6) @ R6                                         # the UR samples in tool0
+    dc, _ = tree.query(L, k=1)
+    # a centre lies on its triangle and the samples on the UR surface: the exact distance is <= this
+    upper = float(dc.min()) - allow
+    extra = np.inf
+    for c, h in MOUNT_EXTRA_SOLIDS_TOOL:
+        pts, bgap = _box_surface(c, h)
+        de, _ = cKDTree(L).query(pts, k=1)
+        extra = min(extra, float(de.min()) - surf.gap - bgap - allow)
     if EARLY_EXIT and upper < margin:
-        return EarlyRefusal(upper)
-    need = dv - surf.gap < margin + w_gap + allow
-    # the UR sample nearest a point lies on some piece, whose centre is within dv + rho of the point
-    best = float(_exact_min(W[need], P, P.mean(axis=1), dv[need] + surf.rho).min()) if need.any() else np.inf
-    rest = dv[~need]
-    exact_min = min(best, float(rest.min() - surf.gap) if len(rest) else np.inf)
-    return exact_min - w_gap - allow
+        return EarlyRefusal(min(upper, extra))
+    lower = dc - rho
+    need = lower - surf.gap - allow < margin
+    d = lower.copy()
+    if need.any():
+        # the nearest triangle's centre is within d + rho <= dc + rho of the sample
+        d[need] = _exact_min(L[need], T, cent, dc[need] + rho)
+    return min(float(d.min()) - surf.gap - allow, extra)
 
 
 def table_lower_bound(label, frames, table_z):
