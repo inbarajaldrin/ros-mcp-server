@@ -1803,6 +1803,12 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     return tuple(float(v) for v in gp), tuple(float(v) for v in q)
 
 
+# rotate_object's subprocess timeout (lead 2026-11-20): 60 s was too close to the cell PC's projected worst reorient
+# (46.7 s: route search + IK x 2.19 from the twin's 28.0 s on a4500, mujoco/evidence/w5b-rotate-timing in the lab).
+# It is also rotate_object's declared budget (--budget-s).
+ROTATE_TIMEOUT_S = 90
+
+
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                base_offset_xy: Optional[Tuple[float, float]] = None,
                observed_base=None) -> Tuple[list[str], int]:
@@ -1834,7 +1840,9 @@ def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                      '--object-name', kw['object_name'],
                      '--base-name', kw['base_name']]
         argv += state.quat_argv()
-        return argv, 60
+        # rotate_object refuses before motion if it would outlast this timeout (ROTATE_OUTLASTS_CALLER)
+        argv += ['--budget-s', str(ROTATE_TIMEOUT_S)]
+        return argv, ROTATE_TIMEOUT_S
 
     if tool_name == 'translate_object':
         action = kw.get('action', '')

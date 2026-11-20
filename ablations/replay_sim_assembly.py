@@ -62,7 +62,7 @@ def _command_for_step(step: str, object_name: str | None = None,
         return cmd, 90
     if short == "rotate_object":
         return py + ["primitives.rotate_object", "--object-name", kwargs["object_name"],
-                     "--base-name", kwargs["base_name"], "--mode", "sim"], 150
+                     "--base-name", kwargs["base_name"], "--mode", "sim", "--budget-s", "150"], 150
     if short == "translate_object":
         action = str(kwargs["action"]).replace("_", "-")
         return py + ["primitives.translate_object", "--mode", "sim",
