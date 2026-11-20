@@ -163,6 +163,19 @@ def _pose_points(arrays, alpha, alpha0):
     return out
 
 
+def to_link_frame(name, P, alpha, alpha0):
+    """Flange-frame points P (..., 3) -> link `name`'s modelled pose (rg2_base_link at alpha0), the inverse of
+    _pose_points at alpha.  A rigid motion, so a distance to the link posed at alpha is the distance to its modelled
+    triangles from the mapped points: one fixed search tree per link serves every opening."""
+    B = np.asarray(P, float) @ np.diag([-1.0, -1.0, 1.0])
+    d = alpha - alpha0
+    if "knuckle" in name:
+        return _rot_xz(B, np.asarray(LINK_ORIGIN[name][0]), d if name.startswith("l") else -d)
+    side = -1.0 if name.startswith("l") else 1.0
+    r = _STATE.get("link_r", ARC_R_M)
+    return B - r * np.array([side * (math.sin(alpha) - math.sin(alpha0)), 0.0, math.cos(alpha) - math.cos(alpha0)])
+
+
 def posed(alpha):
     """{link: triangles (m, 3, 3) in the FLANGE frame} at moment-arm angle alpha."""
     m = model()

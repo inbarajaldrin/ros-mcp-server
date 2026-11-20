@@ -86,3 +86,11 @@ def test_the_shared_api():
     assert F.worst_finger_points_tool(None).shape == (16, 3)
     assert F.tip_z_tool(0.0092) > F.tip_z_tool(0.110)            # closed fingers reach deeper
     assert F.tip_z_tool(None) >= F.tip_z_tool(0.0092) - 1e-12
+
+
+def test_to_link_frame_inverts_the_pose():
+    links, alpha0, _ = F.model()
+    for name, T in links.items():
+        for a in (F.ALPHA_MIN, alpha0 + 0.1, F.ALPHA_MAX):
+            P = F._pose_points({name: T}, a, alpha0)[name]
+            assert np.abs(F.to_link_frame(name, P, a, alpha0) - T).max() < 1e-12, (name, a)
