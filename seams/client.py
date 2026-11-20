@@ -43,6 +43,23 @@ def _vp(VisionPose, frame, xyz, q):
     return v
 
 
+def _init_without_signal_handlers(rclpy):
+    """rclpy.init WITHOUT rclpy's signal handlers (review rc1 P2-2): with them a SIGINT shuts the context down before
+    _action's KeyboardInterrupt branch runs, so its goal cancel could not be confirmed (the server would finish the
+    insert).  Without them SIGINT is Python's KeyboardInterrupt with the context alive, and SIGTERM (stop_run.sh /
+    RealIO's group stop after the grace) is mapped to the same path."""
+    import signal
+    try:
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    except ImportError:                                   # an rclpy without the option: its default handlers
+        rclpy.init()
+
+    def _term(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _term)
+
+
 def _action(node, ActionT, name, goal, timeout):
     import rclpy
     from rclpy.action import ActionClient
@@ -96,7 +113,8 @@ def main():
     if a.op == 'mate-for':
         print('__SEAM__ ' + json.dumps({'mate': mate_for(a.part, a.base)})); return 0
     import rclpy
-    rclpy.init(); node = rclpy.create_node('seams_client'); out = {}
+    _init_without_signal_handlers(rclpy)
+    node = rclpy.create_node('seams_client'); out = {}
     try:
         if a.op == 'drive':
             from fmb_seam_msgs.action import DriveMate
