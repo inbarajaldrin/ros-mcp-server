@@ -229,6 +229,11 @@ APPROVED 2026-11-18 (R11).
   empty-gripper joint-travel and wrist_3 caps; the camera rule and the table/self check on both fix-orientation swings; rotate_object's
   replay timeout 90 s, with ROTATE_OUTLASTS_CALLER refusing before any send. Still owed before the first real run: the prismatic stop
   test (URSim 5.17.3 + ur_robot_driver 2.14.0 on a4500), and re-timing rotate_object on dev 720a5d8 (tier-2 adds ~9 s per process).
+- (lead, 2026-11-20 later) URSim stop test DONE (lab bf4c166): pre-try and mid-press kills restore and hold still; a failed restore left
+  force mode stopped but the controllers switched, and the replay carried on. Fix w5b-insert-restore: Opus r1 NOT READY (the replay's latch),
+  being fixed. NOTE: on this tree FMB1's line_green and inverted_u_yellow go to touch_insert, not prismatic (PRISMATIC_ROUTE_OBJECTS is
+  FMB3's parts); u_brown/u_orange use compliant_insert. The replay-level controller check covers every insert route. rotate_object budgets
+  for every caller merged (dev 65c29ec).
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
