@@ -671,6 +671,19 @@ def mount_mesh():
     return out
 
 
+def _mount_boxes():
+    """(lo (B, 3), hi (B, 3)) of the mount's padded boxes in tool0 (camera_geometry: their union encloses the CAD)."""
+    from primitives.shared import camera_geometry as CG
+    with _LOCK:
+        hit = _MOUNT.get("boxes")
+    if hit is None:
+        boxes = CG._all_boxes(CG.CAMERA_MOUNT_BOX_PAD_M)
+        hit = (np.array([b[0] for b in boxes], float), np.array([b[1] for b in boxes], float))
+        with _LOCK:
+            _MOUNT["boxes"] = hit
+    return hit
+
+
 def mount_unavailable():
     """Why the pinned mount meshes are unavailable, or None."""
     mount_mesh()
@@ -683,7 +696,11 @@ def mount_lower_bound(label, frames, margin):
     tier 2 is unavailable (fail closed); an EarlyRefusal when the refusal is certain before the exact pass.
     The finger method: the UR side is the pinned mesh's samples (their covering gap subtracted), the mount side the
     EXACT pinned mount/D415 triangles (camera_geometry.mount_mesh_triangles_tool; tier 1 keeps the padded boxes, which
-    enclose them), plus MOUNT_EXTRA_SOLIDS_TOOL as sampled boxes; allowances 2 x ALLOWANCE_PER_BODY_M."""
+    enclose them), plus MOUNT_EXTRA_SOLIDS_TOOL as sampled boxes; allowances 2 x ALLOWANCE_PER_BODY_M.
+    First the padded boxes (camera_geometry, CAMERA_MOUNT_BOX_PAD_M: their union encloses the meshes, so a sample's
+    exact distance to the nearest box - 0 inside one - is a lower bound on its distance to the mount): samples that
+    clear the margin that way keep that bound, and only the rest are measured against the 111k-triangle meshes (the
+    seed-48 yellow reorient's route search, review r2 timing).  With MOUNT_EXTRA_SOLIDS_TOOL set, every sample is.""" 
     from primitives.shared.collision import _box_surface
     surf = body(label)
     mesh = mount_mesh()
@@ -696,6 +713,15 @@ def mount_lower_bound(label, frames, margin):
         return None
     R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
     L = (S - p6) @ R6                                         # the UR samples in tool0
+    lo, hi = _mount_boxes()
+    dbox = np.min(np.linalg.norm(np.maximum(np.maximum(lo[None] - L[:, None], L[:, None] - hi[None]), 0.0), axis=2),
+                  axis=1)
+    box_lower = dbox - surf.gap - allow
+    near = np.ones(len(L), bool) if MOUNT_EXTRA_SOLIDS_TOOL else box_lower < margin
+    far = float(box_lower[~near].min()) if (~near).any() else np.inf
+    if not near.any():
+        return far
+    L = L[near]
     dc, _ = tree.query(L, k=1)
     # a centre lies on its triangle and the samples on the UR surface: the exact distance is <= this
     upper = float(dc.min()) - allow
@@ -705,14 +731,14 @@ def mount_lower_bound(label, frames, margin):
         de, _ = cKDTree(L).query(pts, k=1)
         extra = min(extra, float(de.min()) - surf.gap - bgap - allow)
     if EARLY_EXIT and upper < margin:
-        return EarlyRefusal(min(upper, extra))
+        return EarlyRefusal(min(upper, extra, far))
     lower = dc - rho
     need = lower - surf.gap - allow < margin
     d = lower.copy()
     if need.any():
         # the nearest triangle's centre is within d + rho <= dc + rho of the sample
         d[need] = _exact_min(L[need], T, cent, dc[need] + rho)
-    return min(float(d.min()) - surf.gap - allow, extra)
+    return min(float(d.min()) - surf.gap - allow, extra, far)
 
 
 def table_lower_bound(label, frames, table_z):

@@ -250,3 +250,35 @@ def test_the_10_15_wrist2_overlap_stays_refused():
         C.set_gripper_openings(w)
         why = C.physical_self_collision_refusal(YELLOW_1015_13REC8_END)
         assert why and "wrist_2" in why, (w, why)
+
+
+@pytest.mark.parametrize("q", [_at(*TWIN, 0.525), _at(*L0928, 0.30), _at(*L0928, 0.35), _at(*L1019, 0.575)])
+def test_the_box_prefilter_is_a_lower_bound_and_never_changes_a_verdict(monkeypatch, q):
+    """mount_lower_bound keeps the padded boxes' exact distance for samples that clear the margin by it; the boxes
+    enclose the meshes, so the result is <= the true sample-to-mesh distance (brute force over every sample, less the
+    same gap and allowances), and its verdict is the true one's."""
+    from scipy.spatial import cKDTree
+    from primitives.shared.collision import dh_link_frames, physical_link_capsules
+    monkeypatch.setattr(A, "EARLY_EXIT", False)
+    q = np.asarray(q, float)
+    frames = dh_link_frames(q)
+    T, cent, rho, tree = A.mount_mesh()
+    R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
+    lo, hi = A._mount_boxes()
+    checked = 0
+    for lab in [lab for *_x, lab in physical_link_capsules(q)]:
+        surf = A.body(lab)
+        if surf is None:
+            continue
+        S, _ = A._world(surf, frames)
+        L = (S - p6) @ R6
+        dbox = np.linalg.norm(np.maximum(np.maximum(lo[None] - L[:, None], L[:, None] - hi[None]), 0.0), axis=2).min()
+        if dbox > 0.03:
+            continue                                # far from the mount: the prefilter decides nothing there
+        checked += 1
+        got = A.mount_lower_bound(lab, frames, 0.010)
+        dc, _ = tree.query(L, k=1)
+        true = float(A._exact_min(L, T, cent, dc + rho).min()) - surf.gap - 2 * A.ALLOWANCE_PER_BODY_M
+        assert got <= true + 1e-9, lab
+        assert (got >= 0.010) == (true >= 0.010), lab
+    assert checked >= 1
