@@ -203,12 +203,12 @@ def test_the_to_table_floor_follows_the_given_opening():
     from primitives.shared import rg2_geometry as g
     from primitives.shared.config import RG2_TIP_CLOSED_M, TABLE_HEIGHT
     down = np.diag([1.0, -1.0, -1.0])
-    closed = md.to_table_floor_z(down)
-    assert abs(closed - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M)) < 1e-12
+    closed = md.to_table_floor_z(down)                                # no width: the whole stroke, tilt-aware
+    assert closed >= TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M
     open95 = md.to_table_floor_z(down, 95.2)
     assert g.tip_z_tool(0.0952) < RG2_TIP_CLOSED_M - 0.010            # the open fingers sit > 10 mm higher ...
     assert open95 < closed                                            # ... the floor follows the width (lead ruling)
-    assert md.to_table_floor_z(down, 0.0) > closed                    # closed by the mesh: 234.2 mm, deeper
+    assert abs(md.to_table_floor_z(down, 0.0) - closed) < 1e-9        # fully closed = the whole stroke's deepest
 
 
 def test_the_to_table_floor_falls_back_to_the_closed_tips_without_the_model(monkeypatch):
@@ -263,15 +263,42 @@ def test_the_floor_with_a_width_is_never_below_move_to_grasps_floor():
     assert worst >= 0.00233 - 1e-6, worst
 
 
-def test_a_missing_width_is_exactly_devs_closed_tip_floor():
+def test_a_missing_width_is_never_below_devs_closed_tip_floor():
     import numpy as np
     import tests.ros_stubs as ros_stubs
     ros_stubs.install()
     from primitives.core import move_down as md
     from primitives.shared.config import RG2_TIP_CLOSED_M, TABLE_HEIGHT
     down = np.diag([1.0, -1.0, -1.0])
-    assert md.to_table_floor_z(down) == TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M
+    assert md.to_table_floor_z(down) >= TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M
     assert md.floor_width_mm() is None
+
+
+def test_the_no_width_floor_is_tilt_aware_over_the_whole_stroke():
+    """Lead 2026-11-20 (the hazard): with no width, the lowest RG2 point over the WHOLE stroke stays 2 mm above the
+    table at every face-down tilt (0/10/20/40/60 deg, jaw plane and across); dev's closed-tip floor put it 11-50 mm
+    into the table at 20-60 deg."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared.config import TABLE_HEIGHT
+    from primitives.shared.gripper_rules import gripper_points_tool
+    from scipy.spatial.transform import Rotation as R
+    P = gripper_points_tool(None)
+    down = R.from_euler("x", 180, degrees=True)
+    for axis in ("y", "x"):
+        for tilt in (0, 10, 20, 40, 60):
+            Rm = (R.from_euler(axis, tilt, degrees=True) * down).as_matrix()
+            floor = md.to_table_floor_z(Rm)
+            assert float((P @ Rm[2, :]).min()) + floor - TABLE_HEIGHT >= 0.002 - 1e-9, (axis, tilt)
+
+
+def test_the_replays_floor_mirror_is_move_downs():
+    src = (Path(__file__).resolve().parents[1] / "ablations/replay_real_assembly.py").read_text()
+    body = src[src.index("def _move_down_floor_z(ee_quat_xyzw):"):]
+    body = body[:body.index("\n    def ", 10)]
+    assert "to_table_floor_z(Rm)" in body and "RG2_TIP_CLOSED_M]))[2]" not in body
 
 
 def test_the_u_orange_flat_pick_passes_with_the_raise():
