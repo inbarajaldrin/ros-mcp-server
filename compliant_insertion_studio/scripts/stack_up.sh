@@ -76,7 +76,7 @@ if timeout 8 ros2 control list_controllers 2>/dev/null | grep -q "scaled_joint_t
     # An earlier launch_robot.sh that timed out mid-bringup leaves the controllers
     # loaded but never reaches set_payload. "Driver up" therefore does NOT imply
     # the payload is set, and force mode without it has no gravity compensation.
-    if ! grep -qs "Payload has been set successfully" /tmp/ur_bringup_logs/*.log; then
+    if ! grep -qsE "Payload has been set (successfully|and verified)" /tmp/ur_bringup_logs/*.log; then
         warn "payload not confirmed in any bringup log — set it before running force mode:"
         warn "  see launch_robot.sh's set_payload block, or relaunch the driver cleanly"
     fi
