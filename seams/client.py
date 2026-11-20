@@ -142,7 +142,9 @@ def main():
             r, err = _action(node, Grip, '/ur5e/rg2/grip', goal, 90.0)
             out = {'error': err} if r is None else {
                 'verdict': r.verdict, 'reached': r.reached, 'holding': r.holding,
-                'width_measured_m': _nan(r.width_measured_m), 'identity_verified': r.identity_verified}
+                'width_measured_m': _nan(r.width_measured_m), 'identity_verified': r.identity_verified,
+                'identity_authority': r.identity_authority, 'not_holding_reason': r.not_holding_reason,
+                'not_holding_detail': r.not_holding_detail}
     finally:
         node.destroy_node(); rclpy.shutdown()
     print('__SEAM__ ' + json.dumps(out, default=float), flush=True)
