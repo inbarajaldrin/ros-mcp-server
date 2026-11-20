@@ -2173,6 +2173,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
     def execute(step_idx, step, tool_name, kw, tag=""):
         """Run one primitive. Returns its result dict, or None if the argv build failed."""
+        if cell_io._DASHBOARD_STOPPED and not args.dry_run:      # latched (post_insert_gate, a dashboard stop)
+            return {'result': 'failure', 'error': f"DASHBOARD_STOPPED: {cell_io._DASHBOARD_STOPPED}",
+                    'label': f"{obj}#{step_idx}{tag} {tool_name}"}
         if tool_name == 'translate_object' and kw.get('action') == 'place_down':
             snap_before = snapshot_robot_state()
             _record_snapshot(snap_fh, "before", f"{obj}#{step_idx}{tag} place_down", snap_before)
@@ -2288,6 +2291,15 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                 os.environ.pop('HELD_YAW_OFFSET_DEG', None)
         else:
             result = run_subprocess(argv, label=label, timeout_s=timeout_s, log_fh=log_fh)
+        # After EVERY insert, success or not, whichever caller ran it (review r1 P1-1/P1-2, w5b-insert-restore): the
+        # arm must be commandable (scaled active, passthrough / force_mode off).  If not, cell_io halts motion and
+        # latches the run, so no later step - recovery, retry or the end-of-run cleanup - moves or re-sends anything.
+        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
+            gate = cell_io.post_insert_gate(result)
+            if gate:
+                say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs; stop_run.sh restores the cell")
+                result = {'result': 'failure', 'error': f"INSERT_GATE: {gate}", 'label': label,
+                          'insert_result': result}
         _hq_before = state.held_quat
         state.update_from_result(tool_name, result)
         snap_after = snapshot_robot_state()
@@ -2405,24 +2417,14 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             continue
 
         t_step = time.time()                       # insert logs written from here belong to this step
-        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not cell_io._SAFETY_STOP:
+        if (tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run and not cell_io._SAFETY_STOP
+                and not cell_io._DASHBOARD_STOPPED):
             pre_insert_base_read(obj, state, args, say, log_fh)  # fresh base read from the hover (base not fixed)
             if not one_node():       # one node: the align funnel at the hover measures the held part where it matters
                 held_yaw_calibration(obj, state, say, log_fh)  # one read where the arm is; no extra moves
         result = execute(step_idx, step, tool_name, kw)
         if result is None:
             return False
-        # After every insert, success or not (lead 2026-11-20, w5b-insert-restore): the trajectory controller must be
-        # back and the insert's passthrough / force_mode off.  If not, halt motion (dashboard stop) and stop the run:
-        # the next primitive would find no trajectory controller, and force mode may still be applying a wrench.
-        if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
-            ok_ctrl, why_ctrl = cell_io.controllers_restored()
-            if not ok_ctrl:
-                halted = cell_io.dashboard_stop(os.environ.get('ROBOT_IP', '192.168.1.111'))
-                say(f"  [{step_idx}] CONTROLLERS_NOT_RESTORED after the insert ({why_ctrl}); dashboard stop "
-                    f"{'confirmed' if halted else 'NOT CONFIRMED - use the pendant'}; stopping the run "
-                    f"(stop_run.sh restores the controllers)")
-                return False
         # Grip-width guard: a close that ends far from the grasp's own width took the wrong thing
         # (2026-10-19 20:53: flat u_brown, fingers closed across both legs at 69.9 mm instead of
         # 21 on a leg; the part slipped out in the reorient and the release command failed).
@@ -2525,6 +2527,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
             attempt, before any lift: lifting a held part out of a wedge tripped a protective stop (cycle 3)."""
             if not (_is_bar(obj) and not cell_io._SAFETY_STOP and not args.dry_run):
                 return None          # (10-22: the release-and-nudge is a recovery - it runs in one-node mode too)
+            if cell_io._DASHBOARD_STOPPED:          # latched: no release, no nudge (stop_run.sh first)
+                return False
             w = _wedged_near_seat(obj, t_step, result)
             if w is None:
                 return None
@@ -2555,7 +2559,8 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         # aimed at a base the previous attempt had pushed (fork_yellow slid base3 ~30 mm over cycle 2).
         k_try = 1
         while (result.get('result') == 'failure' and tool_name == 'translate_object' and kw.get('action') == 'insert'
-               and k_try < INSERT_OUTER_TRIES and not cell_io._SAFETY_STOP and not args.dry_run):
+               and k_try < INSERT_OUTER_TRIES and not cell_io._SAFETY_STOP and not cell_io._DASHBOARD_STOPPED
+               and not args.dry_run):
             k_try += 1
             prev_ob = getattr(args, 'observed_base', None)
             say(f"  [{step_idx}] insert attempt {k_try - 1} failed -> lift, re-read the base, attempt {k_try}/{INSERT_OUTER_TRIES}")
@@ -2577,7 +2582,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
 
         if (result.get('result') == 'failure' and tool_name == 'translate_object'
                 and kw.get('action') == 'insert' and insert_recoveries['n'] < INSERT_MAX_RECOVERIES
-                and not cell_io._SAFETY_STOP and not one_node()):
+                and not cell_io._SAFETY_STOP and not cell_io._DASHBOARD_STOPPED and not one_node()):
             # (rule 2, one-node mode: not seated -> drive-mate's own retry -> stop; no regrasp ladder - 10-22 06:52 it
             # set line_green down and regrasped it after three failed attempts)
             # A missed insert means a bad grasp (the insert itself searches ~5 mm). Set the

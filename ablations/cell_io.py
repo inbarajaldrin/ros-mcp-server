@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -53,7 +53,12 @@ def dashboard_stop(host: str = '192.168.1.111', timeout: float = 3.0) -> bool:
             s_.recv(1024)                                      # banner
             s_.sendall(b'stop\n')
             reply = s_.recv(1024).decode(errors='replace').strip()
-            return reply.lower().startswith('stopped')
+            if reply.lower().startswith('stopped'):
+                return True
+            # "Failed to execute: stop" when no program runs (review r1 P3): the arm is already halted if the program
+            # state says STOPPED - not an error, so nobody is sent to the pendant for a stopped arm
+            s_.sendall(b'programState\n')
+            return s_.recv(1024).decode(errors='replace').strip().upper().startswith('STOPPED')
     except Exception:
         return False
 
@@ -101,6 +106,33 @@ def controllers_restored(attempts: int = 2, list_text: Optional[str] = None) -> 
 
 
 _DASHBOARD_STOPPED: Optional[str] = None     # set once cell_io sent the dashboard `stop` (the program is down)
+
+
+def post_insert_gate(result: Optional[dict], host: Optional[str] = None) -> Optional[str]:
+    """Run after EVERY insert subprocess (review r1 of w5b-insert-restore, P1-1/P1-2).  None when the arm is left
+    commandable; otherwise the reason, and the run is latched: _DASHBOARD_STOPPED makes run_subprocess refuse every
+    later step - the end-of-run cleanup included - and no program re-send happens until stop_run.sh.
+      * a protective / safety stop is reported as itself (_SAFETY_STOP; the run already halts on it);
+      * an insert that reports INSERT_RESTORE_FAILED (prismatic sent the dashboard stop itself) is latched as such;
+      * otherwise the controllers are checked (controllers_restored, fail closed): scaled active, passthrough and
+        force_mode inactive - if not, the dashboard stop (halts any force mode / trajectory) and the latch."""
+    global _DASHBOARD_STOPPED
+    if _SAFETY_STOP:
+        return f"robot {_SAFETY_STOP} during the insert"
+    host = host or os.environ.get('ROBOT_IP', '192.168.1.111')
+    error = str((result or {}).get('error') or '')
+    if 'INSERT_RESTORE_FAILED' in error:
+        halted = dashboard_stop(host)
+        _DASHBOARD_STOPPED = (f"INSERT_RESTORE_FAILED: the insert could not restore the trajectory controller "
+                              f"(dashboard stop {'confirmed' if halted else 'NOT confirmed - use the pendant'})")
+        return _DASHBOARD_STOPPED
+    ok, why = controllers_restored()
+    if ok:
+        return None
+    halted = dashboard_stop(host)
+    _DASHBOARD_STOPPED = (f"CONTROLLERS_NOT_RESTORED after an insert ({why}); dashboard stop "
+                          f"{'confirmed' if halted else 'NOT confirmed - use the pendant'}")
+    return _DASHBOARD_STOPPED
 
 
 def _group_alive(pgid: int) -> bool:

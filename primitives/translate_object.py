@@ -391,22 +391,9 @@ def _subprocess_fast_path():
                                *[f"{v:.6f}" for v in args.final_base_orientation]]
             print(f"[line_green route] prismatic: {' '.join(prism_argv)}", flush=True)
             r = _run_child(prism_argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            success = (r.returncode == 0)
-            out = {
-                "result": "success" if success else "failure",
-                "mode": args.mode,
-                "movement_type": "insert",
-                "object_name": args.object_name,
-                "base_name": args.base_name,
-                "router": "line_green→prismatic_peg_insertion",
-            }
-            if r.returncode == 3:      # prismatic EXIT_RESTORE_FAILED: controllers not restored, dashboard stop sent
-                out["error"] = ("INSERT_RESTORE_FAILED: prismatic could not restore the trajectory controller (dashboard "
-                                "stop sent); stop the run, stop_run.sh restores the controllers")
-            elif not success:
-                out["error"] = f"prismatic_peg_insertion exited {r.returncode}"
+            out = prismatic_insert_result(r.returncode, args)
             _output(out)
-            sys.exit(0 if success else 1)
+            sys.exit(0 if out["result"] == "success" else 1)
 
         # Free base (2026-10-21, operator): no compliance - guarded touches that retract on first contact and correct
         # (compliant_insertion_studio/wrapper/touch_insert.py); the compliant search's lateral push dragged the base.
@@ -1872,6 +1859,20 @@ def run_move_down(mode=None, *, to_table=False, require_contact=False):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def prismatic_insert_result(returncode, args):
+    """translate_object's result for a prismatic insert from the child's exit code.  Exit 3 is prismatic's
+    EXIT_RESTORE_FAILED (controllers not restored, dashboard stop sent): reported typed, so the replay latches the run."""
+    out = {"result": "success" if returncode == 0 else "failure", "mode": args.mode, "movement_type": "insert",
+           "object_name": args.object_name, "base_name": args.base_name,
+           "router": "line_green→prismatic_peg_insertion"}
+    if returncode == 3:
+        out["error"] = ("INSERT_RESTORE_FAILED: prismatic could not restore the trajectory controller (dashboard stop "
+                        "sent); stop the run, stop_run.sh restores the controllers")
+    elif returncode != 0:
+        out["error"] = f"prismatic_peg_insertion exited {returncode}"
+    return out
+
 
 def main():
     parser = argparse.ArgumentParser(

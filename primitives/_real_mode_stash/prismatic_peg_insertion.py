@@ -237,7 +237,11 @@ def halt_motion_dashboard(host=None, timeout=3.0):
             s_.settimeout(timeout)
             s_.recv(1024)                                      # banner
             s_.sendall(b"stop\n")
-            return s_.recv(1024).decode(errors="replace").strip().lower().startswith("stopped")
+            if s_.recv(1024).decode(errors="replace").strip().lower().startswith("stopped"):
+                return True
+            # "Failed to execute: stop" when no program runs: already halted if the program state is STOPPED
+            s_.sendall(b"programState\n")
+            return s_.recv(1024).decode(errors="replace").strip().upper().startswith("STOPPED")
     except Exception as error:
         print(f"[CLEANUP] dashboard {host}:29999 unreachable: {error!r}")
         return False
@@ -262,11 +266,15 @@ def safe_state_cleanup(node):
         # (start_force_mode needs it).
         if node is None:
             print("[CLEANUP] Stopping force mode... not started (no node)")
+        elif not getattr(node, "force_mode_maybe_on", True):
+            # never requested, or its last stop was acknowledged (review r1 P2-2: no repeated stops against an
+            # inactive controller on the common failure path)
+            print("[CLEANUP] Stopping force mode... not active (never started, or stopped and acknowledged)")
         else:
             stopped = False
-            for attempt in (1, 2, 3):
+            for attempt in (1, 2, 3):          # bounded: <= 3 x (2 s service wait + 2 s answer) + 0.6 s
                 try:
-                    stopped = rclpy.ok() and node.stop_force_mode()
+                    stopped = rclpy.ok() and node.stop_force_mode(timeout=2.0)
                 except Exception as error:
                     print(f"[CLEANUP] force-mode stop attempt {attempt} failed: {error!r}")
                 if stopped:
@@ -450,6 +458,7 @@ class PrismaticPegInsertion(Node):
                                         f'/{PASSTHROUGH_CONTROLLER}/follow_joint_trajectory')
         self.start_force_mode_client = self.create_client(SetForceMode, '/force_mode_controller/start_force_mode')
         self.stop_force_mode_client = self.create_client(Trigger, '/force_mode_controller/stop_force_mode')
+        self.force_mode_maybe_on = False     # set before every start request, cleared only by an acknowledged stop
 
         # 2026-05-07: telemetry — writes CSV+meta in same schema as
         # compliant_insertion_studio/wrapper logs so the analyzer dashboard
@@ -747,6 +756,7 @@ class PrismaticPegInsertion(Node):
         # iteration of a smoke loop) after activation. 6 attempts × 0.8s
         # backoff = ~4s total budget.
         for attempt_n in range(6):
+            self.force_mode_maybe_on = True       # set before the request: a late or lost answer may still have started it
             resp = self.call_service(self.start_force_mode_client, req)
             if resp is not None and resp.success:
                 if attempt_n > 0:
@@ -808,6 +818,7 @@ class PrismaticPegInsertion(Node):
         # iteration of a smoke loop) after activation. 6 attempts × 0.8s
         # backoff = ~4s total budget.
         for attempt_n in range(6):
+            self.force_mode_maybe_on = True       # set before the request: a late or lost answer may still have started it
             resp = self.call_service(self.start_force_mode_client, req)
             if resp is not None and resp.success:
                 if attempt_n > 0:
@@ -818,9 +829,12 @@ class PrismaticPegInsertion(Node):
         self.get_logger().error("start_force_mode failed after 6 attempts")
         return False
 
-    def stop_force_mode(self):
-        resp = self.call_service(self.stop_force_mode_client, Trigger.Request())
-        return resp is not None and resp.success
+    def stop_force_mode(self, timeout=5.0):
+        resp = self.call_service(self.stop_force_mode_client, Trigger.Request(), timeout=timeout)
+        ok = resp is not None and resp.success
+        if ok:
+            self.force_mode_maybe_on = False
+        return ok
 
     # -- Trajectory --
 
@@ -1227,6 +1241,7 @@ class PrismaticPegInsertion(Node):
         req.speed_limits.angular.y = 0.1
         req.speed_limits.angular.z = 0.1
 
+        self.force_mode_maybe_on = True       # set before the request: a late or lost answer may still have started it
         resp = self.call_service(self.start_force_mode_client, req)
         if resp is None or not resp.success:
             return False
@@ -1583,6 +1598,8 @@ def main():
         traceback.print_exc()
         return 1
     finally:
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)      # from here on nothing may cut the cleanup or mask its rc
+        _signal.signal(_signal.SIGTERM, _signal.SIG_IGN)
         if not safe_state_cleanup(node):
             return EXIT_RESTORE_FAILED      # overrides success too: the arm is not left commandable
 
