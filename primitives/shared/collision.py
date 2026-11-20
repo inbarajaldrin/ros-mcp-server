@@ -107,10 +107,15 @@ PHYSICAL_WRIST_CAPSULES = (
     (5, (0.0, 0.0, -0.00884), (0.0, 0.0, 0.05315), 0.03894, "wrist_2 (housing) 2/2"),
     (6, (0.0, 0.0, -0.04575), (0.0, 0.0, -0.01726), 0.04456, "wrist_3 1/2"),
     (6, (0.0, 0.0, -0.02738), (0.0, 0.0, 4e-05), 0.0382, "wrist_3 2/2"),
-    (6, (0.0, 0.0, 0.0005), (0.0, 0.0, 0.0185), 0.035, "quick changer"),      # the gripper's, not UR's (twin)
+    # the gripper's, not UR's: the twin's r 35 mm grown to 40 mm so it encloses the cell's pinned RG2 mesh below the
+    # RG2 box (flange adapter to 39.4 mm; lead ruling 2026-11-20: tier 1 strictly conservative)
+    (6, (0.0, 0.0, 0.0005), (0.0, 0.0, 0.0185), 0.040, "quick changer"),
 )
 # The RG2 body: a box in the flange frame (centre, half sizes along the flange x, y, z), measured exactly.
-RG2_BODY_BOX = ((0.0, 0.0003, 0.0786), (0.035, 0.035, 0.065))
+# Grown (lead ruling 2026-11-20, tier 1 strictly conservative) from the twin's ((0, 0.0003, 0.0786), (0.035, 0.035,
+# 0.065)) to enclose the cell's pinned RG2 mesh (arm_surface.RG2_MESH) over the box's z range, 0.5 mm spare: the
+# mesh spans x -42.4..42.4 (finger knuckles at its modelled opening), y -35.9..38.7 mm there.
+RG2_BODY_BOX = ((0.0, 0.0014, 0.0786), (0.0430, 0.0378, 0.065))
 # The UR5e base: a cylinder about the base z axis, (radius m, top z m) - the bounds of ur_description's
 # meshes/ur5e/collision/base.stl (r 75.6 mm, z 0..99.1 mm).  The DH base capsule (J0-J1, r 75 mm) reaches z 237 mm
 # with its cap, above any physical base; it stays in the DH check only.

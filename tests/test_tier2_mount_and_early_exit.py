@@ -143,3 +143,24 @@ def test_the_disk_cache_round_trips_and_a_bad_file_is_recomputed(tmp_path, monke
     fixed = A._load_link_cached("forearm_link")
     assert all(np.array_equal(fixed[lab].pieces, exact[lab].pieces) for lab in exact)
     assert set(first) == set(exact)
+
+
+def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
+    """Lead ruling 2026-11-20: tier 1 must be strictly conservative (tier 2 only reconsiders tier-1 refusals).  Every
+    vertex of the cell's pinned RG2 mesh up to the box's top lies inside RG2_BODY_BOX or the quick-changer capsule
+    (flange frame, mounted rpy 0 0 pi).  Above the box are the fingertips, which tier 1 does not model."""
+    import hashlib
+    raw = A.RG2_MESH.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != A.RG2_MESH_SHA256:
+        pytest.skip("the cell's RG2 mesh is not the pinned one")
+    V = np.array([[float(x) for x in l.split()[1:4]] for l in raw.decode().splitlines() if l.startswith("v ")])
+    V = np.unique((V @ np.diag([-1.0, -1.0, 1.0])).round(7), axis=0)
+    c, h = np.asarray(C.RG2_BODY_BOX[0]), np.asarray(C.RG2_BODY_BOX[1])
+    V = V[V[:, 2] <= c[2] + h[2]]
+    in_box = np.all(np.abs(V - c) <= h, axis=1)
+    _f, a, b, r, _l = next(cap for cap in C.PHYSICAL_WRIST_CAPSULES if cap[4] == "quick changer")
+    a, b = np.asarray(a), np.asarray(b)
+    t = np.clip(((V - a) @ (b - a)) / float((b - a) @ (b - a)), 0.0, 1.0)
+    in_qc = np.linalg.norm(V - (a + t[:, None] * (b - a)), axis=1) <= r
+    outside = V[~(in_box | in_qc)]
+    assert len(outside) == 0, f"{len(outside)} RG2 vertices outside tier 1, e.g. {np.round(outside[:3] * 1000, 1)} mm"

@@ -386,8 +386,8 @@ class EarlyRefusal(float):
 # The RG2's real housing (lead 2026-11-20, w5b-tier2): the cell's OnRobot mesh, pinned; tier 2 for UR vs "RG2 body".
 # Mounted as the cell mounts it: tool0 -> rg2_base_link rpy (0, 0, pi), xyz 0 (ur5e_with_rg2.launch.py defaults).
 # Below RG2_HOUSING_Z_MAX_M (tool frame) the mesh is housing only - the finger knuckles start at z 125.8 mm (rg2.urdf
-# joint origins); above it the box stays (the fingers move).  The mesh pokes up to 3.6 mm outside RG2_BODY_BOX in x/y
-# (and below its bottom face): the mesh, not the box, is used wherever it applies.
+# joint origins); above it the box stays (the fingers move).  RG2_BODY_BOX and the quick-changer capsule enclose this
+# mesh (tests/test_tier2_mount_and_early_exit.py), so tier 1 stays conservative.
 RG2_MESH = Path(__file__).resolve().parents[2] / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2.obj"
 RG2_MESH_SHA256 = "d420ca2022260a0584b608da60fa460e12c59a2b7eca9368928a9c85ddcf02cb"
 RG2_HOUSING_Z_MAX_M = 0.110
