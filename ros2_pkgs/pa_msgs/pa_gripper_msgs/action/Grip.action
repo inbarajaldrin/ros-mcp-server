@@ -32,9 +32,11 @@ string expect
 float64 expect_span_m
 ---
 # reached  the measured width settled within the declared tolerance of width_m
-# holding  the jaws stalled short of the commanded width against something solid, i.e. a part
-#          is between them. reached and holding are independent: a successful grasp is
-#          normally holding=true, reached=false.
+# holding  a WITNESSED hold of the part `expect` names: both declared pads in contact with that
+#          occurrence or part (pa_attach.hold). A stall alone is not a hold — the jaws can stop
+#          on the table or on one face of the part; `not_holding_reason` below says which.
+#          reached and holding are independent: a successful grasp is normally holding=true,
+#          reached=false.
 bool reached
 bool holding
 # --- evidence ---
@@ -62,7 +64,24 @@ bool identity_verified
 #          Any nested engine verdict an adapter publishes beside the result is the engine's own
 #          report and may disagree; this field is what says which answer the flag carries.
 string identity_authority
-string verdict                  # reached | holding | slip | refused | unreachable
+# not_holding_reason  WHY `holding` is false, ADDITIVE and set on every result whose `holding` is
+#          false; empty exactly when `holding` is true (pa_attach.hold, plan47 2026-10-21). `holding`
+#          is true only when the contact witness names the part the goal declared — both declared pads
+#          on that occurrence or part (a rig: the width-vs-span identity) — and the stalled width is in
+#          the declared span's band under the hold-width leg's declared mode. Otherwise one of:
+#            table          no body between both pads; a pad is on a surface outside the objects root
+#            empty          nothing between the pads (no stall, a slip, a full close, or silent pads
+#                           that report contact themselves)
+#            wrong_part     both pads on a body that is not the declared part
+#            one_pad        one pad on a body, the other on nothing heard
+#            width_off_band the declared part, at a width outside its span's band (refuse mode only)
+#            attach_refused grasp_mode weld: the declared part, and its joint was not authored
+#            unknown        nothing witnessed what is between the pads; NEVER read as a hold
+#            not_a_close    the goal closed nothing (an open, a no-op move, a goal refused unmoved)
+# not_holding_detail  the measured sentence behind the reason (widths, the body, its separation).
+string not_holding_reason
+string not_holding_detail
+string verdict                  # reached | holding | not_holding | slip | refused | unreachable
 ---
 float64 width_measured_m
 float64 theta_measured_rad

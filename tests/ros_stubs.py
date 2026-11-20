@@ -12,7 +12,7 @@ ROS_MODULES = ["rclpy", "rclpy.node", "rclpy.action", "rclpy.qos", "rclpy.durati
                "builtin_interfaces.msg", "std_msgs", "std_msgs.msg", "action_msgs", "action_msgs.msg",
                "controller_manager_msgs", "controller_manager_msgs.srv", "visualization_msgs", "visualization_msgs.msg",
                "ur_msgs", "ur_msgs.srv", "std_srvs", "std_srvs.srv", "fmb_seam_msgs", "fmb_seam_msgs.action",
-               "fmb_seam_msgs.msg"]
+               "fmb_seam_msgs.msg", "pa_gripper_msgs", "pa_gripper_msgs.action"]
 
 
 class _Any:

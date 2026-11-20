@@ -3,7 +3,7 @@
 
     python3 -m seams.grip_adapter            # serves /ur5e/rg2/grip
 
-The contract (pa_gripper_msgs/action/Grip.action, unchanged): {width_m, force, expect, expect_span_m} ->
+The contract (pa_gripper_msgs/action/Grip.action, prompt2assembly's current one): {width_m, force, expect, expect_span_m} ->
 {reached, holding} + evidence. The twin's own RG2 adapter (pa_rg2_adapter) is a ros2_control-style node; this cell's
 RG2 runs through onrobot_ros over the tool serial bridge, so per the seam rule ("one thin adapter per gripper") this is
 the cell's adapter. It holds no width: every number in the result is read back from the gripper.
@@ -19,6 +19,25 @@ the cell's adapter. It holds no width: every number in the result is read back f
              it = rg_gripper.command_callback accepting "width,force" + passing FORCE_N here. Not needed yet.
              The RG2 reports no effort, so the evidence carries NaN for it
   identity   expect_span_m > 0 -> width_vs_span: |measured gap - declared span| <= SPAN_TOL_M
+  holding    (Grip.action as of prompt2assembly robot-integration 3b9eeaf, plan47 2026-10-21) a WITNESSED hold of the
+             part `expect` names; a rig has no contact witness, so: a closing move that stalled (the RG2's grip flag,
+             or stopped > STALL_M short of the command) at a width within SPAN_TOL_M of `expect_span_m`.  Otherwise
+             holding is false with not_holding_reason (judge(), below):
+               not_a_close     the goal closed nothing (an open, a no-op, a goal refused unmoved)
+               empty           a close that did not stall (nothing between the pads, or a full close)
+               width_off_band  stalled, but at a width outside the declared span's band
+               unknown         stalled with no span declared (or expect "none"), or no width reading: nothing
+                               witnessed what is between the pads; never read as a hold
+             and not_holding_detail the measured sentence.  verdict: holding | not_holding | reached | refused |
+             unreachable.
+
+DEPLOY (the interface rebuild's blast radius, checked 2026-11-20 on dev d19916d): the built pa_gripper_msgs in
+$FMB_ROS_WS (~/Desktop/ros2_ws/src/pa_msgs/pa_gripper_msgs; `colcon build --packages-select pa_gripper_msgs`) is
+imported by exactly two things in this repo, both run by hand, never by stack_up.sh: this adapter
+(python3 -m seams.grip_adapter) and seams.client's `grip` op.  No other package in the workspace depends on it
+(package.xml), stack_up.sh starts no seams process, and compliant_insertion_studio/realcell_env/declaration.draft.yaml
+only names the type.  So the rebuild touches no running process unless a grip_adapter / seams.client grip is up:
+stop the adapter first (pgrep -af seams.grip_adapter), rebuild, restart it.
 """
 import json
 import math
@@ -44,6 +63,44 @@ REACH_TOL_M = 0.003            # the RG2 has no precise positioning mode (SETUP.
 STALL_M = 0.002
 SPAN_TOL_M = 0.003
 FORCE_APPLIED_N = 40.0         # what the RG2 actually closes at today (driver default 400 x 0.1 N)
+
+
+def judge(cmd, width_m, w_before, w, grasped, expect, span_m, rc):
+    """The verdict fields from the readings (no ROS).  cmd: 'open' | 'close' | '<mm>'; w_before / w: the measured gap
+    (m) before / after, None when unread; grasped: the RG2's grip flag; span_m: the goal's expect_span_m."""
+    closing = cmd == 'close' or (cmd != 'open' and w_before is not None and width_m < w_before)
+    reached = w is not None and abs(w - width_m) <= REACH_TOL_M
+    stalled = closing and w is not None and (bool(grasped) or w - width_m > STALL_M)
+    has_span = bool(span_m and span_m > 0) and (expect or 'none') != 'none'
+    identity = has_span and w is not None and abs(w - span_m) <= SPAN_TOL_M
+    out = dict(reached=reached, identity_verified=bool(identity),
+               identity_authority='width_vs_span' if (has_span and w is not None) else 'none')
+    w_txt = 'unread' if w is None else f'{1000 * w:.1f} mm'
+    if rc and not closing:
+        reason, detail = 'not_a_close', f'the goal was refused (control_gripper rc {rc})'
+    elif rc:                     # review w8-realio r1 P2-1: e.g. 'fingers asymmetric' (one pad on the part) is never a hold
+        reason, detail = 'unknown', (f'control_gripper exited {rc} on the close (e.g. fingers asymmetric: one pad on '
+                                     f'the part), measured {w_txt}')
+    elif not closing:
+        reason, detail = 'not_a_close', f'an opening / no-op move to {1000 * width_m:.1f} mm (measured {w_txt})'
+    elif w is None:
+        reason, detail = 'unknown', 'no width reading after the close'
+    elif not stalled:
+        reason, detail = 'empty', (f'the close to {1000 * width_m:.1f} mm did not stall (measured {w_txt}, grip flag '
+                                   f'{bool(grasped)}): nothing between the pads')
+    elif not has_span:
+        reason, detail = 'unknown', (f'stalled at {w_txt} with no declared span (expect {expect!r}): nothing '
+                                     f'witnessed what is between the pads')
+    elif not identity:
+        reason, detail = 'width_off_band', (f'stalled at {w_txt}, {1000 * abs(w - span_m):.1f} mm from the declared '
+                                            f'span {1000 * span_m:.1f} mm (band +-{1000 * SPAN_TOL_M:.0f})')
+    else:
+        reason, detail = '', ''
+    holding = closing and stalled and identity and not rc
+    out.update(holding=bool(holding), not_holding_reason=reason, not_holding_detail=detail, closing=closing)
+    out['verdict'] = ('holding' if holding else 'not_holding' if (closing and w is not None and stalled)
+                      else 'reached' if reached else 'refused' if rc else 'not_holding' if closing else 'unreachable')
+    return out
 
 
 class GripAdapter(Node):
@@ -75,21 +132,17 @@ class GripAdapter(Node):
         res.theta_measured_rad = float('nan')          # onrobot_ros reports no joint angle
         res.effort_measured_nm = float('nan')          # nor an effort
         res.stall_margin_m = float('nan') if w is None else float(w - g.width_m)
-        closing = cmd == 'close' or (w0 is not None and g.width_m < w0)
-        res.reached = w is not None and abs(w - g.width_m) <= REACH_TOL_M
-        # held only after a CLOSING move: stalled short of the command, or the RG2's grip flag. An opening that ends
-        # wider than commanded is overshoot (10-21: release to 35 mm read 37.1 and was called 'holding')
-        res.holding = closing and (bool(self.grasped) or (w is not None and w - g.width_m > STALL_M))
-        if g.expect_span_m > 0 and w is not None:
-            res.identity_verified = abs(w - g.expect_span_m) <= SPAN_TOL_M
-            res.identity_authority = 'width_vs_span'
-        else:
-            res.identity_verified = False; res.identity_authority = 'none'
+        j = judge(cmd, float(g.width_m), w0, w, self.grasped, g.expect, float(g.expect_span_m), p.returncode)
+        closing = j['closing']
+        res.reached, res.holding = j['reached'], j['holding']
+        res.identity_verified, res.identity_authority = j['identity_verified'], j['identity_authority']
+        res.not_holding_reason, res.not_holding_detail = j['not_holding_reason'], j['not_holding_detail']
         res.attach_applied = False; res.attached_body = ''; res.attach_drift_mm = float('nan'); res.attach_refusal = ''
-        res.verdict = 'holding' if res.holding else ('reached' if res.reached else ('refused' if p.returncode else 'unreachable'))
+        res.verdict = j['verdict']
         ev = {'goal': {'width_m': g.width_m, 'force': g.force, 'expect': g.expect, 'expect_span_m': g.expect_span_m},
               'cmd': cmd, 'closing': closing, 'width_before_m': w0, 'rc': p.returncode, 'width_measured_m': res.width_measured_m, 'holding': res.holding,
               'reached': res.reached, 'identity_verified': res.identity_verified, 'verdict': res.verdict,
+              'not_holding_reason': res.not_holding_reason, 'not_holding_detail': res.not_holding_detail,
               'force_requested_n': g.force, 'force_applied_n': FORCE_APPLIED_N,
               'force_note': 'stub: requested force not applied (onrobot_ros passes none; seam open)'}
         self.events.publish(String(data=json.dumps(ev)))
