@@ -15,7 +15,8 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
   * gripper_rules.gripper_table_refusal: the gripper centre and both finger boxes 2 mm above the table, at the leg's
     opening (unknown: closed and widest both);
   * gripper_rules.extended_gripper_refusal and orientation_refusal: rotate_object's extended-gripper checks (base
-    column, upper arm) and its EE-facing-robot / camera-toward--X rules;
+    column, upper arm; its "gripper centre below the table" clause is left to gripper_table_refusal, which checks
+    the fingers themselves) and its EE-facing-robot / camera-toward--X rules;
   * camera_up.camera_route_refusal: the camera side near the table, the mount/D415 clearance, the mount vs the arm;
   * held_part_collision.held_part_route_refusal: the held part against the arm and the table;
 - per stance, by leg (`leg` is required, no default: a caller states what it flies):
@@ -56,7 +57,7 @@ TRAVEL_CAP_ARM_RAD = np.pi               # translate_object.py's insert-hover ca
 TRAVEL_CAP_WRIST3_RAD = 3.2
 LEGS = ("transit", "insert", "approach")
 APPROACH_DENSE_STEP_RAD = 0.05
-APPROACH_NEAR_TABLE_M = 0.150
+APPROACH_NEAR_TABLE_M = 0.250   # a pre-place hover: 0.15 m above a horizontal stand-up, gripper centre ~0.22 m up
 
 
 def waypoint_refusal(w):
@@ -102,7 +103,8 @@ def stance_refusal(q, leg, opening_m=None, dense_segment=False):
     compact for transit and insert legs, and for approach legs away from the table or off a dense segment."""
     from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
     T = forward_kinematics(dh_params, np.asarray(q, float))
-    why = gripper_table_refusal(T, opening_m) or extended_gripper_refusal(q) or orientation_refusal(T)
+    why = (gripper_table_refusal(T, opening_m) or extended_gripper_refusal(q, table_check=False)
+           or orientation_refusal(T))
     if why:
         return why
     near = float((T[:3, :3] @ np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float) + T[:3, 3])[2]) - TABLE_HEIGHT \

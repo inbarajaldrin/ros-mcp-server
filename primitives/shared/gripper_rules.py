@@ -69,8 +69,10 @@ def gripper_table_refusal(T_flange, opening_m=None):
     return None
 
 
-def extended_gripper_refusal(q):
-    """rotate_object.check_extended_gripper_collision as a pure function (same thresholds)."""
+def extended_gripper_refusal(q, table_check=True):
+    """rotate_object.check_extended_gripper_collision as a pure function (same thresholds).  table_check=False drops
+    its first clause (the nominal gripper centre below the table): that point is empty space between open jaws (a pick
+    with the jaws open is refused by it at -0.4 mm), and gripper_table_refusal checks the fingers themselves."""
     from primitives.shared.collision import compute_all_joint_positions, segment_distance
     from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, TABLE_HEIGHT
     from primitives.shared.ik import dh_params, forward_kinematics
@@ -80,7 +82,7 @@ def extended_gripper_refusal(q):
     ee = T[:3, 3]
     tip = ee + T[:3, :3] @ np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float)
     min_safe = 0.04 + 0.02
-    if tip[2] < TABLE_HEIGHT:
+    if table_check and tip[2] < TABLE_HEIGHT:
         return f"EXTENDED_GRIPPER: gripper centre {1000 * (tip[2] - TABLE_HEIGHT):.1f} mm below the table"
     if np.linalg.norm(tip[:2]) < 0.08 + min_safe and tip[2] < 0.20:
         return "EXTENDED_GRIPPER: gripper centre inside the base column"
