@@ -58,23 +58,30 @@ def floor_width_mm(opening_mm=None, close_width_mm=None, measured_mm=None):
 
 
 def to_table_floor_z(R_flange, opening_mm=None):
-    """The face-down --to-table floor (flange z): the fingertips PLACE_TIP_CLEARANCE_M above the table.  The fingertip
-    depth is the CLOSED one (RG2_TIP_CLOSED_M, config's measured figure) unless a raw width is given: then the deepest
-    finger point at that width by the one RG2 model (rg2_geometry.tip_z_tool, the pinned finger meshes posed by the
-    4-bar, over the width's range).  The width is floor_width_mm's (the narrowest the jaws reach), never just the
-    approach opening.  The model unavailable: the closed-tip floor stands.  CLAMPED (lead 2026-11-20, r4 P2-3): with a
-    width the floor never goes below dev's default closed-tip floor (config's RG2_TIP_CLOSED_M), whatever width is
-    passed, until the caliper measurement settles the fingertip.
-    Fingertip figures: the model's closed tip is 234.2 mm below the flange, config's measured RG2_TIP_CLOSED_M 230.86;
-    without a width this floor uses config's (dev unchanged; if the mesh is right it puts the tips 2.3 mm into the table
-    with only the force stop) until the caliper measurement settles it."""
-    depth = RG2_TIP_CLOSED_M
+    """The face-down --to-table floor (flange z).
+    Without a width: the CLOSED fingertips (config's measured RG2_TIP_CLOSED_M) PLACE_TIP_CLEARANCE_M (1 mm) above the
+    table - dev's floor, unchanged.
+    With a raw width (floor_width_mm's: the NARROWEST the jaws reach - the close width, never just the approach
+    opening; fully closed when the measured width is missing): the fingertip depth at that width is the DEEPER of the
+    one RG2 model's (rg2_geometry.tip_z_tool, the pinned finger meshes posed by the 4-bar) and config's
+    rg2_tip_length_m at the same rubber gap (raw - 9.2 mm), with GRASP_TIP_CLEARANCE_M (2 mm): the floor is never
+    below move_to_grasp's width-aware pad-centre floor at that width, the floor the cell already trusts on the real arm
+    for a pick (lead ruling 2026-11-20, replacing the closed-tip clamp, which refused every flat-U pick), and the deeper
+    figure holds until the caliper measurement settles the fingertip.  The model unavailable: dev's closed-tip
+    floor (fail safe)."""
+    from primitives.shared.config import GRASP_TIP_CLEARANCE_M, rg2_tip_length_m
+    depth, clearance = RG2_TIP_CLOSED_M, PLACE_TIP_CLEARANCE_M
     if opening_mm is not None:
+        raw = max(0.0, float(opening_mm))
         from primitives.shared.rg2_geometry import tip_z_tool
-        tip = tip_z_tool(float(opening_mm) / 1000.0)
-        if tip is not None:
-            depth = max(float(tip), RG2_TIP_CLOSED_M)          # the clamp: never below dev's closed-tip floor
-    return TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M - float((np.asarray(R_flange, float) @ np.array([0.0, 0.0, depth]))[2])
+        tip = tip_z_tool(raw / 1000.0)
+        if tip is not None:                      # the model unavailable: dev's closed-tip floor stands (fail safe)
+            depth = max(float(tip), float(rg2_tip_length_m(max(0.0, raw - RAW_MINUS_GAP_MM))))
+            clearance = GRASP_TIP_CLEARANCE_M
+    return TABLE_HEIGHT + clearance - float((np.asarray(R_flange, float) @ np.array([0.0, 0.0, depth]))[2])
+
+
+RAW_MINUS_GAP_MM = 9.2          # /gripper_width (raw) - /gripper_width_offset (the rubber gap): SETUP.md section 6
 from primitives.shared.ik import compute_cartesian_waypoints_ik, dh_params, forward_kinematics
 from primitives.shared.robot_contract import (
     ARM_ACTION, BARE_ARM_JOINTS, DROIDSTACK_SIM, JOINT_STATES_TOPIC,
