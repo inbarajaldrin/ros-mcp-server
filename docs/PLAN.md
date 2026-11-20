@@ -152,6 +152,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   road (c): RealIO over the cell's proven seams (drive-mate inserts with the post-insert gate and persistent latch, the Grip contract
   with witnessed holds, move_plan/move_down behind the one checker), one part at a time, u_brown first, with the operator present.
   Before the first move: rebuild pa_gripper_msgs in the live workspace (operator's go), a read-only start capture, then his go.
+- **R36 (2026-11-20 ~19:45Z, operator on WhatsApp)**: before the first real deploy, (1) a twin VIDEO of the board program on the real
+  captured scene for him to gauge, and (2) a Codex review of the real-arm code run on his Mac (this PC's Codex budget may be spent).
+  The pa_gripper_msgs rebuild needed no call from him (no motion, nothing running used it): done 11-20 by the lead, backup kept.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
