@@ -528,6 +528,18 @@ class MoveToClearArea(Node):
                 return
 
             self.get_logger().info(f"Hover IK solved: cost={hover_solver._best_result.cost:.6f}")
+            # the camera rule and the cable caps on the lift, the swing and the hover stance (lead 2026-11-20): fail
+            # closed
+            from primitives.shared.camera_up import hover_route_refusal
+            refusal = hover_route_refusal(self.current_joint_angles,
+                                          [p.positions for p in trajectory_points] + [hover_joints])
+            if refusal:
+                self.error_message = f"Fix-orientation refused: {refusal}"
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
             lift_duration = 3 if trajectory_points else 0
             trajectory_points.append(JointTrajectoryPoint(
                 positions=[float(x) for x in hover_joints],

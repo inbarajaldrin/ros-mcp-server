@@ -268,6 +268,12 @@ def fix_orientation_inprocess(node, target_xy, logger):
         logger.error(f"fix-orient: the turn to face-down collides (joint step "
                      f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad) - not sending")
         return False
+    # the camera rule and the cable caps on the lift, the swing and the hover stance (lead 2026-11-20): fail closed
+    from primitives.shared.camera_up import hover_route_refusal
+    refusal = hover_route_refusal(current_joints, [p.positions for p in trajectory_points] + [hover_joints])
+    if refusal:
+        logger.error(f"fix-orient: {refusal} - not sending")
+        return False
     lift_duration = 3 if trajectory_points else 0
     trajectory_points.append(JointTrajectoryPoint(
         positions=[float(x) for x in hover_joints],

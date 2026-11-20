@@ -122,3 +122,19 @@ def test_the_physical_upper_arm_catches_what_the_dh_capsule_misses():
     reason = hpc.held_part_route_refusal(q, q, held)
     assert reason.startswith("HELD_PART_ARM_COLLISION") and "physical upper arm" in reason
     assert hpc.held_part_min_clearances(q, q, held)["physical"]["upper arm"] < -0.050
+
+
+def test_an_empty_gripper_route_gets_the_joint_travel_and_wrist3_caps():
+    """Review r5 P2-3 (w5-realpath-gaps): the cables wind the same with an empty gripper."""
+    wound = np.array(R48_START, float)
+    wound[0] += np.radians(370.0)
+    reason = hpc.held_part_route_refusal(R48_START, wound, None)
+    assert reason is not None and reason.startswith("ROUTE_JOINT_TRAVEL")
+    cable = np.array(R48_START, float)
+    cable[5] = -(hpc.WRIST3_LIMIT_RAD + 0.1)   # R48_START's wrist_3 is -3.14: 0.96 rad of travel, past the limit
+    reason = hpc.held_part_route_refusal(R48_START, cable, None)
+    assert reason is not None and reason.startswith("ROUTE_WRIST3_LIMIT")
+
+
+def test_an_empty_gripper_route_within_the_caps_still_passes_with_no_part_check():
+    assert hpc.held_part_route_refusal(R48_START, R48_TARGET, None) is None
