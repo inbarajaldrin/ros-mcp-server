@@ -67,7 +67,8 @@ def test_the_flown_real_near_miss_is_rerouted_not_flown_into_the_upper_arm_margi
     assert route is not None and len(route) == 3 and np.allclose(route[-1], REAL_TARGET)
 
 
-def test_empty_gripper_adds_nothing_and_the_planner_builds_no_model():
+def test_empty_gripper_needs_no_part_check_and_the_planner_builds_no_model():
+    # within the cable caps an empty-gripper route passes (the caps themselves: test_an_empty_gripper_route_gets_...)
     assert hpc.held_part_route_refusal(R48_START, R48_TARGET, None) is None
     # The planner's model builder, compiled from source so the test needs no rclpy.
     tree = ast.parse((ROOT / "primitives/core/move_to_clear_area.py").read_text())
@@ -102,6 +103,8 @@ def test_planner_and_real_replay_pass_the_held_state():
     assert "held_part_route_refusal(start_joints, target_joints, held_part)" in clear
     assert "held_part_route_refusal(start_joints, home, held_part)" in clear
     assert "HELD_PART_ROUTE_REFUSED" in clear
+    # an empty gripper's refusal is reported as its own (review r1 P3-3), not as a held-part refusal
+    assert 'elif held_refusals:' in clear and '"ROUTE_REFUSED: every route to the clear area was refused for the camera "' in clear
     replay = (ROOT / "ablations/replay_real_assembly.py").read_text()
     assert "'--held-quat', *[f\"{float(v):.6f}\" for v in state.held_quat]" in replay
     translate = ast.unparse(ast.parse((ROOT / "primitives/translate_object.py").read_text()))

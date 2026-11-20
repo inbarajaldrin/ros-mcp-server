@@ -161,17 +161,24 @@ def fix_orientation_inprocess(node, target_xy, logger):
     Returns:
         True on success, False on failure
     """
+    node.fix_orientation_error = None
+
+    def fail(reason):
+        """Log it, and keep it for the caller's result JSON (review r1 P3-5): a refusal's typed reason, not only
+        'Auto fix-orientation failed'."""
+        logger.error(reason)
+        node.fix_orientation_error = reason
+        return False
+
     from primitives.shared.ik import IKSolverConfig, IKSolver
 
     current_joints = node.current_joint_angles
     if current_joints is None:
-        logger.error("fix_orientation_inprocess: no joint angles available")
-        return False
+        return fail("fix_orientation_inprocess: no joint angles available")
 
     ee_pose = node.current_ee_pose
     if ee_pose is None:
-        logger.error("fix_orientation_inprocess: no EE pose available")
-        return False
+        return fail("fix_orientation_inprocess: no EE pose available")
 
     current_pos = np.array([
         ee_pose.pose.position.x,
@@ -220,8 +227,7 @@ def fix_orientation_inprocess(node, target_xy, logger):
             dx=0.001,
         )
         if lift_joints is None:
-            logger.error("fix-orient: lift IK failed")
-            return False
+            return fail("fix-orient: lift IK failed")
 
         logger.info(f"fix-orient: lift IK cost={solver._best_result.cost:.6f}")
         trajectory_points.append(JointTrajectoryPoint(
@@ -256,8 +262,7 @@ def fix_orientation_inprocess(node, target_xy, logger):
         dx=0.001,
     )
     if hover_joints is None:
-        logger.error("fix-orient: hover IK failed")
-        return False
+        return fail("fix-orient: hover IK failed")
 
     logger.info(f"fix-orient: hover IK cost={hover_solver._best_result.cost:.6f}")
     # from a wound wrist the turn to face-down is a long joint swing (run 109d: wrist_2 -6.16 -> ~-1.6): check it for
@@ -265,15 +270,13 @@ def fix_orientation_inprocess(node, target_xy, logger):
     from primitives.shared.collision import check_trajectory_collision
     swing_from = np.array(trajectory_points[-1].positions) if trajectory_points else np.array(current_joints)
     if check_trajectory_collision(swing_from, np.array(hover_joints), logger=logger):
-        logger.error(f"fix-orient: the turn to face-down collides (joint step "
-                     f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad) - not sending")
-        return False
+        return fail(f"fix-orient: the turn to face-down collides (joint step "
+                    f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad) - not sending")
     # the camera rule and the cable caps on the lift, the swing and the hover stance (lead 2026-11-20): fail closed
     from primitives.shared.camera_up import hover_route_refusal
     refusal = hover_route_refusal(current_joints, [p.positions for p in trajectory_points] + [hover_joints])
     if refusal:
-        logger.error(f"fix-orient: {refusal} - not sending")
-        return False
+        return fail(f"fix-orient: {refusal} - not sending")
     lift_duration = 3 if trajectory_points else 0
     trajectory_points.append(JointTrajectoryPoint(
         positions=[float(x) for x in hover_joints],
@@ -328,7 +331,7 @@ def fix_orientation_inprocess(node, target_xy, logger):
             break
 
     if fix_error[0]:
-        logger.error(fix_error[0])
+        fail(fix_error[0])
     if fix_success[0]:
         logger.info("fix-orient: completed successfully")
 
@@ -2681,7 +2684,8 @@ def main(args=None):
             node.update_timer.cancel()
 
             if not fix_orientation_inprocess(node, (gx, gy), node.get_logger()):
-                node.error_message = "Auto fix-orientation failed before move_to_object"
+                node.error_message = ("Auto fix-orientation failed before move_to_object: "
+                                      + (getattr(node, "fix_orientation_error", None) or "see the log"))
                 node.get_logger().error(node.error_message)
                 node.should_exit = True
             else:

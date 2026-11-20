@@ -885,9 +885,13 @@ class MoveToClearArea(Node):
                         self.get_logger().info("Direct and via-home routes refused - joint-group split route")
                 if not collision_free_trajectories:
                     self.error_message = "Motion planning failed: all candidate trajectories to the target were rejected due to collision"
-                    if held_refusals:
+                    if held_refusals and held_part is not None:
                         self.error_message = ("HELD_PART_ROUTE_REFUSED: every route to the clear area was refused for "
                                               f"the held part or the camera ({'; '.join(held_refusals[:3])})")
+                    elif held_refusals:
+                        # empty gripper: the camera rule or the cable caps, no part (review r1 P3-3)
+                        self.error_message = ("ROUTE_REFUSED: every route to the clear area was refused for the camera "
+                                              f"or the cable caps, gripper empty ({'; '.join(held_refusals[:3])})")
                     self.get_logger().error(self.error_message)
                     self.operation_success = False
                     self.operation_complete = True
