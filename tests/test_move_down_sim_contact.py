@@ -207,7 +207,7 @@ def test_the_to_table_floor_follows_the_given_opening():
     assert abs(closed - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M)) < 1e-12
     open95 = md.to_table_floor_z(down, 95.2)
     assert g.tip_z_tool(0.0952) < RG2_TIP_CLOSED_M - 0.010            # the open fingers sit > 10 mm higher ...
-    assert open95 == closed                                           # ... but the floor is CLAMPED at dev's (r4 P2-3)
+    assert open95 < closed                                            # ... the floor follows the width (lead ruling)
     assert md.to_table_floor_z(down, 0.0) > closed                    # closed by the mesh: 234.2 mm, deeper
 
 
@@ -218,6 +218,7 @@ def test_the_to_table_floor_falls_back_to_the_closed_tips_without_the_model(monk
     from primitives.core import move_down as md
     from primitives.shared import rg2_geometry as g
     monkeypatch.setattr(g, "tip_z_tool", lambda opening_m=None: None)
+    monkeypatch.setattr(g, "finger_boxes_tool", lambda opening_m=None: None)   # the model the floor reads (r2)
     down = np.diag([1.0, -1.0, -1.0])
     assert md.to_table_floor_z(down, 95.2) == md.to_table_floor_z(down)
 
@@ -241,17 +242,53 @@ def test_the_floor_is_judged_at_the_narrowest_width_r4():
     assert md.to_table_floor_z(down, md.floor_width_mm(95.2, 30.2)) > md.to_table_floor_z(down, 95.2)
 
 
-def test_the_floor_never_goes_below_devs_closed_tip_floor_r4():
-    """Lead 2026-11-20 (r4 P2-3): CLAMP, until the caliper measurement settles the fingertip."""
+def test_the_floor_with_a_width_is_never_below_move_to_grasps_floor():
+    """Lead ruling 2026-11-20 (replacing the closed-tip clamp): with a width, the floor is the deeper of the model's and
+    config's fingertip at that width, 2 mm clear - never below move_to_grasp's pad-centre floor at the same width; the
+    r4 reviewer measured >= 2.33 mm above it.  Face-down and tilted 20 deg, every width 0-110 mm raw."""
     import numpy as np
     import tests.ros_stubs as ros_stubs
     ros_stubs.install()
     from primitives.core import move_down as md
+    from primitives.shared.config import GRASP_TIP_CLEARANCE_M, TABLE_HEIGHT, rg2_tip_length_m
     from scipy.spatial.transform import Rotation as R
-    for Rm in (np.diag([1.0, -1.0, -1.0]), (R.from_euler("y", 20, degrees=True) * R.from_euler("x", 180, degrees=True)).as_matrix()):
-        dev = md.to_table_floor_z(Rm)
-        for w in (52.0, 60.0, 80.0, 110.0, 0.0, 30.2):
-            assert md.to_table_floor_z(Rm, w) >= dev - 1e-12, w
+    worst = np.inf
+    for Rm in (np.diag([1.0, -1.0, -1.0]),
+               (R.from_euler("y", 20, degrees=True) * R.from_euler("x", 180, degrees=True)).as_matrix()):
+        down = float(-(Rm @ np.array([0.0, 0.0, 1.0]))[2])          # cos of the tool's tilt
+        for raw in np.arange(0.0, 110.01, 0.5):
+            gap = max(0.0, raw - md.RAW_MINUS_GAP_MM)
+            mtg = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M + down * rg2_tip_length_m(gap)    # move_to_grasp's floor
+            worst = min(worst, md.to_table_floor_z(Rm, raw) - mtg)
+    assert worst >= 0.00233 - 1e-6, worst
+
+
+def test_a_missing_width_is_exactly_devs_closed_tip_floor():
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared.config import RG2_TIP_CLOSED_M, TABLE_HEIGHT
+    down = np.diag([1.0, -1.0, -1.0])
+    assert md.to_table_floor_z(down) == TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M
+    assert md.floor_width_mm() is None
+
+
+def test_the_u_orange_flat_pick_passes_with_the_raise():
+    """The board port's u_orange pick (seed 48): the part's 70.0 mm gap = 79.2 mm raw; the planner raises the grasp so
+    the model's fingertips at that width are 2.2 mm clear (dev move_to_grasp's pad-centre behaviour); move_down's floor
+    at the same width must admit it (the closed-tip clamp refused it by 9.3 mm)."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared.config import TABLE_HEIGHT
+    from primitives.shared.rg2_geometry import tip_z_tool
+    down = np.diag([1.0, -1.0, -1.0])
+    raw = 79.2
+    target = TABLE_HEIGHT + 0.0022 + tip_z_tool(raw / 1000)                 # the raised pick's flange z
+    floor = md.to_table_floor_z(down, md.floor_width_mm(95.2, raw))
+    assert floor <= target < md.to_table_floor_z(down)                      # admitted; the old clamp refused it
 
 
 def test_an_unheard_gripper_width_is_taken_as_fully_closed_r4(monkeypatch):
@@ -273,3 +310,28 @@ def test_an_unheard_gripper_width_is_taken_as_fully_closed_r4(monkeypatch):
                         raising=False)
     n2.get_logger = lambda: types.SimpleNamespace(warn=warned.append)
     assert n2.await_measured_width(1.0) == 71.3
+
+
+def test_the_width_floor_is_exact_at_any_face_down_tilt_r2():
+    """Review w8-floor-width r1 P1 (lead ruling): the floor keeps the LOWEST RG2 point (finger boxes at the width +
+    housing / quick-changer corners) 2 mm above the table in the actual orientation; tilts 0/10/20/40/60 deg in the jaw
+    plane (about tool y: the fingers open along tool x) and across it (about tool x), at 79.2 mm raw and fully closed."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from primitives.shared.config import GRASP_TIP_CLEARANCE_M, TABLE_HEIGHT, rg2_tip_length_m
+    from primitives.shared.gripper_rules import gripper_points_tool
+    from scipy.spatial.transform import Rotation as R
+    down = R.from_euler("x", 180, degrees=True)
+    for axis in ("y", "x"):
+        for tilt in (0, 10, 20, 40, 60):
+            Rm = (R.from_euler(axis, tilt, degrees=True) * down).as_matrix()
+            for raw in (79.2, 0.0):
+                floor = md.to_table_floor_z(Rm, raw)
+                P = gripper_points_tool(raw / 1000.0)
+                lowest_at_floor = float((P @ Rm[2, :]).min()) + floor - TABLE_HEIGHT
+                assert lowest_at_floor >= GRASP_TIP_CLEARANCE_M - 1e-9, (axis, tilt, raw)
+                along = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M - float(
+                    (Rm @ np.array([0, 0, rg2_tip_length_m(max(0.0, raw - md.RAW_MINUS_GAP_MM))]))[2])
+                assert floor >= along - 1e-12
