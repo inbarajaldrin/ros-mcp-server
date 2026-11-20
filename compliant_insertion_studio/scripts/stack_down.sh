@@ -3,7 +3,7 @@
 #
 #   bash compliant_insertion_studio/scripts/stack_down.sh
 #
-# Reverse of stack_up.sh: grasp points -> camera -> gripper -> driver. Publishers
+# Reverse of stack_up.sh: seams servers -> grasp points -> camera -> gripper -> driver. Publishers
 # go first so nothing is left commanding a robot whose driver is going away.
 #
 # Signal discipline (these are not stylistic — each has cost a session):
@@ -36,8 +36,23 @@ echo "════════════════════════�
 echo "  stack_down"
 echo "════════════════════════════════════════════════════════════"
 
-# ------------------------------------------------------- 1. grasp publisher
-step 1/4 "Grasp-points publisher"
+# ------------------------------------------------------- 1. seams servers
+# stack_up's fmb-seams-* user units.  SIGINT first (rclpy shuts down cleanly), then systemd's stop.  A drive-mate goal
+# in flight is stop_run.sh's job (dashboard stop + the insert's cleanup), not this script's: it warns and stops anyway.
+step 1/5 "Seams servers"
+for UNIT in fmb-seams-drive-mate-server fmb-seams-execute-mate-server fmb-seams-grip-adapter fmb-seams-vision-server; do
+    if systemctl --user is-active --quiet "$UNIT"; then
+        systemctl --user kill -s SIGINT "$UNIT" >/dev/null 2>&1
+        for _ in 1 2 3 4 5 6; do systemctl --user is-active --quiet "$UNIT" || break; sleep 0.5; done
+        systemctl --user stop "$UNIT" >/dev/null 2>&1
+        systemctl --user is-active --quiet "$UNIT" && warn "$UNIT still active" || ok "$UNIT stopped"
+    else
+        ok "$UNIT not running"
+    fi
+done
+
+# ------------------------------------------------------- 2. grasp publisher
+step 2/5 "Grasp-points publisher"
 P=grasp_points
 if pgrep -f "python3.*${P}_publisher" >/dev/null 2>&1; then
     pkill -SIGTERM -f "python3.*${P}_publisher"
@@ -49,8 +64,8 @@ else
     ok "not running"
 fi
 
-# ------------------------------------------------------- 2. camera
-step 2/4 "Camera (aruco localizer + RealSense node)"
+# ------------------------------------------------------- 3. camera
+step 3/5 "Camera (aruco localizer + RealSense node)"
 A=aruco_camera
 if pgrep -f "${A}_localizer" >/dev/null 2>&1; then
     # SIGINT so rclpy runs its shutdown hooks and releases the device cleanly.
@@ -80,8 +95,8 @@ else
     ok "RealSense node not running"
 fi
 
-# ------------------------------------------------------- 3. gripper bridge
-step 3/4 "OnRobot RG2 bridge"
+# ------------------------------------------------------- 4. gripper bridge
+step 4/5 "OnRobot RG2 bridge"
 G=gripper_control
 S=socat
 if pgrep -f "$G" >/dev/null 2>&1 || pgrep -f "${S}.*ttyUR" >/dev/null 2>&1; then
@@ -97,8 +112,8 @@ else
     ok "not running"
 fi
 
-# ------------------------------------------------------- 4. driver + RViz
-step 4/4 "UR driver + RViz"
+# ------------------------------------------------------- 5. driver + RViz
+step 5/5 "UR driver + RViz"
 if [ -x "$REPO/compliant_insertion_studio/scripts/close_robot.sh" ] \
    || [ -f "$REPO/compliant_insertion_studio/scripts/close_robot.sh" ]; then
     bash "$REPO/compliant_insertion_studio/scripts/close_robot.sh" >/tmp/stack_down_driver.log 2>&1
@@ -143,7 +158,7 @@ ros2 daemon stop >/dev/null 2>&1
 
 # ------------------------------------------------------- report
 echo
-LEFT="$(pgrep -af "ur_ros2_control|[u]r5e_with_rg2|[a]ruco_camera_localizer|[g]rasp_points_publisher|[r]ealsense2_camera|[r]viz2 -d|[s]ocat.*ttyUR|${RG}${RJ}|${RG}${RB}" 2>/dev/null | grep -v "bash -c" || true)"
+LEFT="$(pgrep -af "ur_ros2_control|[u]r5e_with_rg2|[a]ruco_camera_localizer|[g]rasp_points_publisher|[r]ealsense2_camera|[r]viz2 -d|[s]ocat.*ttyUR|[s]eams\.(vision_server|grip_adapter|drive_mate_server|execute_mate_server)|${RG}${RJ}|${RG}${RB}" 2>/dev/null | grep -v "bash -c" || true)"
 if [ -z "$LEFT" ]; then
     echo "════════════════════════════════════════════════════════════"
     echo "  STACK DOWN. Nothing left running."
