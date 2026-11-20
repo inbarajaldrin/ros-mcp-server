@@ -15,6 +15,8 @@ business" there (review r1 of w8-realpath-prereq, P1-2).  These are pure geometr
   The nominal gripper centre (0.2286 m) is not a material point: it lies in the empty space between open jaws and
   above the closed fingertips, so the finger boxes bound it.  The model unavailable (a mesh missing or not its pin):
   RG2_MODEL_UNAVAILABLE, a refusal.
+- grasp_stance_refusal: the stance a Grip closes at, judged at the CLOSE width (review r3 P1-1: the fingertips go
+  down as the jaws close; rotate_object's dropped "gripper centre below the table" clause held them there before).
 - extended_gripper_refusal: rotate_object.check_extended_gripper_collision, the same numbers (the gripper centre below
   the table; the gripper centre inside the base column, r < 0.14 m below z 0.20 m; the flange -> gripper-centre
   segment within 0.11 m of the upper arm).  tests/test_seqplan_rules.py holds it to rotate_object's own method.
@@ -75,6 +77,15 @@ def gripper_table_refusal(T_flange, opening_m=None):
         return (f"GRIPPER_TABLE: the gripper/fingertips reach {1000 * low:+.1f} mm above the table "
                 f"(needs {1000 * GRASP_TIP_CLEARANCE_M:.0f})")
     return None
+
+
+def grasp_stance_refusal(T_flange, close_width_m=None):
+    """The stance a Grip closes at (review r3 P1-1): closing drives the RG2's fingertips DOWN (4-bar), so the stance is
+    judged at the width the jaws close to, as move_to_grasp.py:462 judges it at the part's grip width.  close_width_m:
+    the raw width the jaws are commanded to (the part's grasp width); None = fully closed.  gripper_table_refusal at
+    that width, typed GRASP_STANCE."""
+    why = gripper_table_refusal(T_flange, 0.0 if close_width_m is None else float(close_width_m))
+    return None if why is None else f"GRASP_STANCE: at the close ({'closed' if close_width_m is None else f'{1000 * close_width_m:.1f} mm raw'}) {why}"
 
 
 def extended_gripper_refusal(q, table_check=True):

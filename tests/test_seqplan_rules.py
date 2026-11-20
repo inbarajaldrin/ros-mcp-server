@@ -214,3 +214,58 @@ def test_the_approach_exemption_needs_a_straight_segment_r3():
     assert route_refusal([low, side], leg="approach", opening_m=0.0).startswith("EE_BELOW_BASE")
     up = _top_down_at(0.04, low)
     assert rules.straight_segment(low, up)
+
+
+# ---- review r3 P1-1 / P3-3 (round 4) ------------------------------------------------------------------------------
+def _top_down_xy(dz, dx=0.0, seed=None):
+    target = _gc(HOME).copy()
+    target[0] += dx
+    target[2] = TABLE_HEIGHT + dz
+
+    def f(q):
+        T = _fk(q)
+        return 1e3 * np.sum((T[:3, :3] @ GRIPPER_CENTER_TOOL_OFFSET + T[:3, 3] - target) ** 2) + np.sum(
+            (T[:3, 2] - [0, 0, -1]) ** 2)
+    return minimize(f, HOME if seed is None else seed, method="BFGS").x
+
+
+def _descent_to(dz, start=0.03):
+    """A dense vertical descent (IK per 2 mm) ending with the gripper centre dz above the table."""
+    W = [_top_down_xy(dz + start)]
+    for k in range(1, int(round(start / 0.002)) + 1):
+        W.append(_top_down_xy(dz + start - 0.002 * k, seed=W[-1]))
+    return W
+
+
+def test_a_pick_is_judged_where_the_jaws_close_r4():
+    """Review r3 P1-1, the u_orange case: a 95.2 mm raw approach whose open tips end 3 mm above the table passes as an
+    approach, but the close to ~30 mm raw drives the tips > 20 mm down, into the table.  A route that ends in a Grip is
+    judged at the close width (grasp_stance_refusal); unknown close width: fully closed."""
+    from primitives.core.move_plan import move_refusal
+    from primitives.shared import rg2_geometry as g
+    from primitives.shared.gripper_rules import grasp_stance_refusal
+    open_raw, close_raw = 0.0952, 0.0302
+    gc_off = float(GRIPPER_CENTER_TOOL_OFFSET[2])
+    assert g.tip_z_tool(close_raw) - g.tip_z_tool(open_raw) > 0.020        # the close drives the tips > 20 mm down
+    W = _descent_to(0.003 - (gc_off - g.tip_z_tool(open_raw)))             # open tips 3 mm above the table
+    assert route_refusal(W, leg="approach", opening_m=open_raw) is None     # judged at the approach opening only
+    why = route_refusal(W, leg="approach", opening_m=open_raw, close_width_m=close_raw)
+    assert why and why.startswith("GRASP_STANCE"), why
+    assert route_refusal(W, leg="approach", opening_m=open_raw, ends_in_grip=True).startswith("GRASP_STANCE")
+    assert grasp_stance_refusal(_fk(W[-1]), close_raw).startswith("GRASP_STANCE")
+    move = {"waypoints": [w.tolist() for w in W], "dense": True, "contact": False, "opening_m": open_raw,
+            "close_width_m": close_raw}
+    assert move_refusal(move).startswith("GRASP_STANCE")
+    W_ok = _descent_to(0.003 - (gc_off - g.tip_z_tool(close_raw)))         # the CLOSED tips end 3 mm above the table
+    assert route_refusal(W_ok, leg="approach", opening_m=open_raw, close_width_m=close_raw) is None
+
+
+def test_the_lift_exemption_itself_needs_a_straight_segment_r4():
+    """Review r3 P3-3: a level drag along the table from a contact stance is refused by the lift rule itself, not only
+    by EE-below-base."""
+    a = _top_down_xy(0.0015)
+    W = [a]
+    for k in range(1, 31):
+        W.append(_top_down_xy(0.0015, dx=0.002 * k, seed=W[-1]))
+    why = route_refusal(W, leg="approach", opening_m=0.0, starts_at_contact=True)
+    assert why and why.startswith("LIFT_FROM_CONTACT: not a straight"), why

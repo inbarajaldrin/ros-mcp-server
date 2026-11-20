@@ -40,13 +40,29 @@ from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, T
 PLACE_TIP_CLEARANCE_M = 0.001
 
 
+def floor_width_mm(opening_mm=None, close_width_mm=None, measured_mm=None):
+    """The width the --to-table floor is judged at: the NARROWEST raw width the jaws reach at this stance (review r3
+    P1-1: closing drives the RG2's fingertips down, so a pick is judged where it closes, as move_to_grasp.py:462
+    judges it at the part's grip width).  None when no width is given (dev's closed-tip floor, every existing caller);
+    otherwise the smallest of the descent's opening, the measured /gripper_width (review r3 P2: a commanded open that
+    was not reached) and the close width the stance ends in (the part's grasp width; fully closed, 0, when not
+    given)."""
+    if opening_mm is None and close_width_mm is None:
+        return None
+    given = [0.0 if close_width_mm is None else float(close_width_mm)]
+    given += [float(v) for v in (opening_mm, measured_mm) if v is not None]
+    return max(0.0, min(given))
+
+
 def to_table_floor_z(R_flange, opening_mm=None):
     """The face-down --to-table floor (flange z): the fingertips PLACE_TIP_CLEARANCE_M above the table.  The fingertip
-    depth is the CLOSED one (RG2_TIP_CLOSED_M) unless the descent's raw opening is given (--opening-mm): then the
-    deepest finger point at that opening by the one RG2 model (rg2_geometry.tip_z_tool, the pinned finger meshes posed
-    by the 4-bar, over the width's range).  An open RG2's fingertips sit higher (4-bar): a pick descends with the jaws
-    open (the board port's u_orange pick at 95 mm raw: the closed-tip floor refused it by 11.7 mm).  The model
-    unavailable: the closed-tip floor stands."""
+    depth is the CLOSED one (RG2_TIP_CLOSED_M, config's measured figure) unless a raw width is given: then the deepest
+    finger point at that width by the one RG2 model (rg2_geometry.tip_z_tool, the pinned finger meshes posed by the
+    4-bar, over the width's range).  The width is floor_width_mm's (the narrowest the jaws reach), never just the
+    approach opening.  The model unavailable: the closed-tip floor stands.
+    Fingertip figures: the model's closed tip is 234.2 mm below the flange, config's measured RG2_TIP_CLOSED_M 230.86;
+    without a width this floor uses config's (dev unchanged; if the mesh is right it puts the tips 2.3 mm into the table
+    with only the force stop) until the caliper measurement settles it."""
     depth = RG2_TIP_CLOSED_M
     if opening_mm is not None:
         from primitives.shared.rg2_geometry import tip_z_tool
@@ -100,10 +116,17 @@ MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
 # =============================================================================
 
 class MoveDown(Node):
-    def __init__(self, target_height=None, mode='real', to_table=False, require_contact=False, opening_mm=None):
+    def __init__(self, target_height=None, mode='real', to_table=False, require_contact=False, opening_mm=None,
+                 close_width_mm=None):
         super().__init__('move_down')
         self.to_table = to_table
         self.opening_mm = opening_mm   # the RG2's raw width during the descent (--opening-mm), for the --to-table floor
+        self.close_width_mm = close_width_mm   # the raw width the stance ends in (--close-width-mm; a pick's grasp)
+        self.measured_width_mm = None
+        if to_table and mode == 'real' and (opening_mm is not None or close_width_mm is not None):
+            from std_msgs.msg import Float32           # the RG2's measured raw width (review r3 P2)
+            self.create_subscription(Float32, '/gripper_width',
+                                     lambda m: setattr(self, 'measured_width_mm', float(m.data)), 10)
         # Sim only: an INSERT descent must stop on the simulated wrench - its endpoint is never a seat.
         # A place-down ends at its floor exactly as on the real arm (a sideways stance stops above the
         # table and the release drops the part; replay_real_assembly._gentle_place_down).
@@ -755,9 +778,13 @@ class MoveDown(Node):
             # was released in the air and dropped — yellow tipped, U parts tipped at staging
             # (2026-10-15). Floor = CLOSED fingertips PLACE_TIP_CLEARANCE_M above the table; open
             # tips sit higher (RG2 4-bar), so the fingers cannot touch it and contact stops the part.
-            min_flange_z = to_table_floor_z(target_rot_matrix, self.opening_mm)
-            self.get_logger().info(f"to-table: floor flange z {min_flange_z:.4f} (closed tips "
-                                   f"{1000*PLACE_TIP_CLEARANCE_M:.0f} mm above the table)")
+            width = floor_width_mm(self.opening_mm, self.close_width_mm, self.measured_width_mm)
+            min_flange_z = to_table_floor_z(target_rot_matrix, width)
+            self.get_logger().info(
+                f"to-table: floor flange z {min_flange_z:.4f} (fingertips {1000*PLACE_TIP_CLEARANCE_M:.0f} mm above "
+                f"the table, " + ("closed, config's measured tip)" if width is None else
+                                  f"at {width:.1f} mm raw, the narrowest of opening {self.opening_mm}, close "
+                                  f"{self.close_width_mm}, measured {self.measured_width_mm})"))
         self._min_flange_z = min_flange_z  # Store for convergence check
 
         target_position = list(current_pos)
@@ -1020,8 +1047,12 @@ def main(args=None):
     parser.add_argument('--require-contact', action='store_true',
                         help='sim insert: refuse an endpoint reached without a measured contact')
     parser.add_argument('--opening-mm', type=float, default=None,
-                        help='the RG2 raw width (/gripper_width) during the descent: the --to-table floor puts the '
-                             'fingertips at that opening (rg2_geometry), not the closed ones, 1 mm above the table')
+                        help='the RG2 raw width (/gripper_width) during the descent; the --to-table floor is judged '
+                             'at the narrowest width the jaws reach (floor_width_mm), never wider than this')
+    parser.add_argument('--close-width-mm', type=float, default=None,
+                        help='the RG2 raw width the stance ends in (a pick: the part\'s grasp width): the floor is '
+                             'judged at the narrowest of this, --opening-mm and the measured /gripper_width; with '
+                             '--opening-mm alone, fully closed')
     parser.add_argument('--to-table', action='store_true',
                        help='placing a held part: go down until it touches the table (face-down floor = '
                             'closed fingertips 1 mm above the table instead of the 80 mm margin)')
@@ -1031,7 +1062,7 @@ def main(args=None):
     
     init_ros(args=args)
     node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table, opening_mm=known_args.opening_mm,
-                    require_contact=known_args.require_contact)
+                    require_contact=known_args.require_contact, close_width_mm=known_args.close_width_mm)
     
     try:
         while rclpy.ok() and not node.finish_requested:

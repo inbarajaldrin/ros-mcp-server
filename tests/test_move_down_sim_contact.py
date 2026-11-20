@@ -220,3 +220,22 @@ def test_the_to_table_floor_falls_back_to_the_closed_tips_without_the_model(monk
     monkeypatch.setattr(g, "tip_z_tool", lambda opening_m=None: None)
     down = np.diag([1.0, -1.0, -1.0])
     assert md.to_table_floor_z(down, 95.2) == md.to_table_floor_z(down)
+
+
+def test_the_floor_is_judged_at_the_narrowest_width_r4():
+    """Review r3 P1-1 / P2: the --to-table floor is judged where the jaws close (the grasp width; fully closed when not
+    given) and never wider than the measured width; with no width at all, dev's closed-tip floor."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    assert md.floor_width_mm() is None
+    assert md.floor_width_mm(95.2) == 0.0                                  # close width unknown: fully closed
+    assert md.floor_width_mm(95.2, 30.2) == 30.2
+    assert md.floor_width_mm(95.2, 30.2, measured_mm=25.0) == 25.0         # a measured narrower jaw wins
+    assert md.floor_width_mm(95.2, 30.2, measured_mm=80.0) == 30.2
+    assert md.floor_width_mm(None, 30.2) == 30.2
+    down = np.diag([1.0, -1.0, -1.0])
+    approach_only = md.to_table_floor_z(down, 95.2)
+    at_close = md.to_table_floor_z(down, md.floor_width_mm(95.2, 30.2))
+    assert at_close - approach_only > 0.020                                # the u_orange case: 21 mm higher

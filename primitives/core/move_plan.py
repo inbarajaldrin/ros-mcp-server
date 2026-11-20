@@ -97,6 +97,9 @@ def move_refusal(move):
     from primitives.shared.ik import dh_params, forward_kinematics
     T_end = forward_kinematics(dh_params, W[-1])
     why = camera_stance_refusal(T_end) or gripper_table_refusal(T_end, move.get("opening_m"))
+    if not why and (move.get("ends_in_grip") or move.get("close_width_m") is not None):
+        from primitives.shared.gripper_rules import grasp_stance_refusal     # review r3 P1-1: judged at the close
+        why = grasp_stance_refusal(T_end, move.get("close_width_m"))
     if why:
         return f"{why} (final stance)"
     z_tips = float((gripper_points_tool(move.get("opening_m")) @ T_end[2, :3] + T_end[2, 3]).min()) - TABLE_HEIGHT

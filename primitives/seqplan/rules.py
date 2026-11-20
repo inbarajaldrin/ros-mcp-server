@@ -12,8 +12,11 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
 - along each segment, sampled at most SAMPLE_STEP_RAD apart on any joint (both ends included):
   * collision.check_trajectory_collision: the arm against the table and itself (DH capsules, the two-tier physical
     arm + RG2 body, the camera mount vs the arm);
-  * gripper_rules.gripper_table_refusal: the gripper centre and both finger boxes 2 mm above the table, at the leg's
-    opening (unknown: closed and widest both);
+  * gripper_rules.gripper_table_refusal: the RG2's finger boxes (rg2_geometry, the one finger model) and its housing
+    and quick-changer corners 2 mm above the table, at the leg's opening (unknown: the boxes enclose the whole
+    stroke); the nominal gripper centre is not a material point (gripper_rules);
+  * a route that ends in a Grip (close_width_m given): its LAST stance also at the close width
+    (gripper_rules.grasp_stance_refusal, review r3 P1-1: the fingertips go down as the jaws close);
   * gripper_rules.extended_gripper_refusal and orientation_refusal: rotate_object's extended-gripper checks (base
     column, upper arm; its "gripper centre below the table" clause is left to gripper_table_refusal, which checks
     the fingers themselves) and its EE-facing-robot / camera-toward--X rules;
@@ -29,8 +32,13 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
     APPROACH_NEAR_TABLE_M of the table.  That is move_down's and move_to_safe_height's motion (vertical, orientation
     kept); a carry labelled "approach" is held to both rules as a transit is.
 - starts_at_contact (a lift from a stance move_down reached, its force stop the authority there; lead ruling
-  2026-11-20): while the gripper is under its 2 mm floor at the route's start, the floor is replaced by: its lowest
-  point rises monotonically and clears the floor within LIFT_FROM_CONTACT_M of gripper-centre travel.
+  2026-11-20): while the gripper is under its 2 mm floor at the route's start, the floor is replaced by: the segment
+  is straight (straight_segment: vertical or along the tool axis, orientation kept; review r3 P3-3), its lowest point
+  rises monotonically, and it clears the floor within LIFT_FROM_CONTACT_M of gripper-centre travel.
+Fingertip figures (review r3): these rules use the RG2 model's fingertip (234.2 mm closed); config's measured
+RG2_TIP_CLOSED_M (230.86 mm) and rg2_tip_length_m stay in dev's move_down default floor and move_to_grasp.  If the
+mesh is right, dev's closed-tip --to-table floor puts the tips 2.3 mm into the table (force stop only); the caliper
+measurement settles which figure is right.
 The table threshold of each leg mirrors the primitive that flies it (z_threshold): move_to_clear_area and the
 place-down descent TABLE_HEIGHT - TABLE_COLLISION_MARGIN_*, every other primitive TABLE_HEIGHT.
 The camera's table floor is the real 30 mm (camera_up.CAMERA_CLEARANCE_M).
@@ -144,10 +152,12 @@ def _samples(a, b):
 
 
 def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshold=TABLE_HEIGHT, opening_m=None,
-                  starts_at_contact=False):
+                  starts_at_contact=False, close_width_m=None, ends_in_grip=False):
     """None when every segment of the joint route passes every rule, else the first typed refusal (with the segment).
-    `leg`: "transit" | "insert" | "approach" (see the module).  `opening_m`: the gripper's opening along the route,
-    None when unknown (both extremes are judged)."""
+    `leg`: "transit" | "insert" | "approach" (see the module).  `opening_m`: the gripper's raw opening along the
+    route, None when unknown (the finger boxes then enclose the whole stroke).  ends_in_grip / close_width_m: the
+    route ends where a Grip closes (a pick), to close_width_m raw (None: fully closed); its last stance is judged at
+    that width too (grasp_stance_refusal)."""
     if leg not in LEGS:
         raise ValueError(f"route_refusal: leg must be one of {LEGS}, not {leg!r}")
     W = [np.asarray(w, float) for w in waypoints]
@@ -184,7 +194,9 @@ def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshol
                     low = gripper_low_z(Tq, opening_m)
                     if low is not None and low < floor:
                         rise = float((Tq[:3, :3] @ off + Tq[:3, 3])[2] - gc0[2])
-                        if low < prev_low - 1e-6:
+                        if not straight_segment(a, b):
+                            why = "LIFT_FROM_CONTACT: not a straight vertical / tool-axis segment under the floor"
+                        elif low < prev_low - 1e-6:
                             why = f"LIFT_FROM_CONTACT: the gripper descends ({1000 * (low - prev_low):+.2f} mm) under its floor"
                         elif rise > LIFT_FROM_CONTACT_M:
                             why = (f"LIFT_FROM_CONTACT: still under the 2 mm floor after {1000 * rise:.1f} mm of rise "
@@ -202,6 +214,9 @@ def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshol
         if not why:
             why = (camera_route_refusal(a, b, near_table_end=near_table_end and last, num_samples=n)
                    or held_part_route_refusal(a, b, held, num_samples=n))
+        if not why and last and (ends_in_grip or close_width_m is not None):
+            from primitives.shared.gripper_rules import grasp_stance_refusal
+            why = grasp_stance_refusal(forward_kinematics(dh_params, b), close_width_m)
         if why:
             return f"{why} (segment {i + 1}/{len(W) - 1})"
     return None
