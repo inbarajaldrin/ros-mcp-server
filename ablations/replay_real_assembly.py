@@ -2134,7 +2134,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
                                               TABLE_COLLISION_MARGIN_SIDEWAYS)
         Rm = R_.from_quat(ee_quat_xyzw).as_matrix()
         if Rm[2, 2] < -0.5:      # face-down: move_down's own --to-table floor (no width: tilt-aware, whole stroke)
-            from primitives.core.move_down import to_table_floor_z
+            from primitives.shared.table_floor import to_table_floor_z      # pure: no ROS import here
             return float(to_table_floor_z(Rm))
         return TABLE_HEIGHT + TABLE_COLLISION_MARGIN_SIDEWAYS - (Rm @ GRIPPER_CENTER_TOOL_OFFSET)[2]
 

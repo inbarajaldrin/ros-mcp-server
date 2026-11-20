@@ -275,23 +275,26 @@ def test_a_missing_width_is_never_below_devs_closed_tip_floor():
 
 
 def test_the_no_width_floor_is_tilt_aware_over_the_whole_stroke():
-    """Lead 2026-11-20 (the hazard): with no width, the lowest RG2 point over the WHOLE stroke stays 2 mm above the
-    table at every face-down tilt (0/10/20/40/60 deg, jaw plane and across); dev's closed-tip floor put it 11-50 mm
-    into the table at 20-60 deg."""
+    """Lead 2026-11-20 (the hazard) + review w8-floor-notilt r1 P2: with no width, every opening's finger boxes (the
+    sweep tiles the whole stroke) keep their lowest point 2 mm above the table at every face-down tilt (0/10/20/40/60
+    deg, jaw plane and across); dev's closed-tip floor put the RG2 11-50 mm into the table at 20-60 deg.  The exact
+    meshes: tests/test_table_floor.py."""
     import numpy as np
     import tests.ros_stubs as ros_stubs
     ros_stubs.install()
     from primitives.core import move_down as md
     from primitives.shared.config import TABLE_HEIGHT
     from primitives.shared.gripper_rules import gripper_points_tool
+    from primitives.shared.table_floor import SWEEP_OPENINGS_M
     from scipy.spatial.transform import Rotation as R
-    P = gripper_points_tool(None)
     down = R.from_euler("x", 180, degrees=True)
     for axis in ("y", "x"):
         for tilt in (0, 10, 20, 40, 60):
             Rm = (R.from_euler(axis, tilt, degrees=True) * down).as_matrix()
             floor = md.to_table_floor_z(Rm)
-            assert float((P @ Rm[2, :]).min()) + floor - TABLE_HEIGHT >= 0.002 - 1e-9, (axis, tilt)
+            for w in SWEEP_OPENINGS_M:
+                low = float((gripper_points_tool(w) @ Rm[2, :]).min()) + floor - TABLE_HEIGHT
+                assert low >= 0.002 - 1e-9, (axis, tilt, w)
 
 
 def test_the_replays_floor_mirror_is_move_downs():
