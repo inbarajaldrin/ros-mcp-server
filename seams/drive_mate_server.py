@@ -262,8 +262,10 @@ class DriveMateServer(Node):
         from std_msgs.msg import Bool
         from std_srvs.srv import Trigger
         reads = ReentrantCallbackGroup()            # the TCP and program-state reads never wait on the reset service
-        self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose', lambda m: setattr(self, 'tcp', m.pose), 10,
-                                 callback_group=reads)
+        # The TCP pose (500 Hz) is subscribed only while a goal runs (_tcp_start / _tcp_stop): a Python callback at
+        # 500 Hz cost this server ~31 % CPU idle on the cell PC (2026-11-20), whose load drops the robot program.
+        self._reads = reads
+        self._tcp_sub = None
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(Bool, '/io_and_status_controller/robot_program_running',
@@ -437,9 +439,33 @@ class DriveMateServer(Node):
         rc, text = self._run_motion(gh, argv, env, log_path, 'aligning')
         return rc, text, log_path
 
+    TCP_FIRST_SAMPLE_S = 2.0
+
+    def _tcp_start(self):
+        """Subscribe to the TCP pose for this goal and wait (<= TCP_FIRST_SAMPLE_S) for a FRESH sample; a pose left
+        from an earlier goal is never used.  No sample: self.tcp stays None and _execute refuses (no TCP pose)."""
+        self.tcp = None
+        if self._tcp_sub is None:
+            self._tcp_sub = self.create_subscription(PoseStamped, '/tcp_pose_broadcaster/pose',
+                                                     lambda m: setattr(self, 'tcp', m.pose), 1,
+                                                     callback_group=self._reads)
+        t_end = time.time() + self.TCP_FIRST_SAMPLE_S
+        while self.tcp is None and time.time() < t_end:
+            time.sleep(0.01)
+
+    def _tcp_stop(self):
+        if self._tcp_sub is not None:
+            self.destroy_subscription(self._tcp_sub)
+            self._tcp_sub = None
+        self.tcp = None
+
     def execute(self, gh):
         with self.busy:
-            return self._execute(gh)
+            self._tcp_start()
+            try:
+                return self._execute(gh)
+            finally:
+                self._tcp_stop()
 
     def _execute(self, gh):
         g = gh.request; res = DriveMate.Result()
