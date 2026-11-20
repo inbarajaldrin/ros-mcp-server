@@ -62,23 +62,28 @@ def to_table_floor_z(R_flange, opening_mm=None):
     Without a width: the CLOSED fingertips (config's measured RG2_TIP_CLOSED_M) PLACE_TIP_CLEARANCE_M (1 mm) above the
     table - dev's floor, unchanged.
     With a raw width (floor_width_mm's: the NARROWEST the jaws reach - the close width, never just the approach
-    opening; fully closed when the measured width is missing): the fingertip depth at that width is the DEEPER of the
-    one RG2 model's (rg2_geometry.tip_z_tool, the pinned finger meshes posed by the 4-bar) and config's
-    rg2_tip_length_m at the same rubber gap (raw - 9.2 mm), with GRASP_TIP_CLEARANCE_M (2 mm): the floor is never
-    below move_to_grasp's width-aware pad-centre floor at that width, the floor the cell already trusts on the real arm
-    for a pick (lead ruling 2026-11-20, replacing the closed-tip clamp, which refused every flat-U pick), and the deeper
-    figure holds until the caliper measurement settles the fingertip.  The model unavailable: dev's closed-tip
-    floor (fail safe)."""
+    opening; fully closed when the measured width is missing): the flange z that puts the LOWEST point of the RG2 -
+    rg2_geometry's finger boxes at that width plus the housing and quick-changer corners (gripper_rules'
+    gripper_points_tool, the geometry every other rule uses) - GRASP_TIP_CLEARANCE_M (2 mm) above the table in the
+    ACTUAL orientation, so it is exact at any face-down tilt (review w8-floor-width r1 P1); and never below config's
+    width-aware figure along the tool axis (rg2_tip_length_m at the rubber gap raw - 9.2 mm, move_to_grasp's
+    pad-centre floor) - the deeper fingertip holds until the caliper measurement (lead rulings 2026-11-20).
+    The model unavailable: dev's closed-tip floor (fail safe)."""
     from primitives.shared.config import GRASP_TIP_CLEARANCE_M, rg2_tip_length_m
-    depth, clearance = RG2_TIP_CLOSED_M, PLACE_TIP_CLEARANCE_M
-    if opening_mm is not None:
-        raw = max(0.0, float(opening_mm))
-        from primitives.shared.rg2_geometry import tip_z_tool
-        tip = tip_z_tool(raw / 1000.0)
-        if tip is not None:                      # the model unavailable: dev's closed-tip floor stands (fail safe)
-            depth = max(float(tip), float(rg2_tip_length_m(max(0.0, raw - RAW_MINUS_GAP_MM))))
-            clearance = GRASP_TIP_CLEARANCE_M
-    return TABLE_HEIGHT + clearance - float((np.asarray(R_flange, float) @ np.array([0.0, 0.0, depth]))[2])
+    R = np.asarray(R_flange, float)
+    closed = TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M - float((R @ np.array([0.0, 0.0, RG2_TIP_CLOSED_M]))[2])
+    if opening_mm is None:
+        return closed
+    raw = max(0.0, float(opening_mm))
+    from primitives.shared.gripper_rules import gripper_points_tool
+    P = gripper_points_tool(raw / 1000.0)
+    if P is None:
+        return closed
+    lowest = float((np.asarray(P, float) @ R[2, :]).min())          # the lowest RG2 point below the flange, in base z
+    exact = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M - lowest
+    along_axis = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M - float(
+        (R @ np.array([0.0, 0.0, rg2_tip_length_m(max(0.0, raw - RAW_MINUS_GAP_MM))]))[2])
+    return max(exact, along_axis)
 
 
 RAW_MINUS_GAP_MM = 9.2          # /gripper_width (raw) - /gripper_width_offset (the rubber gap): SETUP.md section 6
