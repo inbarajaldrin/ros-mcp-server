@@ -41,13 +41,23 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   the localizer's IPPE table alignment removes before publishing. Real anchor: the 11-18 upright u_orange pick. Raw PnP reads parts
   7-9 mm LOW in z (removed by the table-rest snap). LIMIT: hand-eye error is zero by construction in the twin and markers are
   noise-free, so this proves the pipeline's logic, not the real cell's accuracy.
-- [ ] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
+- [x] 2.3 A pick-and-place of one FMB1 part from the new code passes in sim
+  DONE 11-20 in MuJoCo (r49 attempt 10, below): every part picked, carried and placed; u_orange and yellow also set down and
+  regripped. Every grip was judged against its expected width (6/6 in the RG2 band) and welded only on the attach verdict.
 - [ ] 2.4 R22: FMB1 assembled end to end in the twin by the cell's code (regular insert), rendered for the operator; then with
   FOV-gated poses (paper2). w3-sim-assembly, Codex 01a1f10e-baa8-7ea3-8a39-07fec69100a7, on a4500 (2026-11-19)
   Isaac road PARKED 11-19 06:30Z: the wrist-reaction stop gate refused (stop overshoot 157/110/67 N at 60/240/480 Hz vs the
   30 N bar; the mass-load delta also fell with rate, 0.74 -> 0.49 -> 0.28 N). Rigid contact on a position-controlled arm needs
   compliant-contact tuning; the assembly video goes through the MuJoCo road (R23-R25). Nothing deleted; cell branch w3-sim kept.
   w3 moved to 2.2 (perception on Isaac-rendered frames).
+  FIRST HALF MET 11-20 in MuJoCo (R23-R25, R27-R33): r49 attempt 10, the counting run. FMB1 was assembled end to end from the
+  flat start (staging seed 48) by the cell's primitives on seqplan plans (board-v1), with VALID pacing: 0.80% missed ticks,
+  0.9986x real time. Seats: u_brown 0.077 mm / 0.005 deg, u_orange 0.075 / 0.004, line_green 0.103 / 0.012, inverted_u_yellow
+  0.147 / 0.014; 81 steps, 0 failures. Receipt: a4500 ~/pa-scratch/w4-mujoco-live/runstate/fmb-full-r49-a10 (archive
+  r49-seqplan-a10). Video: ~/w5-mujoco-videos/fmb1-r49-attempt10-seqplan-physics-PASS.mp4 (sha256 1d5ed42b), sent to the operator.
+  Config: cell w5-seqplan 9fa2978; lab model 7ae1e6a7 with island sleeping plus wake-after-detach (A/B vs sleep-off: same
+  verdicts, seats within 0.01 mm; lab 5de5cfe); hand weld on the attach verdict; stamp-paired capture; 6 CPUs.
+  LIMIT: perception is ground truth in the twin (no FOV gating yet); the second half (FOV-gated poses, paper2) is open.
 
 ## P3 Back on the real cell (done = R13: 3 hands-off certified FMB1 cycles in a row, untipped reset, v3.1 calibrated)
 - [x] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view (2026-11-18: lab
