@@ -137,6 +137,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   per-part wrist_3 budget; hardware limits and the existing |wrist_3| cap only, wrist travel stays in the planner's cost. R33 "drop the
   object straight down ... has worked well for us in the past": place-downs release at move_down's floor as the real cell does.
   RG2 "40 N" per finger vs total: not stated in OnRobot's public datasheets/manuals (searched 11-20); moot for the twin under R31.
+- **R34 (2026-11-20 ~11:50Z, operator on WhatsApp)**: "this is not the same program I asked you to refer earlier". Use the PROGRAM behind the
+  prompt-to-assembly Peg-in-hole board video itself (Opus authoring run 1966d686, dual:~/prompt2assembly/.pa/runs/1966d686.../delivery:
+  planner.py, motion.py, urkin.py, rosio.py, decl.py), ported to our MuJoCo twin and cell, with the camera kept off the table. Borrowing its
+  ideas into seqplan (the lead's 11-20 05:01Z recommendation) was not what he asked. Our hard rules go in only as vetoes on its choices
+  (camera side, mount/D415 clearance, held-part, cable window with wrist_3 not the cheapest joint, calibrated DH); the insert stays ours.
+  Its code is private: it lives in the lab (no remote), never in this public repo. The lead checks every video frame by frame before it
+  reaches the operator ("you should be seeing this and asking agents to fix it").
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
