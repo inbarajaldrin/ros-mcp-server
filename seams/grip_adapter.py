@@ -30,6 +30,14 @@ the cell's adapter. It holds no width: every number in the result is read back f
                                witnessed what is between the pads; never read as a hold
              and not_holding_detail the measured sentence.  verdict: holding | not_holding | reached | refused |
              unreachable.
+
+DEPLOY (the interface rebuild's blast radius, checked 2026-11-20 on dev d19916d): the built pa_gripper_msgs in
+$FMB_ROS_WS (~/Desktop/ros2_ws/src/pa_msgs/pa_gripper_msgs; `colcon build --packages-select pa_gripper_msgs`) is
+imported by exactly two things in this repo, both run by hand, never by stack_up.sh: this adapter
+(python3 -m seams.grip_adapter) and seams.client's `grip` op.  No other package in the workspace depends on it
+(package.xml), stack_up.sh starts no seams process, and compliant_insertion_studio/realcell_env/declaration.draft.yaml
+only names the type.  So the rebuild touches no running process unless a grip_adapter / seams.client grip is up:
+stop the adapter first (pgrep -af seams.grip_adapter), rebuild, restart it.
 """
 import json
 import math
