@@ -1222,7 +1222,10 @@ Returns:
     cmd = f"--mode {mode} --object-name \"{object_name}\" --base-name \"{base_name}\" --skip-verify-grasp"
     if current_object_orientation is not None:
         cmd += f" --current-object-orientation {' '.join(f'{x:.10f}'.rstrip('0').rstrip('.') for x in current_object_orientation)}"
-    raw = _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=90, error_prefix="Rotate for assembly")
+    from primitives.shared.budgets import ROTATE_TIMEOUT_S
+    cmd += f" --budget-s {ROTATE_TIMEOUT_S}"      # rotate_object refuses before motion this timeout would cut
+    raw = _run_with_retry(_run_primitive, "rotate_object.py", cmd, timeout=ROTATE_TIMEOUT_S,
+                          error_prefix="Rotate for assembly")
     result = _parse_result(RotateObjectResult, raw)
     # State store: update orientation on success
     if isinstance(result, dict) and result.get("result") == "success":
