@@ -22,6 +22,14 @@
 
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Run in our own systemd scope. Started from a shell that lives inside another service (an agent's relay, devdroid-text),
+# the whole stack shares that service's cgroup and dies when it restarts: 2026-11-20 03:28 a relay restart killed the driver,
+# gripper, camera and localizer. FMB_STACK_SCOPED marks the re-exec; FMB_STACK_NO_SCOPE=1 opts out.
+if [ -z "${FMB_STACK_SCOPED:-}" ] && [ "${FMB_STACK_NO_SCOPE:-0}" != 1 ] && command -v systemd-run >/dev/null \
+   && ! grep -q "fmb-cell-stack" /proc/self/cgroup; then
+    exec systemd-run --user --scope --collect --quiet --unit="fmb-cell-stack-$(date +%Y%m%d-%H%M%S)" \
+        env FMB_STACK_SCOPED=1 bash "${BASH_SOURCE[0]}" "$@"
+fi
 ROBOT_IP="${ROBOT_IP:-192.168.1.111}"
 DASH="${DASH:-$REPO/compliant_insertion_studio/scripts/ur_dashboard.py}"
 cd "$REPO" || exit 1
