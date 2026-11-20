@@ -1846,20 +1846,19 @@ DRIVE_MATE_LATCH_RECOVERY = (
     "       ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
 
 
-DRIVE_MATE_LATCH_FILE = REPO_ROOT / 'ablations' / 'logs' / 'drive_mate_latch.json'   # seams.drive_mate_server's
-
-
 def drive_mate_startup_refusal(status, latch_file=None):
-    """A SEAMS_DRIVE=1 run's startup check of drive-mate's latch (seams.client latch) AND its persisted latch file
-    (present = latched, whatever the server says: a restarted server reloads it, review r3): None, or why the run must
-    not start.  No answer (server down) refuses too: the run would only fail at its first insert, a part in the hand."""
-    lf = Path(latch_file) if latch_file is not None else DRIVE_MATE_LATCH_FILE
-    if lf.exists():
-        try:
-            reason = json.load(open(lf)).get('reason')
-        except Exception as e:
-            reason = f'unreadable ({e!r})'
+    """A SEAMS_DRIVE=1 run's startup check: the ONE per-machine latch file (seams.latch_state; present = latched,
+    whatever the server says), a state directory a latch can be written to, and the server's latch (seams.client
+    latch).  None, or why the run must not start.  No answer (server down) refuses too: the run would only fail at its
+    first insert, a part in the hand."""
+    from seams.latch_state import latch_path, read_latch, state_dir_refusal
+    lf = Path(latch_file) if latch_file is not None else latch_path()
+    reason = read_latch(lf)
+    if reason:
         return f"DRIVE_MATE_LATCHED (file {lf}): {reason}"
+    why = state_dir_refusal() if latch_file is None else None
+    if why:
+        return why
     if status.get('error'):
         return f"DRIVE_MATE_UNAVAILABLE: {status['error']}"
     if status.get('latched'):

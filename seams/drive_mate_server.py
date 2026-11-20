@@ -95,35 +95,25 @@ REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert:
 SAFETY_OK = ('NORMAL', 'REDUCED')      # cell_io._watch_safety's rule; an unreadable status (None) fails closed
 
 
-LATCH_FILE = REPO / 'ablations' / 'logs' / 'drive_mate_latch.json'
-
-
 class InsertLatch:
-    """The server's latch: tripped by a failed gate, cleared ONLY by a checked, deliberate reset.  Persisted in
-    LATCH_FILE (written atomically, removed only by a successful reset), so a server crash, an OOM kill, a re-login or a
-    restart cannot clear it silently (review r3, lead ruling 2026-11-20): a new server starts latched from the file."""
+    """The server's latch: tripped by a failed gate, cleared ONLY by a checked, deliberate reset.  Persisted in the ONE
+    per-machine latch file (seams.latch_state: ~/.local/state/fmb_cell/drive_mate_latch.json, $FMB_STATE_DIR), so a
+    crash, an OOM kill, a re-login or a restart - from any worktree - cannot clear it silently; the file's PRESENCE is
+    the latch (review r4 P2-1)."""
 
     def __init__(self, path=None):
-        self.path = Path(path) if path is not None else LATCH_FILE
-        self.reason = None
-        try:
-            self.reason = json.load(open(self.path)).get('reason') or None
-        except FileNotFoundError:
-            pass
-        except Exception as e:                   # unreadable: fail closed
-            self.reason = f'latch file {self.path} unreadable ({e!r})'
+        from seams.latch_state import latch_path, read_latch
+        self.path = Path(path) if path is not None else latch_path()
+        self.reason = read_latch(self.path)
+        self.write_error = None
 
     def trip(self, reason):
+        from seams.latch_state import write_latch
         self.reason = self.reason or reason
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix('.tmp')
-            with open(tmp, 'w') as fh:
-                json.dump({'reason': self.reason, 'since': time.time()}, fh)
-                fh.flush(); os.fsync(fh.fileno())
-            os.replace(tmp, self.path)
-        except Exception:
-            pass                                  # the in-memory latch holds regardless
+        self.write_error = write_latch(self.reason, self.path)
+        if self.write_error:                     # loud: the in-memory latch holds, the persisted one does not
+            print(f'!!! drive-mate: {self.write_error} - the latch will NOT survive a restart', file=sys.stderr,
+                  flush=True)
 
     def refusal(self):
         return f'DRIVE_MATE_LATCHED: {self.reason}' if self.reason else ''
@@ -140,12 +130,10 @@ class InsertLatch:
         if program_running is not True:
             return ('not reset: the external-control program is not running '
                     f'({"unknown" if program_running is None else "stopped"}; run stop_run.sh first)')
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            return f'not reset: the latch file {self.path} could not be removed ({e!r})'
+        from seams.latch_state import remove_latch
+        why = remove_latch(self.path)
+        if why:
+            return f'not reset: {why}'
         self.reason = None
         return ''
 

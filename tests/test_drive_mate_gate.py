@@ -380,7 +380,9 @@ def test_the_latch_persists_across_a_restart_and_only_a_reset_removes_it(tmp_pat
     assert a.reset("NORMAL", (True, "restored"), True) == "" and not f.exists()
     assert dms.InsertLatch(f).reason is None
     f.write_text("{not json")
-    assert dms.InsertLatch(f).reason.startswith("latch file")                              # unreadable: latched
+    assert dms.InsertLatch(f).reason.startswith("latch file present")                      # unreadable: latched
+    f.write_text("{}")
+    assert dms.InsertLatch(f).reason.startswith("latch file present")                      # presence is the latch
 
 
 def test_the_startup_check_reads_the_latch_file_even_with_the_server_down(tmp_path):
@@ -430,3 +432,34 @@ def test_stop_run_reports_the_latch_and_never_clears_it():
     calls = [l for l in text.splitlines() if "ros2 service call /ur5e/drive_mate/reset_latch" in l]
     assert calls and all(l.strip().startswith("echo") for l in calls)      # printed, never called
     assert text.index("if ! prog_running; then") < text.index('"  Arm is stopped and commandable.')
+
+
+def test_one_latch_path_for_the_server_the_replay_and_any_tree(monkeypatch, tmp_path):
+    """r4 P2-1: the latch path is per machine (FMB_STATE_DIR / ~/.local/state/fmb_cell), not per tree: a server from
+    another tree starts latched, and every startup check reads the same file."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ablations"))
+    import replay_real_assembly as rra
+    from seams import latch_state
+    monkeypatch.setenv("FMB_STATE_DIR", str(tmp_path / "state"))
+    assert latch_state.latch_path() == tmp_path / "state" / "drive_mate_latch.json"
+    a = dms.InsertLatch()
+    assert a.path == latch_state.latch_path() and a.reason is None
+    a.trip("CONTROLLERS_NOT_RESTORED (x)")
+    assert dms.InsertLatch().reason == "CONTROLLERS_NOT_RESTORED (x)"       # a restarted server, any tree
+    assert rra.drive_mate_startup_refusal({"latched": False}).startswith("DRIVE_MATE_LATCHED (file")
+    assert a.reset("NORMAL", (True, "restored"), True) == "" and rra.drive_mate_startup_refusal(
+        {"latched": False}) is None
+
+
+def test_an_unwritable_state_dir_refuses_the_run_and_a_failed_write_is_loud(monkeypatch, tmp_path, capsys):
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ablations"))
+    import replay_real_assembly as rra
+    blocker = tmp_path / "file_not_dir"
+    blocker.write_text("x")
+    monkeypatch.setenv("FMB_STATE_DIR", str(blocker / "state"))              # under a regular file: unwritable
+    assert rra.drive_mate_startup_refusal({"latched": False}).startswith("DRIVE_MATE_STATE_DIR_UNWRITABLE")
+    a = dms.InsertLatch()
+    a.trip("x")
+    assert a.reason == "x" and a.write_error and "NOT written" in capsys.readouterr().err
