@@ -170,3 +170,38 @@ def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
     in_qc = np.linalg.norm(V - (a + t[:, None] * (b - a)), axis=1) <= r
     outside = V[~(in_box | in_qc)]
     assert len(outside) == 0, f"{len(outside)} RG2 vertices outside tier 1, e.g. {np.round(outside[:3] * 1000, 1)} mm"
+
+
+# 10-15 flown yellow steps (replay_inverted_u_yellow_20261015_*.snapshots.jsonl, joints before -> after)
+YELLOW_1015_5 = ([1.696132, -2.23406, 2.432704, -1.768843, -1.566006, 3.264195],
+                 [1.188665, -2.082274, 2.375037, -0.287314, -0.374753, 3.136008])
+YELLOW_1015_13REC8_END = [0.876917, -1.553163, 2.861902, -1.31836, 0.884919, -3.139337]
+
+
+@needs_rg2
+def test_the_housing_is_the_mesh_without_its_fingers_at_every_height():
+    """Tier 2's RG2 body is the pinned mesh minus the six finger links (lead ruling 2026-11-20, tier 2 only): 10000
+    triangles before subdivision, up to the housing's top (148.05 mm); tier 1 keeps the box."""
+    T, _c, _r = A.rg2_housing()
+    assert 0.1480 < T[:, :, 2].max() < 0.1481
+    assert T[:, :, 2].max() <= C.RG2_BODY_BOX[0][2] + C.RG2_BODY_BOX[1][2]
+
+
+@needs_rg2
+def test_the_10_15_yellow_rotate_is_admitted_at_its_measured_width_and_refused_without_it():
+    """The flown 10-15 yellow #5 rotate: at its measured width (43.4 mm) the housing is >= 29.85 mm and the fingers
+    >= 11.99 mm away (after allowances): admitted all along.  Width unknown (the whole stroke): refused."""
+    a, b = (np.asarray(x) for x in YELLOW_1015_5)
+    C.set_gripper_openings((43.4,))
+    assert all(C.physical_self_collision_refusal(a + t * (b - a)) is None for t in np.linspace(0, 1, 41))
+    C.set_gripper_openings(None)
+    whys = [C.physical_self_collision_refusal(a + t * (b - a)) for t in np.linspace(0, 1, 41)]
+    assert any(w and "RG2 finger" in w for w in whys)
+
+
+@needs_rg2
+def test_the_10_15_wrist2_overlap_stays_refused():
+    for w in ((43.4,), None):
+        C.set_gripper_openings(w)
+        why = C.physical_self_collision_refusal(YELLOW_1015_13REC8_END)
+        assert why and "wrist_2" in why, (w, why)

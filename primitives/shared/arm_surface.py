@@ -388,12 +388,13 @@ class EarlyRefusal(float):
 
 # The RG2's real housing (lead 2026-11-20, w5b-tier2): the cell's OnRobot mesh, pinned; tier 2 for UR vs "RG2 body".
 # Mounted as the cell mounts it: tool0 -> rg2_base_link rpy (0, 0, pi), xyz 0 (ur5e_with_rg2.launch.py defaults).
-# Below RG2_HOUSING_Z_MAX_M (tool frame) the mesh is housing only - the finger knuckles start at z 125.8 mm (rg2.urdf
-# joint origins); above it the box stays (the fingers move).  RG2_BODY_BOX and the quick-changer capsule enclose this
-# mesh (tests/test_tier2_mount_and_early_exit.py), so tier 1 stays conservative.
+# The housing is the mesh minus its six finger links (rg2_geometry: they reproduce the mesh's fingers to < 1e-6 m at
+# its modelled opening), at every height, up to its top at 148.05 mm; the fingers are their own bodies, posed at the
+# measured opening (lead ruling 2026-11-20: tier 2 only - tier 1 keeps RG2_BODY_BOX, which with the quick-changer
+# capsule and the finger boxes encloses the whole mesh, tests/test_tier2_mount_and_early_exit.py).
 RG2_MESH = Path(__file__).resolve().parents[2] / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2.obj"
 RG2_MESH_SHA256 = "d420ca2022260a0584b608da60fa460e12c59a2b7eca9368928a9c85ddcf02cb"
-RG2_HOUSING_Z_MAX_M = 0.110
+RG2_FINGER_TRIANGLES = 60000      # the six pinned finger links' triangles inside the mesh (10000 each)
 RG2_ALLOWANCE_M = 0.0015          # declared, as a UR body's: OnRobot's mesh vs the real housing, and its mounting
 _RG2 = {}
 
@@ -419,47 +420,55 @@ def _exact_min(P, tris, centres, radius):
 
 
 def rg2_housing():
-    """(triangles (n, 3, 3) in the flange frame, centres, covering radius) of the RG2 housing below
-    RG2_HOUSING_Z_MAX_M, or None when the pinned mesh is missing or differs (fail closed: the box stays)."""
+    """(triangles (n, 3, 3) in the flange frame, centres, covering radius) of the RG2 housing: the pinned mesh without
+    its finger links, every height.  None when the mesh or the finger links are missing or differ (fail closed: the
+    box stays)."""
     with _LOCK:
-        if "tri" not in _RG2:
-            try:
-                if hashlib.sha256(RG2_MESH.read_bytes()).hexdigest() != RG2_MESH_SHA256:
-                    raise ValueError(f"{RG2_MESH}: sha256 is not the pinned {RG2_MESH_SHA256[:12]}")
-                V, F = [], []
-                for line in open(RG2_MESH):
-                    if line.startswith("v "):
-                        V.append([float(x) for x in line.split()[1:4]])
-                    elif line.startswith("f "):
-                        F.append([int(t.split("/")[0]) - 1 for t in line.split()[1:4]])
-                T = (np.asarray(V) @ np.diag([-1.0, -1.0, 1.0]))[np.asarray(F)]      # rpy (0, 0, pi)
-                T = T[T[:, :, 2].max(axis=1) <= RG2_HOUSING_Z_MAX_M]
-                T = subdivide(T, EXACT_EDGE_M)                       # the OBJ has triangles ~100 mm across
-                c = T.mean(axis=1)
-                _RG2["tri"] = (T, c, float(np.linalg.norm(T - c[:, None, :], axis=2).max()))
-            except Exception as e:                                   # noqa: BLE001 - fail closed
-                _RG2["tri"] = None
-                _RG2["error"] = f"RG2 mesh: {type(e).__name__}: {e}"
-        return _RG2["tri"]
+        if "tri" in _RG2:
+            return _RG2["tri"]
+    try:
+        from primitives.shared import rg2_geometry as RF
+        if hashlib.sha256(RG2_MESH.read_bytes()).hexdigest() != RG2_MESH_SHA256:
+            raise ValueError(f"{RG2_MESH}: sha256 is not the pinned {RG2_MESH_SHA256[:12]}")
+        if RF.model() is None:
+            raise ValueError(f"the finger links are unavailable ({RF.why_unavailable()}): the housing cannot be separated")
+        V, F = [], []
+        for line in open(RG2_MESH):
+            if line.startswith("v "):
+                V.append([float(x) for x in line.split()[1:4]])
+            elif line.startswith("f "):
+                F.append([int(t.split("/")[0]) - 1 for t in line.split()[1:4]])
+        V = np.asarray(V) @ np.diag([-1.0, -1.0, 1.0])                  # rpy (0, 0, pi)
+        F = np.asarray(F)
+        fingers = np.vstack([t.reshape(-1, 3) for t in RF.posed(RF.model()[1]).values()])
+        d, _ = cKDTree(fingers).query(V)
+        finger_tri = (d[F] < 1e-6).all(axis=1)
+        if int(finger_tri.sum()) != RG2_FINGER_TRIANGLES:
+            raise ValueError(f"{int(finger_tri.sum())} mesh triangles match the finger links, not {RG2_FINGER_TRIANGLES}")
+        T = subdivide(V[F[~finger_tri]], EXACT_EDGE_M)                   # the OBJ has triangles ~100 mm across
+        c = T.mean(axis=1)
+        out = (T, c, float(np.linalg.norm(T - c[:, None, :], axis=2).max()))
+    except Exception as e:                                               # noqa: BLE001 - fail closed
+        out = None
+        with _LOCK:
+            _RG2["error"] = f"RG2 mesh: {type(e).__name__}: {e}"
+    with _LOCK:
+        _RG2["tri"] = out
+    return out
 
 
 def _rg2_lower_bound(L, gap, margin):
-    """Lower bound (m) on the distance from UR surface samples L (flange frame, covering radius gap) to the RG2: the
-    real housing mesh below RG2_HOUSING_Z_MAX_M and the box above it; allowances in.  None: mesh unavailable."""
-    from primitives.shared import collision as C
+    """Lower bound (m) on the distance from UR surface samples L (flange frame, covering radius gap) to the RG2
+    housing (the real mesh without its fingers, every height); allowances in.  None: mesh unavailable."""
     hz = rg2_housing()
     if hz is None:
         return None
     T, cent, rho = hz
     allow = ALLOWANCE_PER_BODY_M + RG2_ALLOWANCE_M
-    bc, bh = np.asarray(C.RG2_BODY_BOX[0], float), np.asarray(C.RG2_BODY_BOX[1], float)
-    lo = np.maximum(bc - bh, [-np.inf, -np.inf, RG2_HOUSING_Z_MAX_M])        # the box's finger zone only
-    hi = bc + bh
-    d_box = np.linalg.norm(np.maximum(np.maximum(lo - L, L - hi), 0.0), axis=1)
     dc, _ = cKDTree(cent).query(L, k=1)                                       # d(sample, tri) >= dc - rho
     lower_h = dc - rho
     # a centroid lies on its triangle, so d(sample, housing) <= dc: the bound returned below is <= upper
-    upper = float(min(dc.min(), d_box.min())) - gap - allow
+    upper = float(dc.min()) - gap - allow
     if EARLY_EXIT and upper < margin:
         return EarlyRefusal(upper)
     need = lower_h - gap - allow < margin
@@ -467,8 +476,7 @@ def _rg2_lower_bound(L, gap, margin):
     if need.any():
         # the nearest triangle's centre is within d + rho <= dc + rho of the sample (d <= dc: a centre is on its triangle)
         exact[need] = _exact_min(L[need], T, cent, dc[need] + rho)
-    d_h = np.where(need, exact, lower_h)
-    return float(np.minimum(d_h, d_box).min()) - gap - allow
+    return float(np.where(need, exact, lower_h).min()) - gap - allow
 
 
 _FINGER = {}
