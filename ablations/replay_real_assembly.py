@@ -1809,6 +1809,17 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
 ROTATE_TIMEOUT_S = 90
 
 
+# After a latched insert (post_insert_gate): the part is still gripped IN THE BASE.  The operator's order (lead
+# 2026-11-20, review r2): open, lift straight up, never move_home first (it plans a straight line that ignores seated
+# parts); restore the program/controllers as stop_run.sh does when the lift needs them.
+LATCH_RECOVERY = ("  The part is still gripped in the base. Recover in this order:\n"
+                  "    1. open the gripper:   python3 -u -m primitives.control_gripper open --mode real\n"
+                  "    2. lift straight up:   python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real\n"
+                  "       (if the external-control program is down, compliant_insertion_studio/scripts/stop_run.sh first:\n"
+                  "        it re-sends the program and restores the controllers without moving the arm)\n"
+                  "    3. never move_home first - its straight line ignores seated parts")
+
+
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,
                base_offset_xy: Optional[Tuple[float, float]] = None,
                observed_base=None) -> Tuple[list[str], int]:
@@ -2297,7 +2308,7 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         if tool_name == 'translate_object' and kw.get('action') == 'insert' and not args.dry_run:
             gate = cell_io.post_insert_gate(result)
             if gate:
-                say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs; stop_run.sh restores the cell")
+                say(f"  [{step_idx}{tag}] INSERT GATE: {gate} - no further step runs.\n{LATCH_RECOVERY}")
                 result = {'result': 'failure', 'error': f"INSERT_GATE: {gate}", 'label': label,
                           'insert_result': result}
         _hq_before = state.held_quat
@@ -3333,6 +3344,11 @@ def main() -> int:
         elif cell_io._SAFETY_STOP:
             msg = (f"\n  CLEANUP SKIPPED: robot is in {cell_io._SAFETY_STOP}. Clear it (dashboard 'close safety popup',"
                    f" 'unlock protective stop'), run stop_run.sh, then lift with move_to_safe_height.\n")
+            print(msg, end='')
+            if log_fh: log_fh.write(msg)
+        elif cell_io._DASHBOARD_STOPPED:
+            # latched after an insert (post_insert_gate) or a dashboard stop: no cleanup motion, no header (review r2)
+            msg = (f"\n  CLEANUP SKIPPED: {cell_io._DASHBOARD_STOPPED}.\n{LATCH_RECOVERY}\n")
             print(msg, end='')
             if log_fh: log_fh.write(msg)
         elif not args.dry_run and not _STOP_BEFORE_FIRED and not _STOP_AFTER_FIRED:

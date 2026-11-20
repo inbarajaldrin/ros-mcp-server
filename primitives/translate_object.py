@@ -105,6 +105,20 @@ def _base_fixed() -> bool:
         return True
 
 
+def prismatic_insert_result(returncode, args):
+    """translate_object's result for a prismatic insert from the child's exit code.  Exit 3 is prismatic's
+    EXIT_RESTORE_FAILED (controllers not restored, dashboard stop sent): reported typed, so the replay latches the run."""
+    out = {"result": "success" if returncode == 0 else "failure", "mode": args.mode, "movement_type": "insert",
+           "object_name": args.object_name, "base_name": args.base_name,
+           "router": "line_green→prismatic_peg_insertion"}
+    if returncode == 3:
+        out["error"] = ("INSERT_RESTORE_FAILED: prismatic could not restore the trajectory controller (dashboard stop "
+                        "sent); stop the run, stop_run.sh restores the controllers")
+    elif returncode != 0:
+        out["error"] = f"prismatic_peg_insertion exited {returncode}"
+    return out
+
+
 def _subprocess_fast_path():
     """Exit early for subprocess-only invocations (before heavy imports)."""
     pre = argparse.ArgumentParser(add_help=False)
@@ -1859,19 +1873,6 @@ def run_move_down(mode=None, *, to_table=False, require_contact=False):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
-def prismatic_insert_result(returncode, args):
-    """translate_object's result for a prismatic insert from the child's exit code.  Exit 3 is prismatic's
-    EXIT_RESTORE_FAILED (controllers not restored, dashboard stop sent): reported typed, so the replay latches the run."""
-    out = {"result": "success" if returncode == 0 else "failure", "mode": args.mode, "movement_type": "insert",
-           "object_name": args.object_name, "base_name": args.base_name,
-           "router": "line_green→prismatic_peg_insertion"}
-    if returncode == 3:
-        out["error"] = ("INSERT_RESTORE_FAILED: prismatic could not restore the trajectory controller (dashboard stop "
-                        "sent); stop the run, stop_run.sh restores the controllers")
-    elif returncode != 0:
-        out["error"] = f"prismatic_peg_insertion exited {returncode}"
-    return out
 
 
 def main():

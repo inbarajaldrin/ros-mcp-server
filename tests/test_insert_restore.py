@@ -244,3 +244,59 @@ def test_replay_stops_after_insert_restore_failed_on_the_recovery_reinsert(monke
     ok, ran, latch = _drive(monkeypatch, [fail, fail, fail, restore_failed], [GOOD, GOOD, GOOD])
     assert ok is False and latch.startswith("INSERT_RESTORE_FAILED")
     assert ran[-2:] == ["u_orange#1rec10 translate_object", "DASHBOARD_STOP"]
+
+
+# ---- translate_object AS A SCRIPT (review r2 P1-N1: the fast path runs while the module is still loading) ----------
+@pytest.mark.parametrize("rc", [0, 1, 3])
+def test_translate_object_run_as_a_script_reports_prismatics_exit(monkeypatch, capsys, rc):
+    import json
+    import runpy
+    import subprocess
+    children = []
+
+    class Proc:
+        def __init__(self, argv, **kw):
+            children.append(argv)
+            self.returncode = rc if "primitives._real_mode_stash.prismatic_peg_insertion" in argv else 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+    monkeypatch.setattr(subprocess, "Popen", Proc)
+    monkeypatch.setenv("ALIGN_AT_HOVER", "0")
+    monkeypatch.setattr(sys, "argv", ["translate_object", "--mode", "real", "--insert", "--object-name", "line_brown",
+                                      "--base-name", "base3", "--grasp-id", "1", "--current-object-orientation",
+                                      "0", "0", "0", "1", "--use-default-base-position"])
+    sys.modules.pop("primitives.translate_object", None)
+    with pytest.raises(SystemExit) as ex:
+        runpy.run_module("primitives.translate_object", run_name="__main__")
+    out = capsys.readouterr().out
+    assert any("prismatic_peg_insertion" in " ".join(c) for c in children), children
+    res = json.loads(out.rsplit("__RESULT_JSON__", 1)[1].split("__END_RESULT_JSON__", 1)[0])
+    assert ex.value.code == (0 if rc == 0 else 1)
+    assert res["result"] == ("success" if rc == 0 else "failure")
+    if rc == 3:
+        assert res["error"].startswith("INSERT_RESTORE_FAILED")
+    if rc == 1:
+        assert res["error"] == "prismatic_peg_insertion exited 1"
+
+
+@pytest.mark.parametrize("failure", ["timeout", "rc1", "exception", "empty"])
+def test_an_unreadable_controller_list_fails_closed(cio, monkeypatch, failure):
+    """review r2: the real CLI path (not list_text) - every way the list can fail is a False after the retries."""
+    import subprocess as sp
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if failure == "timeout":
+            raise sp.TimeoutExpired(argv, 15)
+        if failure == "exception":
+            raise OSError("ros2 not found")
+        return types.SimpleNamespace(returncode=1 if failure == "rc1" else 0, stdout="", stderr="daemon wedged")
+    monkeypatch.setattr(cio.subprocess, "run", run)
+    monkeypatch.setattr(cio.time, "sleep", lambda s: None)
+    ok, why = cio.controllers_restored()
+    assert ok is False and why.startswith("controller state unreadable") and len(calls) == 2
+    # and the gate latches on it, with the dashboard stop
+    why_gate = cio.post_insert_gate({"result": "success"})
+    assert why_gate.startswith("CONTROLLERS_NOT_RESTORED") and "unreadable" in why_gate and cio._test_stops
