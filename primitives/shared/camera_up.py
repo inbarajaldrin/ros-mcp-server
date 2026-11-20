@@ -139,53 +139,44 @@ def camera_stance_refusal(T_flange, near_table=None):
 
 
 CAMERA_MOUNT_ARM_MARGIN_M = 0.010   # the self-collision check's 1 cm margin (collision.check_self_collision)
-MOUNT_ARM_LINKS = 4                 # base, upper arm, forearm, wrist_1 (wrist_2/3 carry the mount)
 
 
 def camera_mount_arm_refusal(joints):
     """None, or a typed reason: the v3.1 mount/D415 (fitted CAD boxes, faces sampled at <= 5 mm, the sampling
-    gap subtracted) within the margin of an arm-link capsule: collision.py's DH capsules (UR5E_LINK_RADII) and its
-    physical link capsules (PHYSICAL_LINK_CAPSULES), both.  r48c (MuJoCo, 2026-11-19): a camera-up yellow
-    reorient drove the mount 16.6 mm inside the wrist_1 capsule; the arm-only self-collision check could not see it."""
+    gap subtracted) within the margin of the arm: collision.PHYSICAL_LINK_CAPSULES (proven to enclose the UR5e's
+    real surface, shoulder to wrist_1) and the base cylinder (lead ruling 2026-11-19: the DH capsules are a
+    mis-placed approximation built for self-collision, not used here).  r48c (MuJoCo, 2026-11-19): a camera-up
+    yellow reorient drove the mount into the wrist_1 zone; the arm-only self-collision check could not see it."""
     from primitives.shared.camera_geometry import mount_box_spheres_tool, mount_surface_tool
-    from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions, physical_link_capsules
+    from primitives.shared.collision import base_cylinder_distance, physical_link_capsules
     from primitives.shared.ik import dh_params, forward_kinematics
     q = np.asarray(joints, float)
     T = forward_kinematics(dh_params, q)
     surface, gap, owner = mount_surface_tool()
     centres, radii = mount_box_spheres_tool()
     C = centres @ T[:3, :3].T + T[:3, 3]
-    J = [np.asarray(p) for p in compute_all_joint_positions(q)]
 
     def axis_distance(P, a, ab):
         t = np.clip(((P - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
         return np.linalg.norm(P - (a + t[:, None] * ab), axis=1)
 
-    for link in range(MOUNT_ARM_LINKS):
-        a, b = J[link], J[link + 1]
+    for a, b, r, label in physical_link_capsules(q):
         ab = b - a
         # skip only the boxes whose bounding sphere clears the margin plus the sampling gap (their samples would
         # too); sample the faces of the others
-        near = np.flatnonzero(axis_distance(C, a, ab) - radii - gap - UR5E_LINK_RADII[link]
-                              < CAMERA_MOUNT_ARM_MARGIN_M)
-        if near.size == 0:
-            continue
-        W = surface[np.isin(owner, near)] @ T[:3, :3].T + T[:3, 3]
-        # the nearest surface sample, less the sampling gap: a lower bound on the true box-to-capsule clearance
-        clearance = float(np.min(axis_distance(W, a, ab))) - gap - UR5E_LINK_RADII[link]
-        if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-            return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from arm link {link} "
-                    f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
-    for a, b, r, label in physical_link_capsules(q):
-        ab = b - a
         near = np.flatnonzero(axis_distance(C, a, ab) - radii - gap - r < CAMERA_MOUNT_ARM_MARGIN_M)
         if near.size == 0:
             continue
         W = surface[np.isin(owner, near)] @ T[:3, :3].T + T[:3, 3]
+        # the nearest surface sample, less the sampling gap: a lower bound on the true box-to-capsule clearance
         clearance = float(np.min(axis_distance(W, a, ab))) - gap - r
         if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-            return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from the physical {label} "
+            return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from the {label} "
                     f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
+    clearance = float(np.min(base_cylinder_distance(surface @ T[:3, :3].T + T[:3, 3]))) - gap
+    if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
+        return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from the base "
+                f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
     return None
 
 

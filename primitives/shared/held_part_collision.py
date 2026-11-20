@@ -17,8 +17,9 @@ Held part model, best available first:
 
 Refusal (fail closed, typed reason) at any of num_samples+1 joint-linear
 samples of start -> target:
-  * a held-part point within (link radius + HELD_LINK_MARGIN_M) of an arm-link
-    capsule axis, links 0..ARM_LINKS_CHECKED-1;
+  * a held-part point within HELD_LINK_MARGIN_M of the arm's enclosed real
+    surface: collision.PHYSICAL_LINK_CAPSULES (shoulder to wrist_1; wrist_2/3
+    carry the gripper the part hangs from) and the base cylinder;
   * a held-part point below the table plus HELD_TABLE_MARGIN_M;
 and before sampling, joint travel: any joint moving more than
 MAX_JOINT_TRAVEL_RAD, or wrist_3 outside +-WRIST3_LIMIT_RAD (camera cable).
@@ -33,13 +34,12 @@ from functools import lru_cache
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from primitives.shared.collision import UR5E_LINK_RADII, compute_all_joint_positions, physical_link_capsules
+from primitives.shared.collision import base_cylinder_distance, physical_link_capsules
 from primitives.shared.config import CAD_DATA_DIR, TABLE_HEIGHT
 from primitives.shared.ik import WRIST3_LIMIT_RAD, dh_params, forward_kinematics
 
 HELD_LINK_MARGIN_M = 0.010        # the same 1 cm safety margin check_self_collision uses
 HELD_TABLE_MARGIN_M = 0.0         # the carry's own table margin is applied to the arm; the part must not go below the table
-ARM_LINKS_CHECKED = 4             # base, upper arm, forearm, wrist_1; wrist_2/3 carry the gripper the part hangs from
 MAX_JOINT_TRAVEL_RAD = 2 * np.pi  # no joint winds through more than one full turn in one carry.  Half a turn would
                                   # refuse two carries the real cell flew safely (10-22 yellow wrist_3 187 deg, 10-24
                                   # u_orange wrist_2 272 deg); the held-part geometry, not a travel cap, is the guard.
@@ -145,26 +145,24 @@ def held_part_route_refusal(start, target, held: HeldPart | None, num_samples: i
         if lowest < TABLE_HEIGHT + HELD_TABLE_MARGIN_M:
             return (f"HELD_PART_TABLE: {held.name} ({held.source}) {1000 * (TABLE_HEIGHT - lowest):.1f} mm "
                     f"below the table at alpha={alpha:.3f}")
-        joints = [np.asarray(p) for p in compute_all_joint_positions(q)]
-        for link in range(ARM_LINKS_CHECKED):
-            clearance = float(np.min(_point_segment_distance(P, joints[link], joints[link + 1]))) - held.radius_m
-            need = UR5E_LINK_RADII[link] + HELD_LINK_MARGIN_M
-            if clearance < need:
-                return (f"HELD_PART_ARM_COLLISION: {held.name} ({held.source}) {1000 * clearance:.1f} mm from link "
-                        f"{link} axis (needs {1000 * need:.1f}) at alpha={alpha:.3f}")
+        # the arm's real surface, enclosed (PHYSICAL_LINK_CAPSULES, shoulder to wrist_1) and the base cylinder
+        # (lead ruling 2026-11-19: the DH capsules are a mis-placed approximation built for self-collision)
         for a, b, r, label in physical_link_capsules(q):
             clearance = float(np.min(_point_segment_distance(P, a, b))) - held.radius_m - r
             if clearance < HELD_LINK_MARGIN_M:
                 return (f"HELD_PART_ARM_COLLISION: {held.name} ({held.source}) {1000 * clearance:.1f} mm from the "
-                        f"physical {label} (needs {1000 * HELD_LINK_MARGIN_M:.0f}) at alpha={alpha:.3f}")
+                        f"{label} (needs {1000 * HELD_LINK_MARGIN_M:.0f}) at alpha={alpha:.3f}")
+        clearance = float(np.min(base_cylinder_distance(P))) - held.radius_m
+        if clearance < HELD_LINK_MARGIN_M:
+            return (f"HELD_PART_ARM_COLLISION: {held.name} ({held.source}) {1000 * clearance:.1f} mm from the base "
+                    f"(needs {1000 * HELD_LINK_MARGIN_M:.0f}) at alpha={alpha:.3f}")
     return None
 
 
 def held_part_min_clearances(start, target, held: HeldPart, num_samples: int = 40):
-    """Diagnostics: per-link minimum (clearance - needed) along the route, metres (negative = would refuse): the DH
-    capsules ("links") and the physical capsules ("physical", by label)."""
+    """Diagnostics: the minimum (clearance - needed) along the route, metres (negative = would refuse), per arm body
+    ("physical", by label, plus "base") and to the table."""
     start, target = np.asarray(start, float), np.asarray(target, float)
-    worst = {link: np.inf for link in range(ARM_LINKS_CHECKED)}
     physical = {}
     table = np.inf
     for i in range(num_samples + 1):
@@ -172,14 +170,12 @@ def held_part_min_clearances(start, target, held: HeldPart, num_samples: int = 4
         T_f = forward_kinematics(dh_params, q)
         P = held.points_flange @ T_f[:3, :3].T + T_f[:3, 3]
         table = min(table, float(np.min(P[:, 2])) - held.radius_m - TABLE_HEIGHT - HELD_TABLE_MARGIN_M)
-        joints = [np.asarray(p) for p in compute_all_joint_positions(q)]
-        for link in range(ARM_LINKS_CHECKED):
-            c = float(np.min(_point_segment_distance(P, joints[link], joints[link + 1]))) - held.radius_m
-            worst[link] = min(worst[link], c - UR5E_LINK_RADII[link] - HELD_LINK_MARGIN_M)
         for a, b, r, label in physical_link_capsules(q):
             c = float(np.min(_point_segment_distance(P, a, b))) - held.radius_m - r - HELD_LINK_MARGIN_M
             physical[label] = min(physical.get(label, np.inf), c)
-    return {"links": worst, "physical": physical, "table": table}
+        c = float(np.min(base_cylinder_distance(P))) - held.radius_m - HELD_LINK_MARGIN_M
+        physical["base"] = min(physical.get("base", np.inf), c)
+    return {"physical": physical, "table": table}
 
 
 def held_part_model(name, T_flange, T_part=None, held_quat=None, grasp_id=None):

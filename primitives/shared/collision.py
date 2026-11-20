@@ -5,6 +5,8 @@ Provides table collision, self-collision, and configuration safety checks
 using DH-based forward kinematics and capsule-based link models.
 """
 
+import re
+
 import numpy as np
 
 from primitives.shared.config import DH_PARAMS, TABLE_HEIGHT
@@ -21,21 +23,54 @@ from primitives.shared.ik import dh_transform
 UR5E_LINK_RADII = (0.075, 0.065, 0.055, 0.045, 0.045, 0.040)
 
 
-# The physical link capsules, for the checks of things the arm carries (held part, camera mount) against the
-# arm.  The DH segments above are not on the physical links: the upper-arm tube runs 0.138 m off its DH segment
-# along the elbow axis, and there the DH capsule overstated the clearance by up to 128 mm (fmb-cell-lab
-# mujoco/capsule_model_check.py, review P2-2).  These are the twin's UR5e collision capsules (fmb_cell.xml, the
-# MuJoCo Menagerie geometry), expressed in this DH chain's link frames, where they are fixed to < 1 mm:
-# (DH frame index, end a, end b, radius m, arm link label).  The checks use BOTH models; neither replaces the other.
+# The arm's real surface, enclosed (lead ruling 2026-11-19, w5-enclose): capsules fitted to ur_description's VISUAL
+# meshes (UR's own surface meshes) in this DH chain's link frames, where each mesh is fixed (checked to 1e-9).  Every
+# piece of each link's surface (subdivided to <= 20 mm) lies wholly inside one of its capsules, >= 0.5 mm inside
+# (tubes are split along their axis into 8 capsules and joint housings into 2, so a tapered or flaring part is
+# not given its thickest radius):
+# tests/test_arm_capsules_enclose.py proves it; the fit is fmb-cell-lab mujoco/arm-capsules/fit_surface_capsules.py.
+# They replace the twin's Menagerie capsules, which left the real surface up to 27 mm outside (upper arm).  Used by
+# the physical self-check (with the DH check), and - alone - by the camera mount and held-part checks against the arm.
+# (DH frame, end a, end b, radius m, label)
 PHYSICAL_LINK_CAPSULES = (
-    (1, (0.0002, -0.1002, 0.0), (0.0002, 0.0198, 0.0), 0.060, "shoulder"),
-    (2, (0.4251, 0.0, 0.1584), (0.4251, 0.0, 0.0384), 0.060, "upper arm (shoulder end)"),
-    (2, (0.4251, 0.0, 0.1384), (0.0251, 0.0, 0.1384), 0.050, "upper arm"),
-    (3, (0.3924, 0.0, 0.1477), (0.3924, 0.0, 0.0277), 0.055, "forearm (elbow end)"),
-    (3, (0.3824, 0.0, 0.0077), (0.0024, 0.0, 0.0079), 0.038, "forearm"),
-    (4, (0.0, -0.005, 0.0), (0.0, -0.145, 0.0), 0.040, "wrist_1"),
+    (1, (0.0, -0.0639, 0.0), (0.0, 0.01408, 0.0), 0.06031, "shoulder (pan housing) 1/2"),
+    (1, (0.0, -0.00761, 0.0), (0.0, 0.07152, 0.0), 0.06061, "shoulder (pan housing) 2/2"),
+    (1, (0.0, 0.0, -0.0601), (0.0, 0.0, 0.0136), 0.06046, "shoulder (lift housing) 1/2"),
+    (1, (0.0, 0.0, 0.00124), (0.0, 0.0, 0.0744), 0.06051, "shoulder (lift housing) 2/2"),
+    (2, (0.425, 0.0, 0.0744), (0.425, 0.0, 0.15017), 0.06034, "upper arm (shoulder end) 1/2"),
+    (2, (0.425, 0.0, 0.13433), (0.425, 0.0, 0.20983), 0.06085, "upper arm (shoulder end) 2/2"),
+    (2, (-0.05959, 0.0, 0.1384), (0.0131, 0.0, 0.1384), 0.05938, "upper arm 1/8"),
+    (2, (0.00166, 0.0, 0.1384), (0.07763, 0.0, 0.1384), 0.06082, "upper arm 2/8"),
+    (2, (0.07693, 0.0, 0.1384), (0.15467, 0.0, 0.1384), 0.05885, "upper arm 3/8"),
+    (2, (0.13866, 0.0, 0.1384), (0.21412, 0.0, 0.1384), 0.04391, "upper arm 4/8"),
+    (2, (0.21188, 0.0, 0.1384), (0.28735, 0.0, 0.1384), 0.04391, "upper arm 5/8"),
+    (2, (0.27134, 0.0, 0.1384), (0.34904, 0.0, 0.1384), 0.05885, "upper arm 6/8"),
+    (2, (0.34838, 0.0, 0.1384), (0.42435, 0.0, 0.1384), 0.06036, "upper arm 7/8"),
+    (2, (0.41453, 0.0, 0.1384), (0.4856, 0.0, 0.1384), 0.06068, "upper arm 8/8"),
+    (2, (0.0, 0.0, 0.0602), (0.0, 0.0, 0.14383), 0.06026, "upper arm (elbow end) 1/2"),
+    (2, (0.0, 0.0, 0.12481), (0.0, 0.0, 0.20983), 0.0611, "upper arm (elbow end) 2/2"),
+    (3, (0.3922, 0.0, -0.04058), (0.3922, 0.0, 0.01153), 0.04903, "forearm (elbow end) 1/2"),
+    (3, (0.3922, 0.0, 0.00515), (0.3922, 0.0, 0.06022), 0.0616, "forearm (elbow end) 2/2"),
+    (3, (-0.03887, 0.0, 0.0077), (0.0308, 0.0, 0.0077), 0.03934, "forearm 1/8"),
+    (3, (0.0104, 0.0, 0.0077), (0.08407, 0.0, 0.0077), 0.0401, "forearm 2/8"),
+    (3, (0.08386, 0.0, 0.0077), (0.14597, 0.0, 0.0077), 0.03924, "forearm 3/8"),
+    (3, (0.14535, 0.0, 0.0077), (0.20788, 0.0, 0.0077), 0.03925, "forearm 4/8"),
+    (3, (0.20684, 0.0, 0.0077), (0.26979, 0.0, 0.0077), 0.03934, "forearm 5/8"),
+    (3, (0.26833, 0.0, 0.0077), (0.3284, 0.0, 0.0077), 0.0496, "forearm 6/8"),
+    (3, (0.32832, 0.0, 0.0077), (0.39489, 0.0, 0.0077), 0.06129, "forearm 7/8"),
+    (3, (0.38312, 0.0, 0.0077), (0.45055, 0.0, 0.0077), 0.05877, "forearm 8/8"),
+    (3, (0.0, 0.0, -0.04945), (0.0, 0.0, 0.01166), 0.04031, "forearm (wrist_1 end) 1/2"),
+    (3, (0.0, 0.0, -0.00285), (0.0, 0.0, 0.06045), 0.03896, "forearm (wrist_1 end) 2/2"),
+    (4, (0.0, -0.07355, 0.0), (0.0, -0.05448, 0.0), 0.03826, "wrist_1 1/8"),
+    (4, (0.0, -0.06547, 0.0), (0.0, -0.03549, 0.0), 0.03827, "wrist_1 2/8"),
+    (4, (0.0, -0.05713, 0.0), (0.0, -0.02155, 0.0), 0.04037, "wrist_1 3/8"),
+    (4, (0.0, -0.0407, 0.0), (0.0, -0.00857, 0.0), 0.03918, "wrist_1 4/8"),
+    (4, (0.0, -0.02736, 0.0), (0.0, -0.00141, 0.0), 0.03911, "wrist_1 5/8"),
+    (4, (0.0, 0.01448, 0.0), (0.0, 0.02612, 0.0), 0.03934, "wrist_1 7/8"),
+    (4, (0.0, 0.02281, 0.0), (0.0, 0.03862, 0.0), 0.03707, "wrist_1 8/8"),
+    (4, (0.0, 0.0, -0.05629), (0.0, 0.0, 0.00163), 0.04055, "wrist_1 (housing) 1/2"),
+    (4, (0.0, 0.0, -0.00799), (0.0, 0.0, 0.05359), 0.03907, "wrist_1 (housing) 2/2"),
 )
-
 
 def dh_link_frames(joint_angles):
     """The base frame and the six DH link frames (7 4x4 transforms)."""
@@ -61,17 +96,25 @@ def physical_link_capsules(joint_angles, frames=None):
 # wrist_2 / wrist_3 capsules and cylinder, the quick changer and the RG2 body (fmb_cell.xml), in this DH chain's
 # frames (fixed to < 1.3 mm).  Cylinders are kept as capsules (a superset).  (DH frame, end a, end b, radius m, label)
 PHYSICAL_WRIST_CAPSULES = (
-    (5, (0.0, -0.0004, 0.0), (0.0, 0.1196, 0.001), 0.040, "wrist_2"),
-    (5, (0.0, 0.0, 0.0605), (0.0, 0.0, -0.0195), 0.040, "wrist_2 (joint)"),
-    (6, (0.0, 0.0, -0.0391), (0.0, 0.0, 0.0009), 0.040, "wrist_3"),
-    (6, (0.0, 0.0, 0.0005), (0.0, 0.0, 0.0185), 0.035, "quick changer"),
+    (5, (0.0, -0.03908, 0.0), (0.0, -0.02734, 0.0), 0.03793, "wrist_2 1/8"),
+    (5, (0.0, -0.02955, 0.0), (0.0, -0.01636, 0.0), 0.03955, "wrist_2 2/8"),
+    (5, (0.0, -0.01983, 0.0), (0.0, -0.01341, 0.0), 0.03903, "wrist_2 3/8"),
+    (5, (0.0, 0.00112, 0.0), (0.0, 0.01695, 0.0), 0.03915, "wrist_2 5/8"),
+    (5, (0.0, 0.00815, 0.0), (0.0, 0.03159, 0.0), 0.03944, "wrist_2 6/8"),
+    (5, (0.0, 0.01436, 0.0), (0.0, 0.04611, 0.0), 0.03942, "wrist_2 7/8"),
+    (5, (0.0, 0.02645, 0.0), (0.0, 0.04611, 0.0), 0.03986, "wrist_2 8/8"),
+    (5, (0.0, 0.0, -0.05673), (0.0, 0.0, 0.0032), 0.04011, "wrist_2 (housing) 1/2"),
+    (5, (0.0, 0.0, -0.00884), (0.0, 0.0, 0.05315), 0.03894, "wrist_2 (housing) 2/2"),
+    (6, (0.0, 0.0, -0.04575), (0.0, 0.0, -0.01726), 0.04456, "wrist_3 1/2"),
+    (6, (0.0, 0.0, -0.02738), (0.0, 0.0, 4e-05), 0.0382, "wrist_3 2/2"),
+    (6, (0.0, 0.0, 0.0005), (0.0, 0.0, 0.0185), 0.035, "quick changer"),      # the gripper's, not UR's (twin)
 )
 # The RG2 body: a box in the flange frame (centre, half sizes along the flange x, y, z), measured exactly.
 RG2_BODY_BOX = ((0.0, 0.0003, 0.0786), (0.035, 0.035, 0.065))
 # The UR5e base: a cylinder about the base z axis, (radius m, top z m) - the bounds of ur_description's
 # meshes/ur5e/collision/base.stl (r 75.6 mm, z 0..99.1 mm).  The DH base capsule (J0-J1, r 75 mm) reaches z 237 mm
 # with its cap, above any physical base; it stays in the DH check only.
-UR5E_BASE_CYLINDER = (0.0756, 0.0991)
+UR5E_BASE_CYLINDER = (0.0761, 0.0996)   # + 0.5 mm: encloses the visual base mesh too (tests)
 PHYSICAL_SELF_MARGIN_M = 0.010
 _RG2_SURFACE = []
 
@@ -95,10 +138,18 @@ def _rg2_surface(spacing=0.005):
                 pts.append(face)
         _RG2_SURFACE.extend([np.concatenate(pts), gap])
     return _RG2_SURFACE[0], _RG2_SURFACE[1]
-# Kinematic order of each body; pairs closer than two links apart are not checked (they share a joint).
-_SELF_ORDER = {"shoulder": 1, "upper arm (shoulder end)": 2, "upper arm": 2, "forearm (elbow end)": 3,
-               "forearm": 3, "wrist_1": 4, "wrist_2": 5, "wrist_2 (joint)": 5, "wrist_3": 6, "quick changer": 6,
-               "RG2 body": 6}
+# Kinematic order of each body (pairs less than two apart are not checked: they share a joint).  A joint housing
+# (a capsule along DH frame k's z axis, the axis of joint k+1) joins links k and k+1, so it ranks k + 0.5.
+_SELF_ORDER = {"shoulder (pan housing)": 0.5, "shoulder (lift housing)": 1.5,
+               "upper arm (shoulder end)": 1.5, "upper arm": 2, "upper arm (elbow end)": 2.5,
+               "forearm (elbow end)": 2.5, "forearm": 3, "forearm (wrist_1 end)": 3.5,
+               "wrist_1": 4, "wrist_1 (housing)": 4.5, "wrist_2": 5, "wrist_2 (housing)": 5.5,
+               "wrist_3": 6, "quick changer": 6, "RG2 body": 6}
+
+
+def _order(label):
+    """A body's kinematic order; a tube's bin capsules ("forearm 2/4") rank with their tube."""
+    return _SELF_ORDER[re.sub(r" \d+/\d+$", "", label)]
 
 
 def _segment_convex_distance(A, B, point_distance):
@@ -127,6 +178,15 @@ def _segment_box_distance(A, B, centre, half):
     """Exact distance from segments A[i]-B[i] (box frame) to an axis-aligned box."""
     return _segment_convex_distance(
         A, B, lambda P: np.linalg.norm(np.maximum(np.abs(P - centre) - half, 0.0), axis=-1))
+
+
+def base_cylinder_distance(P):
+    """Distance (m) from points P (base frame) to the UR5e base cylinder UR5E_BASE_CYLINDER (0 inside)."""
+    P = np.asarray(P, float)
+    radius, top = UR5E_BASE_CYLINDER
+    radial = np.maximum(np.hypot(P[..., 0], P[..., 1]) - radius, 0.0)
+    vertical = np.maximum(np.maximum(-P[..., 2], P[..., 2] - top), 0.0)
+    return np.hypot(radial, vertical)
 
 
 def _segment_base_distance(A, B):
@@ -174,8 +234,8 @@ def physical_self_clearances(joint_angles):
     labels = tuple(c[3] for c in caps)
     if labels not in _PAIRS_CACHE:
         ii, jj = zip(*[(i, j) for i in range(len(caps)) for j in range(i + 1, len(caps))
-                       if abs(_SELF_ORDER[labels[i]] - _SELF_ORDER[labels[j]]) >= 2])
-        far = [i for i, l in enumerate(labels) if _SELF_ORDER[l] <= 4]
+                       if abs(_order(labels[i]) - _order(labels[j])) >= 2])
+        far = [i for i, l in enumerate(labels) if _order(l) <= 4]
         _PAIRS_CACHE[labels] = (np.array(ii), np.array(jj), np.array(far))
     ii, jj, far = _PAIRS_CACHE[labels]
     A = np.array([c[0] for c in caps])
@@ -190,7 +250,7 @@ def physical_self_clearances(joint_angles):
     out += [(float(x), labels[i], "RG2 body") for x, i in zip(db, far)]
     # the base cylinder against everything two or more links above it (the upper arm cannot reach it: its tube
     # runs 138 mm out along the shoulder axis, outside the 75.6 mm base)
-    above = np.array([i for i, l in enumerate(labels) if _SELF_ORDER[l] >= 3])
+    above = np.array([i for i, l in enumerate(labels) if _order(l) >= 2.5])
     dbase = _segment_base_distance(A[above], B[above]) - R[above]
     out += [(float(x), "base", labels[i]) for x, i in zip(dbase, above)]
     # ... and against the RG2 body: its faces sampled at <= 5 mm, less the sampling gap (a lower bound)
@@ -205,13 +265,55 @@ def physical_self_clearances(joint_angles):
 
 def physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
     """None, or a typed reason: two physical bodies of the arm and gripper closer than the margin, or the camera
-    mount/D415 within its margin of the arm (camera_up.camera_mount_arm_refusal)."""
-    worst = min(physical_self_clearances(joint_angles))
-    if worst[0] < margin:
-        return (f"PHYSICAL_SELF_COLLISION: {worst[1]} vs {worst[2]} {1000 * worst[0]:.1f} mm apart "
-                f"(needs {1000 * margin:.0f})")
+    mount/D415 within its margin of the arm (camera_up.camera_mount_arm_refusal).
+
+    Two tiers (review w5-enclose r1): the enclosing capsules first; a pair they refuse is admitted only when the
+    lower bound on its real surfaces' distance (arm_surface.pair_lower_bound: UR's meshes, allowances included)
+    clears the same margin.  Tier 2 unavailable (meshes missing or not the pinned ones): the refusal stands."""
+    from primitives.shared import arm_surface
+    q = np.asarray(joint_angles, float)
+    tier1 = sorted(c for c in physical_self_clearances(q) if c[0] < margin)
+    if tier1:
+        frames, caps = _physical_bodies(q)
+        capsule_of = {label: (a, b, r) for a, b, r, label in caps}
+        for d1, la, lb in tier1:
+            d2 = arm_surface.pair_lower_bound(la, lb, frames, capsule_of, margin)
+            if d2 is None:
+                return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb} {1000 * d1:.1f} mm apart (needs {1000 * margin:.0f}; "
+                        f"real-surface check unavailable: {arm_surface.why_unavailable()})")
+            if d2 < margin:
+                return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb}: real surfaces >= {1000 * d2:.1f} mm apart "
+                        f"(capsules {1000 * d1:.1f}; needs {1000 * margin:.0f})")
     from primitives.shared.camera_up import camera_mount_arm_refusal
-    return camera_mount_arm_refusal(joint_angles)
+    return camera_mount_arm_refusal(q)
+
+
+def arm_table_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
+    """None, or a typed reason: the arm's real surface (shoulder to wrist_3) within the margin of the table plane.
+
+    Tier 1: each enclosing capsule's lowest point (its lower end's z less its radius).  Tier 2 for a capsule tier 1
+    refuses: the lowest vertex of UR's mesh pieces in it, exact, less the allowance (arm_surface.table_lower_bound).
+    The base stands on the table and is not checked; the gripper is the grasp's own business."""
+    from primitives.shared import arm_surface
+    q = np.asarray(joint_angles, float)
+    frames = dh_link_frames(q)
+    caps = list(physical_link_capsules(q, frames))
+    for k, a, b, r, label in PHYSICAL_WRIST_CAPSULES:
+        if label != "quick changer":
+            F = frames[k]
+            caps.append((F[:3, :3] @ np.asarray(a) + F[:3, 3], F[:3, :3] @ np.asarray(b) + F[:3, 3], r, label))
+    for a, b, r, label in sorted(caps, key=lambda c: min(c[0][2], c[1][2]) - c[2]):
+        d1 = min(float(a[2]), float(b[2])) - r - TABLE_HEIGHT
+        if d1 >= margin:
+            break
+        d2 = arm_surface.table_lower_bound(label, frames, TABLE_HEIGHT)
+        if d2 is None:
+            return (f"ARM_TABLE_COLLISION: {label} capsule {1000 * d1:.1f} mm above the table (needs "
+                    f"{1000 * margin:.0f}; real-surface check unavailable: {arm_surface.why_unavailable()})")
+        if d2 < margin:
+            return (f"ARM_TABLE_COLLISION: {label} real surface {1000 * d2:.1f} mm above the table "
+                    f"(capsule {1000 * d1:.1f}; needs {1000 * margin:.0f})")
+    return None
 
 
 def compute_all_joint_positions(joint_angles):
@@ -237,7 +339,8 @@ def compute_all_joint_positions(joint_angles):
 
 def check_collision_with_table(joint_angles, z_threshold=TABLE_HEIGHT, verbose=False, logger=None):
     """
-    Check if any part of the robot (all joints) goes below the table.
+    Check if any part of the robot goes below the table: the DH joint origins against z_threshold, and the arm's
+    enclosed real surface against the table plane (arm_table_refusal, review w5-enclose r1 P2-1).
 
     Args:
         joint_angles: Array of 6 joint angles
@@ -246,8 +349,14 @@ def check_collision_with_table(joint_angles, z_threshold=TABLE_HEIGHT, verbose=F
         logger: ROS logger instance for verbose output
 
     Returns:
-        True if collision detected (any joint below threshold), False otherwise
+        True if collision detected (any joint below threshold, or the arm's surface within 10 mm of the table:
+        arm_table_refusal), False otherwise
     """
+    table = arm_table_refusal(joint_angles)
+    if table:
+        if verbose and logger:
+            logger.warn(f"Collision detected: {table}")
+        return True
     joint_positions = compute_all_joint_positions(joint_angles)
 
     for i, pos in enumerate(joint_positions):
