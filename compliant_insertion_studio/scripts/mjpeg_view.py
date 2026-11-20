@@ -112,6 +112,30 @@ def _img_src(src):
     return url
 
 
+
+_RELAY_TAIL = 'This came from another Claude session'
+
+
+def _relayed(text):
+    """A message relayed into the session ("Another Claude session sent a message: ...") as one page entry, or None for an
+    ordinary operator message. WhatsApp messages from the operator show as his own words only (the wrapper, delivery id and
+    reply instructions stripped); messages from other agents show as an event naming the agent, never as the operator."""
+    import re
+    t = text.strip()
+    if not t.startswith('Another Claude session sent a message'):
+        return None
+    t = t.split(_RELAY_TAIL)[0]
+    m = re.search(r'BEGIN_UNTRUSTED_(\w+)\s*(.*?)\s*END_UNTRUSTED_\1', t, re.S)
+    if '[WhatsApp user' in t and m:
+        body = m.group(2)
+        body = re.sub(r'\[delivery [^\]]*\][^\n]*', '', body).strip()
+        return {'k': 'user', 'x': '(WhatsApp) ' + body}
+    a = re.search(r"inter-agent message from '([^']+)'", t)
+    who = a.group(1) if a else 'another agent'
+    body = t.split(']', 1)[1] if ']' in t else t
+    body = ' '.join(body.split())
+    return {'k': 'event', 'x': f'message from {who}: ' + body[:600] + ('...' if len(body) > 600 else '')}
+
 def log_entries(since):
     """Transcript records from byte offset `since` (the last ~12 MB when negative: tool output and images fill it) as compact entries, and the new
     offset. Only complete lines; replies, thinking, tool calls with a line of each result, images; bookkeeping left out."""
@@ -145,11 +169,13 @@ def log_entries(since):
                 ev = c.split('<event>')[1].split('</event>')[0] if '<event>' in c else 'background event'
                 out.append({'k': 'event', 't': ts, 'x': ev[:400]})
             elif not c.lstrip().startswith('<'):
-                out.append({'k': 'user', 't': ts, 'x': c})
+                rl = _relayed(c)
+                out.append(dict(rl, t=ts) if rl else {'k': 'user', 't': ts, 'x': c})
         elif d.get('type') == 'user' and isinstance(c, list):
             for b in c:
                 if b.get('type') == 'text' and not b.get('text', '').lstrip().startswith('<'):
-                    out.append({'k': 'user', 't': ts, 'x': b['text']})
+                    rl = _relayed(b['text'])
+                    out.append(dict(rl, t=ts) if rl else {'k': 'user', 't': ts, 'x': b['text']})
                 elif b.get('type') == 'image':                       # an image the operator attached
                     u = _img_src(b.get('source'))
                     if u:
