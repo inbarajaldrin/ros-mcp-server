@@ -1452,9 +1452,19 @@ def insert_via_drive_mate(obj, base, argv, snap, say):
     say(f"  [drive_mate] {mate}: {json.dumps(out)}")
     if out.get('base_measured') and STATE_REF.get('args') is not None:
         STATE_REF['args'].measured_base = (tuple(out['base_measured'][0]), tuple(out['base_measured'][1]))
-    ok = bool(out.get('seated'))
+    return map_drive_mate_result(out)
+
+
+def map_drive_mate_result(out):
+    """drive-mate's result in the replay's terms.  A gate refusal (INSERT_GATE / DRIVE_MATE_LATCHED: the arm was left
+    uncommandable, the server stopped it and latched) is a failure with that error WHATEVER `seated` says, so the
+    replay's post_insert_gate latches too (review r1 P1-1)."""
+    refusal = str(out.get('refusal') or '')
+    gated = 'INSERT_GATE:' in refusal or 'DRIVE_MATE_LATCHED' in refusal
+    ok = bool(out.get('seated')) and not gated
     return dict(out, result='success' if ok else 'failure', movement_type='insert', via='drive_mate',
-                error='' if ok else (out.get('error') or out.get('refusal') or f"stage {out.get('stage_reached')}"))
+                error='' if ok else (refusal if gated else (out.get('error') or refusal
+                                                            or f"stage {out.get('stage_reached')}")))
 
 
 
@@ -1815,7 +1825,9 @@ LATCH_RECOVERY = ("  The part is still gripped in the base. Recover in this orde
                   "    2. lift straight up:   python3 -u -m primitives.move_to_safe_height --lift-by 0.05 --mode real\n"
                   "       (if the external-control program is down, compliant_insertion_studio/scripts/stop_run.sh first:\n"
                   "        it re-sends the program and restores the controllers without moving the arm)\n"
-                  "    3. never move_home first - its straight line ignores seated parts")
+                  "    3. never move_home first - its straight line ignores seated parts\n"
+                  "  A latched drive-mate (DRIVE_MATE_LATCHED) is cleared by stop_run.sh's last step, or by hand after it:\n"
+                  "    ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {}")
 
 
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,

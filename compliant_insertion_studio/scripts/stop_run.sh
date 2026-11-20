@@ -187,6 +187,13 @@ POSE="$(timeout 5 ros2 topic echo --once /tcp_pose_broadcaster/pose 2>/dev/null)
 echo "$POSE" | awk '/position:/{p=1} p&&/[xyz]:/{printf "%s%.1f mm ", $1, $2*1000} /orientation:/{exit}' | sed 's/^/  TCP /'; echo
 W_MM="$(timeout 5 ros2 topic echo --once /gripper_width 2>/dev/null | awk '/data:/{print $2; exit}')"
 [ -n "$W_MM" ] && echo "  gripper width ${W_MM} mm (a part is likely held if it is well below the open width)"
+# a drive-mate latched by its post-insert gate is cleared only now (safety NORMAL/REDUCED, controllers restored, the
+# program running: the server checks all three); not running / not latched: nothing to do
+if timeout 5 ros2 service list 2>/dev/null | grep -q '^/ur5e/drive_mate/reset_latch$'; then
+  RL="$(timeout 20 ros2 service call /ur5e/drive_mate/reset_latch std_srvs/srv/Trigger {} 2>/dev/null \
+        | grep -o "message='[^']*'" | head -1)"
+  echo "  drive-mate latch: ${RL:-no answer}"
+fi
 echo
 echo "  Arm is stopped and commandable. Nothing was moved. If a part is held:"
 echo "    python3 -u -m primitives.control_gripper <width> --mode real   # release"

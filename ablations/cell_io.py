@@ -123,7 +123,9 @@ def post_insert_gate(result: Optional[dict], host: Optional[str] = None) -> Opti
         return f"robot {_SAFETY_STOP} during the insert"
     host = host or os.environ.get('ROBOT_IP', '192.168.1.111')
     error = str((result or {}).get('error') or '')
-    if 'INSERT_GATE:' in error or 'DRIVE_MATE_LATCHED' in error:
+    refusal = str((result or {}).get('refusal') or '')          # drive-mate's own field, whatever `seated` says
+    if any(k in t for t in (error, refusal) for k in ('INSERT_GATE:', 'DRIVE_MATE_LATCHED')):
+        error = refusal if ('INSERT_GATE:' in refusal or 'DRIVE_MATE_LATCHED' in refusal) else error
         # drive-mate ran this gate itself (seams/drive_mate_server: the dashboard stop is sent there) or is latched
         # from an earlier insert: the run latches too, without a second stop
         _DASHBOARD_STOPPED = f"drive-mate: {error}"
