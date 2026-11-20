@@ -137,4 +137,6 @@ def test_robot_contract_names_follow_the_sim_flag(flag, arm, states):
 
 def test_regular_sim_insert_descends_to_the_physical_contact_floor():
     source = (Path(__file__).resolve().parents[1] / "primitives/translate_object.py").read_text()
-    assert "run_move_down(mode='sim', to_table=True, require_contact=True)" in source
+    # ruling A (2026-11-20): to contact at the capped final-approach speed, after the normal-speed approach
+    assert ("mode='sim', to_table=True, require_contact=True,\n"
+            "                                    max_speed_mm_s=SIM_INSERT_CONTACT_SPEED_MM_S)") in source

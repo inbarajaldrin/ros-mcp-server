@@ -50,7 +50,9 @@ def test_sim_insert_reobserves_the_friction_held_object_before_descent():
     assert "settle_sim_observation(node, args.object_name, 0.5)" in source
     assert "pose.header = msg.header" in source
     assert 'SIM_INSERT_HOVER_BIAS_M if object_name == "u_brown" else 0.0' in source
-    assert "run_move_down(mode='sim', to_table=True, require_contact=True)" in source
+    # the insert's descent to contact still requires one (ruling A 2026-11-20: at the capped final-approach speed)
+    assert ("mode='sim', to_table=True, require_contact=True,\n"
+            "                                    max_speed_mm_s=SIM_INSERT_CONTACT_SPEED_MM_S)") in source
     assert "Pre-release held pose (logged, not gated)" in source  # ruling A, 2026-11-19
     assert "seat_mm > 1.0 or seat_deg > 1.0" not in source  # gated after release (sim_seat_scorer)
 
