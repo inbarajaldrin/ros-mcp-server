@@ -1803,10 +1803,8 @@ def depth_pick_target(obj, gid, say=print, log_fh=None):
     return tuple(float(v) for v in gp), tuple(float(v) for v in q)
 
 
-# rotate_object's subprocess timeout (lead 2026-11-20): 60 s was too close to the cell PC's projected worst reorient
-# (46.7 s: route search + IK x 2.19 from the twin's 28.0 s on a4500, mujoco/evidence/w5b-rotate-timing in the lab).
-# It is also rotate_object's declared budget (--budget-s).
-ROTATE_TIMEOUT_S = 90
+# rotate_object's subprocess timeout, also its declared budget (--budget-s): one value for every caller
+from primitives.shared.budgets import ROTATE_TIMEOUT_S  # noqa: E402
 
 
 def build_argv(tool_name: str, kw: dict, state: AssemblyState,

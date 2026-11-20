@@ -243,6 +243,9 @@ def _move_to_grasp(object_name: str, grasp_id: int, *, mode: str = "real") -> di
     )
 
 
+from primitives.shared.budgets import ROTATE_TIMEOUT_S  # noqa: E402
+
+
 def _rotate_object(object_name: str, base_name: str,
                    quat: Tuple[float, float, float, float],
                    *, mode: str = "real") -> dict:
@@ -252,8 +255,9 @@ def _rotate_object(object_name: str, base_name: str,
          "--mode", mode,
          "--object-name", object_name,
          "--base-name", base_name,
-         *_quat_argv(quat)],
-        timeout_s=90,
+         *_quat_argv(quat),
+         "--budget-s", str(ROTATE_TIMEOUT_S)],      # refuses before motion its timeout would cut
+        timeout_s=ROTATE_TIMEOUT_S,
     )
 
 
