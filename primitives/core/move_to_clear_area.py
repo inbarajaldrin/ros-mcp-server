@@ -528,6 +528,18 @@ class MoveToClearArea(Node):
                 return
 
             self.get_logger().info(f"Hover IK solved: cost={hover_solver._best_result.cost:.6f}")
+            # the turn to face-down for table and self collision before sending, the same check as move_to_grasp's
+            # fix_orientation_inprocess (lead 2026-11-20): fail closed
+            swing_from = (np.array(trajectory_points[-1].positions) if trajectory_points
+                          else np.array(self.current_joint_angles))
+            if check_trajectory_collision(swing_from, np.array(hover_joints), logger=self.get_logger()):
+                self.error_message = (f"Fix-orientation refused: the turn to face-down collides (joint step "
+                                      f"{np.max(np.abs(np.array(hover_joints) - swing_from)):.2f} rad)")
+                self.get_logger().error(self.error_message)
+                self.operation_success = False
+                self.operation_complete = True
+                rclpy.shutdown()
+                return
             # the camera rule and the cable caps on the lift, the swing and the hover stance (lead 2026-11-20): fail
             # closed
             from primitives.shared.camera_up import hover_route_refusal
