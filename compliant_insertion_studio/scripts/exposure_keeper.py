@@ -9,7 +9,8 @@ and the colour image goes black (brightness 5-8/255; markers lost). What worked 
   MANUAL            each sample outside [LOW, HIGH]: scale the exposure toward TARGET, clamped to [EXP_MIN, EXP_MAX].
   MANUAL -> AUTO    when the exposure is at EXP_MIN and the frame still stays above HIGH for HOLD samples: auto on, gain 64.
 
-It samples every PERIOD_S, so it never fights the camera's own auto exposure. Depth is unaffected: the D415 uses its IR projector.
+It takes ONE frame every PERIOD_S and subscribes to the image only for that frame, so between samples it costs nothing (a
+standing subscription made the camera node copy every 15 Hz frame to it: ~3% of a core on the cell PC). Depth is unaffected: the D415 uses its IR projector.
 Transitions are logged to /tmp/exposure_keeper.log. Started by stack_up.sh; FMB_EXPOSURE_KEEPER=0 skips it.
 
     python3 compliant_insertion_studio/scripts/exposure_keeper.py [--once]
@@ -21,7 +22,7 @@ DARK, LOW, HIGH, TARGET = 20.0, 50.0, 170.0, 90.0
 EXP_MIN, EXP_MAX = 156, 8000
 GAIN_DARK, GAIN_LIT = 128, 64
 HOLD = 3
-PERIOD_S = 2.0
+PERIOD_S = 10.0   # lights change rarely; a 30 s reaction (HOLD samples) is enough
 NODE = '/camera/camera'
 IMG = '/camera/camera/color/image_raw'
 
@@ -60,7 +61,6 @@ def main():
     rclpy.init()
     node = rclpy.create_node('exposure_keeper')
     last = {}
-    node.create_subscription(Image, IMG, lambda m: last.__setitem__('m', m), 1)
     get = node.create_client(GetParameters, NODE + '/get_parameters')
     put = node.create_client(SetParameters, NODE + '/set_parameters')
 
@@ -96,8 +96,10 @@ def main():
     while rclpy.ok():
         t0 = time.time()
         last.pop('m', None)
+        sub = node.create_subscription(Image, IMG, lambda m: last.__setitem__('m', m), 1)
         while 'm' not in last and time.time() - t0 < 5.0:
             rclpy.spin_once(node, timeout_sec=0.1)
+        node.destroy_subscription(sub)
         state, exposure = read_state()
         if 'm' not in last or state is None:
             if a.once:
