@@ -51,7 +51,11 @@ def sim_graph_refusal(names, instance: str) -> str | None:
 
 
 def ros_graph_topic_names(wait_s: float = 10.0, instance: str = "ur5e_0") -> set[str]:
-    """Topic names seen on the current domain, polled until the sim action appears or `wait_s` passes."""
+    """Topic names seen on the current domain, polled until the sim action AND its joint states appear or `wait_s`
+    passes (discovery is not atomic: stopping at the action alone refused a twin run whose /<instance>/joint_states
+    arrived a moment later, w8 2026-11-20).  The real driver is judged on EVERY snapshot (review r1 P2): any of its
+    topics seen while polling is kept in the returned set (so sim_graph_refusal refuses) and the probe stops there;
+    the sim topics must be in the last snapshot."""
     import rclpy
     from rclpy.context import Context
 
@@ -59,16 +63,18 @@ def ros_graph_topic_names(wait_s: float = 10.0, instance: str = "ur5e_0") -> set
     rclpy.init(context=context)
     try:
         node = rclpy.create_node("sim_guard_probe", context=context)
-        want = f"/{instance}/arm_controller/follow_joint_trajectory/_action/status"
+        want = {f"/{instance}/arm_controller/follow_joint_trajectory/_action/status", f"/{instance}/joint_states"}
         deadline = time.monotonic() + wait_s
         names: set[str] = set()
+        real_seen: set[str] = set()
         while True:
             names = {n for n, _types in node.get_topic_names_and_types()}
-            if want in names or time.monotonic() > deadline:
+            real_seen |= {n for n in names if n.startswith(REAL_ARM_CONTROLLER + "/")}
+            if real_seen or want <= names or time.monotonic() > deadline:
                 break
             time.sleep(0.2)
         node.destroy_node()
-        return names
+        return names | real_seen
     finally:
         rclpy.shutdown(context=context)
 
