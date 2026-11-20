@@ -282,3 +282,26 @@ def test_the_box_prefilter_is_a_lower_bound_and_never_changes_a_verdict(monkeypa
         assert got <= true + 1e-9, lab
         assert (got >= 0.010) == (true >= 0.010), lab
     assert checked >= 1
+
+
+def test_every_tier1_mount_solid_is_in_the_pinned_meshes_or_in_tier2s_extra_solids():
+    """Review w5b-tier2 r3, R3-2: tier 2's mount side is the pinned mount/D415 meshes plus MOUNT_EXTRA_SOLIDS_TOOL.  A
+    tier-1 mount box for a part those meshes lack (the coming D415 USB plug, w8 P3-6) must also be an extra solid, or
+    tier 2 would admit through it.  So: every tier-1 box under a pinned mesh's name lies within that mesh's extent
+    (fitted to it, +2 mm), and every box under any other name is listed in MOUNT_EXTRA_SOLIDS_TOOL."""
+    from primitives.shared import camera_geometry as CG
+    if A.mount_mesh() is None:
+        pytest.skip("the pinned mount meshes are not available")
+    extra = [(tuple(np.round(np.asarray(c, float), 6)), tuple(np.round(np.asarray(h, float), 6)))
+             for c, h in A.MOUNT_EXTRA_SOLIDS_TOOL]
+    for name, boxes in CG.CAMERA_MOUNT_BOXES_TOOL.items():
+        if name in CG.MOUNT_MESH_SHA256:
+            V = CG.mount_mesh_triangles_tool(name).reshape(-1, 3)
+            vlo, vhi = V.min(axis=0) - 0.002, V.max(axis=0) + 0.002
+            for lo, hi in boxes:
+                assert np.all(np.asarray(lo) >= vlo) and np.all(np.asarray(hi) <= vhi), (name, lo, hi)
+        else:
+            for lo, hi in boxes:
+                lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+                key = (tuple(np.round((lo + hi) / 2, 6)), tuple(np.round((hi - lo) / 2, 6)))
+                assert key in extra, f"tier-1 mount box {name} {tuple(lo)}..{tuple(hi)} is not in MOUNT_EXTRA_SOLIDS_TOOL"
