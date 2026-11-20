@@ -1207,11 +1207,12 @@ class ReorientForAssembly(Node):
                             current_object_orientation=None):
         """Reorient EE so OBJECT ends up at a valid assembly pose."""
         # the RG2's opening for every physical check below (rg2_geometry): the width the gripper measured when it closed
-        # on this part (--gripper-width-mm); not given: unknown, the whole stroke (fail safe - a CAD width is not a
-        # measurement: flown rotates ran at 0.6 mm and 69.9 mm on missed grasps)
+        # on this part (--gripper-width-mm), down to fully closed (a slip closes the jaws: rg2_geometry.held); not
+        # given: unknown, the whole stroke (fail safe - a CAD width is not a measurement: flown rotates ran at 0.6 mm
+        # and 69.9 mm on missed grasps)
         from primitives.shared.collision import set_gripper_openings
         w = getattr(self, "gripper_width_mm", None)
-        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None)
+        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None, held=True)
 
         # Store for JSON output
         self.object_name = object_name

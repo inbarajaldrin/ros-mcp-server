@@ -185,17 +185,37 @@ def posed(alpha):
     return _pose_points(links, alpha, alpha0)
 
 
+HELD = "held"
+
+
+def held(width_mm):
+    """An opening item for a held grip measured at width_mm: the fingers may close from there to fully closed (a slip
+    closes the jaws under the grip command), never open past it - [closed, w + 2 offset + 1] (lead ruling 2026-11-20,
+    review w5b-tier2 r1 P2-1)."""
+    return (HELD, float(width_mm))
+
+
 def alpha_ranges(openings):
-    """The alpha intervals an opening set stands for: None -> the whole stroke; known widths w (mm) ->
-    [w - 1, w + 2 offset + 1] each (see the module note)."""
+    """The alpha intervals an opening set stands for: None -> the whole stroke; a known width w (mm) ->
+    [w - 1, w + 2 offset + 1]; held(w) -> [closed, w + 2 offset + 1] (see the module note)."""
     if openings is None:
         return [(ALPHA_MIN, ALPHA_MAX)]
     out = []
-    for w in openings:
-        lo = alpha_of_raw(w / 1000.0 - KNOWN_WIDTH_BELOW_M)
-        hi = alpha_of_raw(w / 1000.0 + KNOWN_WIDTH_ABOVE_M)
+    for item in openings:
+        if isinstance(item, tuple) and item and item[0] == HELD:
+            out.append((ALPHA_MIN, alpha_of_raw(float(item[1]) / 1000.0 + KNOWN_WIDTH_ABOVE_M)))
+            continue
+        lo = alpha_of_raw(float(item) / 1000.0 - KNOWN_WIDTH_BELOW_M)
+        hi = alpha_of_raw(float(item) / 1000.0 + KNOWN_WIDTH_ABOVE_M)
         out.append((min(lo, hi), max(lo, hi)))
     return out
+
+
+def _openings_key(openings):
+    if openings is None:
+        return None
+    return tuple(sorted((it[0], round(float(it[1]), 3)) if isinstance(it, tuple) else ("w", round(float(it), 3))
+                        for it in openings))
 
 
 def alpha_samples(openings):
@@ -216,7 +236,7 @@ def padding(name):
 def boxes(openings):
     """{label: (centre, half)} axis-aligned boxes (flange frame) enclosing each finger link over the opening set,
     padded for the sampling; None when the meshes are unavailable (callers fail closed)."""
-    key = ("boxes", None if openings is None else tuple(sorted(round(float(w), 3) for w in openings)))
+    key = ("boxes", _openings_key(openings))
     with _LOCK:
         if key in _STATE:
             return _STATE[key]

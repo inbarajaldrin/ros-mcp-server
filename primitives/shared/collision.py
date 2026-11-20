@@ -130,7 +130,21 @@ _RG2_SURFACE = []
 def _rg2_surface(spacing=0.005):
     """The RG2 body's faces sampled on a grid of at most `spacing` (flange frame), and the sampling gap."""
     if not _RG2_SURFACE:
-        centre, half = np.asarray(RG2_BODY_BOX[0]), np.asarray(RG2_BODY_BOX[1])
+        _RG2_SURFACE.extend(_box_surface(RG2_BODY_BOX[0], RG2_BODY_BOX[1], spacing))
+    return _RG2_SURFACE[0], _RG2_SURFACE[1]
+
+
+_BOX_SURFACES = {}
+
+
+def _box_surface(centre, half, spacing=0.005):
+    """An axis-aligned box's faces sampled on a grid of at most `spacing`, and the sampling gap (every face point is
+    within the gap of a sample): min(sample distance) - gap is a lower bound on the box's distance to a convex body."""
+    key = (tuple(np.round(np.asarray(centre, float), 7)), tuple(np.round(np.asarray(half, float), 7)), spacing)
+    if key not in _BOX_SURFACES:
+        if len(_BOX_SURFACES) > 400:
+            _BOX_SURFACES.clear()
+        centre, half = np.asarray(centre, float), np.asarray(half, float)
         lo, hi = centre - half, centre + half
         n = [max(1, int(np.ceil((hi[k] - lo[k]) / spacing))) for k in range(3)]
         grids = [np.linspace(lo[k], hi[k], n[k] + 1) for k in range(3)]
@@ -144,8 +158,8 @@ def _rg2_surface(spacing=0.005):
                 face = np.empty((U.size, 3))
                 face[:, k], face[:, u], face[:, v] = w, U.ravel(), V.ravel()
                 pts.append(face)
-        _RG2_SURFACE.extend([np.concatenate(pts), gap])
-    return _RG2_SURFACE[0], _RG2_SURFACE[1]
+        _BOX_SURFACES[key] = (np.concatenate(pts), gap)
+    return _BOX_SURFACES[key]
 # Kinematic order of each body (pairs less than two apart are not checked: they share a joint).  A joint housing
 # (a capsule along DH frame k's z axis, the axis of joint k+1) joins links k and k+1, so it ranks k + 0.5.
 _SELF_ORDER = {"shoulder (pan housing)": 0.5, "shoulder (lift housing)": 1.5,
@@ -240,12 +254,25 @@ def _physical_bodies(joint_angles):
 _GRIPPER_OPENINGS = None
 
 
-def set_gripper_openings(widths_mm):
-    """Widths (mm) the RG2 may have during the next checks (e.g. a move's start and end), or None (unknown: whole
-    stroke).  Returns the previous setting."""
+def set_gripper_openings(widths_mm, held=False):
+    """Widths (mm, MEASURED) the RG2 may have during the next checks, or None (unknown: whole stroke).  held: the
+    widths are a held grip's, which may close to fully closed during the move (rg2_geometry.held).  Returns the
+    previous setting."""
     global _GRIPPER_OPENINGS
+    from primitives.shared import rg2_geometry
     prev = _GRIPPER_OPENINGS
-    _GRIPPER_OPENINGS = None if widths_mm is None else tuple(float(w) for w in widths_mm if w is not None) or None
+    if widths_mm is None:
+        _GRIPPER_OPENINGS = None
+    else:
+        items = []
+        for w in widths_mm:
+            if w is None:
+                continue
+            if isinstance(w, tuple):                           # already an opening item (a previous setting restored)
+                items.append(w)
+            else:
+                items.append(rg2_geometry.held(w) if held else float(w))
+        _GRIPPER_OPENINGS = tuple(items) or None
     return prev
 
 
@@ -278,7 +305,7 @@ def physical_self_clearances(joint_angles):
                                np.asarray(RG2_BODY_BOX[0]), np.asarray(RG2_BODY_BOX[1])) - R[far]
     out += [(float(x), labels[i], "RG2 body") for x, i in zip(db, far)]
     # the RG2's finger links at the current opening(s) (rg2_geometry: boxes over the opening set; unknown = whole
-    # stroke) against the same bodies; finger meshes unavailable -> a refusal (fail closed)
+    # stroke) against the same far capsules (the base cylinder below); finger meshes unavailable -> a refusal
     from primitives.shared import rg2_geometry
     fboxes = rg2_geometry.boxes(_GRIPPER_OPENINGS)
     if fboxes is None:
@@ -299,6 +326,15 @@ def physical_self_clearances(joint_angles):
     radial = np.maximum(np.hypot(W[:, 0], W[:, 1]) - radius, 0.0)
     vertical = np.maximum(np.maximum(-W[:, 2], W[:, 2] - top), 0.0)
     out.append((float(np.min(np.hypot(radial, vertical))) - gap, "base", "RG2 body"))
+    # ... and against the finger links at the opening set (review w5b-tier2 r1 P2-2: the tips reach ~230 mm, far past
+    # the RG2 body box); tier 2 as for every finger pair (the base's pinned mesh against the exact links)
+    if fboxes is not None:
+        for flabel, (fc, fh) in fboxes.items():
+            fs, fgap = _box_surface(fc, fh)
+            W = fs @ R6.T + p6
+            radial = np.maximum(np.hypot(W[:, 0], W[:, 1]) - radius, 0.0)
+            vertical = np.maximum(np.maximum(-W[:, 2], W[:, 2] - top), 0.0)
+            out.append((float(np.min(np.hypot(radial, vertical))) - fgap, "base", flabel))
     return out
 
 

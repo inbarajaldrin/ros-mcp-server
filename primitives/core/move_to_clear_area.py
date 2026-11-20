@@ -349,11 +349,11 @@ class MoveToClearArea(Node):
 
     def move_to_clear_space(self):
         """Move to clear space position while maintaining current end-effector orientation"""
-        # the RG2's opening for the physical checks: the measured width (--gripper-width-mm); else unknown, the whole
-        # stroke (fail safe)
+        # the RG2's opening for the physical checks: the held grip's measured width (--gripper-width-mm), down to fully
+        # closed (a slip closes the jaws); else unknown, the whole stroke (fail safe)
         from primitives.shared.collision import set_gripper_openings
         w = getattr(self, "gripper_width_mm", None)
-        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None)
+        set_gripper_openings((float(w),) if isinstance(w, (int, float)) else None, held=True)
         pose_data = self.read_current_ee_pose()
         
         if pose_data is None:

@@ -147,29 +147,36 @@ def test_the_disk_cache_round_trips_and_a_bad_file_is_recomputed(tmp_path, monke
 
 
 def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
-    """Lead ruling 2026-11-20: tier 1 must be strictly conservative (tier 2 only reconsiders tier-1 refusals).  Every
-    vertex of the cell's pinned RG2 mesh, at every height, lies inside RG2_BODY_BOX, the quick-changer capsule or a
-    finger link's box over the whole stroke (flange frame, mounted rpy 0 0 pi; the mesh's fingers are at one opening
-    of the stroke).  The housing's top (148.05 mm) is above the fingers' knuckles: the box reaches it."""
+    """Lead ruling 2026-11-20: tier 1 must be strictly conservative (tier 2 only reconsiders tier-1 refusals).  The
+    pinned RG2 mesh, at every height (flange frame, mounted rpy 0 0 pi): its HOUSING (the mesh minus the six finger
+    links) inside RG2_BODY_BOX or the quick-changer capsule alone - so tier 1 holds at any opening (review r1 P3-3) -
+    and its fingers inside their own boxes over the stroke (the mesh's fingers are at one opening of it; the
+    per-opening boxes are tested in test_rg2_geometry).  The housing's top (148.05 mm) is inside the box."""
     import hashlib
+    from scipy.spatial import cKDTree
+    from primitives.shared import rg2_geometry as F
     raw = A.RG2_MESH.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != A.RG2_MESH_SHA256:
-        pytest.skip("the cell's RG2 mesh is not the pinned one")
+    if hashlib.sha256(raw).hexdigest() != A.RG2_MESH_SHA256 or F.model() is None:
+        pytest.skip("the cell's RG2 mesh or finger links are not the pinned ones")
     V = np.array([[float(x) for x in l.split()[1:4]] for l in raw.decode().splitlines() if l.startswith("v ")])
     V = np.unique((V @ np.diag([-1.0, -1.0, 1.0])).round(7), axis=0)
+    fingers = np.vstack([t.reshape(-1, 3) for t in F.posed(F.model()[1]).values()])
+    is_finger = cKDTree(fingers).query(V)[0] < 1e-6
+    housing, finger_v = V[~is_finger], V[is_finger]
+    assert len(housing) > 1000 and len(finger_v) > 1000
     c, h = np.asarray(C.RG2_BODY_BOX[0]), np.asarray(C.RG2_BODY_BOX[1])
-    in_box = np.all(np.abs(V - c) <= h, axis=1)
-    from primitives.shared import rg2_geometry as F
-    fingers = F.boxes(None)
-    assert fingers is not None
-    for fc, fh in fingers.values():
-        in_box |= np.all(np.abs(V - fc) <= fh, axis=1)
+    in_box = np.all(np.abs(housing - c) <= h, axis=1)
     _f, a, b, r, _l = next(cap for cap in C.PHYSICAL_WRIST_CAPSULES if cap[4] == "quick changer")
     a, b = np.asarray(a), np.asarray(b)
-    t = np.clip(((V - a) @ (b - a)) / float((b - a) @ (b - a)), 0.0, 1.0)
-    in_qc = np.linalg.norm(V - (a + t[:, None] * (b - a)), axis=1) <= r
-    outside = V[~(in_box | in_qc)]
-    assert len(outside) == 0, f"{len(outside)} RG2 vertices outside tier 1, e.g. {np.round(outside[:3] * 1000, 1)} mm"
+    t = np.clip(((housing - a) @ (b - a)) / float((b - a) @ (b - a)), 0.0, 1.0)
+    in_qc = np.linalg.norm(housing - (a + t[:, None] * (b - a)), axis=1) <= r
+    outside = housing[~(in_box | in_qc)]
+    assert len(outside) == 0, f"{len(outside)} housing vertices outside tier 1, e.g. {np.round(outside[:3] * 1000, 1)} mm"
+    assert 0.1480 < housing[:, 2].max() <= c[2] + h[2]
+    inside = np.zeros(len(finger_v), bool)
+    for fc, fh in F.boxes(None).values():
+        inside |= np.all(np.abs(finger_v - fc) <= fh, axis=1)
+    assert inside.all()
 
 
 # 10-15 flown yellow steps (replay_inverted_u_yellow_20261015_*.snapshots.jsonl, joints before -> after)

@@ -49,7 +49,8 @@ def test_the_pad_gap_follows_the_arc_model():
         assert abs(F.alpha_of_raw(raw_mm / 1000.0) - arc.alpha(arc.theta_of_raw_width(raw_mm))) < 1e-9
 
 
-@pytest.mark.parametrize("openings", [None, (21.0,), (56.7,), (100.0,), (35.0, 84.0)])
+@pytest.mark.parametrize("openings", [None, (21.0,), (56.7,), (100.0,), (35.0, 84.0), (("held", 43.4),),
+                                      (("held", 21.0), 100.8)])
 def test_rg2_finger_boxes_enclose(openings):
     """Every pinned finger-link vertex, posed by the 4-bar at random openings BETWEEN the samples and at the
     samples, lies inside its box (finger_link_boxes over the opening set; None = the whole stroke)."""

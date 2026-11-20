@@ -232,12 +232,13 @@ CACHE_DIR = Path(os.environ.get("ARM_SURFACE_CACHE", Path.home() / ".cache" / "f
 
 def _cache_key(link):
     """The disk cache's key for one link's bodies: the link's pinned mesh and every source file the bodies are derived
-    from (this module, collision's capsules, ik's DH).  Any change gives a new key: a stale cache cannot be read."""
+    from (this module, collision's capsules, ik's DH, config's nominal DH).  Any change gives a new key: a stale cache
+    cannot be read."""
     h = hashlib.sha256()
     h.update(link.encode())
     h.update(MESH_SHA256[VISUAL_ORIGIN[link][1]].encode())
     here = Path(__file__).resolve().parent
-    for f in ("arm_surface.py", "collision.py", "ik.py"):
+    for f in ("arm_surface.py", "collision.py", "ik.py", "config.py"):
         h.update((here / f).read_bytes())
     return h.hexdigest()[:32]
 
@@ -267,6 +268,13 @@ def _load_link_cached(link):
         tmp = path.with_suffix(f".{os.getpid()}.tmp.npz")
         np.savez(tmp, **arrays)
         os.replace(tmp, path)
+        # prune: this link's files under other keys are stale (~45 MB per source edit otherwise, review r1 P3-2)
+        for old in CACHE_DIR.glob(f"{link}-*.npz"):
+            if old != path and ".tmp." not in old.name:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
     except Exception:                                            # noqa: BLE001 - a cache write never fails a check
         pass
     return out

@@ -1831,15 +1831,17 @@ from primitives.shared.budgets import ROTATE_TIMEOUT_S  # noqa: E402
 
 
 # After a latched insert (post_insert_gate) the gripper still holds the part (lead 2026-11-20, review r3 P2-R1/P3-R1).
-# Where it is follows from the insert's own result: success -> it rests in the seat; anything else -> unknown (it may
-# hang at or above the hover: prismatic's exhausted path retracts).  stop_run.sh always comes first: after a latch
+# Where it is: the insert's own result says seated or not, and that label is not a verification (CLAUDE.md §2, review
+# w5b-tier2 r1 P3-4) - so the text says "reported", and the operator checks before opening; anything else -> unknown
+# (it may hang at or above the hover: prismatic's exhausted path retracts).  stop_run.sh always comes first: after a latch
 # the program is down, and stop_run.sh ends force mode with its still-check before anything moves.
 LATCH_PART_WHERE = {'where': None}      # the last latched insert's part position, for the end-of-run message
 
 
 def latch_recovery(where=None):
     """The operator's recovery order after a latch; `where` is 'seat' (the insert reported success) or None."""
-    head = ("  The part rests IN THE SEAT, gripped (the insert reported success)." if where == 'seat' else
+    head = ("  The insert REPORTED the part seated (not verified): look at it before opening - if it is not in the "
+            "seat, follow the UNKNOWN steps (do not open)." if where == 'seat' else
             "  The part's position is UNKNOWN - it may hang at or above the hover, gripped. Never assume where it is.")
     steps = ["    1. compliant_insertion_studio/scripts/stop_run.sh - always first: re-sends the program, ends force mode,"
              " restores the controllers, checks the arm is still"]
