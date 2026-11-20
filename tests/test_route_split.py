@@ -65,11 +65,13 @@ def _reorient_node():
 
 
 # Both stances pass the reorient IK rules and the direct joint line is clear of the table and the arm (DH and
-# physical models), but moving wrist_1 + wrist_2 first stops at a stance where the RG2 body is 12.7 mm inside the
-# physical upper arm - a stance the DH capsules alone admit (built from a twin-colliding stance of the r2 sweep).
-SPLIT_START = np.array([-2.7529, -1.677, 2.2101, 1.1559, 1.2272, -2.4303])
+# physical models), but moving wrist_1 + wrist_2 first stops at a stance where the RG2 body is inside the physical
+# upper arm (real surfaces -3.8 mm apart) - a stance the DH capsules alone admit (built from a twin-colliding stance of
+# the r2 sweep).  2026-11-20: the start moved by <= 0.03 rad from (-2.7529, -1.677, 2.2101, 1.1559, 1.2272), whose
+# mount/D415 is 8.6 mm from the upper arm once the mount boxes are padded to enclose the CAD (review r1 P3-7).
+SPLIT_START = np.array([-2.723, -1.675, 2.1955, 1.1168, 1.2143, -2.4303])
 SPLIT_TARGET = np.array([-3.1297, -1.6724, 1.6913, 1.9806, 1.4451, -2.4303])
-SPLIT_MIDDLE = np.array([-2.7529, -1.677, 2.2101, 1.9806, 1.4451, -2.4303])
+SPLIT_MIDDLE = np.array([-2.723, -1.675, 2.1955, 1.9806, 1.4451, -2.4303])
 
 
 def test_rotate_object_refuses_a_split_whose_middle_stance_self_collides(monkeypatch):
