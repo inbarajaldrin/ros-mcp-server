@@ -217,7 +217,11 @@ APPROVED 2026-11-18 (R11).
   the real UR5e surface (UR visual meshes): up to 27 mm outside on the upper arm, 10-14 mm on others. The physical self/mount/held-part
   checks can under-estimate clearance by that much; the review's 94/94 sweep used the same capsules as truth (circular). Fix: capsules
   proven to enclose the visual meshes (triangle-level test), branch w5-enclose -> review -> merge, with the flown-history re-check.
-  No real run before it merges.
+  No real run before it merges. MERGED 2026-11-20 into dev 720a5d8 (Opus r2 READY TO MERGE; same 5/4730 flown refusals as dev).
+- SAFETY (lead, 2026-11-20): real-path gaps from the w4 round-1 deferrals MERGED into dev b66d665 (w5-realpath-gaps, Opus r1+r2 READY):
+  empty-gripper joint-travel and wrist_3 caps; the camera rule and the table/self check on both fix-orientation swings; rotate_object's
+  replay timeout 90 s, with ROTATE_OUTLASTS_CALLER refusing before any send. Still owed before the first real run: the prismatic stop
+  test (URSim 5.17.3 + ur_robot_driver 2.14.0 on a4500), and re-timing rotate_object on dev 720a5d8 (tier-2 adds ~9 s per process).
 - DroidStack engine `abbd0a57` (0.1.0) is installed on the cell PC at `~/.droidstack`, with boxes dual / a4500 / rtx6000 recorded.
   Its assembly and perception packs are "NOT READY — placeholder" (source snapshot `~/droidstack-src-2648fe5`, 2026-11-13).
 - This repo (`inbarajaldrin/ros-mcp-server`) is PUBLIC on GitHub (unauthenticated API 200, 2026-11-18); prompt-to-assembly is private.
