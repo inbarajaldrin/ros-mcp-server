@@ -9,7 +9,9 @@ planner's absolute values are the ones its cable window and travel budget were c
   (primitives.shared.robot_contract); a real-arm target is refused unless ROS_MCP_SEQPLAN_REAL=1, whatever --mode
   says, and --mode must name the target it goes to.  URSim uses the real controller names: it needs the variable too.
 - The move JSON states what it is: {"label": str, "waypoints": [[6 joint values, rad], ...], "dense": bool,
-  "contact": bool}.  Both flags are required (review r1 P2-2).
+  "contact": bool, "ends_in_grip": bool [, "opening_m": raw m, "close_width_m": raw m]}.  The three flags are
+  required (review r1 P2-2; ends_in_grip: lead 2026-11-20, r4 P2-1): a move that ends where a Grip closes has its
+  final stance judged at the close width too (gripper_rules.grasp_stance_refusal; close_width_m None = fully closed).
 - No contact stop here (review r1 P1-5): a move that declares contact, or that ends lower than it starts with the
   fingertips under CONTACT_CLEAR_M above the table, is refused.  Fly a descent toward a part or the table with
   move_down (its force stop), as move_to_grasp and the place-down passes do.
@@ -74,7 +76,7 @@ def _gc(q):
 def move_refusal(move):
     """None, or why this move JSON must not be sent (shape, flags, limits, the final stance, contact)."""
     from primitives.seqplan.rules import waypoint_refusal
-    for key in ("dense", "contact"):
+    for key in ("dense", "contact", "ends_in_grip"):
         if not isinstance(move.get(key), bool):
             return f"MOVE_FLAG_MISSING: '{key}' must be true or false"
     W = move.get("waypoints")
@@ -97,7 +99,7 @@ def move_refusal(move):
     from primitives.shared.ik import dh_params, forward_kinematics
     T_end = forward_kinematics(dh_params, W[-1])
     why = camera_stance_refusal(T_end) or gripper_table_refusal(T_end, move.get("opening_m"))
-    if not why and (move.get("ends_in_grip") or move.get("close_width_m") is not None):
+    if not why and move["ends_in_grip"]:
         from primitives.shared.gripper_rules import grasp_stance_refusal     # review r3 P1-1: judged at the close
         why = grasp_stance_refusal(T_end, move.get("close_width_m"))
     if why:

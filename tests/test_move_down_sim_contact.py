@@ -206,8 +206,8 @@ def test_the_to_table_floor_follows_the_given_opening():
     closed = md.to_table_floor_z(down)
     assert abs(closed - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + RG2_TIP_CLOSED_M)) < 1e-12
     open95 = md.to_table_floor_z(down, 95.2)
-    assert abs(open95 - (TABLE_HEIGHT + md.PLACE_TIP_CLEARANCE_M + g.tip_z_tool(0.0952))) < 1e-12
-    assert open95 < closed - 0.010                                    # the open fingers sit > 10 mm higher
+    assert g.tip_z_tool(0.0952) < RG2_TIP_CLOSED_M - 0.010            # the open fingers sit > 10 mm higher ...
+    assert open95 == closed                                           # ... but the floor is CLAMPED at dev's (r4 P2-3)
     assert md.to_table_floor_z(down, 0.0) > closed                    # closed by the mesh: 234.2 mm, deeper
 
 
@@ -235,7 +235,41 @@ def test_the_floor_is_judged_at_the_narrowest_width_r4():
     assert md.floor_width_mm(95.2, 30.2, measured_mm=25.0) == 25.0         # a measured narrower jaw wins
     assert md.floor_width_mm(95.2, 30.2, measured_mm=80.0) == 30.2
     assert md.floor_width_mm(None, 30.2) == 30.2
+    from primitives.shared import rg2_geometry as g
     down = np.diag([1.0, -1.0, -1.0])
-    approach_only = md.to_table_floor_z(down, 95.2)
-    at_close = md.to_table_floor_z(down, md.floor_width_mm(95.2, 30.2))
-    assert at_close - approach_only > 0.020                                # the u_orange case: 21 mm higher
+    assert g.tip_z_tool(0.0302) - g.tip_z_tool(0.0952) > 0.020             # the u_orange case: the close is 21 mm deeper
+    assert md.to_table_floor_z(down, md.floor_width_mm(95.2, 30.2)) > md.to_table_floor_z(down, 95.2)
+
+
+def test_the_floor_never_goes_below_devs_closed_tip_floor_r4():
+    """Lead 2026-11-20 (r4 P2-3): CLAMP, until the caliper measurement settles the fingertip."""
+    import numpy as np
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    from scipy.spatial.transform import Rotation as R
+    for Rm in (np.diag([1.0, -1.0, -1.0]), (R.from_euler("y", 20, degrees=True) * R.from_euler("x", 180, degrees=True)).as_matrix()):
+        dev = md.to_table_floor_z(Rm)
+        for w in (52.0, 60.0, 80.0, 110.0, 0.0, 30.2):
+            assert md.to_table_floor_z(Rm, w) >= dev - 1e-12, w
+
+
+def test_an_unheard_gripper_width_is_taken_as_fully_closed_r4(monkeypatch):
+    """Lead 2026-11-20 (r4 P2-2): on the real arm move_down waits briefly for /gripper_width; absent = fully closed."""
+    import types
+    import tests.ros_stubs as ros_stubs
+    ros_stubs.install()
+    from primitives.core import move_down as md
+    n = object.__new__(md.MoveDown)
+    n.measured_width_mm = None
+    warned = []
+    n.get_logger = lambda: types.SimpleNamespace(warn=warned.append)
+    monkeypatch.setattr(md.rclpy, "spin_once", lambda node, timeout_sec=None: None, raising=False)
+    assert n.await_measured_width(0.05) == 0.0 and warned
+    assert md.floor_width_mm(95.2, 60.0, n.measured_width_mm) == 0.0
+    n2 = object.__new__(md.MoveDown)
+    n2.measured_width_mm = None
+    monkeypatch.setattr(md.rclpy, "spin_once", lambda node, timeout_sec=None: setattr(node, "measured_width_mm", 71.3),
+                        raising=False)
+    n2.get_logger = lambda: types.SimpleNamespace(warn=warned.append)
+    assert n2.await_measured_width(1.0) == 71.3

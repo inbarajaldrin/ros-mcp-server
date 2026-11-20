@@ -40,6 +40,9 @@ from primitives.shared.config import TABLE_HEIGHT, GRIPPER_CENTER_TOOL_OFFSET, T
 PLACE_TIP_CLEARANCE_M = 0.001
 
 
+MEASURED_WIDTH_WAIT_S = 1.0   # the real arm: how long move_down waits for /gripper_width before assuming fully closed
+
+
 def floor_width_mm(opening_mm=None, close_width_mm=None, measured_mm=None):
     """The width the --to-table floor is judged at: the NARROWEST raw width the jaws reach at this stance (review r3
     P1-1: closing drives the RG2's fingertips down, so a pick is judged where it closes, as move_to_grasp.py:462
@@ -59,7 +62,9 @@ def to_table_floor_z(R_flange, opening_mm=None):
     depth is the CLOSED one (RG2_TIP_CLOSED_M, config's measured figure) unless a raw width is given: then the deepest
     finger point at that width by the one RG2 model (rg2_geometry.tip_z_tool, the pinned finger meshes posed by the
     4-bar, over the width's range).  The width is floor_width_mm's (the narrowest the jaws reach), never just the
-    approach opening.  The model unavailable: the closed-tip floor stands.
+    approach opening.  The model unavailable: the closed-tip floor stands.  CLAMPED (lead 2026-11-20, r4 P2-3): with a
+    width the floor never goes below dev's default closed-tip floor (config's RG2_TIP_CLOSED_M), whatever width is
+    passed, until the caliper measurement settles the fingertip.
     Fingertip figures: the model's closed tip is 234.2 mm below the flange, config's measured RG2_TIP_CLOSED_M 230.86;
     without a width this floor uses config's (dev unchanged; if the mesh is right it puts the tips 2.3 mm into the table
     with only the force stop) until the caliper measurement settles it."""
@@ -68,7 +73,7 @@ def to_table_floor_z(R_flange, opening_mm=None):
         from primitives.shared.rg2_geometry import tip_z_tool
         tip = tip_z_tool(float(opening_mm) / 1000.0)
         if tip is not None:
-            depth = float(tip)
+            depth = max(float(tip), RG2_TIP_CLOSED_M)          # the clamp: never below dev's closed-tip floor
     return TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M - float((np.asarray(R_flange, float) @ np.array([0.0, 0.0, depth]))[2])
 from primitives.shared.ik import compute_cartesian_waypoints_ik, dh_params, forward_kinematics
 from primitives.shared.robot_contract import (
@@ -124,9 +129,11 @@ class MoveDown(Node):
         self.close_width_mm = close_width_mm   # the raw width the stance ends in (--close-width-mm; a pick's grasp)
         self.measured_width_mm = None
         if to_table and mode == 'real' and (opening_mm is not None or close_width_mm is not None):
-            from std_msgs.msg import Float32           # the RG2's measured raw width (review r3 P2)
+            # the RG2's measured raw width (review r3 P2; lead r4 P2-2): waited for briefly; absent = FULLY CLOSED
+            from std_msgs.msg import Float32
             self.create_subscription(Float32, '/gripper_width',
                                      lambda m: setattr(self, 'measured_width_mm', float(m.data)), 10)
+            self.await_measured_width(MEASURED_WIDTH_WAIT_S)
         # Sim only: an INSERT descent must stop on the simulated wrench - its endpoint is never a seat.
         # A place-down ends at its floor exactly as on the real arm (a sideways stance stops above the
         # table and the release drops the part; replay_real_assembly._gentle_place_down).
@@ -740,6 +747,17 @@ class MoveDown(Node):
         # Continue with movement calculation
         self._execute_move_down(current_pos, current_quat)
     
+    def await_measured_width(self, wait_s):
+        """Wait up to wait_s for /gripper_width; absent, the floor assumes the jaws FULLY CLOSED (lead r4 P2-2)."""
+        t_end = time.monotonic() + wait_s
+        while self.measured_width_mm is None and time.monotonic() < t_end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if self.measured_width_mm is None:
+            self.get_logger().warn(f"/gripper_width not heard in {wait_s:.1f} s: the floor assumes the jaws fully "
+                                   f"closed")
+            self.measured_width_mm = 0.0
+        return self.measured_width_mm
+
     def _execute_move_down(self, current_pos, current_quat):
         """Execute the actual move down calculation and trajectory sending"""
         from scipy.spatial.transform import Rotation as Rot

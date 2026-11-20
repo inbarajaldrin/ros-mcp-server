@@ -15,7 +15,8 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
   * gripper_rules.gripper_table_refusal: the RG2's finger boxes (rg2_geometry, the one finger model) and its housing
     and quick-changer corners 2 mm above the table, at the leg's opening (unknown: the boxes enclose the whole
     stroke); the nominal gripper centre is not a material point (gripper_rules);
-  * a route that ends in a Grip (close_width_m given): its LAST stance also at the close width
+  * a route that ends in a Grip (ends_in_grip, required): its LAST stance also at the close width (close_width_m;
+    None = fully closed)
     (gripper_rules.grasp_stance_refusal, review r3 P1-1: the fingertips go down as the jaws close);
   * gripper_rules.extended_gripper_refusal and orientation_refusal: rotate_object's extended-gripper checks (base
     column, upper arm; its "gripper centre below the table" clause is left to gripper_table_refusal, which checks
@@ -152,14 +153,17 @@ def _samples(a, b):
 
 
 def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshold=TABLE_HEIGHT, opening_m=None,
-                  starts_at_contact=False, close_width_m=None, ends_in_grip=False):
+                  starts_at_contact=False, close_width_m=None, ends_in_grip):
     """None when every segment of the joint route passes every rule, else the first typed refusal (with the segment).
     `leg`: "transit" | "insert" | "approach" (see the module).  `opening_m`: the gripper's raw opening along the
     route, None when unknown (the finger boxes then enclose the whole stroke).  ends_in_grip / close_width_m: the
     route ends where a Grip closes (a pick), to close_width_m raw (None: fully closed); its last stance is judged at
-    that width too (grasp_stance_refusal)."""
+    that width too (grasp_stance_refusal).  ends_in_grip is REQUIRED, like leg (lead 2026-11-20, r4 P2-1): a caller
+    states whether its route ends in a Grip."""
     if leg not in LEGS:
         raise ValueError(f"route_refusal: leg must be one of {LEGS}, not {leg!r}")
+    if not isinstance(ends_in_grip, bool):
+        raise ValueError(f"route_refusal: ends_in_grip must be true or false, not {ends_in_grip!r}")
     W = [np.asarray(w, float) for w in waypoints]
     if not W:
         return "ROUTE_EMPTY"
@@ -214,7 +218,7 @@ def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshol
         if not why:
             why = (camera_route_refusal(a, b, near_table_end=near_table_end and last, num_samples=n)
                    or held_part_route_refusal(a, b, held, num_samples=n))
-        if not why and last and (ends_in_grip or close_width_m is not None):
+        if not why and last and ends_in_grip:
             from primitives.shared.gripper_rules import grasp_stance_refusal
             why = grasp_stance_refusal(forward_kinematics(dh_params, b), close_width_m)
         if why:
