@@ -2001,6 +2001,9 @@ def run_verify_grasp(object_name, mode):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     parser = argparse.ArgumentParser(description='Reorient for Assembly (Fold Symmetry + 24-Cardinal with Intermediary)')
     parser.add_argument('--mode', type=str, required=True, choices=['sim', 'real'],
                        help='Mode: sim (reads from topic) or real (requires orientations)')

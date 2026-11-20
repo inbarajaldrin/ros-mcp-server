@@ -64,9 +64,36 @@ def candidate_routes(start, target, vias=()):
 
 
 def admissible_route(start, target, segment_refusal, vias=()):
-    """The admissible route of least total joint travel (ties: fewer segments), or (None, reasons).
+    """The admissible route of least total joint travel (ties: fewer segments, then generation order), or
+    (None, reasons).
 
-    segment_refusal(a, b, is_last) -> None or a typed reason."""
+    segment_refusal(a, b, is_last) -> None or a typed reason.  The candidates are ordered by that key first (no check
+    needed to compute it) and checked in that order; the first admissible one is the answer - the same route the
+    exhaustive search returns (N-1, w5b-tier2: with tier 2 admitting more routes, checking all of them took the
+    seed-48 u_orange reorient to 76 s on the cell PC)."""
+    keyed = []
+    for i, wps in enumerate(candidate_routes(start, target, vias)):
+        segs = list(zip(wps[:-1], wps[1:]))
+        travel = float(sum(np.sum(np.abs(b - a)) for a, b in segs))
+        keyed.append(((round(travel, 6), len(segs)), i, wps))
+    keyed.sort(key=lambda t: (t[0], t[1]))
+    reasons = []
+    for _key, _i, wps in keyed:
+        segs = list(zip(wps[:-1], wps[1:]))
+        why = None
+        for k, (a, b) in enumerate(segs):
+            why = segment_refusal(a, b, k == len(segs) - 1)
+            if why:
+                break
+        if why:
+            reasons.append(why)
+            continue
+        return wps, None
+    return None, reasons
+
+
+def admissible_route_exhaustive(start, target, segment_refusal, vias=()):
+    """The previous exhaustive search, kept for the equivalence test."""
     best, reasons = None, []
     for wps in candidate_routes(start, target, vias):
         segs = list(zip(wps[:-1], wps[1:]))

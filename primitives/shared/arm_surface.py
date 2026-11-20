@@ -227,6 +227,51 @@ def _link_of(label):
     return None
 
 
+CACHE_DIR = Path(os.environ.get("ARM_SURFACE_CACHE", Path.home() / ".cache" / "fmb-arm-surface"))
+
+
+def _cache_key(link):
+    """The disk cache's key for one link's bodies: the link's pinned mesh and every source file the bodies are derived
+    from (this module, collision's capsules, ik's DH).  Any change gives a new key: a stale cache cannot be read."""
+    h = hashlib.sha256()
+    h.update(link.encode())
+    h.update(MESH_SHA256[VISUAL_ORIGIN[link][1]].encode())
+    here = Path(__file__).resolve().parent
+    for f in ("arm_surface.py", "collision.py", "ik.py"):
+        h.update((here / f).read_bytes())
+    return h.hexdigest()[:32]
+
+
+def _load_link_cached(link):
+    """_load_link through a disk cache (N-1: the cold load is ~9 s per process on a4500, ~20 s on the cell PC).  Any
+    cache problem - missing, unreadable, inconsistent - falls back to the exact computation (and rewrites it)."""
+    import json as _json
+    path = CACHE_DIR / f"{link}-{_cache_key(link)}.npz"
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            labels = _json.loads(str(z["labels"]))
+            out = {}
+            for i, lab in enumerate(labels):
+                out[lab] = _Body(int(z[f"f{i}"]), z[f"s{i}"], float(z[f"g{i}"]), z[f"p{i}"])
+            if out:
+                return out
+    except Exception:                                            # noqa: BLE001 - recompute
+        pass
+    out = _load_link(link)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        arrays = {"labels": np.array(_json.dumps(list(out)))}
+        for i, (lab, bd) in enumerate(out.items()):
+            arrays.update({f"f{i}": np.array(bd.frame), f"s{i}": bd.samples, f"g{i}": np.array(bd.gap),
+                           f"p{i}": bd.pieces})
+        tmp = path.with_suffix(f".{os.getpid()}.tmp.npz")
+        np.savez(tmp, **arrays)
+        os.replace(tmp, path)
+    except Exception:                                            # noqa: BLE001 - a cache write never fails a check
+        pass
+    return out
+
+
 def _load_link(link):
     """{label: _Body} for the bins of one link (raises on any failure: the caller fails closed).  Pieces are assigned
     to bins at the proof's 20 mm level (a piece in several capsules goes to each) and then subdivided; a sub-piece
@@ -270,12 +315,46 @@ def body(label):
             return None
         if link not in _STATE["links"]:
             try:
-                _STATE["links"][link] = _load_link(link)
+                _STATE["links"][link] = _load_link_cached(link)
             except Exception as e:                                   # noqa: BLE001
                 _STATE["links"][link] = None
                 _STATE["error"] = f"{link}: {type(e).__name__}: {e}"
         bodies = _STATE["links"][link]
         return None if bodies is None else bodies.get(label)
+
+
+def state_token():
+    """What a memoized verdict depends on besides the joints (N-1 caches in collision / camera_up): the load state,
+    the mesh locations and the early-exit switch.  A test that resets or redirects any of them gets fresh answers."""
+    return (id(_STATE), str(VISUAL_DIR), id(_RG2), str(RG2_MESH), EARLY_EXIT)
+
+
+def preload_async():
+    """Load every pinned link's bodies in a daemon thread (N-1: the cold load is ~9 s per process on the cell PC),
+    overlapped with the caller's startup (grasp verify, ROS init, the first poses).  body() takes the same lock, so a
+    check that needs a link first waits for the load instead of loading it twice.  Returns the thread."""
+    import threading as _t
+
+    def load():
+        try:
+            available()                                          # hashes + the base
+            rg2_housing()                                        # the RG2 mesh (~14 MB OBJ)
+            for link in DH_FRAME:
+                with _LOCK:
+                    done = link in _STATE["links"]
+                if not done and _STATE.get("hashes"):
+                    with _LOCK:
+                        if link not in _STATE["links"]:
+                            try:
+                                _STATE["links"][link] = _load_link_cached(link)
+                            except Exception as e:               # noqa: BLE001 - fail closed, as body() does
+                                _STATE["links"][link] = None
+                                _STATE["error"] = f"{link}: {type(e).__name__}: {e}"
+        except Exception:                                        # noqa: BLE001 - a preload never raises
+            pass
+    th = _t.Thread(target=load, name="arm_surface_preload", daemon=True)
+    th.start()
+    return th
 
 
 def available():
@@ -292,6 +371,101 @@ def why_unavailable():
 def _world(body, frames):
     F = frames[body.frame]
     return body.samples @ F[:3, :3].T + F[:3, 3], body.pieces @ F[:3, :3].T + F[:3, 3]
+
+
+EARLY_EXIT = True          # N-1; tests turn it off to check the early verdict against the exact path
+
+
+class EarlyRefusal(float):
+    """A refusal decided before the exact pass (review w5-enclose r2 N-1): the value is min(sample-to-sample distance)
+    less the allowances, an UPPER estimate of the bound, already below the margin - so the exact bound is too.
+    Callers compare it like a float; its message must not call it a lower bound."""
+    early = True
+
+
+# The RG2's real housing (lead 2026-11-20, w5b-tier2): the cell's OnRobot mesh, pinned; tier 2 for UR vs "RG2 body".
+# Mounted as the cell mounts it: tool0 -> rg2_base_link rpy (0, 0, pi), xyz 0 (ur5e_with_rg2.launch.py defaults).
+# Below RG2_HOUSING_Z_MAX_M (tool frame) the mesh is housing only - the finger knuckles start at z 125.8 mm (rg2.urdf
+# joint origins); above it the box stays (the fingers move).  The mesh pokes up to 3.6 mm outside RG2_BODY_BOX in x/y
+# (and below its bottom face): the mesh, not the box, is used wherever it applies.
+RG2_MESH = Path(__file__).resolve().parents[2] / "compliant_insertion_studio" / "urdf" / "rg2" / "rg2.obj"
+RG2_MESH_SHA256 = "d420ca2022260a0584b608da60fa460e12c59a2b7eca9368928a9c85ddcf02cb"
+RG2_HOUSING_Z_MAX_M = 0.110
+RG2_ALLOWANCE_M = 0.0015          # declared, as a UR body's: OnRobot's mesh vs the real housing, and its mounting
+_RG2 = {}
+
+
+def _exact_min(P, tris, centres, radius):
+    """Exact min distance from each point P[i] to the triangles whose centre lies within radius[i] of it (the caller
+    proves the nearest triangle is among them), in chunks of points so memory stays bounded."""
+    tree = cKDTree(centres)
+    out = np.full(len(P), np.inf)
+    for s0 in range(0, len(P), 500):
+        Pc, rc = P[s0:s0 + 500], radius[s0:s0 + 500]
+        lists = tree.query_ball_point(Pc, r=rc)
+        ii = np.repeat(np.arange(len(Pc)), [len(x) for x in lists])
+        if not len(ii):
+            continue
+        jj = np.concatenate([np.asarray(x, int) for x in lists])
+        best = np.full(len(Pc), np.inf)
+        for k in range(0, len(ii), 100000):
+            d = point_triangle_distance(Pc[ii[k:k + 100000]], tris[jj[k:k + 100000]])
+            np.minimum.at(best, ii[k:k + 100000], d)
+        out[s0:s0 + 500] = best
+    return out
+
+
+def rg2_housing():
+    """(triangles (n, 3, 3) in the flange frame, centres, covering radius) of the RG2 housing below
+    RG2_HOUSING_Z_MAX_M, or None when the pinned mesh is missing or differs (fail closed: the box stays)."""
+    with _LOCK:
+        if "tri" not in _RG2:
+            try:
+                if hashlib.sha256(RG2_MESH.read_bytes()).hexdigest() != RG2_MESH_SHA256:
+                    raise ValueError(f"{RG2_MESH}: sha256 is not the pinned {RG2_MESH_SHA256[:12]}")
+                V, F = [], []
+                for line in open(RG2_MESH):
+                    if line.startswith("v "):
+                        V.append([float(x) for x in line.split()[1:4]])
+                    elif line.startswith("f "):
+                        F.append([int(t.split("/")[0]) - 1 for t in line.split()[1:4]])
+                T = (np.asarray(V) @ np.diag([-1.0, -1.0, 1.0]))[np.asarray(F)]      # rpy (0, 0, pi)
+                T = T[T[:, :, 2].max(axis=1) <= RG2_HOUSING_Z_MAX_M]
+                T = subdivide(T, EXACT_EDGE_M)                       # the OBJ has triangles ~100 mm across
+                c = T.mean(axis=1)
+                _RG2["tri"] = (T, c, float(np.linalg.norm(T - c[:, None, :], axis=2).max()))
+            except Exception as e:                                   # noqa: BLE001 - fail closed
+                _RG2["tri"] = None
+                _RG2["error"] = f"RG2 mesh: {type(e).__name__}: {e}"
+        return _RG2["tri"]
+
+
+def _rg2_lower_bound(L, gap, margin):
+    """Lower bound (m) on the distance from UR surface samples L (flange frame, covering radius gap) to the RG2: the
+    real housing mesh below RG2_HOUSING_Z_MAX_M and the box above it; allowances in.  None: mesh unavailable."""
+    from primitives.shared import collision as C
+    hz = rg2_housing()
+    if hz is None:
+        return None
+    T, cent, rho = hz
+    allow = ALLOWANCE_PER_BODY_M + RG2_ALLOWANCE_M
+    bc, bh = np.asarray(C.RG2_BODY_BOX[0], float), np.asarray(C.RG2_BODY_BOX[1], float)
+    lo = np.maximum(bc - bh, [-np.inf, -np.inf, RG2_HOUSING_Z_MAX_M])        # the box's finger zone only
+    hi = bc + bh
+    d_box = np.linalg.norm(np.maximum(np.maximum(lo - L, L - hi), 0.0), axis=1)
+    dc, _ = cKDTree(cent).query(L, k=1)                                       # d(sample, tri) >= dc - rho
+    lower_h = dc - rho
+    # a centroid lies on its triangle, so d(sample, housing) <= dc: the bound returned below is <= upper
+    upper = float(min(dc.min(), d_box.min())) - gap - allow
+    if EARLY_EXIT and upper < margin:
+        return EarlyRefusal(upper)
+    need = lower_h - gap - allow < margin
+    exact = np.full(len(L), np.inf)
+    if need.any():
+        # the nearest triangle's centre is within d + rho <= dc + rho of the sample (d <= dc: a centre is on its triangle)
+        exact[need] = _exact_min(L[need], T, cent, dc[need] + rho)
+    d_h = np.where(need, exact, lower_h)
+    return float(np.minimum(d_h, d_box).min()) - gap - allow
 
 
 def pair_lower_bound(la, lb, frames, capsule_of, margin):
@@ -311,6 +485,9 @@ def pair_lower_bound(la, lb, frames, capsule_of, margin):
         if other == "RG2 body":
             R6, p6 = frames[6][:3, :3], frames[6][:3, 3]
             L = (S - p6) @ R6
+            real = _rg2_lower_bound(L, surf.gap, margin)              # the real housing (w5b-tier2)
+            if real is not None:
+                return real
             d = np.linalg.norm(np.maximum(np.abs(L - np.asarray(C.RG2_BODY_BOX[0])) - np.asarray(C.RG2_BODY_BOX[1]), 0.0),
                                axis=1)
         elif other in capsule_of:
@@ -342,6 +519,12 @@ def pair_lower_bound(la, lb, frames, capsule_of, margin):
     cheap = float(dv.min()) - A.gap - Bb.gap - allow           # both sides sampled: both covering radii
     if cheap >= margin:
         return cheap
+    # early exit (N-1): lb's samples lie on its surface, so every exact distance below is <= dv and the bound this
+    # function would return is <= min(dv) - A.gap - allow.  Below the margin, the refusal is certain: skip the exact
+    # pass (it cost up to 4 s per call on a deep pair).
+    upper = float(dv.min()) - A.gap - allow
+    if EARLY_EXIT and upper < margin:
+        return EarlyRefusal(upper)
     # exact on lb's side for the samples of la that the cheap bound cannot clear
     need = dv - Bb.gap < margin + A.gap + allow
     P = SA[need]
@@ -360,6 +543,37 @@ def pair_lower_bound(la, lb, frames, capsule_of, margin):
     rest = dv[~need]
     exact_min = min(best, float(rest.min() - Bb.gap) if len(rest) else np.inf)
     return exact_min - A.gap - allow
+
+
+
+def mount_lower_bound(label, frames, W, w_gap, margin):
+    """Tier 2 of the camera-mount rule (lead 2026-11-20, w5b-tier2): a lower bound (m) on the distance between the
+    v3.1 mount / D415 and the UR5e's real surface inside the enclosing capsule `label`, allowances included; None when
+    tier 2 is unavailable (fail closed); an EarlyRefusal when the refusal is certain before the exact pass.
+    W: the mount boxes' face samples in the base frame (camera_geometry.mount_surface_tool, transformed), w_gap their
+    sampling gap.  Same method as pair_lower_bound: the UR side is the pinned mesh (samples, then exact pieces), the
+    mount side its sampled box faces (gap subtracted); allowances 2 x ALLOWANCE_PER_BODY_M, as for two UR bodies."""
+    surf = body(label)
+    if surf is None:
+        return None
+    allow = 2 * ALLOWANCE_PER_BODY_M
+    S, P = _world(surf, frames)
+    W = np.asarray(W, float)
+    if not len(S) or not len(W):
+        return None
+    dv, _ = cKDTree(S).query(W, k=1)
+    cheap = float(dv.min()) - surf.gap - w_gap - allow
+    if cheap >= margin:
+        return cheap
+    upper = float(dv.min()) - w_gap - allow          # the UR samples lie on its surface: the exact bound is <= this
+    if EARLY_EXIT and upper < margin:
+        return EarlyRefusal(upper)
+    need = dv - surf.gap < margin + w_gap + allow
+    # the UR sample nearest a point lies on some piece, whose centre is within dv + rho of the point
+    best = float(_exact_min(W[need], P, P.mean(axis=1), dv[need] + surf.rho).min()) if need.any() else np.inf
+    rest = dv[~need]
+    exact_min = min(best, float(rest.min() - surf.gap) if len(rest) else np.inf)
+    return exact_min - w_gap - allow
 
 
 def table_lower_bound(label, frames, table_z):

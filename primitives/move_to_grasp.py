@@ -2588,6 +2588,9 @@ class DirectObjectMove(Node):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Direct Object Movement Node')
     parser.add_argument('--topic', type=str, default=None, 

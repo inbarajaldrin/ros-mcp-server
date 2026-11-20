@@ -147,7 +147,23 @@ def camera_stance_refusal(T_flange, near_table=None, clearance_m=None):
 CAMERA_MOUNT_ARM_MARGIN_M = 0.010   # the self-collision check's 1 cm margin (collision.check_self_collision)
 
 
+_MOUNT_CACHE = {}
+
+
 def camera_mount_arm_refusal(joints):
+    """Memoized per joint vector (N-1, w5b-tier2): the trajectory checks (physical_self) and the camera route rule ask
+    about the same samples.  The key includes the tier-2 settings, so a test that swaps them gets a fresh answer."""
+    from primitives.shared import arm_surface
+    key = (tuple(float(x) for x in np.asarray(joints, float)), id(arm_surface.mount_lower_bound),
+           id(arm_surface.body), arm_surface.state_token())
+    if key not in _MOUNT_CACHE:
+        if len(_MOUNT_CACHE) > 20000:
+            _MOUNT_CACHE.clear()
+        _MOUNT_CACHE[key] = _camera_mount_arm_refusal(joints)
+    return _MOUNT_CACHE[key]
+
+
+def _camera_mount_arm_refusal(joints):
     """None, or a typed reason: the v3.1 mount/D415 (fitted CAD boxes, faces sampled at <= 5 mm, the sampling
     gap subtracted) within the margin of the arm: collision.PHYSICAL_LINK_CAPSULES (proven to enclose the UR5e's
     real surface, shoulder to wrist_1) and the base cylinder (lead ruling 2026-11-19: the DH capsules are a
@@ -177,12 +193,36 @@ def camera_mount_arm_refusal(joints):
         # the nearest surface sample, less the sampling gap: a lower bound on the true box-to-capsule clearance
         clearance = float(np.min(axis_distance(W, a, ab))) - gap - r
         if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-            return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from the {label} "
-                    f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
-    clearance = float(np.min(base_cylinder_distance(surface @ T[:3, :3].T + T[:3, 3]))) - gap
+            why = _mount_tier2(q, label, W, gap, clearance)
+            if why:
+                return why
+    Wall = surface @ T[:3, :3].T + T[:3, 3]
+    clearance = float(np.min(base_cylinder_distance(Wall))) - gap
     if clearance < CAMERA_MOUNT_ARM_MARGIN_M:
-        return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * clearance:.1f} mm from the base "
-                f"(needs {1000 * CAMERA_MOUNT_ARM_MARGIN_M:.0f})")
+        why = _mount_tier2(q, "base", Wall, gap, clearance)
+        if why:
+            return why
+    return None
+
+
+def _mount_tier2(q, label, W, gap, tier1_m):
+    """Tier 2 for one capsule the mount rule refused (lead 2026-11-20): None admits it (the mount's real faces clear
+    the UR5e's real surface in that capsule by the margin, allowances included); otherwise the typed refusal.  It is
+    only ever asked about what tier 1 refused, and it fails closed: no pinned meshes -> the tier-1 refusal stands."""
+    from primitives.shared import arm_surface
+    from primitives.shared.collision import dh_link_frames
+    m = CAMERA_MOUNT_ARM_MARGIN_M
+    d2 = arm_surface.mount_lower_bound(label, dh_link_frames(q), W, gap, m)
+    where = "the base" if label == "base" else f"the {label}"
+    if d2 is None:
+        return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 {1000 * tier1_m:.1f} mm from {where} (needs {1000 * m:.0f}; "
+                f"real-surface check unavailable: {arm_surface.why_unavailable()})")
+    if getattr(d2, "early", False):
+        return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 vs {where}: real surfaces < {1000 * m:.0f} mm apart (a surface "
+                f"sample pair at {1000 * d2:.1f} mm after allowances; capsule {1000 * tier1_m:.1f})")
+    if d2 < m:
+        return (f"CAMERA_MOUNT_ARM_COLLISION: mount/D415 vs {where}: real surfaces >= {1000 * d2:.1f} mm apart "
+                f"(capsule {1000 * tier1_m:.1f}; needs {1000 * m:.0f})")
     return None
 
 

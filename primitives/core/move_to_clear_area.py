@@ -1149,6 +1149,9 @@ def output_result(result):
 
 
 def main(args=None):
+    # the tier-2 meshes load in the background while this primitive starts up (N-1: ~9 s cold on the cell PC)
+    from primitives.shared import arm_surface as _arm_surface
+    _arm_surface.preload_async()
     parser = argparse.ArgumentParser(description='Move to clear space position')
     parser.add_argument('--move', action='store_true',
                        help='Move to target position keeping current EE orientation (default)')

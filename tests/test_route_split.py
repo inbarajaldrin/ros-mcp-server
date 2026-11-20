@@ -20,11 +20,20 @@ def rule(a, b, is_last):
     return camera_route_refusal(a, b, near_table_end=is_last)
 
 
-def test_r48e_reorient_has_no_admissible_route_against_the_real_surface():
-    """r48e's u_orange reorient (MuJoCo, flown there as a split) sweeps the v3.1 mount within 10 mm of the forearm's
-    enclosed real surface on the direct line and on every split and detour (w5-enclose): refused, typed."""
+def test_r48e_reorient_against_the_enclosing_capsules_and_the_real_mesh(monkeypatch):
+    """r48e's u_orange reorient (MuJoCo, flown there as a split).  Against the forearm's enclosing capsules the v3.1
+    mount comes within 10 mm on the direct line and on every split and detour (w5-enclose).  Against the real UR5e
+    mesh (the mount rule's tier 2, w5b-tier2) the direct line still refuses, but the split "arm first, then wrist_3"
+    clears: an independent exact measurement gives 13.6 mm (gap subtracted), 10.6 mm after the 3 mm allowances
+    (fmb-cell-lab mujoco/evidence/w5b-uorange-reorient-diagnosis).  Without the meshes: refused, as before."""
+    from primitives.shared import arm_surface
     why = camera_route_refusal(START, TARGET, near_table_end=True)
     assert why.startswith("CAMERA_MOUNT_ARM_COLLISION") and "forearm" in why
+    if arm_surface.available():
+        route, _ = admissible_route(START, TARGET, rule)
+        assert route is not None and len(route) == 3
+        assert np.allclose(route[1][5], START[5]) and np.allclose(route[1][:5], TARGET[:5])   # arm first, wrist_3 last
+    monkeypatch.setattr(arm_surface, "mount_lower_bound", lambda *a, **k: None)          # no meshes: fail closed
     route, reasons = admissible_route(START, TARGET, rule)
     assert route is None and reasons and all(r.startswith("CAMERA_MOUNT_ARM_COLLISION") for r in reasons)
 
@@ -188,3 +197,25 @@ def test_clear_area_in_between_stances_get_the_stance_rules():
     why = clear_area_segment_refusal(compact, compact, False, TABLE_COLLISION_MARGIN_SIDEWAYS, None)
     assert why is not None and why.startswith("ARM_STANCE_REFUSED")
     assert clear_area_segment_refusal(compact, compact, True, TABLE_COLLISION_MARGIN_SIDEWAYS, None) is None
+
+
+def test_ordered_search_returns_the_exhaustive_searchs_route():
+    """N-1 (w5b-tier2): checking candidates in key order and stopping at the first admissible gives the same route as
+    the exhaustive search, for many random admit/refuse patterns (incl. vias and ties)."""
+    from primitives.shared.route_split import admissible_route_exhaustive
+    rng = np.random.default_rng(11)
+    home = np.array([1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0])
+    for trial in range(200):
+        refused = {}
+
+        def rule(a, b, last, _r=refused, _p=rng.uniform(0.2, 0.97)):
+            k = (tuple(np.round(a, 6)), tuple(np.round(b, 6)))
+            if k not in _r:
+                _r[k] = rng.random() < _p
+            return "NO" if _r[k] else None
+        vias = (home,) if trial % 2 else ()
+        new, _ = admissible_route(START, TARGET, rule, vias)
+        old, _ = admissible_route_exhaustive(START, TARGET, rule, vias)
+        assert (new is None) == (old is None)
+        if new is not None:
+            assert len(new) == len(old) and all(np.allclose(x, y) for x, y in zip(new, old))

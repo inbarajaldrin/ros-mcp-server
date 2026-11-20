@@ -97,10 +97,13 @@ def test_mount_surface_sampling_bounds_the_true_box_distance():
     assert worst_corner_miss > 0.010                    # what the corner sampling could hide
 
 
-def test_mount_vs_arm_prefilter_matches_the_full_surface():
-    """The bounding-sphere prefilter only skips boxes that clear the margin: same verdict as every sample, against
-    the arm's enclosed surface (collision.PHYSICAL_LINK_CAPSULES) and the base cylinder."""
+def test_mount_vs_arm_prefilter_matches_the_full_surface(monkeypatch):
+    """Tier 1: the bounding-sphere prefilter only skips boxes that clear the margin: same verdict as every sample,
+    against the arm's enclosed surface (collision.PHYSICAL_LINK_CAPSULES) and the base cylinder.  Tier 2 (the real
+    mesh, w5b-tier2) is switched off for the comparison; with it on, it only ever admits what tier 1 refused."""
     import numpy as np
+    from primitives.shared import arm_surface
+    real_tier2 = arm_surface.mount_lower_bound
     from primitives.shared.camera_geometry import mount_surface_tool
     from primitives.shared.camera_up import CAMERA_MOUNT_ARM_MARGIN_M, camera_mount_arm_refusal
     from primitives.shared.collision import base_cylinder_distance, physical_link_capsules
@@ -119,7 +122,10 @@ def test_mount_vs_arm_prefilter_matches_the_full_surface():
             if float(np.min(np.linalg.norm(W - (a + t[:, None] * ab), axis=1))) - gap - r < CAMERA_MOUNT_ARM_MARGIN_M:
                 brute = True
                 break
+        monkeypatch.setattr(arm_surface, "mount_lower_bound", lambda *a, **k: None)      # tier 1 alone
         assert (camera_mount_arm_refusal(q) is not None) == brute
+        monkeypatch.setattr(arm_surface, "mount_lower_bound", real_tier2)
+        assert camera_mount_arm_refusal(q) is None or brute                      # tier 2 never adds a refusal
         refused += brute
     assert 0 < refused < 300
 

@@ -263,7 +263,25 @@ def physical_self_clearances(joint_angles):
     return out
 
 
+_PHYS_CACHE = {}
+
+
 def physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
+    """Memoized per joint vector and margin (N-1, w5b-tier2); the key includes the tier-2 settings and the mount
+    check (tests swap them)."""
+    from primitives.shared import arm_surface
+    from primitives.shared import camera_up
+    key = (tuple(float(x) for x in np.asarray(joint_angles, float)), float(margin), id(arm_surface.pair_lower_bound),
+           id(arm_surface.rg2_housing), id(arm_surface.mount_lower_bound), id(camera_up.camera_mount_arm_refusal),
+           id(arm_surface.body), arm_surface.state_token())
+    if key not in _PHYS_CACHE:
+        if len(_PHYS_CACHE) > 20000:
+            _PHYS_CACHE.clear()
+        _PHYS_CACHE[key] = _physical_self_collision_refusal(joint_angles, margin)
+    return _PHYS_CACHE[key]
+
+
+def _physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M):
     """None, or a typed reason: two physical bodies of the arm and gripper closer than the margin, or the camera
     mount/D415 within its margin of the arm (camera_up.camera_mount_arm_refusal).
 
@@ -282,6 +300,9 @@ def physical_self_collision_refusal(joint_angles, margin=PHYSICAL_SELF_MARGIN_M)
                 return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb} {1000 * d1:.1f} mm apart (needs {1000 * margin:.0f}; "
                         f"real-surface check unavailable: {arm_surface.why_unavailable()})")
             if d2 < margin:
+                if getattr(d2, "early", False):                   # decided before the exact pass (N-1)
+                    return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb}: real surfaces < {1000 * margin:.0f} mm apart "
+                            f"(a surface sample pair at {1000 * d2:.1f} mm after allowances; capsules {1000 * d1:.1f})")
                 return (f"PHYSICAL_SELF_COLLISION: {la} vs {lb}: real surfaces >= {1000 * d2:.1f} mm apart "
                         f"(capsules {1000 * d1:.1f}; needs {1000 * margin:.0f})")
     from primitives.shared.camera_up import camera_mount_arm_refusal
