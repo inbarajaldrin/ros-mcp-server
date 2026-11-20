@@ -1858,16 +1858,53 @@ def run_move_to_clear_area(object_name=None, mode=None, held_quat=None, grasp_id
     return run_subprocess(script_path, cmd_args)
 
 
-def run_move_down(mode=None, *, to_table=False, require_contact=False):
-    """Run move_down subprocess."""
+def run_move_down(mode=None, *, to_table=False, require_contact=False, height=None, max_speed_mm_s=None):
+    """Run move_down subprocess.  height / max_speed_mm_s: the sim insert's two phases only (move_down refuses the
+    speed cap in real mode); the real place-down's command is unchanged."""
     script_path = os.path.join(os.path.dirname(__file__), 'core', 'move_down.py')
     logger.info("Lowering object onto table")
     cmd_args = ['--mode', mode] if mode else []
+    if height is not None:
+        cmd_args += ['--height', f"{float(height):.5f}"]
     if to_table:
         cmd_args.append('--to-table')
     if require_contact:
         cmd_args.append('--require-contact')
+    if max_speed_mm_s is not None:
+        cmd_args += ['--max-speed-mm-s', f"{float(max_speed_mm_s):g}"]
     return run_subprocess(script_path, cmd_args, timeout=310)
+
+
+# The sim insert's approach (lead 2026-11-20, ruling A).  One full-speed descent to contact met the part at
+# 80-100 mm/s and the twin pressed 372-459 N before move_down's 102 ms median stopped it; the arm then rebounded ~1 mm
+# while holding (the u_orange 2 mm and u_brown 1.275 mm misses; w5b (d)).  The real cell never meets a part that fast:
+# touch_insert probes at <= 5 mm/s from 3 mm above the rim, and 70 mm/s into contact gave -75 N and a protective stop
+# (run 82d).  So the twin's insert does as the real one: normal speed to SIM_INSERT_APPROACH_ABOVE_M above the first
+# predicted contact (the base rim, or the seat if lower), then the descent to contact at SIM_INSERT_CONTACT_SPEED_MM_S.
+SIM_INSERT_APPROACH_ABOVE_M = 0.003
+SIM_INSERT_CONTACT_SPEED_MM_S = 5.0
+
+
+def _world_verts(T, verts_local):
+    T = np.asarray(T, float)
+    return (T[:3, :3] @ np.asarray(verts_local, float).T).T + T[:3, 3]
+
+
+def sim_insert_approach_flange_z(T_tcp, T_part, part_verts_local, obstacles, T_tcp_at_seat,
+                                 above=SIM_INSERT_APPROACH_ABOVE_M):
+    """Flange z SIM_INSERT_APPROACH_ABOVE_M above the first possible contact of the straight vertical descent, never
+    below the seat.  obstacles: (T_world, verts_local) of every other body (the base, the other parts) at its
+    ground-truth pose; one whose xy extent overlaps the held part's can be met at its top.  Conservative: the held
+    part's lowest point against the highest overlapping top."""
+    P = _world_verts(T_part, part_verts_local)
+    lo_xy, hi_xy, low = P[:, :2].min(axis=0), P[:, :2].max(axis=0), float(P[:, 2].min())
+    top = -np.inf
+    for T_obs, verts in obstacles:
+        Q = _world_verts(T_obs, verts)
+        if np.all(Q[:, :2].max(axis=0) >= lo_xy) and np.all(Q[:, :2].min(axis=0) <= hi_xy):
+            top = max(top, float(Q[:, 2].max()))
+    contact_flange_z = float(T_tcp[2, 3]) - (low - top) if np.isfinite(top) else -np.inf
+    return max(contact_flange_z, float(T_tcp_at_seat[2, 3])) + above
 
 
 # ---------------------------------------------------------------------------
@@ -2131,9 +2168,34 @@ def main():
                                 "Insert-chain commit: "
                                 + json.dumps(chain_evidence, sort_keys=True)
                             )
-                            # The regular insert descends to the physical table
-                            # floor and must stop earlier on base/part contact.
-                            insert_ok, insert_out = run_move_down(mode='sim', to_table=True, require_contact=True)
+                            # Ruling A (lead 2026-11-20): normal speed to 3 mm above the first predicted
+                            # contact, then to contact at the real probe speed (see SIM_INSERT_*).
+                            from compliant_insertion_studio.wrapper.cad_geometry import _load_obj_verts
+                            obstacles = [(T_base_gt, _load_obj_verts(args.base_name))]
+                            for other, tf in node.current_poses.items():
+                                if other in (args.object_name, args.base_name):
+                                    continue
+                                try:
+                                    obstacles.append((node.transform_to_matrix(tf.transform), _load_obj_verts(other)))
+                                except Exception:                    # not a CAD part (a marker board, a frame)
+                                    continue
+                            approach_z = sim_insert_approach_flange_z(
+                                T_tcp_gt, T_part_gt, _load_obj_verts(args.object_name), obstacles, T_required_tcp_gt)
+                            descent = {"approach_flange_z_m": round(approach_z, 5),
+                                       "approach_above_m": SIM_INSERT_APPROACH_ABOVE_M,
+                                       "contact_speed_mm_s": SIM_INSERT_CONTACT_SPEED_MM_S,
+                                       "seat_flange_z_m": round(float(T_required_tcp_gt[2, 3]), 5)}
+                            insert_ok, insert_out, contact = True, "", False
+                            if T_tcp_gt[2, 3] > approach_z + 0.001:
+                                insert_ok, insert_out = run_move_down(mode='sim', to_table=True, height=approach_z)
+                                contact = bool((extract_json_from_output(insert_out) or {}).get("contact"))
+                                descent["approach_contact"] = contact     # met something above the predicted rim
+                            if insert_ok and not contact:
+                                insert_ok, insert_out = run_move_down(
+                                    mode='sim', to_table=True, require_contact=True,
+                                    max_speed_mm_s=SIM_INSERT_CONTACT_SPEED_MM_S)
+                            node._sim_insert_descent = descent
+                            node.get_logger().info("Sim insert descent: " + json.dumps(descent, sort_keys=True))
                             if insert_ok:
                                 # Ruling A (lead, 2026-11-19): the seat is judged on the
                                 # part's FINAL pose, after the gripper opens and the arm
@@ -2247,6 +2309,8 @@ def main():
             result["error"] = error or (node.error_message if node else "Unknown error")
         if node is not None and getattr(node, "_sim_pre_release", None):
             result["pre_release"] = node._sim_pre_release
+        if node is not None and getattr(node, "_sim_insert_descent", None):
+            result["sim_insert_descent"] = node._sim_insert_descent
 
         output_result(result)
 

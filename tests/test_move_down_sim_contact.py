@@ -129,7 +129,9 @@ def test_only_the_insert_requires_contact_and_the_place_down_drop_is_bounded():
     assert "'--require-contact'" in source
     root = MOVE_DOWN.parents[2]
     translate = (root / "primitives/translate_object.py").read_text()
-    assert "run_move_down(mode='sim', to_table=True, require_contact=True)" in translate
+    # the insert's descent to contact still requires one (ruling A 2026-11-20: at the capped final-approach speed)
+    assert ("mode='sim', to_table=True, require_contact=True,\n"
+            "                                    max_speed_mm_s=SIM_INSERT_CONTACT_SPEED_MM_S)") in translate
     assert "['--drop', args.object_name]" in translate
     assert "'--held-quat', *[f\"{float(v):.6f}\" for v in args.current_object_orientation]" in translate
     scorer = (root / "ablations/sim_seat_scorer.py").read_text()

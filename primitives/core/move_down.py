@@ -87,6 +87,33 @@ SIM_CONTACT_MEDIAN_WINDOW_S = CONTACT_MEDIAN_N / REAL_WRENCH_HZ
 SIM_BASELINE_WINDOW_S = BASELINE_MEDIAN_N / REAL_WRENCH_HZ
 
 FORCE_CHECK_INTERVAL = 0.02  # Check force every 20ms during movement
+# >>> sim-only (ruling A, lead 2026-11-20)
+# A peak Cartesian speed cap for the sim insert's descent to contact.  The twin's insert met the part at 80-100 mm/s -
+# 20x any real contact approach (touch_insert probes at <= 5 mm/s) - and the 102 ms median stop let the arm press
+# 372-459 N and rebound ~1 mm (w5b (d), lab mujoco/evidence/w5b-contact-overshoot).  Refused in real mode; every
+# sim-only line of this file sits between these markers, and the rest is the reviewed real source byte for byte
+# (tests/test_sim_insert_approach.py).
+S_CURVE_PEAK_OVER_MEAN = 1.0 / (1.0 - 0.5 * 0.2 - 0.5 * 0.2)   # s_curve_profile's 20 % raised-cosine ramps
+
+
+def capped_duration(duration_s, distance_m, max_speed_m_s):
+    """The s-curve duration whose peak Cartesian speed is <= max_speed_m_s (never shorter than duration_s)."""
+    if max_speed_m_s is None:
+        return duration_s
+    return max(duration_s, S_CURVE_PEAK_OVER_MEAN * distance_m / max_speed_m_s)
+
+
+_SIM_MAX_SPEED_M_S = None
+
+
+def set_sim_speed_cap(mode, max_speed_mm_s):
+    """Sim only: cap this process's descent (read by _execute_move_down, which MoveDown's constructor already runs:
+    set it before constructing the node).  Raises in real mode."""
+    global _SIM_MAX_SPEED_M_S
+    if mode != 'sim':
+        raise ValueError("move_down: the speed cap is sim-only (the real descent is not changed from here)")
+    _SIM_MAX_SPEED_M_S = None if max_speed_mm_s is None else float(max_speed_mm_s) / 1000.0
+# <<< sim-only
 MOVE_DOWN_INCREMENT = 0.6  # Distance to move down per increment in meters
 MIN_WORKSPACE_Z = TABLE_HEIGHT  # Absolute minimum flange Z (workspace limit)
 # =============================================================================
@@ -837,6 +864,10 @@ class MoveDown(Node):
             total_duration = compute_duration(
                 joint_distance=joint_dist, cartesian_distance=distance_to_target, profile='s_curve'
             )
+            # >>> sim-only (ruling A, lead 2026-11-20)
+            if self.mode == 'sim' and _SIM_MAX_SPEED_M_S is not None:  # set only in sim (set_sim_speed_cap)
+                total_duration = capped_duration(total_duration, distance_to_target, _SIM_MAX_SPEED_M_S)
+            # <<< sim-only
             self.get_logger().info(f"Duration: {total_duration:.2f}s (cart={distance_to_target:.3f}m, joint={joint_dist:.2f}rad)")
 
             # Hard rule (lead, 2026-11-19): the descent's end pose keeps the camera off the table side and the
@@ -1017,6 +1048,10 @@ class MoveDown(Node):
                 "movement_type": movement_type
             }
 
+        # >>> sim-only (ruling A, lead 2026-11-20)
+        if self.mode == 'sim':
+            result["contact"] = bool(self.force_threshold_reached)     # the sim insert's two phases read it
+        # <<< sim-only
         output_result(result)
 
 
@@ -1046,8 +1081,21 @@ def main(args=None):
                        help='placing a held part: go down until it touches the table (face-down floor = '
                             'closed fingertips 1 mm above the table instead of the 80 mm margin)')
     
+    # >>> sim-only (ruling A, lead 2026-11-20)
+    parser.add_argument('--max-speed-mm-s', type=float, default=None,
+                        help='SIM ONLY: cap the descent\'s peak Cartesian speed (the sim insert\'s final approach); '
+                             'refused in real mode')
+    # <<< sim-only
     # Parse known args to avoid conflicts with ROS2
     known_args, unknown_args = parser.parse_known_args()
+    # >>> sim-only (ruling A, lead 2026-11-20)
+    if known_args.max_speed_mm_s is not None and known_args.mode != 'sim':
+        output_result({"result": "failure", "mode": known_args.mode, "movement_type": "move_down",
+                       "error": "--max-speed-mm-s is sim-only: the real descent is not changed from here"})
+        sys.exit(1)
+    if known_args.max_speed_mm_s is not None:
+        set_sim_speed_cap(known_args.mode, known_args.max_speed_mm_s)   # before the node: its constructor descends
+    # <<< sim-only
     
     init_ros(args=args)
     node = MoveDown(known_args.height, known_args.mode, to_table=known_args.to_table, opening_mm=known_args.opening_mm,
