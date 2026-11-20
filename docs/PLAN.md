@@ -155,6 +155,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
 - **R36 (2026-11-20 ~19:45Z, operator on WhatsApp)**: before the first real deploy, (1) a twin VIDEO of the board program on the real
   captured scene for him to gauge, and (2) a Codex review of the real-arm code run on his Mac (this PC's Codex budget may be spent).
   The pa_gripper_msgs rebuild needed no call from him (no motion, nothing running used it): done 11-20 by the lead, backup kept.
+- (lead, 2026-11-20 ~23:30Z) RELEASE CANDIDATE for the first real FMB1 run: lab fmb-cell-lab-w8 tag rc3b-fmb1-first-real (415a606) on
+  cell dev 629208a; record ~/Documents/w8-out/rc3/RC.md. Opus final review RC1 -> RC2 -> RC3b: VERDICT GO FOR SUPERVISED FIRST RUN
+  (fmb-cell-lead/out/review-rc1-final.md). Still gated on: the operator's go and presence; yellow >= 10 cm from base1 and the FMB3
+  pieces off the table; the R36 Codex review on his Mac (asleep); a re-capture + dry-real on the prepared table (no code change).
+  Run: u_brown only; stop only with stop_run.sh, e-stop in hand.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
