@@ -145,7 +145,8 @@ if [ "${FMB_EXPOSURE_KEEPER:-1}" = 0 ]; then
 elif pgrep -f "${EK}.py" >/dev/null; then
     ok "exposure keeper already running"
 else
-    nohup python3 "$REPO/compliant_insertion_studio/scripts/${EK}.py" >/tmp/${EK}.out 2>&1 &
+    # setsid: its own session, so it outlives the shell that ran stack_up (a plain nohup & was reaped once, 11-20)
+    setsid nohup python3 "$REPO/compliant_insertion_studio/scripts/${EK}.py" >/tmp/${EK}.out 2>&1 < /dev/null &
     ok "exposure keeper up (log /tmp/${EK}.log)"
 fi
 # The UR driver's control loop has no RT scheduling on this PC (no FIFO); with the localizer
