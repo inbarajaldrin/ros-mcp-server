@@ -3,7 +3,7 @@
 #
 #   bash compliant_insertion_studio/scripts/stack_up.sh
 #
-# Order matters and is enforced here: driver -> gripper -> camera -> grasp points.
+# Order matters and is enforced here: driver -> gripper -> camera -> grasp points -> seams servers.
 # Each stage is verified before the next starts, so a failure names the stage that
 # broke instead of surfacing three steps later as a mystery.
 #
@@ -55,7 +55,7 @@ echo "  stack_up — tree: $REPO"
 echo "════════════════════════════════════════════════════════════"
 
 # ---------------------------------------------------------------- 0. robot state
-step 0/5 "Robot power + pendant mode"
+step 0/6 "Robot power + pendant mode"
 timeout 3 ping -c1 "$ROBOT_IP" >/dev/null 2>&1 \
     || die "UR at $ROBOT_IP unreachable — check cables/network." 2
 if [ -f "$DASH" ]; then
@@ -70,7 +70,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 1. UR driver
-step 1/5 "UR driver (headless external control)"
+step 1/6 "UR driver (headless external control)"
 if timeout 8 ros2 control list_controllers 2>/dev/null | grep -q "scaled_joint_trajectory_controller.*active"; then
     ok "driver already up"
     # An earlier launch_robot.sh that timed out mid-bringup leaves the controllers
@@ -91,7 +91,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 2. gripper
-step 2/5 "OnRobot RG2 bridge"
+step 2/6 "OnRobot RG2 bridge"
 if timeout 5 ros2 topic list 2>/dev/null | grep -q "^/gripper_status$"; then
     ok "gripper bridge already up"
 else
@@ -111,7 +111,7 @@ case "$GS" in
 esac
 
 # ---------------------------------------------------------------- 3. camera
-step 3/5 "Camera (RealSense node + aruco localizer)"
+step 3/6 "Camera (RealSense node + aruco localizer)"
 # The RealSense node owns the D415 and publishes colour + depth aligned to colour (the seat
 # check and the disassembly's free-spot map need depth); the localizer reads its colour topic
 # instead of opening the device itself (2026-10-14).
@@ -167,7 +167,7 @@ done
 ok "camera stack at nice 10 (driver keeps priority)"
 
 # ---------------------------------------------------------------- 4. grasp points
-step 4/5 "Grasp-points publisher (from THIS tree)"
+step 4/6 "Grasp-points publisher (from THIS tree)"
 P=grasp_points
 if pgrep -f "python3.*${P}_publisher" >/dev/null 2>&1; then
     ok "grasp publisher already running"
@@ -183,8 +183,49 @@ else
     ok "grasp publisher up"
 fi
 
-# ---------------------------------------------------------------- 5. verify
-step 5/5 "Pre-flight"
+# ---------------------------------------------------------------- 5. seams servers
+# The ROS servers an FMB1 run goes through (seams/): vision (/vision/get_pose), grip (/ur5e/rg2/grip), drive-mate
+# (/ur5e/drive_mate, gated + latching) and execute-mate (/ur5e/execute_mate).  Each runs as its own systemd USER unit
+# (fmb-seams-<name>), outside this script's scope and outside any agent's cgroup, so a relay restart or a re-login of
+# this shell does not take them down.  They read the environment once, at start: restart them after changing
+# FMB_LAYOUT or the tree (stack_down stops them).
+step 5/6 "Seams servers (vision, grip, drive-mate, execute-mate)"
+for MOD in vision_server grip_adapter drive_mate_server execute_mate_server; do
+    UNIT="fmb-seams-${MOD//_/-}"
+    if systemctl --user is-active --quiet "$UNIT"; then
+        WD="$(systemctl --user show "$UNIT" -p WorkingDirectory --value 2>/dev/null)"
+        if [ "$WD" = "$REPO" ]; then
+            ok "$UNIT already running"
+        else
+            warn "$UNIT runs from $WD, not $REPO — stack_down first to run this tree's servers"
+        fi
+        continue
+    fi
+    systemctl --user reset-failed "$UNIT" >/dev/null 2>&1
+    systemd-run --user --quiet --collect --unit="$UNIT" --working-directory="$REPO" /usr/bin/bash -c \
+        "source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash; exec python3 -u -m seams.$MOD > /tmp/$MOD.log 2>&1" \
+        || die "could not start $UNIT" 7
+done
+for _ in $(seq 1 30); do
+    A="$(timeout 5 ros2 action list 2>/dev/null)"; S="$(timeout 5 ros2 service list 2>/dev/null)"
+    echo "$A" | grep -q "^/ur5e/drive_mate$" && echo "$A" | grep -q "^/ur5e/execute_mate$" \
+        && echo "$A" | grep -q "^/ur5e/rg2/grip$" && echo "$S" | grep -q "^/vision/get_pose$" && break
+    sleep 1
+done
+for NAME in /ur5e/drive_mate /ur5e/execute_mate /ur5e/rg2/grip; do
+    echo "$A" | grep -q "^$NAME$" || die "$NAME not served (see /tmp/*_server.log, /tmp/grip_adapter.log)" 7
+done
+echo "$S" | grep -q "^/vision/get_pose$" || die "/vision/get_pose not served (see /tmp/vision_server.log)" 7
+ok "seams served: /vision/get_pose /ur5e/rg2/grip /ur5e/drive_mate /ur5e/execute_mate"
+LATCH="$(cd "$REPO" && timeout 30 python3 -m seams.client latch 2>/dev/null | sed -n 's/^__SEAM__ //p' | tail -1)"
+case "$LATCH" in
+    *'"latched": false'*) ok "drive-mate latch: clear" ;;
+    *'"latched": true'*)  warn "drive-mate LATCHED: $LATCH — clear it deliberately (stop_run.sh, then reset_latch) before a run" ;;
+    *)                    warn "drive-mate latch unreadable: ${LATCH:-no answer}" ;;
+esac
+
+# ---------------------------------------------------------------- 6. verify
+step 6/6 "Pre-flight"
 FAIL=0
 # Read a few times: detection needs a moment to stabilise after the camera starts,
 # and a single early read undercounts (observed 3 frames when 5 were present).

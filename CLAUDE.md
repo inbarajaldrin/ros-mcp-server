@@ -19,7 +19,8 @@ is in `assets/cad_data/` (`$FMB_CAD_DATA` overrides), the UR dashboard client in
 and the ROS workspace is `$FMB_ROS_WS` (default `~/Desktop/ros2_ws`); nothing is read from `~/Documents` any more.
 
 Total ~1 minute. Sequence matters: driver → gripper → camera → grasp points.
-**One command does all of 1.1–1.5:** `bash compliant_insertion_studio/scripts/stack_up.sh`
+**One command does all of 1.1–1.5, and starts the four seams servers** (vision, grip, drive-mate, execute-mate, as
+user units `fmb-seams-*`; it reports the drive-mate latch): `bash compliant_insertion_studio/scripts/stack_up.sh`
 (no arm motion; `stack_down.sh` reverses it). The steps below are what it runs.
 
 **Cell PC (Dell OptiPlex 3060, i5-8500T)** differs from the A4500 these docs were written on:

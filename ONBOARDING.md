@@ -95,14 +95,11 @@ files; every pick fails with "Grasp point 1 not found").
    bash compliant_insertion_studio/scripts/stack_up.sh
    ```
    Read its last block. "camera sees only N frames" just means the camera is not looking at parts from where the arm is.
-3. **The seam servers** (FMB1 runs use them):
-   ```bash
-   source /opt/ros/humble/setup.bash && source $FMB_ROS_WS/install/setup.bash
-   for s in vision_server grip_adapter drive_mate_server execute_mate_server; do
-     nohup python3 -u -m seams.$s > /tmp/$s.log 2>&1 &
-   done
-   ```
-   They don't read your shell's environment after start: restart them if you change `FMB_LAYOUT` or other settings.
+3. **The seam servers** (FMB1 runs use them) are started by `stack_up.sh` (step 5): `vision_server`, `grip_adapter`,
+   `drive_mate_server` and `execute_mate_server`, each as a systemd user unit `fmb-seams-<name>` (logs in
+   `/tmp/<name>.log`), and it reports the drive-mate latch. `systemctl --user status 'fmb-seams-*'` shows them;
+   `stack_down.sh` stops them. They don't read your shell's environment after start: restart them (stack_down,
+   stack_up) if you change `FMB_LAYOUT` or other settings.
 4. **Look at the camera** before moving anything (it is the fastest way to catch a problem):
    ```bash
    python3 compliant_insertion_studio/scripts/mjpeg_view.py --bind 127.0.0.1 --port 8080 --fps 3 &
