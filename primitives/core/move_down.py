@@ -59,8 +59,9 @@ def floor_width_mm(opening_mm=None, close_width_mm=None, measured_mm=None):
 
 def to_table_floor_z(R_flange, opening_mm=None):
     """The face-down --to-table floor (flange z).
-    Without a width: the CLOSED fingertips (config's measured RG2_TIP_CLOSED_M) PLACE_TIP_CLEARANCE_M (1 mm) above the
-    table - dev's floor, unchanged.
+    Without a width: the LOWEST RG2 point over the whole stroke (rg2_geometry's finger boxes + housing / quick changer)
+    GRASP_TIP_CLEARANCE_M (2 mm) above the table in the ACTUAL orientation, never below the closed fingertips (config's
+    RG2_TIP_CLOSED_M) 1 mm above it - tilt-aware (lead 2026-11-20; vertical: 4.3 mm above dev's old floor).
     With a raw width (floor_width_mm's: the NARROWEST the jaws reach - the close width, never just the approach
     opening; fully closed when the measured width is missing): the flange z that puts the LOWEST point of the RG2 -
     rg2_geometry's finger boxes at that width plus the housing and quick-changer corners (gripper_rules'
@@ -72,10 +73,16 @@ def to_table_floor_z(R_flange, opening_mm=None):
     from primitives.shared.config import GRASP_TIP_CLEARANCE_M, rg2_tip_length_m
     R = np.asarray(R_flange, float)
     closed = TABLE_HEIGHT + PLACE_TIP_CLEARANCE_M - float((R @ np.array([0.0, 0.0, RG2_TIP_CLOSED_M]))[2])
-    if opening_mm is None:
-        return closed
-    raw = max(0.0, float(opening_mm))
     from primitives.shared.gripper_rules import gripper_points_tool
+    if opening_mm is None:
+        # no width (lead 2026-11-20, the tilted-descent hazard): the LOWEST RG2 point over the WHOLE stroke in the
+        # actual orientation, 2 mm clear; never below dev's closed-tip figure.  Tilt-aware: the closed-tip figure alone
+        # put the RG2 11-50 mm into the table at 20-60 deg.  The model unavailable: the closed-tip floor.
+        P = gripper_points_tool(None)
+        if P is None:
+            return closed
+        return max(closed, TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M - float((np.asarray(P, float) @ R[2, :]).min()))
+    raw = max(0.0, float(opening_mm))
     P = gripper_points_tool(raw / 1000.0)
     if P is None:
         return closed

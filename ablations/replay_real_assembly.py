@@ -2133,8 +2133,9 @@ def replay_object(entry: dict, state: AssemblyState, args: argparse.Namespace,
         from primitives.shared.config import (TABLE_HEIGHT, RG2_TIP_CLOSED_M, GRIPPER_CENTER_TOOL_OFFSET,
                                               TABLE_COLLISION_MARGIN_SIDEWAYS)
         Rm = R_.from_quat(ee_quat_xyzw).as_matrix()
-        if Rm[2, 2] < -0.5:      # face-down: closed fingertips 1 mm above the table
-            return TABLE_HEIGHT + 0.001 - (Rm @ np.array([0.0, 0.0, RG2_TIP_CLOSED_M]))[2]
+        if Rm[2, 2] < -0.5:      # face-down: move_down's own --to-table floor (no width: tilt-aware, whole stroke)
+            from primitives.core.move_down import to_table_floor_z
+            return float(to_table_floor_z(Rm))
         return TABLE_HEIGHT + TABLE_COLLISION_MARGIN_SIDEWAYS - (Rm @ GRIPPER_CENTER_TOOL_OFFSET)[2]
 
     def _clear_area_occupant(held):
