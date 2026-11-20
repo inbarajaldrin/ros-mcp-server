@@ -3,13 +3,20 @@
 The arm checks (collision.check_trajectory_collision) end at RG2_BODY_BOX (0.1436 m from the flange): the fingers out
 to ~0.23 m were in no route check (review r1 of w8-realpath-prereq, P1-2).  These are pure geometry, no ROS:
 
-- gripper_table_refusal: the gripper centre and every corner of both finger boxes stay GRASP_TIP_CLEARANCE_M (2 mm,
-  move_to_grasp's fingertip clearance) above the table.  A finger box (tool frame, opening w): x +-[w/2, w/2 + 20 mm]
-  (pad, link and cover), y +-10.1 mm (the pad's 20.2 mm width), z 0.14 m to the fingertip (rg2_tip_length_m(w)).
-  Opening unknown: both the closed fingers (the longest) and the widest opening (the widest) are judged.
+- gripper_table_refusal: every corner of both finger boxes stays GRASP_TIP_CLEARANCE_M (2 mm, move_to_grasp's
+  fingertip clearance) above the table.  A finger box (tool frame, opening w): x +-[w/2, w/2 + 20 mm] (pad, link and
+  cover), y +-10.1 mm (the pad's 20.2 mm width), z 0.14 m to the fingertip (rg2_tip_length_m(w)).  The nominal
+  gripper centre (0.2286 m) is not a material point: it lies 2.3 mm above the closed fingertips and in the empty
+  space between the jaws when they are open, so the finger boxes bound it.
+  Opening unknown (review r2 P1-B): the corners over OPENING_GRID_MM.  The fingertip depth is concave in the opening
+  (4-bar), so a tilted tool's lowest corner can sit at an intermediate opening (14.7 mm under the extremes at 45
+  deg).  A corner's height is linear in w/2 plus n_z * tip(w); sampled at step h it is under-read by at most
+  h^2 / 8 * max|tip''| over the step.  tip''(w) = -55 / 110^2 * (1 - u^2)^(-3/2) mm/mm^2, u = (w + 3.96) / 110:
+  0.13 /mm at 100 mm, steep only near the stroke's end, hence 1 mm steps to 100 mm and 0.1 mm steps to 110 mm;
+  tests/test_seqplan_rules.py holds the grid within 0.05 mm of 0.01 mm sampling over random orientations.
 - extended_gripper_refusal: rotate_object.check_extended_gripper_collision, the same numbers (the gripper centre below
   the table; the gripper centre inside the base column, r < 0.14 m below z 0.20 m; the flange -> gripper-centre
-  segment within 0.11 m of the upper arm).  tests/test_gripper_rules.py holds it to rotate_object's own method.
+  segment within 0.11 m of the upper arm).  tests/test_seqplan_rules.py holds it to rotate_object's own method.
 - orientation_refusal: rotate_object's EE-facing-robot (tool z . y > 0.5) and camera-toward--X (tool z . x < -0.5).
 """
 from __future__ import annotations
@@ -20,6 +27,7 @@ FINGER_THICK_M = 0.020
 FINGER_HALF_WIDTH_M = 0.0101
 FINGER_TOP_Z_M = 0.14
 RG2_OPEN_MAX_M = 0.110
+OPENING_GRID_MM = np.concatenate([np.arange(0.0, 100.0, 1.0), np.arange(100.0, 110.0 + 1e-9, 0.1)])
 
 
 def finger_boxes_tool(opening_m):
@@ -35,14 +43,18 @@ def _corners(lo, hi):
     return np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
 
 
+_GRID_POINTS = None
+
+
 def gripper_points_tool(opening_m=None):
-    """The gripper centre and the finger-box corners (tool0), at `opening_m`, or at both extremes when None."""
-    from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
-    widths = [0.0, RG2_OPEN_MAX_M] if opening_m is None else [float(opening_m)]
-    pts = [np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float)[None, :]]
-    for w in widths:
-        pts += [_corners(lo, hi) for lo, hi in finger_boxes_tool(w)]
-    return np.concatenate(pts)
+    """The finger-box corners (tool0) at `opening_m`, or over OPENING_GRID_MM when the opening is unknown."""
+    global _GRID_POINTS
+    if opening_m is not None:
+        return np.concatenate([_corners(lo, hi) for lo, hi in finger_boxes_tool(float(opening_m))])
+    if _GRID_POINTS is None:
+        _GRID_POINTS = np.concatenate([_corners(lo, hi) for w in OPENING_GRID_MM
+                                       for lo, hi in finger_boxes_tool(w / 1000.0)])
+    return _GRID_POINTS
 
 
 def gripper_table_refusal(T_flange, opening_m=None):

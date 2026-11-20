@@ -5,9 +5,10 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
 
 - per waypoint: every joint inside its hardware limit (JOINT_LIMITS_RAD), |wrist_3| <= WRIST3_LIMIT_RAD, and wrist_3
   inside the camera cable's CABLE_WINDOW_DEG (absolute joint value, never wrapped);
-- per segment, the travel caps: no joint more than one turn (held_part_collision.joint_travel_refusal), and
-  translate_object's insert-hover caps on EVERY leg: an arm joint (pan, shoulder, elbow) at most pi, wrist_3 at most
-  3.2 rad (TRAVEL_CAP_ARM_RAD / TRAVEL_CAP_WRIST3_RAD);
+- per segment, the travel caps: no joint more than one turn (held_part_collision.joint_travel_refusal), an arm joint
+  (pan, shoulder, elbow) at most pi in one segment (TRAVEL_CAP_ARM_RAD); on an "insert" leg, translate_object's own
+  insert-hover caps measured from the ROUTE's start, as it measures them (review r2 P1-A): joints 0-4 at most pi,
+  wrist_3 at most 3.2 rad (TRAVEL_CAP_WRIST3_RAD);
 - along each segment, sampled at most SAMPLE_STEP_RAD apart on any joint (both ends included):
   * collision.check_trajectory_collision: the arm against the table and itself (DH capsules, the two-tier physical
     arm + RG2 body, the camera mount vs the arm);
@@ -21,8 +22,10 @@ modules unchanged, at every sample of every segment, the route's LAST stance inc
   * "transit" (a joint route between hovers) and "insert" (the seat approach and descent): collision.
     check_ee_below_base and check_compact_configuration at EVERY sample, the last included (rotate_object checks
     every route-segment end, translate_object every insert waypoint);
-  * "approach" (a pick, place-down or lift leg near the table): not those two - a pick's flange is below the base's
-    height by design, as move_to_grasp and move_down fly it.
+  * "approach" (a pick, place-down or lift leg near the table): not those two, but only on a dense segment
+    (APPROACH_DENSE_STEP_RAD) with the gripper centre within APPROACH_NEAR_TABLE_M of the table (review r2 P2-B): a
+    pick's flange is below the base's height by design, as move_to_grasp and move_down fly it; anything else in a
+    leg labelled "approach" (a carry) is held to them as a transit is.
 The table threshold of each leg mirrors the primitive that flies it (z_threshold): move_to_clear_area and the
 place-down descent TABLE_HEIGHT - TABLE_COLLISION_MARGIN_*, every other primitive TABLE_HEIGHT.
 The camera's table floor is the real 30 mm (camera_up.CAMERA_CLEARANCE_M).
@@ -52,6 +55,8 @@ JOINT_LIMITS_RAD = (2 * np.pi, 2 * np.pi, np.pi, 2 * np.pi, 2 * np.pi, 2 * np.pi
 TRAVEL_CAP_ARM_RAD = np.pi               # translate_object.py's insert-hover caps (review r1 P1-4)
 TRAVEL_CAP_WRIST3_RAD = 3.2
 LEGS = ("transit", "insert", "approach")
+APPROACH_DENSE_STEP_RAD = 0.05
+APPROACH_NEAR_TABLE_M = 0.150
 
 
 def waypoint_refusal(w):
@@ -72,24 +77,37 @@ def waypoint_refusal(w):
 
 
 def travel_cap_refusal(a, b):
-    """translate_object's insert-hover caps, on every segment."""
+    """An arm joint (pan, shoulder, elbow) at most pi in one segment (every leg)."""
     d = np.abs(np.asarray(b, float) - np.asarray(a, float))
     for j in range(3):
         if d[j] > TRAVEL_CAP_ARM_RAD + 1e-9:
             return f"TRAVEL_CAP: joint {j} moves {np.degrees(d[j]):.0f} deg in one segment (cap 180)"
-    if d[5] > TRAVEL_CAP_WRIST3_RAD + 1e-9:
-        return f"TRAVEL_CAP: wrist_3 moves {d[5]:.2f} rad in one segment (cap {TRAVEL_CAP_WRIST3_RAD})"
     return None
 
 
-def stance_refusal(q, leg, opening_m=None):
+def insert_cap_refusal(start, w):
+    """translate_object's insert-hover caps from the route's start (translate_object.py: max(delta[:5]) > pi, wrist_3
+    > 3.2 rad, measured from the current stance to each waypoint)."""
+    d = np.abs(np.asarray(w, float) - np.asarray(start, float))
+    j = int(np.argmax(d[:5]))
+    if d[j] > TRAVEL_CAP_ARM_RAD + 1e-9:
+        return f"INSERT_TRAVEL_CAP: joint {j} {np.degrees(d[j]):.0f} deg from the insert's start (cap 180)"
+    if d[5] > TRAVEL_CAP_WRIST3_RAD + 1e-9:
+        return f"INSERT_TRAVEL_CAP: wrist_3 {d[5]:.2f} rad from the insert's start (cap {TRAVEL_CAP_WRIST3_RAD})"
+    return None
+
+
+def stance_refusal(q, leg, opening_m=None, dense_segment=False):
     """The rules every stance keeps (gripper vs table, extended gripper, orientation), plus EE-below-base and
-    compact for transit and insert legs."""
+    compact for transit and insert legs, and for approach legs away from the table or off a dense segment."""
+    from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET
     T = forward_kinematics(dh_params, np.asarray(q, float))
     why = gripper_table_refusal(T, opening_m) or extended_gripper_refusal(q) or orientation_refusal(T)
     if why:
         return why
-    if leg in ("transit", "insert"):
+    near = float((T[:3, :3] @ np.asarray(GRIPPER_CENTER_TOOL_OFFSET, float) + T[:3, 3])[2]) - TABLE_HEIGHT \
+        < APPROACH_NEAR_TABLE_M
+    if leg in ("transit", "insert") or not (dense_segment and near):
         if check_ee_below_base(q):
             return "EE_BELOW_BASE: the flange is below the base's height on a transit / insert leg"
         if check_compact_configuration(q):
@@ -120,11 +138,14 @@ def route_refusal(waypoints, *, leg, held=None, near_table_end=False, z_threshol
         last = i == len(W) - 2
         n = _samples(a, b)
         why = travel_cap_refusal(a, b) or joint_travel_refusal(a, b, prefix="ROUTE" if held is None else "HELD_ROUTE")
+        if not why and leg == "insert":
+            why = insert_cap_refusal(W[0], b)
+        dense = float(np.max(np.abs(b - a))) <= APPROACH_DENSE_STEP_RAD + 1e-12
         if not why and check_trajectory_collision(a, b, z_threshold=z_threshold, num_samples=n):
             why = "ARM_TABLE_OR_SELF_COLLISION"
         if not why:
             for k in range(n + 1):
-                why = stance_refusal(a + (k / n) * (b - a), leg, opening_m)
+                why = stance_refusal(a + (k / n) * (b - a), leg, opening_m, dense)
                 if why:
                     why = f"{why} (alpha={k / n:.3f})"
                     break
