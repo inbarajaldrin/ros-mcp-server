@@ -137,6 +137,17 @@ else
         || die "localizer did not start (see /tmp/aruco_logs/)" 5
     ok "localizer up"
 fi
+# Keep the colour image usable as the lights change: manual long exposure when the room goes dark, auto again when lit
+# (operator 2026-11-20, "automatic"). FMB_EXPOSURE_KEEPER=0 skips it.
+EK=exposure_keeper
+if [ "${FMB_EXPOSURE_KEEPER:-1}" = 0 ]; then
+    warn "exposure keeper skipped (FMB_EXPOSURE_KEEPER=0)"
+elif pgrep -f "${EK}.py" >/dev/null; then
+    ok "exposure keeper already running"
+else
+    nohup python3 "$REPO/compliant_insertion_studio/scripts/${EK}.py" >/tmp/${EK}.out 2>&1 &
+    ok "exposure keeper up (log /tmp/${EK}.log)"
+fi
 # The UR driver's control loop has no RT scheduling on this PC (no FIFO); with the localizer
 # (~165% CPU), the depth node and RViz loaded, it stalled and the robot dropped the external-
 # control program mid-run (2026-10-15, load 10.7 on 6 cores). Lower the camera stack's priority

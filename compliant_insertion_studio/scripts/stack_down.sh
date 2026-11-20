@@ -62,6 +62,11 @@ if pgrep -f "${A}_localizer" >/dev/null 2>&1; then
 else
     ok "not running"
 fi
+# The exposure keeper sets the camera's exposure; stop it before the camera goes.
+EK=exposure_keeper
+if pgrep -f "${EK}.py" >/dev/null 2>&1; then
+    pkill -SIGTERM -f "${EK}.py"; sleep 1; ok "exposure keeper stopped"
+fi
 # The RealSense node the localizer reads from (stack_up starts it separately). SIGINT so the
 # driver releases the D415; a device left claimed fails the next start.
 RS=realsense2
