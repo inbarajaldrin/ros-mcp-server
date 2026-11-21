@@ -216,6 +216,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   and nothing released (else a fresh staging-view read before the plan read); direct transits need both ends >= SAFE_Z - 5 mm;
   survey-only has no extra read. Lab suite 109 passed / 2 skipped. Dry-real 56 -> 46 legs, 95 -> 85 steps; twin -52.7 s
   (fewer-moves run). rc4c1 (009dfe2) is the fallback. The same live-table sequence and operator precondition apply.
+- (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
+  seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
+  the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
+  exact CAD (SEAT_CLEARANCE_M, pinned to its source); the rest of the RG2 and the camera keep 10 mm. Then re-run + nest re-review.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
