@@ -198,8 +198,12 @@ def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
         pytest.skip("the cell's RG2 mesh or finger links are not the pinned ones")
     V = np.array([[float(x) for x in l.split()[1:4]] for l in raw.decode().splitlines() if l.startswith("v ")])
     V = np.unique((V @ np.diag([-1.0, -1.0, 1.0])).round(7), axis=0)
-    fingers = np.vstack([t.reshape(-1, 3) for t in F.posed(F.model()[1]).values()])
-    is_finger = cKDTree(fingers).query(V)[0] < 1e-6
+    posed = F.posed(F.model()[1])
+    corr = np.array([0.0, 0.0, F.tip_correction_m()])
+    # the obj is the CAD: its finger vertices are the posed links with the measured fingertip correction undone
+    cad_fingers = np.vstack([(t - corr if ("finger" in n and "knuckle" not in n) else t).reshape(-1, 3)
+                             for n, t in posed.items()])
+    is_finger = cKDTree(cad_fingers).query(V)[0] < 1e-6
     housing, finger_v = V[~is_finger], V[is_finger]
     assert len(housing) > 1000 and len(finger_v) > 1000
     c, h = np.asarray(C.RG2_BODY_BOX[0]), np.asarray(C.RG2_BODY_BOX[1])
@@ -211,9 +215,11 @@ def test_the_rg2_tier1_shapes_enclose_the_pinned_rg2_mesh():
     outside = housing[~(in_box | in_qc)]
     assert len(outside) == 0, f"{len(outside)} housing vertices outside tier 1, e.g. {np.round(outside[:3] * 1000, 1)} mm"
     assert 0.1480 < housing[:, 2].max() <= c[2] + h[2]
-    inside = np.zeros(len(finger_v), bool)
+    # tier 1 must enclose the MODEL's finger links: the measured (corrected) fingertips and the uncorrected knuckles
+    model_v = np.vstack([t.reshape(-1, 3) for t in posed.values()])
+    inside = np.zeros(len(model_v), bool)
     for fc, fh in F.boxes(None).values():
-        inside |= np.all(np.abs(finger_v - fc) <= fh, axis=1)
+        inside |= np.all(np.abs(model_v - fc) <= fh, axis=1)
     assert inside.all()
 
 
