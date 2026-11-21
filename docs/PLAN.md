@@ -182,6 +182,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (fmb-cell-lead/out/review-rc4.md). P1: --only waived the off-surface flags for a relocated part, and the set-down at read height
   + 8 mm could drop it unbounded. P2: free fall and topple spacing, the depth margin narrower than the finger model, an ambiguous
   stop code after the pick, no end-to-end test. w8 is fixing these as rc4b; the same reviewer re-reviews the delta.
+  rc4b (5d6e734) re-review: NOT READY (out/review-rc4b.md). The code fixes hold, but the live localizer snaps tilt <= 10 deg and
+  z along the ray within 50 mm (filter_config.yaml, checked by the lead), so a slightly leaning or raised part reads as flat:
+  level_rest can't see it. For the first run (rc4c): the operator checks by eye that the parts to relocate rest flat and touch
+  nothing; --survey-only writes each part's depth top vs its CAD top. Queued: an in-program depth rest check. P2s: depth margin
+  15 mm around the footprint; open a held part only within ~10 mm of its release height.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
