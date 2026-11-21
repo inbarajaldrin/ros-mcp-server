@@ -247,6 +247,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   survey-only, prep-only, and every fail-closed stop with empty jaws); a stop holding a part stays put for its recovery. The lead
   homed the arm from the R39 survey's stop (move_home --joint-space, jaws empty; tool0 133/-492/488 mm). In rc5b.
   He also asked about the ~2 h: the time is checking (suite, review, live survey, twin video), not "pick from anywhere".
+- (lead, 2026-11-21 ~12:50 MST) rc5b = lab tag rc5b-fmb1-relocate (7aac13a) + cell branch w8-rg2-tip-measured (785a764, 6af2e27;
+  the fingertip model corrected to the measured 230.86 mm closed tip). Suites clean (lab 124 passed with -n 8 in 446 s; cell 102),
+  dry-reals: R39 u_orange success, R41 stage-all success (u_orange 282 mm, yellow 313 mm from base1), near-base u_brown stops at the
+  stand-up as expected; all end at home (R42). Opus review running (briefs/review-rc5b.md).
+  Stand-up ruling: port the cell's own leg-grasp reorient (with_regrasp: pick flat by the leg, rotate, place at the clear area with
+  the cell's guarded 5 N touchdown via move_cartesian --max-force 5, regrasp grasp 1 top-down) on branch w8-standup-leg -> rc6.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
