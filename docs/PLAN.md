@@ -207,6 +207,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   --survey-only (survey-rest-depth.json table planes, only in run_board's survey-only branch). Everything else is twin-only
   (twin_dh), dry-only (phantom, release drop) or tests. Lab suite 100 passed / 2 skipped; dry-reals unchanged. The rc4c GO carries
   over. Twin DH re-runs: all 12 hover reads 0.68-2.30 mm, so the panel's hover stops were the twin's nominal FK.
+- fewer-moves (w8-fewer-moves e851aa8): Opus review GO FOR SUPERVISED RUN (out/review-fewer-moves.md). Dry-real 56 -> 45 legs; twin
+  u_brown seated 53 s sooner. P2-1: the depth reuse only for the first relocation and < 60 s old; P3s (direct transits start/end at
+  SAFE_Z, fallback tests). Fixed as rc5-fmb1-relocate, the lead checks the delta, then it's offered to the operator with rc4c1 as the
+  fallback.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
