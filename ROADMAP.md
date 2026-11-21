@@ -16,14 +16,13 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
 ## P1 The cell in DroidStack (R1, R3)
 - [x] 1.1 Lab decided: private `~/Documents/fmb-cell-lab` on the cell PC, Isaac on dual-a4500, delivery vs adapters (PLAN.md D1, D2)
 - [x] 1.0 `droidstack init` the lab (lab commit 74888ca, `~/Documents/fmb-cell-lab`); machine paths: owed with the dual dispatch setup
-- [ ] 1.2 Robot: `robots/ur5e_rg2` copied from prompt-to-assembly (P47-1) with its NOTICE; `droidstack cell check` passes
-  (copied + local `cell check` valid for all four tasks under the certified engine 989cff8d9172, lab ddda149; LIVE check owed:
-  dual's admission is closed by a DroidStack supervisor bug (L7) until plan47's fix + re-prepare; a4500 re-prepare waits on its card)
-  11-20: dual admits again (engine 5a027edcfaac); the live cell run pose-u-brown is WORKLOAD_FAILED (exit 2 after 2.1 s, request
-  54a53d01456dfaa203b49cf98e691182), unreadable until plan47's step-evidence install; not retried.
-  11-21 on engine 3fd8948f16bf (step-evidence installed): pose-u-brown WORKLOAD_FAILED is now readable: ISAAC_ROS_RMW_UNDECLARED
-  (dual's ROS road exports no RMW_IMPLEMENTATION; the box's ROS probe certifies it as fastrtps). Box-side; sent to plan47.
-  Request 702aa533c10fad74b136ec4e676acc1e; lab w7-dual-live 0808020, lab-notes/receipts/2026-11-21-w7-dual-live/.
+- [x] 1.2 Robot: `robots/ur5e_rg2` copied from prompt-to-assembly (P47-1) with its NOTICE; `droidstack cell check` passes
+  DONE 11-21 (lab branch w7-dual-live 504bc81, lab-notes/receipts/2026-11-21b-w7-dual-live/README.md): live `cell run --adapter isaacsim`
+  on dual, engine 0be83ddad5f7 (ds-ros-rmw road, rmw_cyclonedds_cpp), all four pose tasks completed exit 0 on GPU0: pose-u-brown
+  b7be68db, pose-u-orange 7fbe09c3, pose-line-green a0547e6a, pose-inverted-u-yellow 85aba980 (Kit 18-23 s, ~5 GB RAM, recordings
+  sealed, Isaac install unchanged). Earlier blockers, all fixed by plan47: L7 admission, disk bound on staged inputs,
+  ISAAC_ROS_RMW_UNDECLARED (11-21, request 702aa533). Scope: cell lifecycle checks (compile, launch Kit + ROS bridge, record, stop);
+  no planner drove a pick.
 - [x] 1.3 The v3.1 mount + D415 body added to the robot copy's collision and visual geometry (R14), and the D415 declared as a
   camera stream on tool0 at the CAD transform, so the sim renders what the real camera sees and planning keeps the mount off the table
   DONE 11-20 (lab branch w7-dual-live 7599048, lab-notes/receipts/2026-11-20b-w7-dual-live/README.md): `collision model` on dual,
