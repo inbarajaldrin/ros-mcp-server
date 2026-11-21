@@ -258,6 +258,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   correction; finish_home trusts bookkeeping, not the gripper; R40 doesn't cover drive-mate (gate for insert runs). The fingertip
   correction, leg grasp, R40 coverage of planner moves, finish_home's signal/latch handling and the search were checked as correct.
   Fixes as rc5c (w8, before rc6).
+  rc5c = lab tag rc5c-fmb1-relocate (77fca13) + cell w8-rg2-tip-measured 93bd6d1: P1 fixed (prep-only always stops), tier-2
+  housing restored (cell 112 passed, 0 skipped), CELL_TIP_MODEL_UNCORRECTED start refusal, finish_home reads the gripper. Lab 133
+  passed (-n 8, 437 s). Re-review running.
+  rc6 stand-up: the sideways U can't reach a touchdown above R40/move_down's floor (the touch is at flange z -29.8 mm, the floor
+  ~0.0). The cell released ~31.8 mm up, which was October's -0.2 mm stop. Lead: R33 already rules it ("drop at move_down's floor,
+  12-30 mm, worked well"), so a declared drop, limit 37 mm (STANDUP_DROP_TOO_HIGH), the landing read + 2 passes decide.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
