@@ -178,6 +178,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   CORRECTED the same hour (lead): disassemble.py --relocate reads the part from a top-down hover, which the v3.1 D415 cannot see
   (memory d415-v31-view-limits), so it is out. w8 builds `run_board --relocate PART` plus relocate-then-assemble now, BEFORE the
   first run: twin run on the realscene-5 scene, then an Opus delta review (new motion), then rc4 flies with him present.
+  rc4 = lab tag rc4-fmb1-relocate (148552b), with --survey-only and a fail-closed depth free-spot check. Opus review: NOT READY
+  (fmb-cell-lead/out/review-rc4.md). P1: --only waived the off-surface flags for a relocated part, and the set-down at read height
+  + 8 mm could drop it unbounded. P2: free fall and topple spacing, the depth margin narrower than the finger model, an ambiguous
+  stop code after the pick, no end-to-end test. w8 is fixing these as rc4b; the same reviewer re-reviews the delta.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
