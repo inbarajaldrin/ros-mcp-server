@@ -170,6 +170,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   asked before any motion for: his presence with the e-stop; yellow at least 10 cm from base1 and the FMB3 pieces off (the D455 at
   17:41 showed neither done); the R36 Codex review waived for this supervised try or done first (lead recommends waiving for u_brown
   only, and doing it before the four-part run).
+- **R38 (2026-11-20 ~17:50 local, operator on WhatsApp)**: table prep is the robot's job, not his: "make sure you have all the
+  capabilities to do operations like this". We have recovered parts like this before, and even removed one part from on top of
+  another. Now: the old code's `disassemble.py --relocate inverted_u_yellow --grasp-id auto` (dry run first, spot shown to him), with
+  him present. FMB3 pieces stay unless the dry run shows a move near them. Queued after the first run (w8): the board program's own
+  pre-step moves any part within 10 cm of base1 out of the way before the assembly.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
