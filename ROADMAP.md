@@ -21,6 +21,9 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   dual's admission is closed by a DroidStack supervisor bug (L7) until plan47's fix + re-prepare; a4500 re-prepare waits on its card)
   11-20: dual admits again (engine 5a027edcfaac); the live cell run pose-u-brown is WORKLOAD_FAILED (exit 2 after 2.1 s, request
   54a53d01456dfaa203b49cf98e691182), unreadable until plan47's step-evidence install; not retried.
+  11-21 on engine 3fd8948f16bf (step-evidence installed): pose-u-brown WORKLOAD_FAILED is now readable: ISAAC_ROS_RMW_UNDECLARED
+  (dual's ROS road exports no RMW_IMPLEMENTATION; the box's ROS probe certifies it as fastrtps). Box-side; sent to plan47.
+  Request 702aa533c10fad74b136ec4e676acc1e; lab w7-dual-live 0808020, lab-notes/receipts/2026-11-21-w7-dual-live/.
 - [x] 1.3 The v3.1 mount + D415 body added to the robot copy's collision and visual geometry (R14), and the D415 declared as a
   camera stream on tool0 at the CAD transform, so the sim renders what the real camera sees and planning keeps the mount off the table
   DONE 11-20 (lab branch w7-dual-live 7599048, lab-notes/receipts/2026-11-20b-w7-dual-live/README.md): `collision model` on dual,
@@ -28,6 +31,8 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   none), whose 3 meshes match the mount USD (lower_saddle, upper_tower, d415_body); collision_probe.py sees rg2_base_link vs the table
   (home clear; first seed-47 hit 19.98 mm). Run from a slim sparse checkout of the same lab commit (all 264 files sha256-identical):
   dual's disk bound counts staged inputs as writes (plan47 fixing in ds-disk-bound-staged).
+  11-21: re-confirmed from the FULL lab tree on engine 3fd8948f16bf (request 8ac8cf354690b1a7d5fa09e82433b4e3, no disk-bound
+  refusal; the output is byte-identical to the 1.3 model, published_sha256 b16212c3 reproduced locally); lab w7-dual-live 0808020.
 - [ ] 1.4 Environment: robot base 0.080 m above the table top (R15), base1 placement and the cell's staging / clear regions
   (`realcell_env/MEASURED_CELL.yaml`, `primitives/shared/cell_layout.yaml`) (declared, base at 0.080 m checked by the lead; table size is
   the paper's, a typed gap)
