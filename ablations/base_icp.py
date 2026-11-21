@@ -164,7 +164,10 @@ def read_icp(base, ob, seated=(), n_points=8000, still_already=False, n_min=None
     if c is None:
         return None, {'error': 'no still depth capture'}
     d, K, tcp = c
-    d = d.astype(np.float32)[::2, ::2] / 1000.0; K = K.copy(); K[:2] /= 2.0
+    # the measured D415 depth correction (e611361, 11-18: raw = 1.0214 * true - 4.8 mm) - every depth reader goes through
+    # depth_to_m; this one did not, so every base fit sat ~4.5-5 mm low and the table-height gate refused it (2026-11-21)
+    from primitives.shared.config import depth_to_m
+    d = depth_to_m(d.astype(np.float32)[::2, ::2]).astype(np.float32); K = K.copy(); K[:2] /= 2.0
     vv, uu = np.nonzero(d > 0.1); z = d[vv, uu]
     Pc = np.c_[(uu - K[0, 2]) / K[0, 0] * z, (vv - K[1, 2]) / K[1, 1] * z, z]
     Tw = T(tcp[:3], tcp[3:]) @ X0
