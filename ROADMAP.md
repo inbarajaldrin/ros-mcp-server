@@ -68,6 +68,10 @@ Ticked only with evidence (a receipt path, run dir or commit). The next unblocke
   Config: cell w5-seqplan 9fa2978; lab model 7ae1e6a7 with island sleeping plus wake-after-detach (A/B vs sleep-off: same
   verdicts, seats within 0.01 mm; lab 5de5cfe); hand weld on the attach verdict; stamp-paired capture; 6 CPUs.
   LIMIT: perception is ground truth in the twin (no FOV gating yet); the second half (FOV-gated poses, paper2) is open.
+  11-21: attempt 10 re-run on the REAL DroidStack lane (plan47's landed weld with partial-open release, engine 3fd8948f16bf, lane
+  w5b-weld-seam-r2 c2aa45a9, no stand-in): 4/4 (0.079 / 0.076 / 0.105 / 0.146 mm), pacing valid (1.46 % missed), all 6 held
+  releases attested at partial widths; lab e454da7 mujoco/evidence/w5b-lane-a10/r2-a10/.
+  The board program's own twin runs (rc4c / rc5, FOV-gated reads with noise) are in w8-out/ (rc4c relocate + u_brown, fewer-moves).
 
 ## P3 Back on the real cell (done = R13: 3 hands-off certified FMB1 cycles in a row, untipped reset, v3.1 calibrated)
 - [x] 3.1 D415 plugged in (operator), stack up, raw frames at home and the base view (2026-11-18: lab
