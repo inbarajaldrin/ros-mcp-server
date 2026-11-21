@@ -279,6 +279,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   depth tops match CAD for the read parts (u_orange 21.6 vs 21.5 mm), homed (R42). The lights went off/on 14:39/14:53; the exposure
   keeper now returns to auto on one saturated frame (dev b8a4020). The eye-check precondition is replaced by the depth record plus
   photos: yellow stands alone where the robot set it down on 11-18.
+  rc5d (w8): survey-scene in the CAD frame (it had been written in the board frame; dry-reals only); KEEP_CLEAR emptied (operator: "there
+  is no calibration paper on the yellow part"; the 11-18 sheet is gone). Step (c) on the live readings: relocate_no_spot. The live
+  staging depth holds untracked objects: a ~160x180 mm hollow tray (FMB3 base3), a ~30 mm strip (pegs), and a >100 mm object (likely
+  the D455 table camera). Choice put to the operator: (A) clear them by hand, or (B) a new staging layout on depth-free table (lead
+  recommends B; w8 mapping the free table).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
