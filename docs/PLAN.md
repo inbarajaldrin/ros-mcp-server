@@ -234,6 +234,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   depth). The stand-up from the 70 mm grasp stays open. Yellow unseen: from the survey's 4 stances it sits in a blind area
   (x < -0.16 or the finger-hidden strip near the robot base); rc5b adds observing every missing part at every stance plus a
   coverage search (up to 3 aimed view hovers), fail-closed.
+  11-21 (operator: "Yellow is in the reorient stage where it was placed last by you"): yellow is at the clear area (-0.300,
+  -0.269), set down there on 11-18 16:25 by the lead's pick-reorient test (calib_bags/pickreorient_20261118_162509_inverted_u_yellow).
+  That's the blind zone. The lead had wrongly told the twin it stood behind base1. It's ~340 mm from base1, so R39 relocates
+  u_orange only. u_brown's stand-up needs the clear area: rc5b checks the set-down spot for parts and depth and stops by name
+  if it's occupied. No "real scene" twin video without a real survey read.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
