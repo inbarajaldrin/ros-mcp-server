@@ -264,6 +264,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   rc6 stand-up: the sideways U can't reach a touchdown above R40/move_down's floor (the touch is at flange z -29.8 mm, the floor
   ~0.0). The cell released ~31.8 mm up, which was October's -0.2 mm stop. Lead: R33 already rules it ("drop at move_down's floor,
   12-30 mm, worked well"), so a declared drop, limit 37 mm (STANDUP_DROP_TOO_HIGH), the landing read + 2 passes decide.
+- (lead, 2026-11-21 ~13:20 MST) RELEASE CANDIDATE rc5c: Opus re-review GO FOR SUPERVISED RUN (out/review-rc5c.md). The cell's
+  fingertip correction is merged into dev (1224b61; 75 affected tests pass); the seams services were restarted on it. Live script
+  ~/Documents/w8-out/rc5c/live/run.sh (survey | stage = --stage-all --prep-only) from the detached worktree
+  ~/Documents/fmb-cell-lab-rc5c. Open, insert runs only: R40 on drive-mate (P2-4). P3: finish_home's width units slip (fails safe).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
