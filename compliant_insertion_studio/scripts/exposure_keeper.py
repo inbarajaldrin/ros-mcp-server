@@ -24,6 +24,7 @@ import time
 DARK, LOW, HIGH, TARGET = 20.0, 50.0, 170.0, 90.0
 EXP_MIN, EXP_MAX = 156, 8000
 EXP_LIT = 1000   # manual exposure at or below this means the room is lit: auto exposure (gain 64) reads markers better
+SATURATED = 235.0  # a manual frame this bright: the lights are back on; return to auto on one sample
 GAIN_DARK, GAIN_LIT = 128, 64
 HOLD = 3
 PERIOD_S = 10.0   # lights change rarely; a 30 s reaction (HOLD samples) is enough
@@ -40,6 +41,10 @@ def decide(state, mean, exposure, streak):
                               'rgb_camera.exposure': EXP_MAX}, 0
         return 'auto', {}, streak
     # manual
+    if mean >= SATURATED:
+        # the lights came back on: the dark setting blows the frame out at once (2026-11-21 14:53: 254 / 253 / 243 while the
+        # keeper stepped the exposure down over 30 s and a survey read during it). One saturated sample is enough: back to auto.
+        return 'auto', {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': GAIN_LIT}, 0
     if (exposure <= EXP_LIT and mean >= LOW) or (exposure <= EXP_MIN and mean > HIGH):
         streak += 1
         if streak >= HOLD:

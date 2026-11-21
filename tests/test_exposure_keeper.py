@@ -28,11 +28,16 @@ def test_one_dark_frame_does_not_switch():
     assert state == 'auto' and all(not p for _, p in out)
 
 
-def test_lights_on_scales_exposure_down_then_returns_to_auto():
-    state, exposure, out = run('manual', K.EXP_MAX, [254] * 12)
+def test_lights_on_returns_to_auto_on_the_first_saturated_frame():
+    """2026-11-21 14:53: lights back on, the dark setting read 254 / 253 / 243 while the old rule stepped the exposure down."""
+    state, exposure, out = run('manual', K.EXP_MAX, [254])
     assert state == 'auto'
-    assert {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': K.GAIN_LIT} in [p for _, p in out]
-    assert exposure <= K.EXP_LIT          # back to auto once a short exposure suffices (lit room)
+    assert out[0][1] == {'rgb_camera.enable_auto_exposure': True, 'rgb_camera.gain': K.GAIN_LIT}
+
+
+def test_bright_but_not_saturated_manual_still_scales_down():
+    state, exposure, out = run('manual', K.EXP_MAX, [200])
+    assert state == 'manual' and exposure < K.EXP_MAX
 
 
 def test_manual_in_band_is_left_alone():
