@@ -229,6 +229,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   -0.2 mm (a horizontal set-down at the clear area; rc5 0.5 mm, the same move); lowest top-down 147.8 mm. rc5's flat-U grasp
   descends to 142.6 mm (judged at the on-part width; the cell's floor at the 64 mm close command is 144.9). Rule as rc5b: top-down
   tool0 >= 147.8 mm and the floor judged at the commanded close width; any pose >= -0.2 mm.
+  Under R40 the board's flat-U grasp (across 70 mm) fails the pads-hold rule (pad centre 5.1 mm ABOVE the part's top at 147.8).
+  Lead ruling: relocate a flat U with the cell's proven leg grasp (fmb1_assembly.json grasp_id 1, the cell's runtime grasp
+  depth). The stand-up from the 70 mm grasp stays open. Yellow unseen: from the survey's 4 stances it sits in a blind area
+  (x < -0.16 or the finger-hidden strip near the robot base); rc5b adds observing every missing part at every stance plus a
+  coverage search (up to 3 aimed view hovers), fail-closed.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
