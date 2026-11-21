@@ -253,6 +253,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   stand-up as expected; all end at home (R42). Opus review running (briefs/review-rc5b.md).
   Stand-up ruling: port the cell's own leg-grasp reorient (with_regrasp: pick flat by the leg, rotate, place at the clear area with
   the cell's guarded 5 N touchdown via move_cartesian --max-force 5, regrasp grasp 1 top-down) on branch w8-standup-leg -> rc6.
+  rc5b review: NOT READY (out/review-rc5b.md). P1: --prep-only fell through into the full assembly when nothing needed moving.
+  P2s: the tip correction disabled tier 2's RG2 housing (fails safe to the box); no run-time check that the cell tree has the
+  correction; finish_home trusts bookkeeping, not the gripper; R40 doesn't cover drive-mate (gate for insert runs). The fingertip
+  correction, leg grasp, R40 coverage of planner moves, finish_home's signal/latch handling and the search were checked as correct.
+  Fixes as rc5c (w8, before rc6).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
