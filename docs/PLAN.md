@@ -268,6 +268,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   fingertip correction is merged into dev (1224b61; 75 affected tests pass); the seams services were restarted on it. Live script
   ~/Documents/w8-out/rc5c/live/run.sh (survey | stage = --stage-all --prep-only) from the detached worktree
   ~/Documents/fmb-cell-lab-rc5c. Open, insert runs only: R40 on drive-mate (P2-4). P3: finish_home's width units slip (fails safe).
+- **R40 confirmed (2026-11-21 ~13:50 MST, operator in the terminal)**: "yes keep both": top-down tool0 >= 147.8 mm, and any other
+  pose (the sideways regrasp place-down at the clear area) >= -0.2 mm, both from the October motion logs (the sideways set-downs
+  bottomed at -0.2 / 2.6 mm, move_down's sideways floor ~0). The live page is back at https://s.robo-chain.dev/live/fmb1-cell-0dc845/
+  (user units fmb-live-page = mjpeg_view /annotated_stream + D455 + this session's transcript, fmb-live-tunnel = cloudflared; slug
+  re-set on the Mac with a login shell for npx).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
