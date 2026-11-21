@@ -289,6 +289,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   emptied; lab 138 passed). Free-table proposal R = x [0.22, 0.40], y [-0.57, -0.22] (all 4 FMB1 parts fit, spots >= 80 mm from the
   D455). Sent to the operator. Lead: rc5e makes untracked depth objects static obstacle boxes for the whole run, plus a 60 mm spot
   keep-away from boxes > 100 mm; a probe dry-real on R.
+  Probe dry-real on R (rc5d, live readings): relocate_no_spot. R is free table but too tight for the spot rules (u_brown stays in
+  R's middle; the yaws are relative to the read yaw; 20 mm grid). Even with every part lifted, only 2-3 of 4 fit. Correction sent to
+  the operator. Options: A move the D455 + square table off the old region (works with rc5d as is), or B packing-aware spot
+  choice (new code + review). Lead recommends A if someone can be at the cell.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
