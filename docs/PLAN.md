@@ -211,6 +211,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   u_brown seated 53 s sooner. P2-1: the depth reuse only for the first relocation and < 60 s old; P3s (direct transits start/end at
   SAFE_Z, fallback tests). Fixed as rc5-fmb1-relocate, the lead checks the delta, then it's offered to the operator with rc4c1 as the
   fallback.
+- (lead, 2026-11-21 ~05:45 local) RELEASE CANDIDATE rc5 = lab tag rc5-fmb1-relocate (c427da8, branch w8-fewer-moves), cell dev
+  629208a; record ~/Documents/w8-out/rc5/RC.md. The delta e851aa8..c427da8 was checked by the lead: survey depth reused once, < 60 s
+  and nothing released (else a fresh staging-view read before the plan read); direct transits need both ends >= SAFE_Z - 5 mm;
+  survey-only has no extra read. Lab suite 109 passed / 2 skipped. Dry-real 56 -> 46 legs, 95 -> 85 steps; twin -52.7 s
+  (fewer-moves run). rc4c1 (009dfe2) is the fallback. The same live-table sequence and operator precondition apply.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
