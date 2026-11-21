@@ -160,6 +160,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (fmb-cell-lead/out/review-rc1-final.md). Still gated on: the operator's go and presence; yellow >= 10 cm from base1 and the FMB3
   pieces off the table; the R36 Codex review on his Mac (asleep); a re-capture + dry-real on the prepared table (no code change).
   Run: u_brown only; stop only with stop_run.sh, e-stop in hand.
+- (lead, 2026-11-20 late) RC3c REPLACES RC3b: lab tag rc3c-fmb1-first-real (d4d9468), same cell dev 629208a. The 9-layout physics panel
+  stopped every run at step 1: the startup opened the jaws with width_max (110 mm raw), which grip_adapter refuses (> OPEN_M + 5 mm)
+  and control_gripper rejects (0-100 mm). On the real arm RC3b would have homed, then stopped at home (grip_open_failed; safe, nothing
+  held). Fix: the startup commands OPEN_M (0.100 m), and the jaws are still modelled at width_max. The test is pinned to
+  grip_adapter's OPEN_M. Delta reviewed by the lead: GO (one planner line plus twin-only --noise-view). DryIO accepted any width, which
+  hid this; w8 is adding the adapter's band to DryIO. The other gates above are unchanged.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
