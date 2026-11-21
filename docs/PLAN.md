@@ -166,6 +166,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   held). Fix: the startup commands OPEN_M (0.100 m), and the jaws are still modelled at width_max. The test is pinned to
   grip_adapter's OPEN_M. Delta reviewed by the lead: GO (one planner line plus twin-only --noise-view). DryIO accepted any width, which
   hid this; w8 is adding the adapter's band to DryIO. The other gates above are unchanged.
+- **R37 (2026-11-20 ~17:40 local, operator on WhatsApp)**: "Okay let's try u brown then", a go for the RC3c u_brown run. The lead
+  asked before any motion for: his presence with the e-stop; yellow at least 10 cm from base1 and the FMB3 pieces off (the D455 at
+  17:41 showed neither done); the R36 Codex review waived for this supervised try or done first (lead recommends waiving for u_brown
+  only, and doing it before the four-part run).
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
