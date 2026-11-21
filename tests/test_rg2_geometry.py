@@ -17,9 +17,25 @@ def test_the_links_at_the_modelled_opening_are_the_pinned_obj():
     assert hashlib.sha256(raw).hexdigest() == F.RG2_OBJ_SHA256
     V = np.array([[float(x) for x in l.split()[1:4]] for l in raw.decode().splitlines() if l.startswith("v ")])
     tree = cKDTree(np.unique((V @ np.diag([-1.0, -1.0, 1.0])).round(7), axis=0))     # the obj, tool0 frame
+    corr = F.tip_correction_m()
     for name, T in F.posed(F.model()[1]).items():
+        if "finger" in name and "knuckle" not in name:
+            T = T - np.array([0.0, 0.0, corr])        # the pinned obj is the CAD; the model carries the measured tip
         d, _ = tree.query(T.reshape(-1, 3))
         assert d.max() < 1e-6, name
+
+
+def test_the_closed_fingertip_is_the_measured_one():
+    """Lead ruling 2026-11-21: the closed tips at flange - 230.86 mm (config.RG2_TIP_CLOSED_M, measured on the cell);
+    the meshes were 2.70 mm deeper at every width."""
+    from primitives.shared.config import RG2_TIP_CLOSED_M, rg2_tip_length_m
+    assert abs(F.tip_correction_m() + 0.00270) < 0.0001
+    for gap_mm in (0.0, 15.0, 21.0, 42.7, 71.8):
+        L = F.posed(F.alpha_of_raw((gap_mm + 9.2) / 1000.0))
+        deep = max(float(X[..., 2].max()) for n, X in L.items())
+        assert abs(deep - rg2_tip_length_m(gap_mm)) < 0.0002, gap_mm
+    closed = F.posed(F.ALPHA_MIN)
+    assert abs(max(float(X[..., 2].max()) for X in closed.values()) - RG2_TIP_CLOSED_M) < 1e-6
 
 
 def test_the_outer_knuckle_carries_the_finger_pivot():

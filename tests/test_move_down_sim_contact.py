@@ -262,7 +262,10 @@ def test_the_floor_with_a_width_is_never_below_move_to_grasps_floor():
             gap = max(0.0, raw - md.RAW_MINUS_GAP_MM)
             mtg = TABLE_HEIGHT + GRASP_TIP_CLEARANCE_M + down * rg2_tip_length_m(gap)    # move_to_grasp's floor
             worst = min(worst, md.to_table_floor_z(Rm, raw) - mtg)
-    assert worst >= 0.00233 - 1e-6, worst
+    # never below move_to_grasp's floor (what this protects).  The r4 reviewer's 2.33 mm margin was the visual meshes'
+    # unmeasured 2.70 mm of extra fingertip (less the boxes' padding); with the measured fingertip (rg2_geometry,
+    # 230.86 mm closed) the exact floor sits the boxes' sampling padding (~0.6 mm) above config's.
+    assert worst >= -1e-6, worst
 
 
 def test_a_missing_width_is_never_below_devs_closed_tip_floor():

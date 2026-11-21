@@ -120,9 +120,26 @@ def model():
                     T = _stl(path) @ _rz(yaw).T + np.asarray(xyz)
                     links[name] = T
                 A_l = np.asarray(LINK_ORIGIN["lo_knuckle"][0]); P_l = np.asarray(LINK_ORIGIN["l_finger"][0])
+                # MEASURED fingertip (lead ruling 2026-11-21): the closed fingertips touched base1's top at flange -
+                # 230.86 mm on the cell (config.RG2_TIP_CLOSED_M, 386e31e, 2026-10-14).  The visual meshes put the closed
+                # tip 2.70 mm deeper (233.56), a constant at every width (config's width-aware rg2_tip_length_m minus
+                # the meshes: 2.70 mm at 0 / 15 / 21 / 42.7 / 71.8 mm gap).  The two finger links (tip blocks) are
+                # moved up by that measured amount, so every rule built on this model (the boxes, gripper_rules, the
+                # floor, the contact and scene checks) has the measured fingertip.  Computed here from the pinned
+                # meshes and the measurement, never typed.  The knuckles and housing are unchanged (unmeasured).
+                alpha0_ = math.atan2(abs(P_l[0] - A_l[0]), P_l[2] - A_l[2])
                 # the URDF's distal pivot is 54.994 mm from A (Rg2Arc: 55.0): the finger moves on the URDF's own arc
-                # so the knuckle and the finger stay rigidly coupled; the arc model's 55 mm sets the width only
+                # so the knuckle and the finger stay rigidly coupled; the arc model's 55 mm sets the width only (set
+                # before the correction's posing, which reads it)
                 _STATE["link_r"] = float(np.hypot(P_l[0] - A_l[0], P_l[2] - A_l[2]))
+                closed = _pose_points({n: links[n] for n in ("l_finger", "r_finger")},
+                                      ARC_ALPHA_ZERO_RAD + ARC_THETA_CLOSED_RAD, alpha0_)
+                deep = max(float(X[..., 2].max()) for X in closed.values())
+                from primitives.shared.config import RG2_TIP_CLOSED_M
+                corr = RG2_TIP_CLOSED_M - deep
+                for n in ("l_finger", "r_finger"):
+                    links[n] = links[n] + np.array([0.0, 0.0, corr])     # rg2_base_link z = flange z (rpy 0 0 pi)
+                _STATE["tip_correction_m"] = corr
                 alpha0 = math.atan2(abs(P_l[0] - A_l[0]), P_l[2] - A_l[2])
                 radius = {}
                 for name, T in links.items():
@@ -141,6 +158,12 @@ def model():
 def why_unavailable():
     model()
     return _STATE.get("error")
+
+
+def tip_correction_m():
+    """The measured fingertip correction applied to the finger links (m, along the flange z; negative = up)."""
+    model()
+    return _STATE.get("tip_correction_m")
 
 
 def _rot_xz(V, pivot, phi):

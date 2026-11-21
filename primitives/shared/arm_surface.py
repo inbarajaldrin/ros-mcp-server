@@ -449,7 +449,11 @@ def rg2_housing():
                 F.append([int(t.split("/")[0]) - 1 for t in line.split()[1:4]])
         V = np.asarray(V) @ np.diag([-1.0, -1.0, 1.0])                  # rpy (0, 0, pi)
         F = np.asarray(F)
-        fingers = np.vstack([t.reshape(-1, 3) for t in RF.posed(RF.model()[1]).values()])
+        # the OBJ is the CAD: its fingertip links match the posed links with the measured correction undone
+        # (rg2_geometry moves l_finger / r_finger by tip_correction_m; review rc5b P2-1)
+        corr = np.array([0.0, 0.0, RF.tip_correction_m() if hasattr(RF, "tip_correction_m") else 0.0])
+        fingers = np.vstack([(t - corr if ("finger" in n and "knuckle" not in n) else t).reshape(-1, 3)
+                             for n, t in RF.posed(RF.model()[1]).items()])
         d, _ = cKDTree(fingers).query(V)
         finger_tri = (d[F] < 1e-6).all(axis=1)
         if int(finger_tri.sum()) != RG2_FINGER_TRIANGLES:
