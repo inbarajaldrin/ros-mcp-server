@@ -133,7 +133,20 @@ def _rg2_pair(q):
     return A.pair_lower_bound("forearm 1/8", "RG2 body", frames, capsule_of, 0.010)
 
 
-needs_rg2 = pytest.mark.skipif(A.rg2_housing() is None, reason="the cell's RG2 mesh is not the pinned one")
+def _rg2_pinned():
+    import hashlib
+    return A.RG2_MESH.exists() and hashlib.sha256(A.RG2_MESH.read_bytes()).hexdigest() == A.RG2_MESH_SHA256
+
+
+# review rc5b P2-1: skip only when the pinned mesh is absent; with the pinned mesh, a housing that does not load FAILS
+needs_rg2 = pytest.mark.skipif(not _rg2_pinned(), reason="the cell's RG2 mesh is not the pinned one")
+
+
+@pytest.mark.skipif(not _rg2_pinned(), reason="the cell's RG2 mesh is not the pinned one")
+def test_the_pinned_rg2_mesh_gives_tier_2_its_housing():
+    hz = A.rg2_housing()
+    assert hz is not None, A._RG2.get("error")
+    assert len(hz[0]) > 40000                       # dev loaded 48 895 housing triangles (subdivided)
 
 
 @needs_rg2

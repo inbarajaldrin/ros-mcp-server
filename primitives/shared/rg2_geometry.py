@@ -128,6 +128,9 @@ def model():
                 # floor, the contact and scene checks) has the measured fingertip.  Computed here from the pinned
                 # meshes and the measurement, never typed.  The knuckles and housing are unchanged (unmeasured).
                 alpha0_ = math.atan2(abs(P_l[0] - A_l[0]), P_l[2] - A_l[2])
+                # the URDF's distal pivot is 54.994 mm from A (Rg2Arc: 55.0): the finger moves on the URDF's own arc
+                # so the knuckle and the finger stay rigidly coupled; the arc model's 55 mm sets the width only (set
+                # before the correction's posing, which reads it)
                 _STATE["link_r"] = float(np.hypot(P_l[0] - A_l[0], P_l[2] - A_l[2]))
                 closed = _pose_points({n: links[n] for n in ("l_finger", "r_finger")},
                                       ARC_ALPHA_ZERO_RAD + ARC_THETA_CLOSED_RAD, alpha0_)
@@ -137,9 +140,6 @@ def model():
                 for n in ("l_finger", "r_finger"):
                     links[n] = links[n] + np.array([0.0, 0.0, corr])     # rg2_base_link z = flange z (rpy 0 0 pi)
                 _STATE["tip_correction_m"] = corr
-                # the URDF's distal pivot is 54.994 mm from A (Rg2Arc: 55.0): the finger moves on the URDF's own arc
-                # so the knuckle and the finger stay rigidly coupled; the arc model's 55 mm sets the width only
-                _STATE["link_r"] = float(np.hypot(P_l[0] - A_l[0], P_l[2] - A_l[2]))
                 alpha0 = math.atan2(abs(P_l[0] - A_l[0]), P_l[2] - A_l[2])
                 radius = {}
                 for name, T in links.items():
