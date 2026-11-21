@@ -220,6 +220,15 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   of the scene": rc5 relocate u_orange + yellow only (no u_brown insert), photos after. Lead asked whether he or someone is at the
   cell with the e-stop (R35's supervised first run) and for his eye check of yellow's lean. Run from a clean detached worktree
   ~/Documents/fmb-cell-lab-rc5 via ~/Documents/w8-out/rc5/live/run.sh (survey -> dry-real on a4500 by w8 -> relocate).
+  11-21 ~07:50 he said "Yea go ahead". The rc5 survey ran on the real cell (homing, 3 views, no contact) and stopped fail-closed,
+  unobservable_at_start: (1) base1's depth CAD fit was -4.5 mm off the table height. ablations/base_icp.read_icp skipped
+  config.depth_to_m (the 11-18 D415 correction). Fixed, dev fef912f (raw -67.0 -> corrected -61.9 vs -62.5, same frame). (2) Yellow
+  was not seen from any view; w8 is investigating. Log ~/Documents/w8-out/rc5/live/survey.log.
+- **R40 (2026-11-21 ~08:00 local, operator on WhatsApp)**: "confirm if the tool0 ee position doesn't go below the max allowed
+  limit of the runs we did when the real cell was running". Lead's check over 547 October real-run motion logs: lowest overall
+  -0.2 mm (a horizontal set-down at the clear area; rc5 0.5 mm, the same move); lowest top-down 147.8 mm. rc5's flat-U grasp
+  descends to 142.6 mm (judged at the on-part width; the cell's floor at the 64 mm close command is 144.9). Rule as rc5b: top-down
+  tool0 >= 147.8 mm and the floor judged at the commanded close width; any pose >= -0.2 mm.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
