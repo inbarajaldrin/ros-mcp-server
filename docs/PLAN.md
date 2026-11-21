@@ -239,6 +239,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   That's the blind zone. The lead had wrongly told the twin it stood behind base1. It's ~340 mm from base1, so R39 relocates
   u_orange only. u_brown's stand-up needs the clear area: rc5b checks the set-down spot for parts and depth and stops by name
   if it's occupied. No "real scene" twin video without a real survey read.
+- **R41 (2026-11-21 ~08:45 local, operator on WhatsApp)**: "that's why i said we set the objects up in staging area before
+  assembling": the arrangement puts EVERY part in the staging region before assembly, not only the near-base ones. rc5b: a part
+  outside the staging region or within 100 mm of base1 is relocated to a free, readable staging spot. Today u_orange and yellow
+  move; u_brown and line_green stay. Assembly starts from the staging region every time.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
