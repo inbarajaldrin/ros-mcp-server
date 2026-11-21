@@ -198,6 +198,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (w8, dry-reals with a phantom DryIO mode, dual ~/w8-dry/phantom). Seated u_brown slides ~3.5 mm, not 28. Not a gate. Open: the
   table_z question: closed. Live robot_config.yaml table_z -0.080 = cell TABLE_HEIGHT -0.080 (-0.0825/-0.0805 were a .py default
   and a stale docstring); the first survey records the depth plane anyway.
+- (2026-11-21 ~03:00 local, operator on WhatsApp) "Why is there so many movements from home to move to grasp without grasping".
+  Lead's answer: the reads need aimed view hovers (v3.1), and there are three wastes: the pick hover -> view hover -> pick hover
+  round trip, a duplicate pick-hover leg for yellow, and a depth trip to the staging view per relocation. Cuts on branch
+  w8-fewer-moves (review before flying). Lead recommends flying u_brown on the reviewed rc4c1 first; asked him.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
