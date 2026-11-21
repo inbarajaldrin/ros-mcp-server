@@ -298,6 +298,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   unreadable; lab 146 passed. The live map has 13 boxes, incl. the D455 (195 mm), the square table, and an UNKNOWN 193 mm object at
   base1's -x edge (-17, -463) mm, asked of the operator. With the boxes, R fits 3 of 4 at best, so the lead now recommends A firmly.
   Opus review of rc5e running.
+  rc5e review: NOT READY (out/review-rc5e.md). P1: box tops are capped by the D415's near limit (~0.41 m, i.e. 0.17-0.21 m above the
+  table at the region hovers), so the D455 and box 2 may be taller than mapped. P2s: the survey's forced flight is unchecked against
+  pre-survey rules and boxes; one p99 per box hides a post; pre-survey legs vs the D455; box 6 = depth 45 mm at u_orange's corner (the
+  CAD top is 20.8; a lean or a prop); clear-area coverage. Fixes as rc5f (w8): a clipped box reaches up to SAFE_Z, a per-cell envelope,
+  a persisted map for pre-survey legs, a part-rest depth check refusing the pick, 95 % coverage. Lead still recommends someone at the
+  cell (A + check u_orange + identify box 2).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
