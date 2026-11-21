@@ -193,6 +193,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   operator's by-eye check that u_orange and yellow rest flat and touch nothing, plus the YAML snap grep and mtime check -> (d)
   --relocate-near-base --only u_brown. Gated on: his presence with the e-stop; the R36 Codex review (asked to waive for this try).
   Supersedes RC3c.
+  11-21: phantom audit (review-nest-rule P1: the live localizer slides parts within 50 mm of table rest along the ray, seated
+  parts included). For rc4c's u_brown run, no motion decision uses a seated read; worst case the safe `unobservable` stop
+  (w8, dry-reals with a phantom DryIO mode, dual ~/w8-dry/phantom). Seated u_brown slides ~3.5 mm, not 28. Not a gate. Open: the
+  localizer's table_z (-0.0825) vs the cell's TABLE_HEIGHT (-0.0805); the first survey's depth plane decides which is right.
 - **plan47 rulings** (DroidStack coordinator, 2026-11-18 ~20:3xZ, ref bbef00; facts from DroidStack platform dev f1748570):
   - P47-1: COPY `robots/ur5e_rg2` (composite + binding + NOTICE-OnRobot.md) from prompt-to-assembly into our lab; don't re-onboard.
     The OnRobot meshes are research-use only and ruled out of any public release, so the lab stays PRIVATE.
