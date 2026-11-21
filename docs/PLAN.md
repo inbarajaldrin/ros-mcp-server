@@ -216,6 +216,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   and nothing released (else a fresh staging-view read before the plan read); direct transits need both ends >= SAFE_Z - 5 mm;
   survey-only has no extra read. Lab suite 109 passed / 2 skipped. Dry-real 56 -> 46 legs, 95 -> 85 steps; twin -52.7 s
   (fewer-moves run). rc4c1 (009dfe2) is the fallback. The same live-table sequence and operator precondition apply.
+- **R39 (2026-11-21 ~07:50 local, operator on WhatsApp)**: "Okay let's do the arrangement in the real robot and then send me photos
+  of the scene": rc5 relocate u_orange + yellow only (no u_brown insert), photos after. Lead asked whether he or someone is at the
+  cell with the e-stop (R35's supervised first run) and for his eye check of yellow's lean. Run from a clean detached worktree
+  ~/Documents/fmb-cell-lab-rc5 via ~/Documents/w8-out/rc5/live/run.sh (survey -> dry-real on a4500 by w8 -> relocate).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
