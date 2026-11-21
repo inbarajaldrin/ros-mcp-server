@@ -273,6 +273,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   bottomed at -0.2 / 2.6 mm, move_down's sideways floor ~0). The live page is back at https://s.robo-chain.dev/live/fmb1-cell-0dc845/
   (user units fmb-live-page = mjpeg_view /annotated_stream + D455 + this session's transcript, fmb-live-tunnel = cloudflared; slug
   re-set on the Mac with a login shell for npx).
+- **R43 (2026-11-21 ~14:45 MST, operator in the terminal)**: "okay lets start the work im not at the cell but that is the point of
+  these reviews": reviewed code (rc5c) runs on the real cell without him present. The live page and stop_run.sh are the watch.
+  The rc5c survey ran 14:49-14:57: all 5 parts read (yellow at the clear area (-306, -279) mm, upright, found by search view 2), the
+  depth tops match CAD for the read parts (u_orange 21.6 vs 21.5 mm), homed (R42). The lights went off/on 14:39/14:53; the exposure
+  keeper now returns to auto on one saturated frame (dev b8a4020). The eye-check precondition is replaced by the depth record plus
+  photos: yellow stands alone where the robot set it down on 11-18.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
