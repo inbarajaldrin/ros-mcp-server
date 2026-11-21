@@ -284,6 +284,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   staging depth holds untracked objects: a ~160x180 mm hollow tray (FMB3 base3), a ~30 mm strip (pegs), and a >100 mm object (likely
   the D455 table camera). Choice put to the operator: (A) clear them by hand, or (B) a new staging layout on depth-free table (lead
   recommends B; w8 mapping the free table).
+  Correction (operator 11-21): the untracked objects are the furniture-bench SQUARE TABLE (top + legs), not FMB3. The >100 mm object
+  is the D455 table camera (150-184 mm, x 0.40-0.45, y -0.53 to -0.45). rc5d tagged (df9205c: the survey frame fix, KEEP_CLEAR
+  emptied; lab 138 passed). Free-table proposal R = x [0.22, 0.40], y [-0.57, -0.22] (all 4 FMB1 parts fit, spots >= 80 mm from the
+  D455). Sent to the operator. Lead: rc5e makes untracked depth objects static obstacle boxes for the whole run, plus a 60 mm spot
+  keep-away from boxes > 100 mm; a probe dry-real on R.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
