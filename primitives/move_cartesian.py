@@ -166,6 +166,12 @@ def plan_move(n, xyz, orient=('keep', None), max_force=None, min_duration=0.0, m
     why = camera_path_refusal(T0, wps)
     if why:
         out["error"] = why; return out
+    from primitives.shared import tool0_floor as _r40
+    if _r40.enforced():                                  # R40 on the commanded path, before anything is sent
+        why = _r40.path_refusal([forward_kinematics(dh_params, q) for q in wps], 'waypoint')
+        if why:
+            _r40.log_refusal(why, 'move_cartesian refused')
+            out.update(error=why, refusal=_r40.CODE); return out
     step = float(np.max(dq))                                           # the duration still follows the largest joint
     dur = (float(duration) if duration is not None
            else max(compute_duration(joint_distance=step, cartesian_distance=dist, profile='s_curve'), min_duration))

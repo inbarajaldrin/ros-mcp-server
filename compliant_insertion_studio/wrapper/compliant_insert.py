@@ -1619,6 +1619,23 @@ def run_active(ep: CompliantInsertEpisode) -> str:
             "quat_xyzw": [_q.x, _q.y, _q.z, _q.w],
         })
 
+    # R40 (drive-mate sets the env): force mode has no position target and UR force mode no position limit, so the
+    # planned seat is checked here before force mode starts, and the live tool0 pose every tick below.
+    from primitives.shared import tool0_floor as _r40
+    r40_on = _r40.enforced()
+    if r40_on:
+        if predicted_tcp_z_at_seat is None or ep.tcp is None or not ep.target_xyz:
+            why = f"{_r40.CODE}: the planned seat pose is not known (no CAD seat prediction / TCP pose) - not checkable"
+        else:
+            _q = ep.tcp.pose.orientation
+            why = _r40.r40_refusal(_r40.pose_matrix(
+                (ep.target_xyz[0], ep.target_xyz[1], float(predicted_tcp_z_at_seat)), (_q.x, _q.y, _q.z, _q.w)))
+        if why:
+            _r40.log_refusal(why, 'compliant_insert: predicted seat, force mode not started')
+            ep.get_logger().error(f"{why} (predicted seat) - force mode not started")
+            ep.meta.set_outcome(s.OUTCOME_ABORT, why[:120])
+            return s.PHASE_ABORT
+
     sel_vec = _parse_selection(ep.args.selection)
     if not ep._start_force_mode(sel_vec):
         ep.meta.set_outcome(s.OUTCOME_ABORT, "start_force_mode_failed")
@@ -1644,6 +1661,17 @@ def run_active(ep: CompliantInsertEpisode) -> str:
 
     while True:
         rclpy.spin_once(ep, timeout_sec=0.005)
+
+        # R40 z-floor guard on the live tool0 pose (a software watchdog at this loop's rate, not a controller limit:
+        # the arm can pass the floor by up to lin_speed x one tick before force mode is stopped by run_abort)
+        if r40_on and ep.tcp is not None:
+            _p, _q = ep.tcp.pose.position, ep.tcp.pose.orientation
+            why = _r40.r40_refusal(_r40.pose_matrix((_p.x, _p.y, _p.z), (_q.x, _q.y, _q.z, _q.w)))
+            if why:
+                _r40.log_refusal(why, 'compliant_insert: live tool0 in force mode, aborting')
+                ep.get_logger().error(f"{why} (live, force mode) - abort")
+                ep.meta.set_outcome(s.OUTCOME_ABORT, why[:120])
+                return s.PHASE_ABORT
 
         # Signal-driven outcome
         if ep.outcome_signal == "success":

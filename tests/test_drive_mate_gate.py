@@ -26,6 +26,15 @@ import seams.drive_mate_server as dms  # noqa: E402
 from ablations import cell_io  # noqa: E402
 
 RESTORED = (True, "restored")
+
+
+def _top_down(z, tilt_deg=0.0):
+    """tool0 pointing down (tilted tilt_deg about base x) at height z."""
+    from scipy.spatial.transform import Rotation as R
+    T = np.eye(4)
+    T[:3, :3] = (R.from_euler("x", tilt_deg, degrees=True) * R.from_euler("x", 180, degrees=True)).as_matrix()
+    T[:3, 3] = [0.03, -0.45, z]
+    return T
 LEFT_SWITCHED = (False, "scaled_joint_trajectory_controller inactive; force_mode_controller active")
 
 
@@ -57,7 +66,8 @@ class _GH:
 def rig(monkeypatch, tmp_path):
     """A server built without Node.__init__, and the world it sees: rc / output of the insert, the controllers, the
     robot's safety status; every dashboard stop and every insert start recorded."""
-    world = NS(rc=0, text="", controllers=RESTORED, safety="NORMAL", stops=[], starts=[], children=[])
+    world = NS(rc=0, text="", controllers=RESTORED, safety="NORMAL", stops=[], starts=[], children=[], envs=[],
+               seat=_top_down(0.1829))                   # the predicted seat tool0: October's lowest insert (u_brown)
     srv = object.__new__(dms.DriveMateServer)
     srv.program_running = True
     srv.tcp = NS(position=NS(x=0.03, y=-0.45, z=0.2), orientation=NS(x=1.0, y=0.0, z=0.0, w=0.0))
@@ -70,6 +80,7 @@ def rig(monkeypatch, tmp_path):
     monkeypatch.setattr(dms, "resolve", lambda m: (("u_brown", "base1"), ""))
     monkeypatch.setattr(dms, "grasp_from_held", lambda o, p, q: (11, 0.2, 0.0))
     monkeypatch.setattr(dms, "vision_pose", lambda *a, **k: None)
+    monkeypatch.setattr(dms, "predicted_seat_tool0", lambda *a: world.seat)
     monkeypatch.setattr(dms, "LOGS", tmp_path)
 
     class _Msg:
@@ -86,6 +97,7 @@ def rig(monkeypatch, tmp_path):
         """Each start takes the next (rc, text) from world.children, else world.rc / world.text."""
         def __init__(self, argv, cwd=None, env=None, stdout=None, stderr=None, start_new_session=False):
             world.starts.append(argv)
+            world.envs.append(env)
             rc, text = world.children.pop(0) if world.children else (world.rc, world.text)
             stdout.write(text)
             stdout.flush()
@@ -463,3 +475,55 @@ def test_an_unwritable_state_dir_refuses_the_run_and_a_failed_write_is_loud(monk
     a = dms.InsertLatch()
     a.trip("x")
     assert a.reason == "x" and a.write_error and "NOT written" in capsys.readouterr().err
+
+
+# ---- R40, the tool0 floor (review P2-4) -------------------------------------------------------------------------------
+def test_r40_a_seat_under_the_floor_is_refused_before_any_motion(rig):
+    srv, world = rig
+    world.seat = _top_down(0.1470)                        # top-down, under 147.8 mm
+    res, gh = _run(srv)
+    assert res.refusal.startswith("R40_TOOL0_FLOOR: tool0 z 147.0 mm < 147.8 mm") and "predicted seat" in res.refusal
+    assert gh.ended == "aborted" and world.starts == [] and world.stops == [] and srv.latch.reason is None
+
+
+def test_r40_octobers_lowest_insert_passes_and_the_children_enforce_the_floor(rig):
+    srv, world = rig
+    world.text = _result_text({"result": "success"})
+    res, gh = _run(srv)
+    assert res.refusal == "" and gh.ended == "succeeded" and len(world.starts) == 1
+    assert world.envs[0]["R40_TOOL0_FLOOR"] == "1"
+
+
+def test_r40_an_unpredictable_seat_is_refused_before_any_motion(rig, monkeypatch):
+    srv, world = rig
+    monkeypatch.setattr(dms, "predicted_seat_tool0", lambda *a: (_ for _ in ()).throw(FileNotFoundError("no CAD")))
+    res, gh = _run(srv)
+    assert res.refusal.startswith("R40_TOOL0_FLOOR: the seat pose is not predictable") and world.starts == []
+
+
+def test_r40_refuses_before_the_align_starts(aligning):
+    srv, world = aligning
+    world.seat = _top_down(0.1000)
+    res, gh = _run(srv)
+    assert res.refusal.startswith("R40_TOOL0_FLOOR") and world.starts == [] and gh.ended == "aborted"
+
+
+def test_r40_a_move_the_align_refused_stops_the_goal_before_the_insert(aligning):
+    srv, world = aligning
+    line = "[R40] move_cartesian refused: R40_TOOL0_FLOOR: tool0 z 140.0 mm < 147.8 mm (top-down) at waypoint 30/30"
+    world.children = [(1, line + "\n" + _align_text(error="hover not reached"))]
+    res, gh = _run(srv)
+    assert res.refusal == line[line.index("R40_TOOL0_FLOOR"):] and gh.ended == "aborted"
+    assert len(world.starts) == 1 and "seams.drive_align" in world.starts[0] and srv.latch.reason is None
+
+
+def test_r40_named_by_the_insert_is_the_goals_refusal_after_the_gate(rig):
+    srv, world = rig
+    world.rc = 1
+    world.text = ("[R40] compliant_insert: live tool0 in force mode, aborting: R40_TOOL0_FLOOR: tool0 z 147.0 mm < "
+                  "147.8 mm\n" + _result_text({"result": "failure", "error": "abort"}))
+    res, gh = _run(srv)
+    assert res.refusal.startswith("R40_TOOL0_FLOOR: tool0 z 147.0 mm") and srv.latch.reason is None
+    world.controllers = LEFT_SWITCHED                     # the gate's latch takes precedence over the R40 name
+    res, gh = _run(srv)
+    assert res.refusal.startswith("INSERT_GATE: CONTROLLERS_NOT_RESTORED") and srv.latch.reason and world.stops

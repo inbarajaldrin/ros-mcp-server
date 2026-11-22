@@ -40,6 +40,7 @@ from primitives.shared.signal_safety import die_with_parent as _die_with_parent 
 from primitives.shared.config import GRIPPER_CENTER_TOOL_OFFSET, held_tool_offset, held_tool_offset_for
 BAR_ALONG_MAX_M = 0.030   # a bar may slide this far along its free axis while the compliance finds the slot
 from primitives.shared.ik import compute_cartesian_waypoints_ik
+from primitives.shared import tool0_floor as _r40  # R40 tool0 floor (drive-mate's env)
 from utils.data_path_finder import get_assembly_data_dir, get_aruco_data_dir, get_symmetry_dir, find_assembly_json_by_base_name
 
 # ============================================================================
@@ -967,6 +968,7 @@ class PrismaticPegInsertion(Node):
         """
         self.get_logger().info(f"[INSERTION] Descending to Z={self.target_z:.4f} (attempt={attempt})")
         start_time = time.time()
+        r40_on = _r40.enforced()
         # XY tolerance: 10 mm on attempt 1 (initial chamfer nav), 5 mm on
         # retries (operator request — drift past 5mm on retry means we're
         # off-target).
@@ -1022,6 +1024,16 @@ class PrismaticPegInsertion(Node):
                 last_tele_t = now
 
             z = self.ee_pose.position.z
+            if r40_on:
+                _o = self.ee_pose.orientation
+                why = _r40.r40_refusal(_r40.pose_matrix((self.ee_pose.position.x, self.ee_pose.position.y, z),
+                                                        (_o.x, _o.y, _o.z, _o.w)))
+                if why:
+                    # a watchdog at this loop's rate, not a controller limit: the caller stops force mode next
+                    _r40.log_refusal(why, 'prismatic: live tool0 in force mode, aborting')
+                    self.get_logger().error(f"{why} (live, force mode) - abort")
+                    self.r40_why = why
+                    return 'r40_tool0_floor'
             fx = self.wrench.force.x
             fy = self.wrench.force.y
             fz = self.wrench.force.z
@@ -1289,6 +1301,16 @@ class PrismaticPegInsertion(Node):
         self.get_logger().info(f"Current: [{initial_pos[0]:.4f}, {initial_pos[1]:.4f}, {initial_pos[2]:.4f}]")
         self.get_logger().info(f"Target:  [{target_x:.4f}, {target_y:.4f}, {target_z:.4f}]")
 
+        # R40 (drive-mate sets the env): the descent's target (the seat, at the current orientation) before any motion;
+        # the force-mode descent itself is watched per tick in monitor_insertion
+        if _r40.enforced():
+            why = _r40.r40_refusal(_r40.pose_matrix(self.target_xyz, initial_ori))
+            if why:
+                _r40.log_refusal(why, 'prismatic: seat target, no motion')
+                self.get_logger().error(f"{why} (seat target) - no motion")
+                self._tele_close("abort", why)
+                return False
+
         for attempt in range(1, MAX_RETRIES + 1):
             self.get_logger().info(f"\n--- ATTEMPT {attempt}/{MAX_RETRIES} ---")
 
@@ -1360,6 +1382,10 @@ class PrismaticPegInsertion(Node):
             self.start_force_mode(xy_compliant=False, rz_compliant=False)
             result = self.monitor_insertion(attempt=attempt)
             self.stop_force_mode()
+
+            if result == 'r40_tool0_floor':          # no retry, no retract: the caller (drive-mate) decides
+                self._tele_close("abort", getattr(self, 'r40_why', _r40.CODE))
+                return False
 
             # Check result + deviation
             within, pos_dev, ori_dev = self._check_deviation(initial_ori)
