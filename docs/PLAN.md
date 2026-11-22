@@ -390,6 +390,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   hand-eye, from the depth imager's view) plus a small offset, never from collision boxes; it must not throw away depth that is not the
   gripper. The box mask covered ~40-50 % of the image (the D415's own boxes + the RG2 body box projected from the lens). Returns the
   CAD mask doesn't cover are found out, not masked.
+- (lead, 2026-11-22 ~00:45 MST) w8's CAD self mask (RG2 meshes + v3.1 mount, colour + depth-imager views): 30 % of the image at
+  +30 px (the box mask 40-50 %); covers the real fingertips (left tip ~29 px low vs CAD, open: hand-eye roll or finger asymmetry).
+  It does NOT cover the 11-22 notch or the R43 near-limit clusters at the flown opening (jaws open). The D415 IR frame (home, lights
+  off; w8-out/rc8b/ir/) shows a dot-free patch at the top centre (u ~520-830, v 0-210): the gripper blocks the projector there, so the
+  false depth is the gripper's projector shadow. Ruling: CAD + 30 px wired; the projector shadow becomes UNKNOWN too (CAD from the
+  projector origin, or a measured map); confirmed on the rc8b survey with IR on. Camera op: toggling enable_infra off at runtime
+  stopped the depth pipe; enable_depth false->true restored it (identical valid share/median). No run was affected.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
