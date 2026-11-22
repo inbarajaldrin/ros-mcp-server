@@ -385,6 +385,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   and the table plane passed. The real table matches the R43 start (yellow at the clear area; brown, orange, green in staging). Sent
   to w8 for rc8b: a fringe ring outside the mask = UNKNOWN; known part explains returns within 20 mm up to its top + 5 mm. Then
   survey-only on rc8b, then the arrangement (supervised).
+- **R46 (2026-11-22 ~00:30 MST, operator on WhatsApp: "Isn't the point of the DT view with cad enough to get a cleaner mask with
+  a extra offset")**: the self mask is rendered from the CAD (RG2 meshes at the measured opening + the D415 mount, through the
+  hand-eye, from the depth imager's view) plus a small offset, never from collision boxes; it must not throw away depth that is not the
+  gripper. The box mask covered ~40-50 % of the image (the D415's own boxes + the RG2 body box projected from the lens). Returns the
+  CAD mask doesn't cover are found out, not masked.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
