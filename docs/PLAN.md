@@ -442,6 +442,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   own bar overlaps the buffer slot it was sent to and the destination check counted the moving part as the obstacle. Fix -> rc8g.
   Stand-up (rc9c): no candidate in the new stand-up area; the elbow passes 300-320 mm over the robot-side band -> lead ruling: try a
   higher approach first, else the robot-side band rule (>= 100 mm over the declared rail/carriage tops, this run sees nothing taller).
+- (lead, 2026-11-22 ~13:00 MST) Stand-up option 1 STOPPED (R45 rule 5): after the flange-link ruling, the arm-link carriage margin
+  (p99+20) and the stand-up area's -x grow, 0 of 1,200 candidates pass; closest misses 13-15 mm (wrist_2 46 mm over unzoned table;
+  forearm 85 mm over the rail flank vs 100; one at exactly 50 mm) - each loosened margin exposes the next. rc9c kept unmerged as the
+  record. Put to Aldrin: (1) u_brown stood upright by hand in staging for the first insert (recommended; rc9d = rc9 minus the stand-up,
+  being built), (2) the tilt stand-up (~1 day) for hands-off.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
