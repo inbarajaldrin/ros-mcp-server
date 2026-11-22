@@ -318,6 +318,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   staging uses free table anywhere suitable (not a fixed rectangle); u_orange and box 2 are ours to resolve. rc5g: free-table
   staging (IK-checked, corner-first 10 mm grid, world-axis yaws), a second aimed view before a rest refusal, a second-angle re-read
   of a one-view clipped box (likely the D415 cable).
+- (2026-11-21 ~19:50 MST, operator in the terminal) The square table was flagged for its ArUco markers ("the aruco marker connection
+  is what i flagged it for like how fmb has markers"): it should be a KNOWN object to the localizer (marker layout + CAD), like
+  the FMB parts, not an unknown depth lump. Its CAD is prompt2assembly's (dual); the marker work is the pose6d session's on the Mac
+  (8d65759c). A read-only agent is finding the marker data and checking for marker-ID collisions with FMB (a safety question).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
