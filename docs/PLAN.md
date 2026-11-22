@@ -455,6 +455,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   taped patch (measured polygon from the colour frames, +20 mm) is declared TABLE: depth there is not used (no obstacle / unseen /
   keep-out / column), cells count as table at table height. Consequence told to him: a foreign object lying on the tape can't be
   detected - keep the patch clear except FMB parts (read by markers). u_brown stands upright at (-0.32, -0.47) on the tape (rc9d).
+- (lead, 2026-11-22 ~14:50 MST) rc8g (46f4371; review GO supervised) live stage: survey clean (21 views), then finish_home REFUSED -
+  the clear-area re-look 107 stance sat beyond the table edge on the elbow-negative IK branch (tool0 -0.455, +0.100, 0.53); the off-table
+  columns (floor gap past the robot-side edge) and unseen-patch columns boxed it in; the straight homing path needs elbow +209 deg /
+  wrist_2 -179 deg through a compact configuration (RG2 to 107 mm). No checked route even with off-table capped at 320 mm. Arm parked,
+  jaws empty; asked Aldrin for a person to jog it home from the pendant. rc9d fixes: off-table -> 320 mm cap; views only where the way
+  home is admissible (home IK branch), re-checked after keep-outs before the next view.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
