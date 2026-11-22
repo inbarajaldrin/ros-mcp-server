@@ -406,6 +406,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   zone; every zone ZONE_NOT_CLEAR (assembly 149 / clear 139 / staging 113 unexplained, phantoms to 231 mm) - expected without the
   texture gate. IR per read saved (w8-out/rc8b/live-survey/): the phantoms sit in the top-centre dot-free band in every view; the
   Vention carriage (y -0.15..-0.04) is outside every grown zone. Data handed to w8 for rc8c's gate; dual on hold for plan47 pb12+Kit.
+- (lead, 2026-11-22 ~02:35 MST) rc8c gate ruling: on the 9 rc8b reads most phantoms sit on TEXTURED pixels (likely specular
+  reflections of the dots off the fingertips) in a fixed top band at/between the fingertips; a per-read texture gate can't separate
+  them. Ruling A2: a MEASURED gripper image footprint (CAD + 30 px + its projector shadow + reflections; the smallest region holding
+  every phantom of 11-21/22 + margin; UNKNOWN; views fill it; total share reported, flagged if >= 45 %). The carriage-side aluminium
+  plate (x ~-0.46, y -0.10..-0.30, ~50 mm) inside the grown clear area becomes a declared keep-out at measured p99 + 30 mm. Sensor-side
+  options (laser power, infra2 reflection test) are later. One Opus delta review ce28afb..rc8c, then rc8c survey + arrangement.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
