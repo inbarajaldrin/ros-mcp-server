@@ -334,6 +334,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   rc5g: only this run's assembly parts + base count as known (foreign reads logged, depth stays an obstacle). Adding the table to
   the localizer (the AprilTag dictionary, duplicate ranking, per-model marker size, 5 meshes, real-tag ID check) is queued after
   the first FMB1 insert.
+- rc5g (5ecd7ee) + rc5h (26c9ea8) tagged (lab 182 passed): the rc5f review fixes, R44 free-table staging + second looks, foreign
+  reads ignored. Live-data probe: UNRESOLVED_COLUMN_ON_PATH on box 2 (col_-17_-461): no feasible view sees 150-184 mm there.
+  Lead's evidence that box 2 is the D415's own cable hanging into the assembly view: the D455 photo right after the survey shows
+  nothing tall at base1's far edge, and depth only from ~150 mm to the near limit. rc7 (stand-up + u_brown insert) rebased on rc5h,
+  dry end-to-end OK, tag pending. Opus review of rc5h running (incl. how to recognise self-observation safely).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
