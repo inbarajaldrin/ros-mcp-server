@@ -431,6 +431,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   that fails verification is DISABLED for the run (its ground = outside the zones, arm >= table + 0.32 m there) instead of stopping
   everything; the staging arrangement flies with staging verified (rc8e). Stand-up options put to Aldrin (1 measured-ground rule /
   2 tilt / 3 by hand).
+- **R47 (2026-11-22 ~09:05 MST, operator on WhatsApp, replying to the October-vs-current regrasp render: "But if this is the
+  actual data then this works")**: the low stand-up / place-down pose is acceptable (October flew the gripper 40 mm over the table at
+  the clear area). Lead's reading, sent back to him: option 1 - the arm may go below 320 mm outside the zones only over table cells
+  measured in THIS run (masked depth, h - max >= 50 mm, table under the disc, never unseen / run keep-out / past the table edge; hard
+  60 mm floor for forearm/wrist), with the stand-up quadrant views added to the survey. rc9c builds it after rc8f.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
