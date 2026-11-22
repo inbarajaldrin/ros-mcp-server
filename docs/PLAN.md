@@ -416,7 +416,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   ~40 mm over the table beside the robot mount at the stand-up set-down: arm links weren't in the envelope -> rc8d arm-link envelope,
   rc9b on top). rc8c held-out acceptance survey (w8-out/rc8c/live-survey): assembly clear (the band held); staging stopped on a REAL
   square-table leg block foot outside its keep-out (re-measure); the clear area on a PHANTOM outside the band (1 of 4 views, image
-  bottom edge by the table edge, 44 % invalid neighbours) -> D: a per-read support filter (hole-adjacent returns UNKNOWN), tuned on
+  bottom edge by the table edge) - on w8's check the support filter does not separate it; views 3/4 show a ~32 mm step just past y -0.09
+  (the Vention rail along x, robot side), mislocated 1-3 cm into the zone by view 2's image-border error -> a measured "Vention rail"
+  keep-out (p99 + 30 mm, side margin); support filter dropped; tuned on
   all three live datasets. Then one re-review rc8d+rc9b, a fresh rc8d survey as acceptance, the arrangement.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
