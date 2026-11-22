@@ -119,12 +119,16 @@ RS=realsense2; IMG=/camera/camera/color/image_raw
 # Pin the WRIST D415 by its RealSense serial: a second RealSense (a D455) is now on this PC (2026-11-19), and an unpinned launch
 # may open it instead - the localizer's hand-eye calibration is for the D415 on the wrist. Override with FMB_D415_SERIAL.
 D415_SERIAL=${FMB_D415_SERIAL:-747612060118}
+# infra1 stays ON for the whole session (2026-11-22): a depth read's own IR frame shows where the projector's dots don't land (the
+# gripper's projector shadow), and depth there is false matches. Never toggle the infra streams at runtime: turning them OFF stopped
+# the depth pipe (recover with `ros2 param set /camera/camera enable_depth false` then `true`). infra must match depth at 15 fps: at its
+# default 30 the depth module stalls ("Frames didn't arrive within 5 seconds").
 if timeout 5 ros2 topic list 2>/dev/null | grep -q "^${IMG}$"; then
     ok "RealSense node already publishing"
 else
     nohup bash -c "source /opt/ros/humble/setup.bash; source ${FMB_ROS_WS:-$HOME/Desktop/ros2_ws}/install/setup.bash; \
         exec ros2 launch ${RS}_camera rs_launch.py rgb_camera.color_profile:=1280,720,15 \
-        depth_module.depth_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=false \
+        depth_module.depth_profile:=1280,720,15 depth_module.infra_profile:=1280,720,15 align_depth.enable:=true enable_infra1:=true \
         enable_infra2:=false rgb_camera.auto_exposure_priority:=false serial_no:=_${D415_SERIAL}" >/tmp/realsense.log 2>&1 &
     for _ in $(seq 1 30); do
         sleep 1; timeout 3 ros2 topic list 2>/dev/null | grep -q "^${IMG}$" && break
