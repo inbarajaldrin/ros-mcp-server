@@ -304,6 +304,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   CAD top is 20.8; a lean or a prop); clear-area coverage. Fixes as rc5f (w8): a clipped box reaches up to SAFE_Z, a per-cell envelope,
   a persisted map for pre-survey legs, a part-rest depth check refusing the pick, 95 % coverage. Lead still recommends someone at the
   cell (A + check u_orange + identify box 2).
+  rc5f = lab tag rc5f-fmb1-obstacles (0010dfb; lab 159 passed): clipped boxes are 1.2 m columns after the survey, map reads at 610 mm,
+  a persisted map + START_TOO_LOW_FOR_UNMAPPED_TABLE, PART_NOT_AT_REST_DEPTH, the clear area required at 95 %, survey hovers at
+  560 mm (DEPTH_MIN 0.41). Probe on the live files: obstacle_map_unreadable (clear area 25 % from the old captures). Diagnostic:
+  u_orange refused (45.6 mm vs CAD 20.8), and box 2's column blocks the way home. The table needs a person (D455 + square table off
+  the staging region, u_orange flat, box 2 identified or removed). Opus review of rc5f running.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
