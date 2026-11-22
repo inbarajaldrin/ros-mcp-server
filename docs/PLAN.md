@@ -397,6 +397,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   false depth is the gripper's projector shadow. Ruling: CAD + 30 px wired; the projector shadow becomes UNKNOWN too (CAD from the
   projector origin, or a measured map); confirmed on the rc8b survey with IR on. Camera op: toggling enable_infra off at runtime
   stopped the depth pipe; enable_depth false->true restored it (identical valid share/median). No run was affected.
+- (lead, 2026-11-22 ~00:35 MST) Projector-shadow fix: w8's CAD-from-projector render covers 61-71 % of the R43 clusters and 3/6 notch
+  pixels; a static IR map over-flags 20-43 % of the image. Ruling: rc8b = CAD + 30 px, flown survey-only to collect IR at the view
+  stances (a short review of its survey path first); rc8c = per-read texture gating (a pixel with no projector dots in that read's own
+  infra1 frame is UNKNOWN; a missing/stale infra1 frame fails the read; threshold from the rc8b pairs); one Opus delta review
+  ce28afb..rc8c before the arrangement flies. infra1 now ON (dev d1112c0 stack_up: 1280x720 @ 15 fps; at 30 fps the depth module stalled).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
