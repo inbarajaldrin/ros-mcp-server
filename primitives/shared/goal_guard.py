@@ -168,6 +168,8 @@ def install():
     from rclpy.action import ActionClient
     from rclpy.node import Node
 
+    from primitives.shared.tool0_floor import install_send_guard
+    install_send_guard()                      # R40: an arm goal under the tool0 floor is refused before the send
     original_send = ActionClient.send_goal_async
 
     def send_goal_async(self, goal, *args, **kwargs):

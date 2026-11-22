@@ -47,6 +47,8 @@ def main():
     args = ap.parse_args()
 
     rclpy.init()
+    from primitives.shared.tool0_floor import install_send_guard
+    install_send_guard()          # R40 on TranslateObject's arm goals (this process does not use goal_guard.init_ros)
     node = None
     result = {"result": "failure", "error": "unknown"}
     try:

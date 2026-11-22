@@ -29,6 +29,10 @@ driver plugs in behind the same action later (M3b).
                                                         dashboard stop sent, the server latched
                           | insert_rc: <rc> (<error>)   translate_object exited non-zero; the arm is commandable
                           | align_failed: <why>         the align step failed on a commandable arm; no insert
+                          | R40_TOOL0_FLOOR: <why>      the operator's tool0 floor (R40, primitives/shared/tool0_floor):
+                                                        the predicted seat pose under it - refused before any motion - or
+                                                        a motion child refused / aborted a move under it (named in its
+                                                        output; the gate ran first, a latch takes precedence)
   cancel  SIGINT to the insert (its force-mode cleanup runs), SIGTERM after CHILD_STOP_GRACE_S (60 s) - never SIGKILL
           in force mode.  A cancelled goal LATCHES the server.  With the program already stopped (stop_run.sh's step 0)
           the server sends no stop - the canceller owns the restore (review r2 P2-A); with the program running or
@@ -55,6 +59,14 @@ dashboard_stopped, non-zero exit) latches; a failed align (non-zero exit, no / m
 safety stop in it) refuses align_failed and the insert does not start; an unreadable safety status fails closed;
 the safety rule is cell_io's (NORMAL / REDUCED ok).  reset_latch answers at once when not latched and runs on its own
 callback group.
+
+R40, the tool0 floor (review P2-4): the seat pose this goal drives to (CAD seat at the aim + seat dz, through the held
+grasp, at the current flange orientation; cad_lookup.predict_tcp_at_seat, the insert's own prediction) is checked before
+the align and again before the insert; an unpredictable seat is refused (fail closed).  The motion children run with
+R40_TOOL0_FLOOR=1, so every move they command is checked where it is sent: move_cartesian.plan_move (align moves, servo
+steps, wrist turns, touch-insert probes), every FollowJointTrajectory goal of a goal_guard / _run_hover process (the
+insert's hover, prismatic's descent and retries), and the force-mode loops of compliant_insert and prismatic (the
+predicted seat before force mode, the live tool0 pose every tick: a watchdog, not a controller limit).
 
 Known debt, recorded here rather than hidden: the insert routes by part name (translate_object: lines -> prismatic,
 U parts -> compliant spiral) and adds a per-part seat-z offset (PER_OBJECT_BASE_OFFSET_M) - the seam rule says
@@ -92,7 +104,42 @@ HELD_AXIS_TOL_M = 0.006          # a CAD grasp point this close to the tool axis
 REST_WINDOW_S, REST_STILL_M = 0.5, 0.0005    # the arm at rest after the insert: < 0.5 mm over 0.5 s
 
 
-SAFETY_OK = ('NORMAL', 'REDUCED')      # cell_io._watch_safety's rule; an unreadable status (None) fails closed
+SAFETY_OK = ('NORMAL', 'REDUCED')
+R40_CODE = 'R40_TOOL0_FLOOR'
+
+
+def predicted_seat_tool0(obj, base, grasp_id, depth_m, aim, dz_m, held_world_xyzw, tcp_quat_xyzw):
+    """tool0 (4x4, UR base frame) at the seat this goal drives to: the CAD seat at the aim (+ the seat dz), through the
+    held grasp, at the current flange orientation - the insert's own prediction (cad_lookup.predict_tcp_at_seat)."""
+    from compliant_insertion_studio.wrapper.cad_lookup import predict_tcp_at_seat
+    from primitives.shared.tool0_floor import pose_matrix
+    (x, y, z), q = aim
+    pred = predict_tcp_at_seat(base_name=base, object_name=obj, grasp_id=int(grasp_id),
+                               base_world_xyz=[x, y, z + dz_m], base_world_quat_xyzw=list(q),
+                               held_quat_xyzw=list(held_world_xyzw), ee_orientation_xyzw=list(tcp_quat_xyzw),
+                               flange_offset_m=float(depth_m))['predicted_tcp_at_seat']
+    return pose_matrix(pred['xyz_m'], pred['quat_xyzw'])
+
+
+def r40_seat_refusal(*args):
+    """R40 on predicted_seat_tool0(*args): None, or the refusal ('R40_TOOL0_FLOOR: ...'); a seat that cannot be
+    predicted is refused (fail closed: nothing has moved yet)."""
+    from primitives.shared.tool0_floor import r40_refusal
+    try:
+        T = predicted_seat_tool0(*args)
+    except Exception as e:
+        return f'{R40_CODE}: the seat pose is not predictable ({e!r}) - not checkable'
+    why = r40_refusal(T)
+    return f'{why} (predicted seat)' if why else None
+
+
+def r40_in_output(text):
+    """The first R40 refusal a motion child (or its children) wrote, from 'R40_TOOL0_FLOOR' to the end of its line."""
+    for line in (text or '').splitlines():
+        i = line.find(R40_CODE + ':')
+        if i >= 0:
+            return line[i:].strip()
+    return None      # cell_io._watch_safety's rule; an unreadable status (None) fails closed
 
 
 class InsertLatch:
@@ -516,6 +563,8 @@ class DriveMateServer(Node):
         self.get_logger().info(f'{g.mate_id}: seat dz {1000 * dz:+.2f} mm ({dz_src})')
         env = os.environ.copy()
         env['GRASP_TOOL_OFFSET_M'] = f'{depth:.6f}'; env['ROS_MCP_MODE'] = 'real'
+        from primitives.shared.tool0_floor import ENV as _R40_ENV
+        env[_R40_ENV] = '1'                              # R40 enforced on every move the children send
         env['PYTHONPATH'] = f"{REPO}:{env.get('PYTHONPATH', '')}"
         # align (AR3, decision 10-22: vision measures, drive-mate moves): on a free base bring the part over its seat
         # first - today's servo, run here instead of by the planner. Then the planner's corrections (follow / bias)
@@ -528,6 +577,9 @@ class DriveMateServer(Node):
         elif not bool(getattr(_cfg, 'BASE_FIXED', True)) and os.environ.get('DRIVE_ALIGN', '1') == '1':
             if gh.is_cancel_requested:
                 gh.canceled(); return res
+            why = r40_seat_refusal(obj, base, gid, depth, measured, dz, held_world, (tq.x, tq.y, tq.z, tq.w))
+            if why:                                      # before the align: nothing has moved
+                return refuse(why, 'before the align')
             try:
                 rc_a, text_a, log_a = self._align(gh, g, obj, base, gid, measured, held_world, env)
                 refusal, latch_why = self._after_motion(gh, rc_a, text_a, 'align')   # FIRST: the align moves the arm
@@ -541,6 +593,9 @@ class DriveMateServer(Node):
                     res.refusal = refusal
                     gh.canceled(); return res
                 return refuse(refusal)
+            r40 = r40_in_output(text_a)
+            if r40:                                      # a move of the align was refused / stopped by R40: no insert
+                return refuse(r40, f'during the align - {log_a.name}')
             align = align_result(text_a)
             if refusal or align is None or align.get('error') or align.get('safety'):
                 why = (refusal or ('no __ALIGN__ result' if align is None else '')
@@ -593,6 +648,9 @@ class DriveMateServer(Node):
                                f'({1000 * off:.1f} mm off axis), in-hand yaw {held_yaw_off:+.2f} deg')
         if gh.is_cancel_requested:                       # a cancel between the align and the insert (r1 P3-5)
             gh.canceled(); return res
+        why = r40_seat_refusal(obj, base, gid, depth, aim, dz, held_world, (tq.x, tq.y, tq.z, tq.w))
+        if why:                                          # before the insert starts
+            return refuse(why, 'before the insert')
         t0 = time.time()
         log_path = LOGS / f'drive_mate_{obj}_{time.strftime("%Y%m%d_%H%M%S")}.log'
         try:
@@ -606,6 +664,9 @@ class DriveMateServer(Node):
         if latch_why:
             self.latch.trip(latch_why)
             self.get_logger().error(f'{g.mate_id}: {refusal} - the server is latched until stop_run.sh + reset_latch')
+        elif r40_in_output(text):                        # the gate passed: the insert refused / stopped a move by R40
+            refusal = r40_in_output(text)
+            self.get_logger().error(f'{g.mate_id}: {refusal} (in the insert) - {log_path.name}')
         res.refusal = refusal
         try:
             # judged once, on the trace the insert named (seams.insert_outcome); judged where the arm came to rest
