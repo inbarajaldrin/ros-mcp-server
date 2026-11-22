@@ -309,6 +309,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   560 mm (DEPTH_MIN 0.41). Probe on the live files: obstacle_map_unreadable (clear area 25 % from the old captures). Diagnostic:
   u_orange refused (45.6 mm vs CAD 20.8), and box 2's column blocks the way home. The table needs a person (D455 + square table off
   the staging region, u_orange flat, box 2 identified or removed). Opus review of rc5f running.
+  rc5f review: NOT READY (out/review-rc5f.md). P1: a view seeing only an object's bottom un-clipped its column (the clip test used
+  other views' returns); known-clipped boxes were still flown over during the survey and expired from the saved map after 2 h; the
+  "no unattended run until box 2 is identified" rule was prose only. P2s: invalid "contradicted" drops, prior map replaced not merged,
+  exit 0 when it couldn't get home, missing depth counted as free. Fixes as rc5g.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
