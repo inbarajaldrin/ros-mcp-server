@@ -367,6 +367,17 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   may pass above the square table, never the fingertips or the held part); far edge by height (below table + 0.10 m nothing past
   x 0.40; at any height nothing past x 0.55; the D455 is beyond 0.62 per the operator); the 4-part packing DECLARED as slots in the
   layout, verified offline (SLOT_BLOCKED at run time, no run-time search).
+- **R45 (2026-11-21 ~23:30 MST, operator on WhatsApp: "these seem like too many unnecessary checks or tests that is taking way too
+  long")**. Lead's process rules from the week's time breakdown (out/time-breakdown-week-1118.md: 74.5 agent-h; real robot ~107 min;
+  the board program 14 min of look-only runs; 54 reviews, ~31 real arm-safety P1s caught; the delay was mostly scope added before
+  flying, wrong table guesses, and dead sessions):
+  1. Opus review only for code that can move the arm; nothing else waits on a review.
+  2. A 4-6 min read-only real survey is the first step of every new piece; never gate a run on reading a photo.
+  3. On the operator's go, fly the smallest reviewed scope that day; add features after.
+  4. No long twin panels on the path to the robot (the twin checks run beside it, not as gates).
+  5. After two NOT READY rounds on one mechanism, check its premise on the real cell before a third.
+  6. Targeted tests per change; the full suite once per flown release candidate.
+  7. Watchdog + done-file waits; nothing on the robot's path depends on dual.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
