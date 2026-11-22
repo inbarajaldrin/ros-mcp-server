@@ -465,6 +465,9 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   /joint_states order (pan, wrist_2, wrist_3, wrist_1, elbow, lift). The real stance is the normal branch: [-29.0, -95.8, +89.2, -83.4,
   -89.7, -119.0] deg; home needs base +119 / wrist_3 +119. The only real refusal is off-table column #5. Recovery re-planned with the
   correct q (straight home under rc9d rules, or retrace [021] to re-look 101); no pendant.
+  RESOLVED ~15:20 MST: w8's home_retrace.py (branch w8-home-recovery fa83c7f; lead read the code; plan-only with live joints first)
+  reversed the last two flown legs (re-look 107 -> 101 -> home; lowest RG2 335.8 mm, wrist_3 124.9 deg) - arm HOME, jaws empty, no
+  person. Retrace-to-last-home-admissible-stance becomes rc9d's finish_home fallback.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
