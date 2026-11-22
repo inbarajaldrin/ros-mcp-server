@@ -339,6 +339,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   Lead's evidence that box 2 is the D415's own cable hanging into the assembly view: the D455 photo right after the survey shows
   nothing tall at base1's far edge, and depth only from ~150 mm to the near limit. rc7 (stand-up + u_brown insert) rebased on rc5h,
   dry end-to-end OK, tag pending. Opus review of rc5h running (incl. how to recognise self-observation safely).
+  rc5h review: NOT READY (out/review-rc5h.md): the "could it have seen higher" test uses the colour frame, but aligned depth is empty in
+  the left ~150 px band; the second look flew before its column was protected; and 6 P2s. BOX 2 SOLVED (lead, 11-21 ~21:00 MST): a
+  re-run of the reviewed rc5c survey-only (homed) grabbed the wrist colour image at the assembly view
+  (w8-out/rc5c/live/box2check/wrist_assembly_view.jpg). The RG2's open fingertips fill its top corners, at the depth near limit.
+  LEAD DESIGN CHANGE -> rc8: a self mask of the gripper + the invalid-depth band; a declared envelope (work zones + measured keep-out
+  columns for the D455 and the square table) for planning; depth only as a fail-closed zone verifier (ZONE_NOT_CLEAR); the dynamic
+  obstacle geometry (clustering, columns, second looks, prior map) removed from the planner path. w8 writes DESIGN-rc8.md first.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
