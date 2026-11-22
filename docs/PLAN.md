@@ -378,6 +378,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   5. After two NOT READY rounds on one mechanism, check its premise on the real cell before a third.
   6. Targeted tests per change; the full suite once per flown release candidate.
   7. Watchdog + done-file waits; nothing on the robot's path depends on dual.
+- (lead, 2026-11-22 ~00:05 MST) rc8 real look-only survey (ce28afb, ~6 min, home true) stopped ZONE_NOT_CLEAR. Checked on the raw
+  frames (w8-out/rc8/live-survey/*_marked.png, zone_check_3views_lead.png): 7 of 9 cells sit on the same pixels (u 650-675, v 196-201)
+  in all 3 views, on the self mask's lower edge between the fingers, reading 90 / 16 / 19 mm over bare table = D415 false depth beside
+  the RG2 body. The other 2 are the edges of read parts (u_brown corner, line_green end, 12-15 mm, just past footprint + 10 mm). Cover
+  and the table plane passed. The real table matches the R43 start (yellow at the clear area; brown, orange, green in staging). Sent
+  to w8 for rc8b: a fringe ring outside the mask = UNKNOWN; known part explains returns within 20 mm up to its top + 5 mm. Then
+  survey-only on rc8b, then the arrangement (supervised).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
