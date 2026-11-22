@@ -328,6 +328,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (out/review-r40-drivemate.md): no P1/P2; predicted seats 167-200 mm, all above 147.8. Queued P3s: an upward-escape rule (a pure
   rising lift from below), a 5 mm trip margin + pose staleness in the watchdog, refusals keyed on the child's final result,
   missing tests (compliant/prismatic trip paths). drive-mate server restarted on it.
+- Square table markers (out/square-table-markers.md): AprilTag 36h11 IDs 4-23 (top 4-7, legs 8-23); layout in the Mac's
+  robo-chain fuzzydroid square-table-threading assets (placement.json, 19.84 mm black square). The live localizer (5x5 + 4x4) does
+  not decode them; there are no exact ID clashes, but synthetic renders showed rare 4x4 misreads as FMB3 parts (fork_yellow, line_brown).
+  rc5g: only this run's assembly parts + base count as known (foreign reads logged, depth stays an obstacle). Adding the table to
+  the localizer (the AprilTag dictionary, duplicate ranking, per-model marker size, 5 meshes, real-tag ID check) is queued after
+  the first FMB1 insert.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
