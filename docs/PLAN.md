@@ -451,6 +451,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   slots: 0 spots); it stands in a verified zone outside staging and counts as staged. No bare spot passes every rule (the stand-up
   area and the clear area's -x side are taped; the bare pocket fails yellow's ring and then the carriage keep-out at the pick).
   Asked Aldrin (photo): peel the tape in x -0.39..-0.25, y -0.54..-0.40 (~14 cm square, bigger fine) and stand u_brown at (-0.32, -0.47).
+- **R48 (2026-11-22 ~14:20 MST, operator on WhatsApp: "No need to peel the tape you can place it there without any issue")**: the
+  taped patch (measured polygon from the colour frames, +20 mm) is declared TABLE: depth there is not used (no obstacle / unseen /
+  keep-out / column), cells count as table at table height. Consequence told to him: a foreign object lying on the tape can't be
+  detected - keep the patch clear except FMB parts (read by markers). u_brown stands upright at (-0.32, -0.47) on the tape (rc9d).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
