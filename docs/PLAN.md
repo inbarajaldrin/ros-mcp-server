@@ -352,6 +352,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   the operator. rc8 envelope: below SAFE_Z only in the work zones, transits >= SAFE_Z (table + 0.36 m), so a fixture outside the zones
   below 0.30 m is safe by construction; the square table gets declared keep-outs. rc7 tagged and parked
   (rc7-fmb1-standup-insert 56f8d6f, 193 passed).
+  DESIGN-rc8 accepted (w8-out/rc8/DESIGN-rc8.md, envelope-live.png). Layout fmb1_envelope_2026_11_22: zones assembly / clear area /
+  FMB1 staging (x 0.19-0.40, y -0.62..-0.25); keep-outs = the square table top + legs (+30 mm); the 4-part packing fits with 5 mm
+  slack. Correction (w8): SAFE_Z bounds tool0, and the fingertips hang ~0.23 m lower, so outside the zones EVERY moving point stays
+  >= table + 0.32 m (transits at home height; CheckedIO ENVELOPE_LOW_OUTSIDE_ZONE); fixture rule: below table + 0.30 m outside the
+  zones. Coarse 30 % body mask accepted (the verifier fails closed on coverage); zone views are chosen with the mask applied, plus a
+  clear-area view.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
