@@ -436,6 +436,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   the clear area). Lead's reading, sent back to him: option 1 - the arm may go below 320 mm outside the zones only over table cells
   measured in THIS run (masked depth, h - max >= 50 mm, table under the disc, never unseen / run keep-out / past the table edge; hard
   60 mm floor for forearm/wrist), with the stand-up quadrant views added to the survey. rc9c builds it after rc8f.
+- (lead, 2026-11-22 ~11:45 MST) rc8f (8f5519f; review GO supervised, P2-1 carriage absorption vs measured cells, P2-2 escape_bound
+  unsound -> before unattended) flown on the real cell: survey clean (assembly + staging verified; escape_rise fired once at the clear-
+  area hover, columns lowered to 637 mm - safe today). Arrangement stopped safely before the first pick: relocate_no_spot - line_green's
+  own bar overlaps the buffer slot it was sent to and the destination check counted the moving part as the obstacle. Fix -> rc8g.
+  Stand-up (rc9c): no candidate in the new stand-up area; the elbow passes 300-320 mm over the robot-side band -> lead ruling: try a
+  higher approach first, else the robot-side band rule (>= 100 mm over the declared rail/carriage tops, this run sees nothing taller).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
