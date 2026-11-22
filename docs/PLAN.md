@@ -322,6 +322,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   is what i flagged it for like how fmb has markers"): it should be a KNOWN object to the localizer (marker layout + CAD), like
   the FMB parts, not an unknown depth lump. Its CAD is prompt2assembly's (dual); the marker work is the pose6d session's on the Mac
   (8d65759c). A read-only agent is finding the marker data and checking for marker-ID collisions with FMB (a safety question).
+- (lead, 2026-11-21 ~20:30 MST) R40 inside drive-mate (review P2-4) MERGED into dev (8e8726e, branch lead-r40-drivemate 54e559b):
+  tool0_floor.py; R40_TOOL0_FLOOR=1 set by drive-mate for its motion children (align, wrist turns, touch probes, hover, prismatic,
+  compliant force mode with a per-tick live watchdog); refused by name; unchanged when unset. Opus review FIT TO MERGE
+  (out/review-r40-drivemate.md): no P1/P2; predicted seats 167-200 mm, all above 147.8. Queued P3s: an upward-escape rule (a pure
+  rising lift from below), a 5 mm trip margin + pose staleness in the watchdog, refusals keyed on the child's final result,
+  missing tests (compliant/prismatic trip paths). drive-mate server restarted on it.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
