@@ -473,6 +473,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   to y -0.20 (lead ruling (3), taped = verified): 0/600 - the six closest now clear the set-down but miss at the pre-place (wrist_2
   37 mm, forearm 13-16 mm short outside zones). The SIDEWAYS STAND-UP STOPS (R45 rule 5); hands-off path = the TILT stand-up (next body
   of work, own review + supervised cell test). First insert: u_brown stood upright by hand at (-0.32, -0.47) on rc9d2.
+- (lead, 2026-11-22 ~16:40 MST) TILT stand-up blocked at its first check (w8-tilt 20bcb09): gripping a flat U at a tilt puts the
+  RG2's far fingertip edge 22-23 mm below the pad centre vs a ~20 mm pad height -> fingertip 3.4 mm into the table (geometry). Both robot
+  stand-ups are infeasible on a bare table under the rules. Asked Aldrin: hand stand-up for the first insert; may a small fixed
+  block/stop go at the stand-up area for a hands-off prop/tip later? rc9d2 (470c20d; P2-2 timing by seen_from_leg) awaits t7 + review.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
