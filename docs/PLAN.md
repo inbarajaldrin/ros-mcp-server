@@ -346,6 +346,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   LEAD DESIGN CHANGE -> rc8: a self mask of the gripper + the invalid-depth band; a declared envelope (work zones + measured keep-out
   columns for the D455 and the square table) for planning; depth only as a fail-closed zone verifier (ZONE_NOT_CLEAR); the dynamic
   obstacle geometry (clustering, columns, second looks, prior map) removed from the planner path. w8 writes DESIGN-rc8.md first.
+  w8: box 1 ("the D455") is ALSO the gripper (same pixels, u 532-621 / v 4-172, at the 0.41-0.44 m near limit, in two views). With a
+  self mask (RG2 + changer + mount, 15 px) and the invalid band, no tall object remains in the R43 reads: base1, the square table
+  top 35 mm + legs 30-32 mm, the 3 parts, and a 63 mm object by the robot base. The D455 isn't in the mapped area. Corrected to
+  the operator. rc8 envelope: below SAFE_Z only in the work zones, transits >= SAFE_Z (table + 0.36 m), so a fixture outside the zones
+  below 0.30 m is safe by construction; the square table gets declared keep-outs. rc7 tagged and parked
+  (rc7-fmb1-standup-insert 56f8d6f, 193 passed).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
