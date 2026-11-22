@@ -420,6 +420,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   (the Vention rail along x, robot side), mislocated 1-3 cm into the zone by view 2's image-border error -> a measured "Vention rail"
   keep-out (p99 + 30 mm, side margin); support filter dropped; tuned on
   all three live datasets. Then one re-review rc8d+rc9b, a fresh rc8d survey as acceptance, the arrangement.
+- (lead, 2026-11-22 ~06:00 MST) Under the arm-link rule NO u_brown stand-up candidate passes at the clear area as searched: grasp G
+  dies on camera-up; the twin holds the tool axis toward -y, putting the wrist ~0.2 m on the robot side, down to 3 mm over the table
+  on the rail strip. Ruling: (d) stand-up spots at the clear area's -y side (part y ~-0.33..-0.37, wrist over the verified zone);
+  camera-up is NOT relaxed; a stand-up region in staging goes to Aldrin only if (d) fails. rc8d (arrangement) is tagged and reviewed
+  alone (R45 smallest scope); rc9b waits.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
