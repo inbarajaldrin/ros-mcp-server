@@ -447,6 +447,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   forearm 85 mm over the rail flank vs 100; one at exactly 50 mm) - each loosened margin exposes the next. rc9c kept unmerged as the
   record. Put to Aldrin: (1) u_brown stood upright by hand in staging for the first insert (recommended; rc9d = rc9 minus the stand-up,
   being built), (2) the tilt stand-up (~1 day) for hands-off.
+- (lead, 2026-11-22 ~13:45 MST) rc9d (upright u_brown, no stand-up): an upright U can't stand in staging (90 mm topple ring vs the
+  slots: 0 spots); it stands in a verified zone outside staging and counts as staged. No bare spot passes every rule (the stand-up
+  area and the clear area's -x side are taped; the bare pocket fails yellow's ring and then the carriage keep-out at the pick).
+  Asked Aldrin (photo): peel the tape in x -0.39..-0.25, y -0.54..-0.40 (~14 cm square, bigger fine) and stand u_brown at (-0.32, -0.47).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
