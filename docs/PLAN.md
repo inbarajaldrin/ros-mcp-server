@@ -412,6 +412,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   every phantom of 11-21/22 + margin; UNKNOWN; views fill it; total share reported, flagged if >= 45 %). The carriage-side aluminium
   plate (x ~-0.46, y -0.10..-0.30, ~50 mm) inside the grown clear area becomes a declared keep-out at measured p99 + 30 mm. Sensor-side
   options (laser power, infra2 reflection test) are later. One Opus delta review ce28afb..rc8c, then rc8c survey + arrangement.
+- (lead, 2026-11-22 ~05:30 MST) review-rc8c GO (P2-1 finger landing, P2-2 part cover -> rc8d); review-rc9 NOT READY (P1-1 wrist_2/3
+  ~40 mm over the table beside the robot mount at the stand-up set-down: arm links weren't in the envelope -> rc8d arm-link envelope,
+  rc9b on top). rc8c held-out acceptance survey (w8-out/rc8c/live-survey): assembly clear (the band held); staging stopped on a REAL
+  square-table leg block foot outside its keep-out (re-measure); the clear area on a PHANTOM outside the band (1 of 4 views, image
+  bottom edge by the table edge, 44 % invalid neighbours) -> D: a per-read support filter (hole-adjacent returns UNKNOWN), tuned on
+  all three live datasets. Then one re-review rc8d+rc9b, a fresh rc8d survey as acceptance, the arrangement.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
