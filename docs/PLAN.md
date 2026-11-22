@@ -402,6 +402,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   stances (a short review of its survey path first); rc8c = per-read texture gating (a pixel with no projector dots in that read's own
   infra1 frame is UNKNOWN; a missing/stale infra1 frame fails the read; threshold from the rc8b pairs); one Opus delta review
   ce28afb..rc8c before the arrangement flies. infra1 now ON (dev d1112c0 stack_up: 1280x720 @ 15 fps; at 30 fps the depth module stalled).
+- (lead, 2026-11-22 ~02:20 MST) rc8b (1acdfff) survey-only flown (review-rc8b-survey GO, no P1): rc 0, home, 0 refused; 3 views per
+  zone; every zone ZONE_NOT_CLEAR (assembly 149 / clear 139 / staging 113 unexplained, phantoms to 231 mm) - expected without the
+  texture gate. IR per read saved (w8-out/rc8b/live-survey/): the phantoms sit in the top-centre dot-free band in every view; the
+  Vention carriage (y -0.15..-0.04) is outside every grown zone. Data handed to w8 for rc8c's gate; dual on hold for plan47 pb12+Kit.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
