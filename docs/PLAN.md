@@ -362,6 +362,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   region": it stands at the far end, beyond the staging region and outside every work zone (low motion never goes past the staging
   zone; transits keep >= table + 0.32 m). The square table as a known object comes AFTER the first FMB1 insert ("that is the reason i
   placed it after the staging region").
+- (lead, 2026-11-21 ~22:40 MST) rc8 rulings: with the gripper's real envelope (87 mm along the jaw axis, 114 mm across) and
+  full-height keep-outs, the staging band was only ~80 mm. So: keep-outs at the masked map's measured height (p99) + 30 mm (the body
+  may pass above the square table, never the fingertips or the held part); far edge by height (below table + 0.10 m nothing past
+  x 0.40; at any height nothing past x 0.55; the D455 is beyond 0.62 per the operator); the 4-part packing DECLARED as slots in the
+  layout, verified offline (SLOT_BLOCKED at run time, no run-time search).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
