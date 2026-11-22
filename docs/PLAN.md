@@ -461,6 +461,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   wrist_2 -179 deg through a compact configuration (RG2 to 107 mm). No checked route even with off-table capped at 320 mm. Arm parked,
   jaws empty; asked Aldrin for a person to jog it home from the pendant. rc9d fixes: off-table -> 320 mm cap; views only where the way
   home is admissible (home IK branch), re-checked after keep-outs before the next view.
+  CORRECTION (lead, ~15:05): the elbow-flip / compact-configuration story above was the lead's error - the q passed to w8 was in
+  /joint_states order (pan, wrist_2, wrist_3, wrist_1, elbow, lift). The real stance is the normal branch: [-29.0, -95.8, +89.2, -83.4,
+  -89.7, -119.0] deg; home needs base +119 / wrist_3 +119. The only real refusal is off-table column #5. Recovery re-planned with the
+  correct q (straight home under rc9d rules, or retrace [021] to re-look 101); no pendant.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
