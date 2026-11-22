@@ -425,6 +425,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   on the rail strip. Ruling: (d) stand-up spots at the clear area's -y side (part y ~-0.33..-0.37, wrist over the verified zone);
   camera-up is NOT relaxed; a stand-up region in staging goes to Aldrin only if (d) fails. rc8d (arrangement) is tagged and reviewed
   alone (R45 smallest scope); rc9b waits.
+- (lead, 2026-11-22 ~07:50 MST) review-rc8d GO (no P1/P2). rc8d held-out survey (lights ON): staging OK (100 %, 0 unexplained);
+  assembly 1 cell 41 mm; clear area NOT CLEAR - black tape strips (the old taped clear area) give the D415 holes + edge phantoms, the
+  re-looks read nothing on the tape; a 160 mm cluster at the band's right edge (band measured lights off). R45 rule 5 ruling: a zone
+  that fails verification is DISABLED for the run (its ground = outside the zones, arm >= table + 0.32 m there) instead of stopping
+  everything; the staging arrangement flies with staging verified (rc8e). Stand-up options put to Aldrin (1 measured-ground rule /
+  2 tilt / 3 by hand).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
