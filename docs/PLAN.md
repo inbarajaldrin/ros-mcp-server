@@ -643,3 +643,7 @@ APPROVED 2026-11-18 (R11).
   first pick at move 4 (line_green's own slot holds 7 stale survey cells = u_brown's inner leg faces, 6.5-7.9 mm off material, u_brown
   having moved by then). Ruling: RE-READ, not relax - such a spot is marked "re-read after X leaves" and that move takes a fresh still
   depth read (same check function; a failed read stops, never falls back to the survey cloud). rc8g P3-2 unchanged.
+- (lead ruling, 2026-11-23 ~11:45 MST) rc10f 03c34b8: pre-check passes (5 moves, yellow in); first pick stopped PICK_LANDING_NOT_CLEAR by
+  line_green's own side (survey pose ~10 mm off laterally). Ruling: RE-READ AT THE PICK - the landing check uses a fresh still read at
+  the re-measure hover with the re-measured pose (same function, fail-closed, KNOWN_MARGIN stays 10 mm). w8 to run the dry re-plan in a
+  collect-all-refusals diagnostic mode and report every remaining blocker in one list before tagging.
