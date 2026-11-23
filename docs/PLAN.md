@@ -656,3 +656,7 @@ APPROVED 2026-11-18 (R11).
   survey reads <= top + 8 mm with none above (logged), else the second-view flight; (4) NOT a wider part-explain tolerance: the insert
   carry near base1 is re-checked by a fresh close base read before that leg, else stop; (5) stand-up set-down plans at rank 43 against the
   raised carriage box (rank 9 now refused) - empty-gripper stages confirm on the cell.
+- (lead, 2026-11-23 12:55 MST) review-rc10f: NOT READY, 2 P2s - a "seen" cell counted from a neighbour's returns lets (P2-1) the fresh
+  landing read overrule the survey and (P2-2) the base-area re-check retire a keep-out with no in-cell reading. w8 -> rc10g on 8cd2672:
+  in-cell table rule (>= 3 returns in the cell, none high) for both; plus table-plane trust test on the fresh reads, the slot re-read
+  hover through _fly_view's branch gate, --diagnose/--dry-depth-dir refused with --real. Then a focused re-review.
