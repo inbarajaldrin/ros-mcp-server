@@ -660,3 +660,9 @@ APPROVED 2026-11-18 (R11).
   landing read overrule the survey and (P2-2) the base-area re-check retire a keep-out with no in-cell reading. w8 -> rc10g on 8cd2672:
   in-cell table rule (>= 3 returns in the cell, none high) for both; plus table-plane trust test on the fresh reads, the slot re-read
   hover through _fly_view's branch gate, --diagnose/--dry-depth-dir refused with --real. Then a focused re-review.
+- (lead, 2026-11-23 13:12 MST) Aldrin: "we didn't even have depth and did fine; with depth it takes forever though it should be more
+  information". Lead diagnosis: poses still come from markers + table + CAD; depth is used only to prove free space, cell by cell with tight
+  margins (6 mm own-surface), so pose error / edge pixels / reflections read as unknown obstacles - every blocker today was a part's own
+  edge or a fixture. Proposed next version: FIT-THEN-RENDER - fit each part's pose to markers + depth (CAD-to-depth, resting on the table),
+  render the expected scene (table, fixtures, fitted parts), and only multi-view leftover blobs count as unknown; replaces most per-cell
+  rules and extra views. Asked Aldrin: fly staging on rc10g first, then build this (recommended yes). PENDING his answer.
