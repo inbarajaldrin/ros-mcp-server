@@ -639,3 +639,7 @@ APPROVED 2026-11-18 (R11).
   distance, 435e5ef): today's off-table returns start 5-15 mm further in (y -0.095..-0.105) than earlier surveys; one cell at
   (-0.388,-0.102) 44 mm below the table made a 320 mm cap over yellow's pick path. Below-plane returns cannot be a body on the table.
   Residual: a hole/gap within 20 mm of the edge reads as edge. Edge not re-measured from one day.
+- (lead ruling, 2026-11-23 ~11:20 MST) rc10f 0c2fa63: today's re-plan plans all 5 moves incl. yellow; the new spot pre-check stops before the
+  first pick at move 4 (line_green's own slot holds 7 stale survey cells = u_brown's inner leg faces, 6.5-7.9 mm off material, u_brown
+  having moved by then). Ruling: RE-READ, not relax - such a spot is marked "re-read after X leaves" and that move takes a fresh still
+  depth read (same check function; a failed read stops, never falls back to the survey cloud). rc8g P3-2 unchanged.
