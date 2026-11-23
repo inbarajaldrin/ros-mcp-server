@@ -477,6 +477,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   RG2's far fingertip edge 22-23 mm below the pad centre vs a ~20 mm pad height -> fingertip 3.4 mm into the table (geometry). Both robot
   stand-ups are infeasible on a bare table under the rules. Asked Aldrin: hand stand-up for the first insert; may a small fixed
   block/stop go at the stand-up area for a hands-off prop/tip later? rc9d2 (470c20d; P2-2 timing by seen_from_leg) awaits t7 + review.
+- (lead, 2026-11-22 ~17:30 MST) Aldrin: the October code is off (it doesn't model the v3.1 mount - the reason for the new code).
+  Stand-up measured with the lead's 320/60 arm rule OFF (all mount-aware checks on): the only planning candidate's forearm passes
+  113 mm over the robot carriage (plate max 97.2 mm read) - 16 mm; the lead won't go under 20 mm on a camera measurement. ROBOT
+  STAND-UP STOPPED. Also found: planning vets passed legs the send refused (arr-d4, e3, e4) -> must be fixed in rc9d2. First insert by
+  hand; asked Aldrin about a fixed block/stop for a hands-off tip later.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
