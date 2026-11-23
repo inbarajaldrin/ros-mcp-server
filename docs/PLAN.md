@@ -498,6 +498,12 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   moved it to staging region") R41 re-affirmed as binding: every part incl. yellow is staged into the staging zone before any
   assembly step; rc9d's upright_ready exemption (an upright part in another verified zone counts as staged) is REMOVED - it was a lead
   miss. The only part outside staging is the one being reoriented at the stand-up area, inserted straight after.
+- (lead, 2026-11-22 ~23:55 MST) rc10 (5726588) review GO supervised (P2s -> rc10b; the empty test needs a person at the cell: carriage
+  band bare, cable watched, pendant). Dry x1d passed the full flow from u_brown flat. stage1b (dry re-plan from a real prep's logged
+  poses, via pose_log_shim.py) with rc9d's live unknowns: the R41 arrangement does NOT plan - unseen-patch 1.2 m columns along the clear
+  area's robot-side edge block yellow's view and u_orange's route. Raw frame: the black rail extrusion/table edge, a depth dropout, no
+  object. Lead ruling for rc10b: VISIBILITY-CEILING columns (an unseen cell's column top = the lowest height this run's views would have
+  seen, + margin; unseeable cells stay 1.2 m; a 300 mm box still stops the run).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
