@@ -482,6 +482,13 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   113 mm over the robot carriage (plate max 97.2 mm read) - 16 mm; the lead won't go under 20 mm on a camera measurement. ROBOT
   STAND-UP STOPPED. Also found: planning vets passed legs the send refused (arr-d4, e3, e4) -> must be fixed in rc9d2. First insert by
   hand; asked Aldrin about a fixed block/stop for a hands-off tip later.
+- (lead, 2026-11-22 ~19:00 MST) October-vs-new audit (out/october-vs-new.md, scripts ~/oct-audit on a4500): October's 2-pass stand-up
+  (in-air rotate + sideways clear-area set-down + regrasp) flew 88x with no stop; the new rules refuse all 88 (capsules ~38 mm fatter
+  than the real arm; carriage/rail as columns, not measured boxes). Real October margins: ~40 mm over the table, ~20 mm to the
+  carriage plate. The new mount genuinely matters: October's camera-up wrist now points the v3.1 D415 down, 34 mm into the table; the
+  180 deg twin clears by 56 mm. Missing in the board program: in-air reorient, insert/seat recovery, disassembly + loop, base re-read/
+  push, layouts + tipping. Port order 1-5 put to Aldrin; #1 (October stand-up, camera-up twin, exact meshes, measured keep-outs, the
+  rail strip as a checked zone, ~20 mm to the carriage) awaits his OK + an empty-gripper supervised test. rc9d3 (review-rc9d2 P2s) held.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
