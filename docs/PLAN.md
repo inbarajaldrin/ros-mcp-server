@@ -619,3 +619,9 @@ APPROVED 2026-11-18 (R11).
   Aldrin: "what is the point of these many views ... can we not do the math on a different host, not hardcoded". -> w8 rc10f: the
   arrangement plans the off-slot conflict + own-returns set-aside (dry re-plan of today's scene, zero refusals); rc10f-speed: remote
   planning by config (FMB_PLAN_HOST, local fallback), survey only the zones the task needs, survey once per session, profile the 992 s.
+- (lead ruling, 2026-11-23 ~09:55 MST) DARK-FIXTURE SPECULAR EDGE (named rule, rc10f): today's prep dropped yellow from the arrangement
+  ('stay') because 2 cells at 113 mm at (-0.265,-0.157) became a run keep-out over yellow's pick; raw frames show the carriage plate's
+  edge specular streaks (same class as rc9d's near-carriage phantoms). Rule: an unexplained cluster within the explain tolerance (xy)
+  of a declared dark fixture's measured box, <= 20 mm above its explaining top, <= 4 cells and <= 30 mm extent, RAISES that box (cap
+  declared top + 10 mm; carriage 128 mm), logged; nothing is dropped. Larger/higher/farther stays a keep-out. Also: R41 fails closed
+  when a part is dropped from the targets; every planned spot's depth pre-checked before the first pick.
