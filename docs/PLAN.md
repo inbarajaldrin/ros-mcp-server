@@ -494,6 +494,10 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   with >= 20 mm to the table and to each keep-out's MEASURED box (October's margin), the robot-side rail strip as a depth-verified zone,
   the 2 mm zone gap closed; proven by replaying October's 88 set-downs + the dry full flow, then a review, then an EMPTY-GRIPPER
   supervised test he watches, then u_brown. rc10 = rc9d2 + rc9d3 fixes + this (w8, brief out/to-w8-rc10-1122.md).
+- (lead, 2026-11-22 ~20:30 MST, operator in the terminal: "are you planning for assembly with yellow in the clear area without having
+  moved it to staging region") R41 re-affirmed as binding: every part incl. yellow is staged into the staging zone before any
+  assembly step; rc9d's upright_ready exemption (an upright part in another verified zone counts as staged) is REMOVED - it was a lead
+  miss. The only part outside staging is the one being reoriented at the stand-up area, inserted straight after.
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
