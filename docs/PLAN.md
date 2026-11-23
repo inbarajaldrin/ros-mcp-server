@@ -630,3 +630,8 @@ APPROVED 2026-11-18 (R11).
   39 mm, near-limit cut from the 467 mm camera). Ruling: declare "Vention track (robot side)" a measured dark fixture (top 40, declared
   70), carriage-style absorption of a cut cluster wholly inside box+10 mm with every cell <= top+10, logged; RC.md reports the uncut
   cross-view evidence. Same precedent as the carriage (the robot's own axis).
+- (lead ruling, 2026-11-23 ~10:40 MST) refines ~10:25: today's robot-side cut cluster (293 cells) spans the track, the rail's measured
+  box and the carriage corner -> absorb PER CELL: a cut cluster is absorbed only if every cell lies inside one of the absorbing fixtures'
+  measured boxes + 10 mm (track top 40, rail top 80, carriage top 97.2) and reads <= that box's top + 10; else the whole cluster stays a
+  column; boxes keep their tops; logged with per-fixture counts. Evidence: 290/293 of those cells read UNCUT by another view of this run,
+  tops p50 36.4 / max 60.5 mm.
