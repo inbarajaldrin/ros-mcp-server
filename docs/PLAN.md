@@ -650,3 +650,9 @@ APPROVED 2026-11-18 (R11).
 - (lead, 2026-11-23 10:43 MST by `date`) CORRECTION: the three ruling stamps above written "~10:55", "~11:20", "~11:45" were estimated,
   not read; all three were made between ~10:15 and 10:40 MST. rc10f now 448516a (pick re-read + --diagnose); p5/f5 diagnose re-plans
   on a4500, battery on dual; w8 reports every blocker in one message.
+- (lead rulings, 2026-11-23 10:49 MST) rc10f diagnose list (p6 prep 3/4, f6 full to the insert carry; none a foreign object):
+  (1) pre-check mirrors the runtime (bug) -> 3 "re-read after X leaves" fresh reads; (2) a survey-flagged landing cell the fresh read
+  doesn't see -> one more fresh read from the other view hover, else stop; (3) a disputed rest cell is cleared by >= 2 other valid uncut
+  survey reads <= top + 8 mm with none above (logged), else the second-view flight; (4) NOT a wider part-explain tolerance: the insert
+  carry near base1 is re-checked by a fresh close base read before that leg, else stop; (5) stand-up set-down plans at rank 43 against the
+  raised carriage box (rank 9 now refused) - empty-gripper stages confirm on the cell.
