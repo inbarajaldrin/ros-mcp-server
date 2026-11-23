@@ -635,3 +635,7 @@ APPROVED 2026-11-18 (R11).
   measured boxes + 10 mm (track top 40, rail top 80, carriage top 97.2) and reads <= that box's top + 10; else the whole cluster stays a
   column; boxes keep their tops; logged with per-fixture counts. Evidence: 290/293 of those cells read UNCUT by another view of this run,
   tops p50 36.4 / max 60.5 mm.
+- (lead ruling, 2026-11-23 ~10:55 MST) rc10f: table-edge rule (A) TABLE_EDGE_EXPLAINS_M 10 -> 20 mm (off-table cells only, nearest-point
+  distance, 435e5ef): today's off-table returns start 5-15 mm further in (y -0.095..-0.105) than earlier surveys; one cell at
+  (-0.388,-0.102) 44 mm below the table made a 320 mm cap over yellow's pick path. Below-plane returns cannot be a body on the table.
+  Residual: a hole/gap within 20 mm of the edge reads as edge. Edge not re-measured from one day.
