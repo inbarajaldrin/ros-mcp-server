@@ -625,3 +625,8 @@ APPROVED 2026-11-18 (R11).
   of a declared dark fixture's measured box, <= 20 mm above its explaining top, <= 4 cells and <= 30 mm extent, RAISES that box (cap
   declared top + 10 mm; carriage 128 mm), logged; nothing is dropped. Larger/higher/farther stays a keep-out. Also: R41 fails closed
   when a part is dropped from the targets; every planned spot's depth pre-checked before the first pick.
+- (lead ruling, 2026-11-23 ~10:25 MST) rc10f (92c0d0f) dry re-plan of today: SPECULAR_EDGE fired (carriage edge 113.3, rail flank 57.5)
+  but yellow still stopped by R41: a 184-cell CUT column over the Vention linear axis's track/cover (x -0.70..-0.15, y 0.00..0.04, p99
+  39 mm, near-limit cut from the 467 mm camera). Ruling: declare "Vention track (robot side)" a measured dark fixture (top 40, declared
+  70), carriage-style absorption of a cut cluster wholly inside box+10 mm with every cell <= top+10, logged; RC.md reports the uncut
+  cross-view evidence. Same precedent as the carriage (the robot's own axis).
