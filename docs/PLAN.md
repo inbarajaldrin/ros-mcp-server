@@ -608,3 +608,7 @@ APPROVED 2026-11-18 (R11).
 - robosort (2026-11-18) read for the pattern: dual:~/Documents/RoboSort (dev) docs/PLAN.md, ROADMAP.md, docs/rescue-findings.md,
   planner/README.md; in-Kit ros2_control proven in plan-anything setup/scripts/isaac61/incell_cm_carrier.py @78373beb2.
 - `ssh dual` (alias added 2026-11-18) reaches dual-a4500 as aaugus11; dual can ssh back to this PC as aldrin.
+- (lead, 2026-11-23 ~08:55 MST) review-rc10e: GO FOR SUPERVISED RUN (no P1/P2; P3s: _joint_to dip lift-end not home-branch-checked,
+  zone-check read_view without branch_ok, rest-check 2nd view + staging view without ref/branch_ok; open for unattended). Aldrin:
+  "No video in digital twin for the motion" -> w8 renders the twin video of rc10e's staging (stage1b plan on rc9d live reads) then the
+  stand-up, 2 views 4x, frame-checked; staging flies only after he has seen it and OKs.
