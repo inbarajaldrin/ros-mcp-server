@@ -612,3 +612,10 @@ APPROVED 2026-11-18 (R11).
   zone-check read_view without branch_ok, rest-check 2nd view + staging view without ref/branch_ok; open for unattended). Aldrin:
   "No video in digital twin for the motion" -> w8 renders the twin video of rc10e's staging (stage1b plan on rc9d live reads) then the
   stand-up, 2 views 4x, frame-checked; staging flies only after he has seen it and OKs.
+- (lead, 2026-11-23 09:31 MST) LIVE rc10e prep (Aldrin "yes"): survey 29 views + ceiling, then STOPPED SAFELY before any pick, home:
+  relocate_no_spot line_green (one spot by pose, (0.29,-0.60); depth 30 cells at 28 mm = line_green's own end beyond the 6 mm
+  own-surface tolerance, per the saved zone clouds). Today's table: 3 parts already in the staging zone off-slot, yellow in the clear area.
+  Time: 1178 s before the first pick = arm moves 184 s (motion 94 s) + 992 s in-process planning/vetting/reads on the cell PC.
+  Aldrin: "what is the point of these many views ... can we not do the math on a different host, not hardcoded". -> w8 rc10f: the
+  arrangement plans the off-slot conflict + own-returns set-aside (dry re-plan of today's scene, zero refusals); rc10f-speed: remote
+  planning by config (FMB_PLAN_HOST, local fallback), survey only the zones the task needs, survey once per session, profile the 992 s.
