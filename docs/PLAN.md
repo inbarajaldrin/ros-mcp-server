@@ -489,6 +489,11 @@ Rulings are the operator's. Each gets an id and a UTC time; they're applied with
   180 deg twin clears by 56 mm. Missing in the board program: in-air reorient, insert/seat recovery, disassembly + loop, base re-read/
   push, layouts + tipping. Port order 1-5 put to Aldrin; #1 (October stand-up, camera-up twin, exact meshes, measured keep-outs, the
   rail strip as a checked zone, ~20 mm to the carriage) awaits his OK + an empty-gripper supervised test. rc9d3 (review-rc9d2 P2s) held.
+- **R49 (2026-11-22 ~19:05 MST, operator on WhatsApp: "Okay" to the audit's port #1)**: port October's 2-pass stand-up into the
+  board program - in-air reorient over active zones, the v3.1 camera-up twin (wrist_3 +180), arm vs table/keep-outs on EXACT meshes
+  with >= 20 mm to the table and to each keep-out's MEASURED box (October's margin), the robot-side rail strip as a depth-verified zone,
+  the 2 mm zone gap closed; proven by replaying October's 88 set-downs + the dry full flow, then a review, then an EMPTY-GRIPPER
+  supervised test he watches, then u_brown. rc10 = rc9d2 + rc9d3 fixes + this (w8, brief out/to-w8-rc10-1122.md).
 - (lead, 2026-11-21) nest branch, seed 9 (twin DH): 3/4 seated (line_green through the nest rule); yellow stopped on RG2 tip vs
   seated line_green (true 3.2-6.2 mm < generic 10 mm). Ruling: use the cell's proven grasp rule (ablations/grasp_depth.py, 386e31e,
   the operator's pad-centre rule) for every part's grasp depth. Below h_n the fingertip blocks against a certified S need >= 4 mm on
