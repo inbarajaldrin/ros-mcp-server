@@ -647,3 +647,6 @@ APPROVED 2026-11-18 (R11).
   line_green's own side (survey pose ~10 mm off laterally). Ruling: RE-READ AT THE PICK - the landing check uses a fresh still read at
   the re-measure hover with the re-measured pose (same function, fail-closed, KNOWN_MARGIN stays 10 mm). w8 to run the dry re-plan in a
   collect-all-refusals diagnostic mode and report every remaining blocker in one list before tagging.
+- (lead, 2026-11-23 10:43 MST by `date`) CORRECTION: the three ruling stamps above written "~10:55", "~11:20", "~11:45" were estimated,
+  not read; all three were made between ~10:15 and 10:40 MST. rc10f now 448516a (pick re-read + --diagnose); p5/f5 diagnose re-plans
+  on a4500, battery on dual; w8 reports every blocker in one message.
