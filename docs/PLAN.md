@@ -666,3 +666,4 @@ APPROVED 2026-11-18 (R11).
   edge or a fixture. Proposed next version: FIT-THEN-RENDER - fit each part's pose to markers + depth (CAD-to-depth, resting on the table),
   render the expected scene (table, fixtures, fitted parts), and only multi-view leftover blobs count as unknown; replaces most per-cell
   rules and extra views. Asked Aldrin: fly staging on rc10g first, then build this (recommended yes). PENDING his answer.
+- (R50, Aldrin, 2026-11-23 13:13 MST) "okay": fly staging on rc10g today, then switch the depth check to FIT-THEN-RENDER (see the entry above).
